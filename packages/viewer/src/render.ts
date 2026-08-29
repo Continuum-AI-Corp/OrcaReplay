@@ -179,7 +179,11 @@ function parts(event: TraceEvent): RowParts {
         meta: pick(a, 'id', 'call_id'),
       };
     case 'tool.result': {
-      const failed = a['error'] !== undefined || a['ok'] === false;
+      // `is_error` is what the recorder writes, from the provider's own tool_result flag. The other
+      // two are accepted so a hand-written or third-party trace still renders; checking only those
+      // meant a failed call showed the word "ok" in a normal tone, which is worse than showing
+      // nothing — the timeline is where you go to find the failure.
+      const failed = a['is_error'] === true || a['error'] !== undefined || a['ok'] === false;
       return {
         label: pick(a, 'name', 'tool'),
         detail: failed ? pick(a, 'error') || 'failed' : pick(a, 'summary') || 'ok',

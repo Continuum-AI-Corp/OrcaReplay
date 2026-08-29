@@ -43,7 +43,10 @@ export class ExchangeEventDeriver {
 
   /** Tool calls that were issued but whose result never came back. */
   unresolved(): PendingToolCall[] {
-    return [...this.#pending.values()];
+    // A pending entry now outlives the result that answered it, so that the recorder can still
+    // resolve the call's seq for `causes` after derive has returned. `#closed` is the authority on
+    // whether a call was actually answered; "still in #pending" no longer means "unanswered".
+    return [...this.#pending.values()].filter((p) => !this.#closed.has(p.id));
   }
 
   /**
@@ -72,7 +75,11 @@ export class ExchangeEventDeriver {
         payload: result.content,
         causesToolId: result.tool_use_id,
       });
-      this.#pending.delete(result.tool_use_id);
+      // Deliberately not deleted here. The recorder resolves the call's seq *after* derive
+      // returns — it has to, since the seq only exists once the event is written — so dropping the
+      // entry in this loop meant `causes` came back empty on every tool result ever recorded, with
+      // no error to notice. `#closed` is what stops a resent result being re-emitted, so the
+      // pending entry can outlive the result it answered without any duplication.
       this.#closed.add(result.tool_use_id);
     }
 

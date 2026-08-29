@@ -133,6 +133,20 @@ describe('buildTimeline', () => {
    * agreed with the invention. So these cases use the writer's real payload, copied from
    * packages/cli/src/commands/record.ts, and are the reason the bug is now visible.
    */
+  it('shows a failed tool result as failed', () => {
+    // The writer emits `is_error`; the renderer checked `error` and `ok`, so a failed tool call
+    // rendered with the word "ok" and a normal tone. Blank would have been bad; asserting that a
+    // failure succeeded is worse, because the timeline is where you go to find the failure.
+    const rows = buildTimeline([
+      ev({ type: 'tool.result', attrs: { name: 'Bash', is_error: true } }),
+      ev({ type: 'tool.result', attrs: { name: 'Read', is_error: false } }),
+    ]);
+    expect(rows[0]!.detail).not.toBe('ok');
+    expect(rows[0]!.tone).toBe('attention');
+    expect(rows[1]!.detail).toBe('ok');
+    expect(rows[1]!.tone).toBe('normal');
+  });
+
   it('renders the filesystem attributes orca record actually writes', () => {
     const rows = buildTimeline([
       ev({

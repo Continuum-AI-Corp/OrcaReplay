@@ -95,6 +95,48 @@ describe('ExchangeEventDeriver', () => {
     expect(d.unresolved()).toHaveLength(0);
   });
 
+  it('links a tool result back to the call that produced it', () => {
+    // `causes` is the only thing that turns a flat event list into a chain you can walk, and it was
+    // never set on a `tool.result`: `derive()` dropped the pending entry in the same loop that
+    // built the event, so by the time the recorder asked for the call's seq there was nothing left
+    // to answer with. The recorder does that lookup *after* derive returns, which is why deleting
+    // early broke it silently — no error, just an empty field on every tool result ever recorded.
+    const d = new ExchangeEventDeriver();
+    d.derive(
+      exchange({
+        canonicalResponse: {
+          id: 'msg_0',
+          model: 'claude-opus-5',
+          stop_reason: 'tool_use',
+          content: [{ type: 'tool_use', id: 'tu_1', name: 'bash', input: {} }],
+          usage: { input_tokens: 10, output_tokens: 3 },
+        },
+      }),
+      1,
+    );
+    // The writer assigns the seq and hands it back, exactly as `record` does.
+    d.markPending('tu_1', 7);
+
+    const next = d.derive(
+      exchange({
+        canonicalRequest: {
+          model: 'claude-opus-5',
+          messages: [
+            {
+              role: 'user',
+              content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: 'ok' }],
+            },
+          ],
+        },
+      }),
+      2,
+    );
+
+    const result = next.find((e) => e.type === 'tool.result');
+    expect(result).toBeDefined();
+    expect(d.seqOf('tu_1'), 'the call seq must still be resolvable after derive returns').toBe(7);
+  });
+
   it('emits tool.result before the request that carried it, since the work came first', () => {
     const d = new ExchangeEventDeriver();
     d.derive(

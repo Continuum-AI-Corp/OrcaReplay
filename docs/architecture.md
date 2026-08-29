@@ -108,7 +108,7 @@ Agent harnesses are not deterministic — timestamps, UUIDs, working directories
 firing at a different point. A recorded request frequently will **not** be byte-identical to the one
 the agent makes on replay.
 
-Matching runs as a ladder, and the rung that matched is recorded:
+Matching runs as a ladder, and the rung that matched is always reported:
 
 | Rung | Strategy | Result |
 |---|---|---|

@@ -13,10 +13,14 @@ npm run check     # format check + typecheck + tests
 it is not all of CI. Three more jobs run commands `check` does not:
 
 ```console
-node scripts/conformance.mjs      # every example trace validates against the normative schema
+node scripts/conformance.mjs      # the shipped example traces and a freshly written one both
+                                  # validate against the normative schema
 node scripts/check-neutrality.mjs # no vendor plugin reaches past @orcareplay/plugin-api
 pip install ./python[dev] && python -m pytest python/ -q   # the Python SDK
 ```
+
+`conformance.mjs` reads `packages/*/dist`, so run it after a build — `npm run check` has already
+done one by the time you get there.
 
 Run those four and CI has nothing left to tell you, with one caveat it cannot: the `check` job runs
 on node 20 as well as 22, so a 22-only API passes locally and fails there.
