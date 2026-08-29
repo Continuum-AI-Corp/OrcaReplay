@@ -16,7 +16,15 @@ import {
   parseOpenaiSse,
 } from '@orcareplay/providers';
 import { anthropicDialect, openaiDialect, selectDialect, type Dialect } from './dialects.js';
+import { attachTlsIntercept, type NetExchange, type TlsInterceptOptions } from './intercept.js';
 import { RequestMatcher, type Divergence } from './matching.js';
+
+export type {
+  InterceptFailure,
+  NetExchange,
+  TlsInterceptOptions,
+  TunnelRecord,
+} from './intercept.js';
 
 /**
  * The interception point.
@@ -71,6 +79,14 @@ export interface ProxyOptions {
   port?: number;
   /** Extra headers to attach to live upstream calls (an API key the agent never saw). */
   upstreamHeaders?: Record<string, string>;
+  /**
+   * Terminate TLS for a named set of hosts, for a harness that ignores base-URL variables.
+   *
+   * Absent by default, and absence is the whole safety story: with no `tls` block the server
+   * registers no `'connect'` listener at all, so there is no code path that could decrypt
+   * anything. Opting in is what creates the capability.
+   */
+  tls?: TlsInterceptOptions;
 }
 
 export interface ProxyStats {
@@ -80,6 +96,21 @@ export interface ProxyStats {
   divergences: number;
   liveCalls: number;
   unmatched: number;
+  /** Decrypted HTTPS exchanges. Zero unless TLS interception was asked for. */
+  intercepted: number;
+  /** Connections passed through as opaque bytes because their host was not on the list. */
+  tunnelled: number;
+}
+
+/** What a run needs to tell the operator, and to tell the child process, about interception. */
+export interface TlsInterceptInfo {
+  /** The hosts that will be decrypted, as written. */
+  hosts: string;
+  /** SHA-256 of the run CA, so the certificate on disk can be matched to this run. */
+  fingerprint: string;
+  caCertPath: string;
+  /** The run CA plus the system roots, for clients whose trust variable replaces the store. */
+  caBundlePath: string;
 }
 
 export interface ProxyHandle {
@@ -87,6 +118,8 @@ export interface ProxyHandle {
   port: number;
   stats(): ProxyStats;
   exchanges(): RecordedExchange[];
+  /** Present only when TLS interception is on. */
+  tls?: TlsInterceptInfo;
   close: () => Promise<void>;
 }
 
@@ -154,6 +187,8 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     divergences: 0,
     liveCalls: 0,
     unmatched: 0,
+    intercepted: 0,
+    tunnelled: 0,
   };
 
   // In hybrid mode only the exchanges below the fork point are replayable; everything at or above
@@ -167,6 +202,45 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       json(res, 500, { error: { message: String(err) } });
     });
   });
+
+  /**
+   * A decrypted exchange that turns out to be a model call is recorded as one.
+   *
+   * This is the reason the feature exists rather than a refinement of it: a harness that ignores
+   * base-URL variables produces a trace indistinguishable from one captured the ordinary way,
+   * which means replay, fork and compare all work on it. Anything the dialects do not recognise
+   * falls through to `net.request` / `net.response`, where it is described but not interpreted.
+   */
+  function onDecrypted(exchange: NetExchange): void {
+    const dialect = selectDialect(dialects, exchange.path);
+    if (dialect && exchange.method === 'POST' && !exchange.requestTruncated) {
+      try {
+        const streamed = (exchange.responseHeaders['content-type'] ?? '').includes('event-stream');
+        const built = buildExchange({
+          dialect,
+          path: exchange.path,
+          rawRequest: exchange.requestBody,
+          rawResponse: exchange.responseBody,
+          status: exchange.status,
+          streamed,
+          headers: exchange.requestHeaders,
+          seq: captured.length,
+          durationMs: exchange.durationMs,
+        });
+        captured.push(built);
+        options.onExchange?.(built);
+        return;
+      } catch {
+        // Not a model call after all — a path that merely looks like one, or a body this dialect
+        // cannot read. Describing it as plain network traffic is honest; guessing is not.
+      }
+    }
+    options.tls?.onNetExchange?.(exchange);
+  }
+
+  const interception = options.tls
+    ? attachTlsIntercept(server, { ...options.tls, onNetExchange: onDecrypted }, stats)
+    : undefined;
 
   async function goLive(
     dialect: Dialect,
@@ -491,9 +565,23 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     port,
     stats: () => ({ ...stats }),
     exchanges: () => captured.slice(),
+    ...(options.tls && interception
+      ? {
+          tls: {
+            hosts: interception.policy.describe(),
+            fingerprint: options.tls.ca.fingerprint,
+            caCertPath: options.tls.ca.certPath,
+            caBundlePath: options.tls.ca.bundlePath,
+          },
+        }
+      : {}),
     close: () =>
-      new Promise<void>((resolve, reject) =>
-        (server as Server).close((err) => (err ? reject(err) : resolve())),
-      ),
+      new Promise<void>((resolve, reject) => {
+        // Tunnels and decrypted sessions are long-lived by design, and `close` waits for every
+        // open connection. Without this a recorded run would hang on exit behind an agent's idle
+        // keep-alive socket.
+        interception?.close();
+        (server as Server).close((err) => (err ? reject(err) : resolve()));
+      }),
   };
 }
