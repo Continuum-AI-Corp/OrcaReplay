@@ -1,16 +1,23 @@
+import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, stat, unlink, writeFile } from 'node:fs/promises';
 // Namespaced as well as named, because `statfs` is not present on every supported node build and
 // a missing named import from a builtin is a load-time error for the whole CLI.
 import * as fsPromises from 'node:fs/promises';
 import { createServer } from 'node:net';
-import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { delimiter, dirname, join } from 'node:path';
+import { promisify } from 'node:util';
 import { defaultAdapters } from '@orcareplay/adapters';
 import { listRuns, orcaDir } from '@orcareplay/core';
 import { runGit } from '@orcareplay/fs-capture';
+import { installShellShim, readShellFrames } from '@orcareplay/shell-shim';
 import type { ParsedArgs } from '../args.js';
 import type { Output } from '../out.js';
 import { formatBytes, runDirBytes } from './gc.js';
+import { shimIsRunnable } from '../mcp.js';
+
+const execFileAsync = promisify(execFile);
 
 export interface DoctorCheck {
   name: string;
@@ -53,6 +60,8 @@ export async function doctorCommand(
     writable.check,
     await checkAgents(cwd),
     await checkPort(),
+    await checkShellShim(),
+    await checkMcpShim(),
     await checkDisk(writable.probeDir),
     await checkRuns(cwd),
   ];
@@ -102,6 +111,69 @@ function checkNode(): DoctorCheck {
     };
   }
   return { name, status: 'ok', detail: version };
+}
+
+/**
+ * Two capture layers that fail quietly.
+ *
+ * Both are shims — a PATH entry in front of `sh`/`bash`, and a rewritten MCP config launching a
+ * JSON-RPC tee. When either cannot start, nothing goes wrong that anybody sees: the agent runs
+ * perfectly, the run succeeds, and the trace is missing a layer, which you discover only when you
+ * go looking for an exit code or a tool call that was never recorded. That is exactly the class of
+ * failure `doctor` exists to move forward in time, so both are exercised for real rather than
+ * inferred from a file existing.
+ */
+async function checkShellShim(): Promise<DoctorCheck> {
+  const name = 'shell shim';
+  const dir = await mkdtemp(join(tmpdir(), 'orca-doctor-shim-'));
+  try {
+    const shim = await installShellShim({ runDir: dir });
+    // Run something through it, rather than trusting that writing the scripts was enough: the
+    // failure this catches is the compiled runner being absent from an installed package.
+    const { stdout } = await execFileAsync('sh', ['-c', 'printf ok'], {
+      env: { ...process.env, PATH: `${shim.dir}${delimiter}${process.env.PATH ?? ''}` },
+    });
+    if (stdout.trim() !== 'ok') {
+      return {
+        name,
+        status: 'warn',
+        detail: `the shim ran but returned ${JSON.stringify(stdout)}`,
+        fix: 'record with --no-shell; exit codes and timing will be missing from the trace',
+      };
+    }
+    const frames = await readShellFrames(shim.framesPath);
+    if (frames.length === 0) {
+      return {
+        name,
+        status: 'warn',
+        detail: 'commands pass through but nothing is captured',
+        fix: 'record with --no-shell rather than trusting a layer that records nothing',
+      };
+    }
+    return { name, status: 'ok', detail: `${shim.shimmed.join(', ')} — captured a test command` };
+  } catch (err) {
+    return {
+      name,
+      status: 'warn',
+      detail: String(err instanceof Error ? err.message : err).split('\n')[0] ?? 'unavailable',
+      fix: 'run `npm run build` if working from source, or record with --no-shell',
+    };
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+async function checkMcpShim(): Promise<DoctorCheck> {
+  const name = 'mcp shim';
+  const runnable = await shimIsRunnable();
+  return runnable
+    ? { name, status: 'ok', detail: 'runnable — pass --mcp-config <path> to use it' }
+    : {
+        name,
+        status: 'warn',
+        detail: 'the shim entry point cannot be launched',
+        fix: 'run `npm run build` if working from source; MCP calls will not be captured without it',
+      };
 }
 
 /** Through fs-capture's own runner, so this tests the git invocation recording will really make. */

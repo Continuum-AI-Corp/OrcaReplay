@@ -14,6 +14,36 @@ import { main } from '../src/main.js';
  * process and shells out to git. When that does not work the user has no way to see why, so the
  * one thing doctor may never do is be vague — or be wrong about its own verdict.
  */
+describe('orca doctor — the capture layers', () => {
+  /**
+   * `orca doctor` answers "will recording actually work here", and it checked node, git, the
+   * workspace, disk, a port and which agents are installed — but not two of the four capture
+   * layers it exists to vouch for. Both fail in the same quiet way: the shim is never reached, the
+   * agent runs perfectly, and the trace is simply missing a layer nobody notices until they go
+   * looking for an exit code that was never recorded.
+   *
+   * `mcp.ts` even had a `shimIsRunnable()` whose docstring reads "Exposed for the doctor command".
+   * Nothing imported it.
+   */
+  it('checks the shell shim, since a broken one loses exit codes silently', async () => {
+    const lines: string[] = [];
+    const out = new Output({ write: (l) => void lines.push(l), isTTY: false });
+    const result = await doctorCommand(parseArgs(['doctor']), out, process.cwd());
+    const check = result.checks.find((c) => c.name.includes('shell'));
+    expect(check, `no shell check in: ${result.checks.map((c) => c.name).join(', ')}`).toBeDefined();
+    expect(check!.status).toBe('ok');
+  });
+
+  it('checks the MCP shim', async () => {
+    const lines: string[] = [];
+    const out = new Output({ write: (l) => void lines.push(l), isTTY: false });
+    const result = await doctorCommand(parseArgs(['doctor']), out, process.cwd());
+    const check = result.checks.find((c) => c.name.includes('mcp'));
+    expect(check, `no mcp check in: ${result.checks.map((c) => c.name).join(', ')}`).toBeDefined();
+    expect(check!.status).toBe('ok');
+  });
+});
+
 describe('doctor', () => {
   let cwd: string;
   let out: Output;
