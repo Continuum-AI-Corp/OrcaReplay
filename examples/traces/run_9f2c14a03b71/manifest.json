@@ -1,0 +1,46 @@
+{
+  "schema_version": "0.1.0",
+  "run_id": "run_9f2c14a03b71",
+  "created_at": "2026-08-29T10:13:38.000Z",
+  "ended_at": "2026-08-29T10:18:29.000Z",
+  "orca_version": "0.1.0",
+  "adapter": {
+    "id": "claude-code",
+    "version": "0.1.0",
+    "harness_version": "2.1.4"
+  },
+  "argv": [
+    "claude"
+  ],
+  "cwd": "/home/dev/api",
+  "env_allowlisted": {
+    "TERM": "xterm-256color",
+    "LANG": "en_US.UTF-8"
+  },
+  "git": {
+    "head": "4f1a9c02e7b8d3516a0c9e4f27b8d150a3c6e9f2",
+    "branch": "fix/auth-refresh",
+    "dirty": true
+  },
+  "platform": {
+    "os": "linux",
+    "arch": "x64",
+    "node": "v22.22.2"
+  },
+  "counts": {
+    "events": 27,
+    "blobs": 5
+  },
+  "redaction": {
+    "policy_version": 1,
+    "rules_fired": {
+      "auth_header": 12,
+      "high_entropy": 1
+    }
+  },
+  "exit_code": 1,
+  "integrity": {
+    "events_sha256": "1a4bf78fb5930243f6831075ce49ac2cc5e9ecb602a439a56f77b1f1a8227a00",
+    "blob_count": 5
+  }
+}

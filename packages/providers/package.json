@@ -1,0 +1,14 @@
+{
+  "name": "@orcareplay/providers",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": "./dist/index.js" },
+  "files": ["dist"],
+  "dependencies": {
+    "@orcareplay/plugin-api": "*",
+    "@orcareplay/schema": "*"
+  }
+}

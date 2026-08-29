@@ -1,0 +1,7 @@
+@@ -88,7 +88,9 @@ export function isExpired(payload: JwtPayload): boolean {
+   // JWT exp is seconds since epoch
+-  if (payload.exp < Date.now()) {
++  const now = Math.floor(Date.now() / 1000);
++  if (payload.exp < now) {
+     return true;
+   }

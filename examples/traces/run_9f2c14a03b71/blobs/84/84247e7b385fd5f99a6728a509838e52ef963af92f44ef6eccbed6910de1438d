@@ -1,0 +1,10 @@
+FAIL  test/auth.test.ts
+  ● refreshes a token that expired during the request
+
+    expect(refreshed).toBe(true)
+
+    Received: false
+
+      at test/auth.test.ts:41:24
+
+Tests:  1 failed, 13 passed, 14 total
