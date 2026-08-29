@@ -3,19 +3,10 @@
 **Time travel for AI agents.** Record an agent run, reproduce exactly what happened, and fork
 execution from any step with a different model, prompt or config.
 
-![Recording, replaying and forking an agent run](docs/demo.svg)
+![Recording a Claude Code run, replaying it offline, then forking it onto two models](docs/demo-cli.gif)
 
-```console
-$ orca record claude                        # run your agent; capture everything
-  recording run_9f2c14 · proxy :51733 · 3 capture layers active
-
-$ orca replay last                          # reproduce it exactly, network off
-  replaying offline · 68/68 matched exact · 0 divergences
-
-$ orca replay last --from 17 --model glm-5.3-flash    # fork from the failure, live
-  forked run_a71e08 from run_9f2c14 @ checkpoint 17
-  ✓ 14/14 tests · $0.61 · 4m02s
-```
+<sup>Real output from one session — a Claude Code run recorded, replayed with the network off, then
+forked at checkpoint 4 onto two models and graded by `npx tsc --noEmit`. Nothing here is mocked up.</sup>
 
 Your agent broke something. Replay exactly why.
 
@@ -38,6 +29,37 @@ recording proxy, injects a couple of environment variables, and gets out of the 
 
 Three more capture layers fill the gaps: an MCP shim, a `PATH` shim for shell exit codes and
 timing, and a shadow git index for filesystem diffs.
+
+## The timeline
+
+`orca replay last --ui` (or `orca ui`) opens the run as one self-contained HTML file — no server
+to keep running, no network, nothing to install. Filter it, step it, or press space and watch the
+run play back at the pace it actually happened.
+
+![The OrcaReplay timeline: filtering a 42-event run down to its tool loop](docs/demo-viewer.gif)
+
+Every layer lands in the same timeline, so you can read the run as one story rather than four:
+the model turns and their token counts, each tool call with its arguments and result, the shell
+commands with their exit codes and timing, and the filesystem changes with the tree they produced.
+
+`orca export last -o bug.html` writes exactly that page to a single file you can attach to an
+issue. It carries no external reference of any kind — CI asserts that — so it renders from a
+download folder, on a plane, in five years.
+
+## Same task, different model
+
+`orca compare` forks one recorded run onto several models from the same checkpoint, with the same
+files and the same conversation prefix, and grades each one with a command you choose. The model
+is the only variable, which is what makes the answer mean anything.
+
+![A comparison table: two models forked from the same checkpoint, both passing, with real token counts and costs](docs/compare-card.png)
+
+```console
+orca compare last --from 4 \
+  --models claude-sonnet-5,claude-haiku-4-5 \
+  --verify "npm test" \
+  --share verdict.svg          # the card above, ready to paste into an issue
+```
 
 ## Status
 
