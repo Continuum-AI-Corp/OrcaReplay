@@ -145,6 +145,32 @@ describe('orca record --tls-intercept', () => {
     expect(lines.join('')).not.toMatch(/tls/i);
   });
 
+  it('takes the key with it when the run fails before it ever starts', async () => {
+    // The likeliest failure there is: the agent is not installed. Nothing in the ordinary teardown
+    // runs, and a private key surviving that is the outcome this feature must not have.
+    await expect(
+      recordCommand(
+        parseArgs([
+          'record',
+          'generic-openai',
+          '--tls-intercept',
+          '--no-fs',
+          '--no-shell',
+          '--',
+          'orca-definitely-not-a-real-binary',
+        ]),
+        out,
+        workspace,
+      ),
+    ).rejects.toThrow(/could not launch/);
+
+    const runs = join(workspace, '.orca', 'runs');
+    for (const run of await readdir(runs)) {
+      await expect(stat(join(runs, run, 'tls'))).rejects.toThrow();
+      expect(await grepRunDir(join(runs, run), 'PRIVATE KEY')).toEqual([]);
+    }
+  });
+
   it('says out loud that it is intercepting, and what', async () => {
     await record(['--tls-intercept', '--tls-hosts', 'api.openai.com,*.chatgpt.com']);
     const printed = lines.join('');

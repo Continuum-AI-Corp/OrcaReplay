@@ -175,8 +175,13 @@ export function attachTlsIntercept(
 
   /** One secure context per intercepted host; minting is cheap but not free. */
   const contexts = new Map<string, SecureContext>();
-  /** Which origin a decrypted request was destined for. Keyed by the socket we created for it. */
-  const targets = new WeakMap<TLSSocket, Target>();
+  /**
+   * Which origin a decrypted request was destined for, keyed by the socket we created for it.
+   *
+   * Keyed on `object` rather than `TLSSocket` so a lookup from `req.socket` needs no cast: a
+   * socket this map does not know is simply a miss, which is exactly the answer wanted.
+   */
+  const targets = new WeakMap<object, Target>();
   const open = new Set<Socket | TLSSocket>();
 
   const decrypted = createHttpServer((req, res) => {
@@ -195,7 +200,7 @@ export function attachTlsIntercept(
    * host off the allowlist so the whole connection is tunnelled untouched instead.
    */
   decrypted.on('upgrade', (req, socket: Socket) => {
-    const target = targets.get(req.socket as TLSSocket);
+    const target = targets.get(req.socket);
     options.onFailure?.({
       host: target?.host ?? 'unknown',
       port: target?.port ?? 0,
@@ -214,8 +219,7 @@ export function attachTlsIntercept(
   }
 
   async function forward(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const socket = req.socket as TLSSocket;
-    const target = targets.get(socket);
+    const target = targets.get(req.socket);
     if (!target) throw new Error('decrypted request arrived on an unknown connection');
 
     const startedAt = Date.now();

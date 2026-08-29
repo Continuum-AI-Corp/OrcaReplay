@@ -114,7 +114,7 @@ function keyUsage(...bits: number[]): Buffer {
  * never decodes it, and a key identifier is not worth introducing a parser for.
  */
 function publicKeyPoint(key: KeyObject): Buffer {
-  const jwk = key.export({ format: 'jwk' }) as { x?: string; y?: string };
+  const jwk = key.export({ format: 'jwk' });
   if (!jwk.x || !jwk.y) throw new Error('expected an EC public key');
   return Buffer.concat([
     Buffer.from([0x04]),
@@ -278,6 +278,7 @@ export class RunCa {
     // "0700" is a promise this feature makes rather than a preference.
     await chmod(dir, DIR_MODE);
 
+    // Node types `export` as `string | Buffer` across all overloads; PEM is always a string.
     const keyPem = authority.privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
     await writeFile(join(dir, 'ca.key'), keyPem, { mode: FILE_MODE });
     await chmod(join(dir, 'ca.key'), FILE_MODE);

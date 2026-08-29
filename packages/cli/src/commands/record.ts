@@ -35,11 +35,34 @@ export interface RecordResult {
  * `orca record <agent>` — stand up the capture layers, launch the agent pointed at them, and get
  * out of the way. The agent is not patched, wrapped or modified; it is simply started with a
  * couple of environment variables that point its model traffic at a local proxy.
+ *
+ * The wrapper exists for one reason: a TLS-intercepting run mints a private key, and a key that
+ * outlives a failed run is the outcome this feature must not have. The recording's own teardown
+ * deletes it on the way out, but the likeliest failure of all — the agent is not installed —
+ * happens before any teardown runs. Owning the key's lifetime out here means no failure path
+ * inside can skip it.
  */
 export async function recordCommand(
   args: ParsedArgs,
   out: Output,
   cwd = process.cwd(),
+): Promise<RecordResult> {
+  const minted: RunCa[] = [];
+  try {
+    return await runRecording(args, out, cwd, minted);
+  } catch (err) {
+    for (const ca of minted) {
+      await ca.dispose().catch(() => undefined);
+    }
+    throw err;
+  }
+}
+
+async function runRecording(
+  args: ParsedArgs,
+  out: Output,
+  cwd: string,
+  minted: RunCa[],
 ): Promise<RecordResult> {
   const registry = defaultAdapters();
   const agentName = args.positionals[0];
@@ -141,6 +164,7 @@ export async function recordCommand(
     HostPolicy.from(interceptHosts);
     originRoots = await extraOriginRoots();
     ca = await RunCa.create({ runDir: writer.runDir });
+    minted.push(ca);
   }
 
   const proxy = await createProxy({
