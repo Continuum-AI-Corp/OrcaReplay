@@ -15,6 +15,33 @@ import type { ParsedArgs } from './args.js';
  * request with auth stripped, so a gateway key orca injects is invisible to the recording by
  * construction rather than by a rule someone has to remember.
  */
+/**
+ * OrcaRouter, the gateway orca suggests when you do not name one.
+ *
+ * A default, never a redirect. It fills in the blank when you ask for a gateway — `orca setup` with
+ * no `--gateway` — and nothing more: a run with no gateway configured still proxies the agent's own
+ * traffic straight to the provider the agent was already talking to, on the agent's own key. Sending
+ * that somewhere the user never named would mean posting their source code to a third party as a
+ * side effect of pressing record, and their existing provider key would not authenticate there
+ * anyway. Naming a default is a recommendation; rerouting unconfigured traffic would be a decision
+ * taken on someone's behalf.
+ *
+ * The **origin**, deliberately without the `/v1` an OpenAI SDK wants. That SDK is configured with
+ * `base_url=https://api.orcarouter.ai/v1` because it appends only `/chat/completions`; orca appends
+ * the whole dialect path (`/v1/messages` or `/v1/chat/completions`) and probes `/v1/models`, so a
+ * `/v1` here would produce `/v1/v1/chat/completions`. Confirmed against the maintainers' own
+ * published action, whose `orcarouter-url` input defaults to
+ * `https://api.orcarouter.ai/v1/chat/completions`.
+ *
+ * Model ids there are namespaced by provider — `anthropic/claude-sonnet-4.6`,
+ * `openai/gpt-4o-mini`. Both places that read a model id already cope: dialect selection matches
+ * `(?:.*\/)?claude[-.]`, and `resolveModelId` strips the namespace before pricing.
+ */
+export const ORCAROUTER_URL = 'https://api.orcarouter.ai';
+
+/** Where a person gets a key for the default gateway. Printed, never fetched. */
+export const ORCAROUTER_CONSOLE = 'https://www.orcarouter.ai/console/token';
+
 export interface GatewayConfig {
   /** Origin that serves the model APIs. One gateway usually serves both wire formats. */
   url: string;

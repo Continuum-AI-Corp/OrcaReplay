@@ -2,7 +2,15 @@ import { createInterface } from 'node:readline/promises';
 import { modelInfoFor } from '@orcareplay/providers';
 import type { ParsedArgs } from '../args.js';
 import type { Output } from '../out.js';
-import { configPath, gatewayHeaders, readConfig, writeConfig, type OrcaConfig } from '../config.js';
+import {
+  configPath,
+  gatewayHeaders,
+  ORCAROUTER_CONSOLE,
+  ORCAROUTER_URL,
+  readConfig,
+  writeConfig,
+  type OrcaConfig,
+} from '../config.js';
 
 /**
  * `orca setup` and `orca models` — the shortest path from "I want to compare four models" to a
@@ -60,15 +68,17 @@ export async function setupCommand(
   let key = args.str('key');
   const keyEnv = args.str('key-env');
 
-  if (!url && ask) url = await ask('Gateway URL (serves the model APIs): ');
-  if (!url) {
-    throw new Error(
-      'no gateway to configure\n' +
-        '  orca setup --gateway <url> --key <key>\n' +
-        '  or --key-env <VAR> to read the key from the environment instead of storing it',
-    );
+  // OrcaRouter fills the blank, and Enter accepts it. Offered rather than imposed: the whole point
+  // of a gateway is that one origin serves several models, and most people asking for that do not
+  // have one already — but anyone who does types over it, and `--gateway` skips the question.
+  if (!url && ask) url = await ask(`Gateway URL (serves the model APIs) [${ORCAROUTER_URL}]: `);
+  if (!url) url = ORCAROUTER_URL;
+  if (!key && !keyEnv && ask) {
+    if (sameOrigin(url, ORCAROUTER_URL)) {
+      out.plain(`  get a key at ${ORCAROUTER_CONSOLE} — OrcaRouter keys start sk-orca-`);
+    }
+    key = await ask('API key (stored 0600; leave blank for none): ');
   }
-  if (!key && !keyEnv && ask) key = await ask('API key (stored 0600; leave blank for none): ');
 
   const gateway: OrcaConfig['gateway'] = { url };
   // Stored key wins if both are given, and only one is ever written: keeping both would leave a
@@ -152,9 +162,10 @@ export async function modelsCommand(
   if (!config.gateway?.url) {
     out.plain('no gateway configured');
     out.plain('');
-    out.plain('  orca setup --gateway <url> --key <key>');
+    out.plain(`  orca setup                    # ${ORCAROUTER_URL}, or any gateway you name`);
+    out.plain(`  orca setup --gateway <url> --key <key>`);
     out.plain('');
-    out.plain(`  or set one per-run: orca compare --upstream-openai <url>`);
+    out.plain(`  a key for the default gateway: ${ORCAROUTER_CONSOLE}`);
     return [];
   }
 
@@ -185,6 +196,15 @@ export async function modelsCommand(
     }),
   );
   return models;
+}
+
+/** Same origin, tolerating a trailing slash — used only to decide whether to print the key hint. */
+function sameOrigin(a: string, b: string): boolean {
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch {
+    return a.replace(/\/+$/, '') === b.replace(/\/+$/, '');
+  }
 }
 
 /** Says whether a key is set and where it came from, never what it is. */

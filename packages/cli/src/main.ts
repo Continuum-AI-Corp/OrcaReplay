@@ -40,6 +40,7 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
                                  --keep N, --dry-run
   orca doctor                    check this machine can record at all
   orca setup                     point orca at a gateway once, to compare many models
+                                 defaults to OrcaRouter; --gateway for any other
         --gateway <url>          origin that serves the model APIs
         --key <k> | --key-env V  store the key, or read it from an environment variable
         --models a,b,c           default model list, so compare needs no flags

@@ -293,7 +293,7 @@ describe('redaction is on the write path', () => {
     });
     const raw = await readFile(join(w.runDir, 'events.jsonl'), 'utf8');
     expect(raw).not.toContain('sk-abcdefghijklmnop');
-    expect(raw).toMatch(/<secret:openai_key:[0-9a-f]{8}>/);
+    expect(raw).toMatch(/<secret:sk_api_key:[0-9a-f]{8}>/);
     expect(JSON.stringify(e)).not.toContain('sk-abcdefghijklmnop');
     await w.close();
   });
@@ -320,7 +320,7 @@ describe('redaction is on the write path', () => {
     const store = new BlobStore(join(w.runDir, 'blobs'));
     const body = Buffer.from(await store.get(e.payload as BlobRef)).toString('utf8');
     expect(body).not.toContain('sk-abcdefghijklmnop');
-    expect(body).toMatch(/<secret:openai_key:[0-9a-f]{8}>/);
+    expect(body).toMatch(/<secret:sk_api_key:[0-9a-f]{8}>/);
     await w.close();
   });
 
@@ -390,8 +390,8 @@ describe('TraceWriter.close', () => {
     expect(raw).not.toContain('abcdefghij');
     const file = JSON.parse(raw) as { policy_version: number; records: { rule: string }[] };
     expect(file.policy_version).toBeGreaterThanOrEqual(1);
-    expect(file.records.map((r) => r.rule)).toContain('openai_key');
-    expect(m.redaction?.rules_fired?.['openai_key']).toBe(1);
+    expect(file.records.map((r) => r.rule)).toContain('sk_api_key');
+    expect(m.redaction?.rules_fired?.['sk_api_key']).toBe(1);
   });
 
   it('is idempotent', async () => {

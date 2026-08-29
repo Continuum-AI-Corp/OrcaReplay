@@ -74,7 +74,12 @@ describe('placeholder stability', () => {
 
 describe('pattern rules', () => {
   const cases: [string, string, string][] = [
-    ['openai_key', 'sk-abcdefghijklmnop0123456789', 'openai'],
+    ['sk_api_key', 'sk-abcdefghijklmnop0123456789', 'openai'],
+    // The same rule covers every vendor that copied the prefix, which is why it is not named for
+    // one of them: OrcaRouter is now the gateway `orca setup` suggests, so its keys are the ones
+    // most likely to be sitting next to a trace.
+    ['sk_api_key', 'sk-orca-abcdefghijklmnop0123456789', 'orcarouter'],
+    ['sk_api_key', 'sk-ant-api03-abcdefghijklmnop0123456789', 'anthropic'],
     ['github_token', 'ghp_abcdefghijklmnopqrstuvwxyz0123456789', 'github classic'],
     ['github_token', 'gho_abcdefghijklmnopqrstuvwxyz0123456789', 'github oauth'],
     ['github_token', 'ghs_abcdefghijklmnopqrstuvwxyz0123456789', 'github server'],
@@ -303,7 +308,7 @@ describe('records and rulesFired', () => {
     r.redactString('AKIAIOSFODNN7EXAMPLE');
     const records = r.records();
     expect(records).toHaveLength(2);
-    const openai = records.find((x) => x.rule === 'openai_key');
+    const openai = records.find((x) => x.rule === 'sk_api_key');
     expect(openai?.count).toBe(2);
     expect(openai?.identifier).toBeTruthy();
     expect(openai?.placeholder).toMatch(PLACEHOLDER);
@@ -313,7 +318,7 @@ describe('records and rulesFired', () => {
     const r = fresh();
     r.redactString('sk-abcdefghijklmnop0123 sk-zyxwvutsrqponm9876');
     r.redactHeaders({ authorization: 'Bearer x' });
-    expect(r.rulesFired()['openai_key']).toBe(2);
+    expect(r.rulesFired()['sk_api_key']).toBe(2);
     expect(Object.values(r.rulesFired()).reduce((a, b) => a + b, 0)).toBe(3);
   });
 

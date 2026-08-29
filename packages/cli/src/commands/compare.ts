@@ -64,7 +64,7 @@ export async function compareCommand(
     throw new Error(
       'compare needs models to compare\n' +
         '  orca compare last --models claude-opus-5,glm-5.3-flash\n' +
-        '  or set a default list once: orca setup',
+        '  or run orca setup once — it stores a gateway (OrcaRouter by default) and a model list',
     );
   }
 

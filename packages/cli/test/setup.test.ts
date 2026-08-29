@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parseArgs } from '../src/args.js';
 import { Output, stripAnsi } from '../src/out.js';
-import { readConfig } from '../src/config.js';
+import { ORCAROUTER_CONSOLE, ORCAROUTER_URL, readConfig } from '../src/config.js';
 import { modelsCommand, setupCommand } from '../src/commands/setup.js';
 import { writeConfig } from '../src/config.js';
 import { upstreamPlan } from '../src/upstream.js';
@@ -36,6 +36,92 @@ describe('orca setup', () => {
   });
 
   const text = () => stripAnsi(lines.join('\n'));
+
+  describe('the OrcaRouter default', () => {
+    it('fills the blank when the answer is empty', async () => {
+      const asked: string[] = [];
+      const config = await setupCommand(parseArgs(['setup']), out, {
+        env,
+        probe: async () => ['claude-opus-5'],
+        // Enter on both questions: the gateway takes the default, the key is left unset.
+        ask: async (q) => {
+          asked.push(q);
+          return '';
+        },
+      });
+
+      expect(config.gateway?.url).toBe(ORCAROUTER_URL);
+      expect(asked[0], 'the default has to be visible in the prompt').toContain(ORCAROUTER_URL);
+      expect(await readConfig(env)).toMatchObject({ gateway: { url: ORCAROUTER_URL } });
+    });
+
+    it('is overridden by anything the user actually types', async () => {
+      const config = await setupCommand(parseArgs(['setup']), out, {
+        env,
+        probe: async () => ['some-model'],
+        ask: async (q) => (q.startsWith('Gateway') ? 'https://gw.example' : ''),
+      });
+      expect(config.gateway?.url).toBe('https://gw.example');
+    });
+
+    it('is overridden by --gateway, which skips the question entirely', async () => {
+      const asked: string[] = [];
+      const config = await setupCommand(
+        parseArgs(['setup', '--gateway', 'https://gw.example', '--key', 'k']),
+        out,
+        {
+          env,
+          probe: async () => ['some-model'],
+          ask: async (q) => {
+            asked.push(q);
+            return '';
+          },
+        },
+      );
+      expect(config.gateway?.url).toBe('https://gw.example');
+      expect(asked.some((q) => q.startsWith('Gateway'))).toBe(false);
+    });
+
+    it('works non-interactively with only a key', async () => {
+      // A terminal-less `orca setup --key <k>` used to fail with "no gateway to configure".
+      const config = await setupCommand(parseArgs(['setup', '--key', 'sk-secret-value']), out, {
+        env,
+        probe: async () => ['claude-opus-5'],
+      });
+      expect(config.gateway?.url).toBe(ORCAROUTER_URL);
+      expect(text(), 'still never the key itself').not.toContain('sk-secret-value');
+    });
+
+    it('says where to get a key, but only for the gateway it suggested', async () => {
+      await setupCommand(parseArgs(['setup']), out, {
+        env,
+        probe: async () => [],
+        ask: async () => '',
+      });
+      expect(text()).toContain(ORCAROUTER_CONSOLE);
+
+      lines.length = 0;
+      await setupCommand(parseArgs(['setup']), out, {
+        env,
+        probe: async () => [],
+        ask: async (q) => (q.startsWith('Gateway') ? 'https://gw.example' : ''),
+      });
+      expect(text(), 'a different gateway is not ours to send people to').not.toContain(
+        ORCAROUTER_CONSOLE,
+      );
+    });
+
+    it('is a default, not a redirect: an unconfigured run still goes to the provider', async () => {
+      // The property that keeps this a recommendation. With nothing configured, recording proxies
+      // the agent's own traffic to whatever it was already talking to — routing that through a
+      // gateway the user never named would post their source code to a third party as a side
+      // effect of pressing record, on a key that would not authenticate there anyway.
+      const plan = await upstreamPlan(parseArgs(['record', 'claude']), env);
+      expect(plan.upstream, 'no gateway configured means no upstream override').toBeUndefined();
+      expect(plan.headers).toBeUndefined();
+      expect(JSON.stringify(plan)).not.toContain('orcarouter');
+    });
+  });
 
   it('writes a gateway and key given on the command line', async () => {
     await setupCommand(
@@ -162,10 +248,16 @@ describe('orca setup', () => {
     expect((await readConfig(env)).models).toBeUndefined();
   });
 
-  it('fails with a usable message when it cannot ask and was told nothing', async () => {
-    await expect(
-      setupCommand(parseArgs(['setup']), out, { env, probe: async () => [] }),
-    ).rejects.toThrow(/--gateway/);
+  it('configures the default gateway when it cannot ask and was told nothing', async () => {
+    // This used to throw "no gateway to configure". With a default there is something to
+    // configure, so the useful outcome is a written config and a key you can add afterwards —
+    // not an error telling you to pass the flag whose value orca already knows.
+    const config = await setupCommand(parseArgs(['setup']), out, { env, probe: async () => [] });
+
+    expect(config.gateway?.url).toBe(ORCAROUTER_URL);
+    expect(config.gateway?.api_key, 'a key is never invented').toBeUndefined();
+    expect(config.gateway?.api_key_env).toBeUndefined();
+    expect(text()).toContain('auth=none');
   });
 });
 

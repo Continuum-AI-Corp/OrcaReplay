@@ -2,7 +2,10 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { RedactionRecord } from '@orcareplay/schema';
 
 /** Bump when a rule is added or changed, so old traces stay interpretable. */
-export const REDACTION_POLICY_VERSION = 1;
+// Bumped when a rule's *name* or pattern changes, because both reach the trace: the placeholder is
+// `<secret:<kind>:<hash>>`, and a reader comparing two traces needs to know the policy differed
+// rather than the content. v2 renamed `openai_key` to `sk_api_key`.
+export const REDACTION_POLICY_VERSION = 2;
 
 /** Environment capture is allowlist-only (spec §5). Everything else is denied. */
 export const DEFAULT_ENV_ALLOWLIST = [
@@ -57,7 +60,11 @@ const RULES: Rule[] = [
     pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
   },
   { kind: 'jwt', pattern: /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g },
-  { kind: 'openai_key', pattern: /sk-[A-Za-z0-9_-]{16,}/g },
+  // `sk-` is not an OpenAI prefix, it is the convention half the industry copied: OpenAI's
+  // `sk-proj-`, Anthropic's `sk-ant-`, OrcaRouter's `sk-orca-` and a dozen gateways all match here.
+  // The rule name reaches the trace, `redactions.json` and the placeholder, so calling every one of
+  // them an OpenAI key told a reader something false about where their credential came from.
+  { kind: 'sk_api_key', pattern: /sk-[A-Za-z0-9_-]{16,}/g },
   // Every GitHub credential prefix, `ghr_` (refresh) included: it outlives the access token it
   // renews, so leaving it to the entropy sweep would miss the longest-lived secret of the set.
   { kind: 'github_token', pattern: /gh[posur]_[A-Za-z0-9]{20,}/g },

@@ -70,22 +70,23 @@ that asks instead:
 
 ```console
 $ orca setup
-Gateway URL (serves the model APIs): https://router.example
+Gateway URL (serves the model APIs) [https://api.orcarouter.ai]:
+  get a key at https://www.orcarouter.ai/console/token — OrcaRouter keys start sk-orca-
 API key (stored 0600; leave blank for none):
-  info config.saved path=~/.config/orca/config.json mode=0600 gateway=https://router.example auth=stored
+  info config.saved path=~/.config/orca/config.json mode=0600 gateway=https://api.orcarouter.ai auth=stored
 
   6 models available:
-    claude-haiku-4-5
-    claude-opus-5
-    glm-5.3-flash
+    anthropic/claude-opus-5
+    anthropic/claude-haiku-4-5
+    openai/gpt-5.2
     ...
 
 $ orca models
-MODEL             $/MTOK IN  $/MTOK OUT
-claude-haiku-4-5  1          5
-claude-opus-5     15         75
-glm-5.3-flash     0.05       0.15
-some-local-model  —          —
+MODEL                      $/MTOK IN  $/MTOK OUT
+anthropic/claude-opus-5    15         75
+anthropic/claude-haiku-4-5 1          5
+openai/gpt-5.2             1.25       10
+some-local-model           —          —
 ```
 
 `orca setup` asks the gateway what it actually serves rather than just writing the file, so a wrong
@@ -95,10 +96,24 @@ upstream flags at all. `orca models` prices what it recognises and shows a
 dash for what it does not, because inventing a number for an unknown model is how a comparison
 table ends up quoting a cost that was never real.
 
-Anything that speaks the OpenAI-compatible `/v1/models` and chat endpoints works — OrcaRouter,
-another gateway, or something you run yourself. Non-interactive:
-`orca setup --gateway <url> --key <k>`, or `--key-env <VAR>` to read the key from the environment
-rather than keep a credential on disk.
+[**OrcaRouter**](https://www.orcarouter.ai) is the default answer to that first question — press
+Enter and you have one origin and one key serving Claude, GPT, Gemini, Grok, DeepSeek, Qwen and the
+rest, which is exactly the shape `orca compare` wants. Its model ids are namespaced by provider
+(`anthropic/claude-sonnet-4.6`, `openai/gpt-4o-mini`), which orca handles: the namespace picks the
+wire format and is stripped before pricing.
+
+It is a *default*, not a destination: type over it, or pass `--gateway <url>`, and anything that
+speaks the OpenAI-compatible `/v1/models` and chat endpoints works just as well — another hosted
+gateway, or something you run yourself.
+
+It is also only ever a default for traffic **you** asked to send somewhere. With no gateway
+configured, `orca record` proxies your agent's own calls straight to whatever provider it was
+already talking to, on the agent's own key. Orca does not reroute a recording you never configured:
+that would post your source code to a third party as a side effect of pressing record.
+
+Non-interactive: `orca setup --key <k>` takes the default, `orca setup --gateway <url> --key <k>`
+names another, and `--key-env <VAR>` reads the key from the environment rather than keeping a
+credential on disk.
 
 The key never reaches a trace. It is attached to the outbound request only, while what gets
 recorded is built from the *incoming* request with auth stripped — so it is invisible to the
@@ -136,7 +151,7 @@ Early. `v0` is the walking skeleton of the three commands above.
 | Anthropic / OpenAI-compatible model capture | working |
 | Exact replay with divergence reporting | working — restores the recorded filesystem over your working tree, then puts it back; `--worktree` for a scratch copy, `--in-place` to restore nothing. Writes a run of its own recording what the replay *discovered* — divergences, unmatched requests — and points at the parent for what it merely repeated; `--no-trace` to skip |
 | Fork replay from a checkpoint | working — a fork records its own filesystem snapshots, so it is a run you can fork again |
-| Compare across models | working — `orca setup` stores a gateway, key and default model list, so `orca compare` needs no flags |
+| Compare across models | working — `orca setup` stores a gateway (OrcaRouter by default, any URL you name otherwise), key and model list, so `orca compare` needs no flags |
 | Filesystem snapshots and diffs | working |
 | Single-file HTML export | working |
 | MCP call recording | working — opt in with `--mcp-config <path>`. Replay and fork re-instrument from the config the recording used, so the layer does not stop at the fork point |
@@ -190,11 +205,20 @@ outright, at the cost of being able to fork the run.
 ## What is open, and what is not
 
 Always open, under Apache-2.0: the trace format, the core, the CLI, the viewer, the adapters, and
-the provider interface. OrcaRouter is an optional plugin that may use only the public `Provider`
-interface — no privileged API. No vendor plugin exists yet, so the CI job that enforces this
-(`scripts/check-neutrality.mjs`) says so and passes as a no-op; it starts building against the
-published package rather than workspace source the moment one lands. If a plugin ever needs a
-capability, that capability goes into the public interface first.
+the provider interface.
+
+OrcaReplay is built by the people who build [OrcaRouter](https://www.orcarouter.ai), and that shows
+up in exactly one place: `orca setup` suggests it when you do not name a gateway. That is a default
+you can see and overtype, on a question you chose to answer — not a route anything takes on its own.
+Every model path stays a plain URL you can point anywhere, and there is no code path that treats
+that origin differently from any other.
+
+What the vendor does *not* get is privilege. A plugin — OrcaRouter's included — may use only the
+public `Provider` interface in `@orcareplay/plugin-api`, with no private API behind it. No vendor
+plugin exists yet, so the CI job that enforces this (`scripts/check-neutrality.mjs`) says so and
+passes as a no-op; it starts building against the published package rather than workspace source the
+moment one lands. If a plugin ever needs a capability, that capability goes into the public
+interface first, with a second implementation showing it is not shaped around one vendor.
 
 ## Documentation
 

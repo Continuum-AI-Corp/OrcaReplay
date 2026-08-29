@@ -98,7 +98,7 @@ describe('record, then read it back', () => {
     };
     expect(payload.system).toBe('be terse');
     expect(payload.messages).toHaveLength(200);
-    expect(payload.auth).toMatch(/^Bearer <secret:openai_key:[0-9a-f]{8}>$/);
+    expect(payload.auth).toMatch(/^Bearer <secret:sk_api_key:[0-9a-f]{8}>$/);
   });
 
   it('offers the fork points the trace actually supports', async () => {
@@ -130,7 +130,7 @@ describe('record, then read it back', () => {
       records: { rule: string; count: number }[];
     };
     // The same secret in a payload and in attrs, recorded under one rule.
-    expect(redactions.records.filter((r) => r.rule === 'openai_key').length).toBeGreaterThan(0);
+    expect(redactions.records.filter((r) => r.rule === 'sk_api_key').length).toBeGreaterThan(0);
   });
 
   it('keeps the log small even though the request was not', async () => {
