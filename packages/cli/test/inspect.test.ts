@@ -13,6 +13,113 @@ import {
   showCommand,
 } from '../src/commands/inspect.js';
 
+describe('orca list — fork provenance', () => {
+  /**
+   * `orca compare --models a,b,c` leaves four runs in the directory: the parent and one fork per
+   * model. Listing them as four unrelated ids makes the output of the tool's headline command
+   * unreadable the moment you come back to it.
+   */
+  it('shows which run each fork came from', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'orca-list-fork-'));
+    try {
+      const parent = await TraceWriter.create(join(dir, '.orca', 'runs'), {
+        adapter: { id: 'claude-code', version: '0.0.0' },
+        argv: ['claude-code'],
+        cwd: dir,
+        orcaVersion: '0.0.0',
+      });
+      await parent.close(0);
+      const child = await TraceWriter.create(join(dir, '.orca', 'runs'), {
+        adapter: { id: 'claude-code', version: '0.0.0' },
+        argv: ['claude-code'],
+        cwd: dir,
+        orcaVersion: '0.0.0',
+        parentRun: parent.runId,
+        forkPoint: 4,
+      });
+      await child.close(0);
+
+      const lines: string[] = [];
+      const out = new Output({ write: (l) => void lines.push(l), isTTY: false });
+      await listCommand(parseArgs(['list']), out, dir);
+
+      const text = stripAnsi(lines.join('\n'));
+      expect(text).toContain('FROM');
+      // The child's row names the parent; the parent's row has nothing in that column.
+      const childRow = text.split('\n').find((l) => l.includes(child.runId)) ?? '';
+      const parentRow = text.split('\n').find((l) => l.startsWith(parent.runId)) ?? '';
+      expect(childRow).toContain(`${parent.runId}@4`);
+      expect(parentRow).not.toContain('@');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('orca show — fork provenance', () => {
+  /**
+   * A forked run read on its own is unintelligible without its parent: the timeline opens
+   * mid-conversation, the filesystem is a worktree that no longer exists, and nothing on screen
+   * says which run or which checkpoint it came from. `orca list` does not show it either, so the
+   * only way to find out was to cat the manifest — for the feature the whole tool is named after.
+   */
+  it('names the parent run and fork point at the top of a forked run', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'orca-show-fork-'));
+    try {
+      const parent = await TraceWriter.create(join(dir, '.orca', 'runs'), {
+        adapter: { id: 'claude-code', version: '0.0.0' },
+        argv: ['claude-code'],
+        cwd: dir,
+        orcaVersion: '0.0.0',
+      });
+      await parent.close(0);
+
+      const child = await TraceWriter.create(join(dir, '.orca', 'runs'), {
+        adapter: { id: 'claude-code', version: '0.0.0' },
+        argv: ['claude-code'],
+        cwd: dir,
+        orcaVersion: '0.0.0',
+        parentRun: parent.runId,
+        forkPoint: 4,
+        forkModel: 'claude-haiku-4-5-20251001',
+      });
+      await child.close(0);
+
+      const lines: string[] = [];
+      const out = new Output({ write: (l) => void lines.push(l), isTTY: false });
+      await showCommand(parseArgs(['show', child.runId]), out, dir);
+
+      const text = lines.join('\n');
+      expect(text).toContain(parent.runId);
+      expect(text).toContain('4');
+      expect(text).toContain('claude-haiku-4-5-20251001');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('says nothing about provenance for a run that was recorded, not forked', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'orca-show-plain-'));
+    try {
+      const writer = await TraceWriter.create(join(dir, '.orca', 'runs'), {
+        adapter: { id: 'claude-code', version: '0.0.0' },
+        argv: ['claude-code'],
+        cwd: dir,
+        orcaVersion: '0.0.0',
+      });
+      await writer.close(0);
+
+      const lines: string[] = [];
+      const out = new Output({ write: (l) => void lines.push(l), isTTY: false });
+      await showCommand(parseArgs(['show', writer.runId]), out, dir);
+
+      expect(lines.join('\n')).not.toContain('forked from');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('inspect commands', () => {
   let cwd: string;
   let lines: string[];
@@ -83,7 +190,7 @@ describe('inspect commands', () => {
       const runDir = await makeRun();
       await listCommand(parseArgs(['list']), out, cwd);
       expect(text()).toContain(runDir);
-      expect(text()).toMatch(/RUN\s+CREATED\s+DIR/);
+      expect(text()).toMatch(/RUN\s+CREATED\s+FROM\s+DIR/);
     });
   });
 

@@ -7,6 +7,9 @@ export interface RunRef {
   /** RFC3339, from the manifest when it is readable, else the directory's mtime. */
   createdAt: string;
   dir: string;
+  /** Set when this run was forked from another (spec §1). Absent on a plain recording. */
+  parentRun?: string;
+  forkPoint?: number;
 }
 
 export function orcaDir(cwd: string): string {
@@ -23,18 +26,31 @@ export function runDirFor(cwd: string, runId: string): string {
   return join(runsDir(cwd), runId);
 }
 
-async function createdAtOf(dir: string): Promise<string> {
+/**
+ * The manifest facts a listing needs, read in one pass.
+ *
+ * Everything here degrades rather than throws: a run whose manifest is missing or truncated is
+ * still worth listing — that is exactly the crashed run someone is looking for.
+ */
+async function factsOf(dir: string): Promise<Omit<RunRef, 'runId' | 'dir'>> {
   try {
     const raw = JSON.parse(await readFile(join(dir, 'manifest.json'), 'utf8')) as {
       created_at?: unknown;
+      parent_run?: unknown;
+      fork_point?: unknown;
     };
     const at = raw.created_at;
-    if (typeof at === 'string' && !Number.isNaN(Date.parse(at))) return at;
+    if (typeof at === 'string' && !Number.isNaN(Date.parse(at))) {
+      return {
+        createdAt: at,
+        ...(typeof raw.parent_run === 'string' ? { parentRun: raw.parent_run } : {}),
+        ...(typeof raw.fork_point === 'number' ? { forkPoint: raw.fork_point } : {}),
+      };
+    }
   } catch {
-    // A run whose manifest is missing or truncated is still worth listing — that is exactly
-    // the crashed run someone is looking for.
+    // Fall through to the directory's mtime.
   }
-  return new Date((await stat(dir)).mtimeMs).toISOString();
+  return { createdAt: new Date((await stat(dir)).mtimeMs).toISOString() };
 }
 
 /** Every recorded run in the workspace, newest first. */
@@ -45,7 +61,7 @@ export async function listRuns(cwd: string): Promise<RunRef[]> {
   for (const e of entries) {
     if (!e.isDirectory() || !RUN_ID_PATTERN.test(e.name)) continue;
     const dir = join(root, e.name);
-    runs.push({ runId: e.name, createdAt: await createdAtOf(dir), dir });
+    runs.push({ runId: e.name, dir, ...(await factsOf(dir)) });
   }
   return runs.sort((a, b) =>
     a.createdAt === b.createdAt

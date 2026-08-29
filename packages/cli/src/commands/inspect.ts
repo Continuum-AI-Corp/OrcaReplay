@@ -10,6 +10,7 @@ import {
 import { priceFor } from '@orcareplay/providers';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
+import { formatCost } from './compare.js';
 
 /** `orca list` — what runs are here, newest first. */
 export async function listCommand(
@@ -24,9 +25,16 @@ export async function listCommand(
     out.plain('  orca record claude      # record one');
     return;
   }
+  // FROM is what makes a directory full of `orca compare` output readable: four runs with no
+  // stated relationship are four mysteries, and the relationship is already in every manifest.
   out.table(
-    ['RUN', 'CREATED', 'DIR'],
-    runs.map((r) => [r.runId, r.createdAt, r.dir]),
+    ['RUN', 'CREATED', 'FROM', 'DIR'],
+    runs.map((r) => [
+      r.runId,
+      r.createdAt,
+      r.parentRun === undefined ? '' : `${r.parentRun}@${r.forkPoint ?? '?'}`,
+      r.dir,
+    ]),
   );
 }
 
@@ -46,6 +54,13 @@ export async function showCommand(
   out.plain(
     `${summary.runId}  ${summary.adapter}  ${summary.eventCount} events  exit ${summary.exitCode ?? 0}`,
   );
+  // A forked run's timeline opens mid-conversation in a worktree that no longer exists. Without
+  // this line the only way to learn where it came from is to cat the manifest — for the feature
+  // the tool is named after.
+  if (manifest.parent_run !== undefined) {
+    const model = manifest.fork_model === undefined ? '' : ` on ${manifest.fork_model}`;
+    out.plain(`  forked from ${manifest.parent_run} at checkpoint ${manifest.fork_point}${model}`);
+  }
   out.plain('');
 
   const rows = buildTimeline(events).map((r) => [String(r.seq), r.kind, r.label, r.meta ?? '']);
@@ -63,7 +78,9 @@ export async function showCommand(
     out.info('usage', {
       input: summary.totalUsage.input,
       output: summary.totalUsage.output,
-      cost: `$${cost.toFixed(4)}`,
+      // Same scaling as the compare table: four fixed decimals render a genuinely cheap run as
+      // `$0.0000`, which reads as free rather than as small.
+      cost: formatCost(cost),
     });
   }
 }

@@ -42,6 +42,18 @@ jobs:
       # This is what makes the format a format rather than whatever the writer happens to emit.
       - run: node scripts/conformance.mjs
 
+  python-sdk:
+    name: python sdk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      # The Python SDK reads the same normative format as the TypeScript core, so a format change
+      # that breaks it has to fail here rather than in someone else's notebook. No dependencies to
+      # install: the SDK is standard library only, on purpose.
+      - run: python -m pytest python/ -q
+
   plugin-api-neutrality:
     name: plugin API neutrality
     runs-on: ubuntu-latest
