@@ -3,8 +3,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from 'node:http';
-import { request as httpsRequest, type Agent as HttpsAgent } from 'node:https';
-import { Agent } from 'node:https';
+import { Agent, request as httpsRequest } from 'node:https';
 import { connect as netConnect, isIP, type Socket } from 'node:net';
 import { createSecureContext, rootCertificates, TLSSocket, type SecureContext } from 'node:tls';
 import type { RunCa } from './ca.js';
@@ -118,8 +117,9 @@ export interface TlsInterceptOptions {
 }
 
 export interface TlsInterceptHandle {
+  /** The policy actually in force, so a run can report what it is about to decrypt. */
   policy: HostPolicy;
-  /** Fired for each decision, so the proxy can keep its counters. */
+  /** Destroys every tunnel and decrypted session. Without it a run hangs on an idle keep-alive. */
   close: () => void;
 }
 
@@ -171,7 +171,7 @@ export function attachTlsIntercept(
   // `ca` replaces the default store rather than adding to it, so an extra root has to be supplied
   // alongside the whole bundle or the proxy would stop trusting the public web.
   const originTrust = extraRoots.length > 0 ? [...rootCertificates, ...extraRoots] : undefined;
-  const agent: HttpsAgent = new Agent({ keepAlive: true, maxSockets: 64 });
+  const agent = new Agent({ keepAlive: true, maxSockets: 64 });
 
   /** One secure context per intercepted host; minting is cheap but not free. */
   const contexts = new Map<string, SecureContext>();
@@ -184,6 +184,24 @@ export function attachTlsIntercept(
       if (!res.headersSent) res.writeHead(502, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: { message: `orca tls-intercept: ${String(err)}` } }));
     });
+  });
+
+  /**
+   * A protocol switch inside a session we decrypted — a WebSocket, usually.
+   *
+   * Not relayed: this proxy understands request/response exchanges and nothing else, and a
+   * half-implemented WebSocket relay would drop frames rather than fail. Refusing outright and
+   * saying so leaves the operator with a message instead of a hang, and the remedy is to take the
+   * host off the allowlist so the whole connection is tunnelled untouched instead.
+   */
+  decrypted.on('upgrade', (req, socket: Socket) => {
+    const target = targets.get(req.socket as TLSSocket);
+    options.onFailure?.({
+      host: target?.host ?? 'unknown',
+      port: target?.port ?? 0,
+      reason: `orca cannot relay an ${String(req.headers.upgrade)} upgrade through an intercepted connection`,
+    });
+    socket.end('HTTP/1.1 501 Not Implemented\r\nconnection: close\r\n\r\n');
   });
 
   function contextFor(host: string): SecureContext {
@@ -212,7 +230,9 @@ export function attachTlsIntercept(
         recordableHeaders[key] = value;
       }
     }
-    // Whatever the client believed it was talking to; virtual hosting depends on it.
+    // Node lower-cases every incoming header name, so this replaces the client's own `host`
+    // rather than adding a second one. Forwarded as the client wrote it, because virtual hosting
+    // depends on it; the CONNECT target is the fallback for an HTTP/1.0 client that sent none.
     outboundHeaders.host = req.headers.host ?? target.host;
 
     const requestBody = new Capture(maxCaptured);

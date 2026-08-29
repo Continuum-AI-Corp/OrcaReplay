@@ -101,6 +101,17 @@ describe('per-run certificate authority', () => {
     await expect(stat(ca.dir)).rejects.toThrow();
   });
 
+  it('arms a removal for the exits that never reach dispose, and disarms it after', async () => {
+    // A run that throws or is interrupted never reaches its own teardown. A private key surviving
+    // that is not an acceptable failure mode, so the removal is armed at creation.
+    const before = process.listenerCount('exit');
+    const extra = await RunCa.create({ runDir });
+    expect(process.listenerCount('exit')).toBe(before + 1);
+    await extra.dispose();
+    // And disarmed again, or a process recording many runs would accumulate one listener each.
+    expect(process.listenerCount('exit')).toBe(before);
+  });
+
   it('reports a fingerprint an operator can match against the certificate on disk', async () => {
     const onDisk = new X509Certificate(await readFile(ca.certPath, 'utf8'));
     expect(ca.fingerprint).toBe(onDisk.fingerprint256);

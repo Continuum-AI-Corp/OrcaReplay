@@ -131,11 +131,15 @@ export async function recordCommand(
   if (!interceptTls && tlsHosts.length > 0) {
     out.warn('tls.hosts_ignored', { hosts: tlsHosts.join(','), next: 'add --tls-intercept' });
   }
+  const interceptHosts = tlsHosts.length > 0 ? tlsHosts : DEFAULT_TLS_HOSTS;
   let ca: RunCa | undefined;
+  let originRoots: string[] = [];
   if (interceptTls) {
-    // Validated before anything is minted, so `--tls-hosts '*'` fails without leaving a private
-    // key on disk for a run that is not going to happen.
-    HostPolicy.from(tlsHosts.length > 0 ? tlsHosts : DEFAULT_TLS_HOSTS);
+    // Everything that can be rejected is rejected before anything is minted, so a run that is not
+    // going to happen — `--tls-hosts '*'`, an unreadable ORCA_TLS_UPSTREAM_CA — leaves no private
+    // key on disk at all.
+    HostPolicy.from(interceptHosts);
+    originRoots = await extraOriginRoots();
     ca = await RunCa.create({ runDir: writer.runDir });
   }
 
@@ -150,8 +154,8 @@ export async function recordCommand(
       ? {
           tls: {
             ca,
-            hosts: tlsHosts.length > 0 ? tlsHosts : DEFAULT_TLS_HOSTS,
-            trustedOriginCerts: await extraOriginRoots(),
+            hosts: interceptHosts,
+            trustedOriginCerts: originRoots,
             onNetExchange: (exchange: NetExchange) => {
               writes.push(() => persistNetExchange(exchange));
             },

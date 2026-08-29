@@ -6,6 +6,7 @@ import {
   X509Certificate,
   type KeyObject,
 } from 'node:crypto';
+import { rmSync } from 'node:fs';
 import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import { isIPv4, isIPv6 } from 'node:net';
 import { join } from 'node:path';
@@ -182,12 +183,12 @@ export class RunCa {
   readonly #subject: Buffer;
   readonly #authorityKeyId: Buffer;
   /** One key pair for every host certificate — minting is then a signature, not a keygen. */
-  readonly #leafKey: KeyObject;
   readonly #leafPublicSpki: Buffer;
   readonly #leafKeyPem: string;
   readonly #leafKeyId: Buffer;
   readonly #issued = new Map<string, IssuedCertificate>();
   readonly #lifetimeMs: number;
+  readonly #atExit: () => void;
 
   private constructor(init: {
     dir: string;
@@ -195,13 +196,25 @@ export class RunCa {
     key: KeyObject;
     subject: Buffer;
     authorityKeyId: Buffer;
-    leafKey: KeyObject;
     leafPublicSpki: Buffer;
     leafKeyPem: string;
     leafKeyId: Buffer;
     lifetimeMs: number;
     notAfter: Date;
   }) {
+    this.#atExit = () => {
+      // `exit` handlers must be synchronous, which is why this is the one place the module reaches
+      // for the sync API. Best effort by construction: if it fails there is nothing left to do.
+      try {
+        rmSync(init.dir, { recursive: true, force: true });
+      } catch {
+        /* the directory is already gone, or was never ours to remove */
+      }
+    };
+    // The backstop for every path that never reaches the ordinary teardown: an agent that fails to
+    // launch, a throw mid-recording, a Ctrl-C. Deleting the key is normally the run's own job; a
+    // private key surviving a crashed run is not an acceptable failure mode for it to have.
+    process.once('exit', this.#atExit);
     this.dir = init.dir;
     this.certPath = join(init.dir, 'ca.crt');
     this.keyPath = join(init.dir, 'ca.key');
@@ -212,7 +225,6 @@ export class RunCa {
     this.#key = init.key;
     this.#subject = init.subject;
     this.#authorityKeyId = init.authorityKeyId;
-    this.#leafKey = init.leafKey;
     this.#leafPublicSpki = init.leafPublicSpki;
     this.#leafKeyPem = init.leafKeyPem;
     this.#leafKeyId = init.leafKeyId;
@@ -287,7 +299,6 @@ export class RunCa {
       key: authority.privateKey,
       subject,
       authorityKeyId,
-      leafKey: leaf.privateKey,
       leafPublicSpki: leaf.publicKey.export({ type: 'spki', format: 'der' }),
       leafKeyPem: leaf.privateKey.export({ type: 'pkcs8', format: 'pem' }) as string,
       leafKeyId: keyIdentifier(leaf.publicKey),
@@ -346,11 +357,6 @@ export class RunCa {
     return issued;
   }
 
-  /** Not exposed as a getter: the leaf key is handed out, the authority key never is. */
-  get leafKey(): KeyObject {
-    return this.#leafKey;
-  }
-
   /**
    * End the CA's life with the run.
    *
@@ -358,6 +364,9 @@ export class RunCa {
    * path and from a failure handler.
    */
   async dispose(): Promise<void> {
+    // Removed first: a listener left behind would keep the closure — and a reference to this run —
+    // alive for the life of the process, and orca records more than one run per process.
+    process.off('exit', this.#atExit);
     await rm(this.dir, { recursive: true, force: true });
   }
 }

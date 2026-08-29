@@ -153,6 +153,30 @@ describe('orca record --tls-intercept', () => {
     expect(printed).toContain('*.chatgpt.com');
   });
 
+  it('decrypts model API hosts and nothing else when no list is given', async () => {
+    process.env.ORCA_TEST_TARGETS = JSON.stringify([
+      { host: '127.0.0.1', port: bank.port, path: '/accounts' },
+    ]);
+    const result = await record(['--tls-intercept']);
+
+    const printed = lines.join('');
+    expect(printed).toContain('api.openai.com');
+    expect(printed).toContain('api.anthropic.com');
+    expect(printed).not.toContain('github.com');
+
+    // A local address is on nobody's model API list, so the default policy tunnels it.
+    const events = await (await TraceReader.open(result.runDir)).events();
+    const net = events.filter((e) => e.type.startsWith('net.'));
+    expect(net).toHaveLength(2);
+    for (const event of net) expect(event.attrs?.intercepted).toBe(false);
+    expect(await grepRunDir(result.runDir, 'BANK-BODY-MARKER')).toEqual([]);
+  });
+
+  it('warns rather than silently ignoring hosts named without the flag', async () => {
+    await record(['--tls-hosts', 'api.openai.com']);
+    expect(lines.join('')).toContain('tls.hosts_ignored');
+  });
+
   it('trusts the run CA through the child environment and nowhere else', async () => {
     const result = await record(['--tls-intercept', '--tls-hosts', `127.0.0.1:${model.port}`]);
     const env = await childEnv();
