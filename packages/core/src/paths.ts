@@ -1,4 +1,4 @@
-import { readFile, readdir, stat } from 'node:fs/promises';
+import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { RUN_ID_PATTERN } from '@orcareplay/schema';
 
@@ -18,6 +18,34 @@ export function orcaDir(cwd: string): string {
 
 export function runsDir(cwd: string): string {
   return join(orcaDir(cwd), 'runs');
+}
+
+/**
+ * Create `.orca/runs`, and make the store ignore itself.
+ *
+ * A recording is the conversation the model saw — which is your source — plus shell output, a
+ * snapshot of the whole workspace, and an environment allowlist. SECURITY.md says to treat one as
+ * roughly as sensitive as a shell history plus a heap dump. It was also landing in `git status` as
+ * an untracked directory, one `git add -A` away from being committed and pushed, in the working
+ * tree of the project it just recorded.
+ *
+ * `.orca/.gitignore` containing `*` is git's own idiom for a directory that excludes itself: no
+ * edit to the user's `.gitignore`, nothing to remember, and it works in a repo orca has never seen
+ * before. Written once at creation and never rewritten, so anyone who deliberately wants their
+ * traces tracked can delete it and orca will not put it back.
+ */
+export async function ensureRunsDir(cwd: string): Promise<string> {
+  const dir = runsDir(cwd);
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  const ignore = join(orcaDir(cwd), '.gitignore');
+  if (!(await stat(ignore).catch(() => null))) {
+    await writeFile(
+      ignore,
+      '# Recordings hold source, shell output and workspace snapshots. Not for committing.\n*\n',
+      { mode: 0o600, flag: 'wx' },
+    ).catch(() => undefined);
+  }
+  return dir;
 }
 
 /** Run ids reach us from argv, so the pattern check is also the path-traversal guard. */

@@ -1,12 +1,12 @@
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
   TraceReader,
   deriveCheckpoints,
   resolveRunSelector,
-  runsDir,
+  ensureRunsDir,
   snapToCheckpoint,
   TraceWriter,
 } from '@orcareplay/core';
@@ -414,8 +414,7 @@ async function openReplayTrace(
   cwd: string,
 ): Promise<TraceWriter | undefined> {
   if (!args.bool('trace', true)) return undefined;
-  const dir = runsDir(ctx.cwd);
-  await mkdir(dir, { recursive: true });
+  const dir = await ensureRunsDir(ctx.cwd);
   return TraceWriter.create(dir, {
     adapter: ctx.manifest.adapter,
     argv: ctx.manifest.argv,
@@ -470,8 +469,7 @@ async function replayFork(
     await fs.restore(checkpoint.fsTree, worktree);
   }
 
-  const dir = runsDir(ctx.cwd);
-  await mkdir(dir, { recursive: true });
+  const dir = await ensureRunsDir(ctx.cwd);
   const writer = await TraceWriter.create(dir, {
     adapter: ctx.manifest.adapter,
     argv: ctx.manifest.argv,

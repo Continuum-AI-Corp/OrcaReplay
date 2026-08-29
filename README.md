@@ -216,6 +216,37 @@ Once `v0` ships, `npx orcareplay --help` will be the one-liner and this section 
 
 Node 20+. No account, no signup, no API key changes.
 
+## Where your runs are kept
+
+Everything lands in **`.orca/runs/` inside the project you recorded in** — per-project, never a
+global store, so a run travels with the checkout it belongs to. One run directory is one
+self-describing thing:
+
+```
+.orca/
+  .gitignore          # just `*` — the store excludes itself, so a trace cannot be committed by accident
+  runs/run_d0a2ee7ce615/
+    manifest.json     # who, when, which adapter, the git commit, counts, integrity digest
+    events.jsonl      # the timeline, one JSON object per line, append-only
+    blobs/            # content-addressed payloads over 4 KB, deduplicated
+    fs/               # shadow git index: the workspace at every turn
+    shell-frames.jsonl
+    redactions.json   # what was removed, by rule and count — never by value
+```
+
+Finding an old session:
+
+```console
+orca list                       # every run here, newest first, with what it was forked from
+orca show run_d0a2ee7ce615      # the timeline in the terminal
+orca replay last                # `last` = newest recording (it skips replay traces)
+orca replay run_d0a2ee7ce615    # or name one outright
+orca gc --older-than 7d --dry-run   # what would be reclaimed, before anything is
+```
+
+`orca list` reads the run directories directly, so it works on a trace someone sent you: drop it in
+`.orca/runs/` and every command sees it. Nothing indexes, and there is no database to corrupt.
+
 ## Privacy
 
 Traces are local, mode `0600`, and the recorder makes no network connection of its own. Secrets are

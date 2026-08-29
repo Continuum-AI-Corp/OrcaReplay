@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { delimiter, resolve } from 'node:path';
-import { TraceWriter, runsDir } from '@orcareplay/core';
+import { TraceWriter, ensureRunsDir } from '@orcareplay/core';
 import { FsCapture } from '@orcareplay/fs-capture';
 import { createProxy, RunCa, type RecordedExchange } from '@orcareplay/proxy';
 import { defaultAdapters } from '@orcareplay/adapters';
@@ -75,8 +75,7 @@ async function runRecording(
     out.info('adapter.detected', { id: adapter.id });
   }
 
-  const dir = runsDir(cwd);
-  await mkdir(dir, { recursive: true });
+  const dir = await ensureRunsDir(cwd);
 
   const writer = await TraceWriter.create(dir, {
     adapter: { id: adapter.id, version: ORCA_VERSION, harness_version: adapter.harnessVersions },

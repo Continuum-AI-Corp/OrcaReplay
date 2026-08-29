@@ -1,8 +1,15 @@
-import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { listRuns, orcaDir, resolveRunSelector, runDirFor, runsDir } from '../src/paths.js';
+import {
+  ensureRunsDir,
+  listRuns,
+  orcaDir,
+  resolveRunSelector,
+  runDirFor,
+  runsDir,
+} from '../src/paths.js';
 import { TraceWriter } from '../src/writer.js';
 
 let cwd: string;
@@ -177,5 +184,48 @@ describe('resolveRunSelector', () => {
   it('rejects a selector that is not a run id at all', async () => {
     await seedRun('run_aaaaaa', '2026-08-01T00:00:00.000Z');
     await expect(resolveRunSelector(cwd, '../../etc/passwd')).rejects.toThrow(/run id/i);
+  });
+});
+
+describe('ensureRunsDir', () => {
+  it('makes the trace store ignore itself, so a recording cannot be committed by accident', async () => {
+    // A trace is the conversation the model saw — your source — plus shell output, a snapshot of
+    // the whole workspace and an environment allowlist. It was landing in `git status` as an
+    // untracked directory, one `git add -A` away from being pushed, in the repo it just recorded.
+    const cwd = await mkdtemp(join(tmpdir(), 'orca-ignore-'));
+    try {
+      const dir = await ensureRunsDir(cwd);
+      expect(dir).toBe(join(cwd, '.orca', 'runs'));
+      const ignore = await readFile(join(cwd, '.orca', '.gitignore'), 'utf8');
+      // `*` is git's own idiom for a directory that excludes itself: no edit to the user's
+      // .gitignore, and it works in a repo orca has never seen before.
+      expect(ignore.split('\n')).toContain('*');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('never rewrites one the user changed, so opting back in sticks', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orca-ignore-'));
+    try {
+      await ensureRunsDir(cwd);
+      // Someone who deliberately wants their traces tracked empties this. Orca must not undo that
+      // on the next recording.
+      await writeFile(join(cwd, '.orca', '.gitignore'), '', { mode: 0o600 });
+      await ensureRunsDir(cwd);
+      expect(await readFile(join(cwd, '.orca', '.gitignore'), 'utf8')).toBe('');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('is safe to call repeatedly', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orca-ignore-'));
+    try {
+      await expect(ensureRunsDir(cwd)).resolves.toBeDefined();
+      await expect(ensureRunsDir(cwd)).resolves.toBeDefined();
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
   });
 });
