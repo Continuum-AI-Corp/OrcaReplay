@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://orcareplay.dev/schema/v0/event.schema.json",
+  "title": "Orca Trace Event",
+  "type": "object",
+  "required": ["seq", "ts", "mono_us", "turn", "type", "actor"],
+  "additionalProperties": false,
+  "properties": {
+    "seq": { "type": "integer", "minimum": 0 },
+    "ts": { "type": "string", "format": "date-time" },
+    "mono_us": { "type": "integer", "minimum": 0 },
+    "turn": { "type": "integer", "minimum": 0 },
+    "type": {
+      "type": "string",
+      "enum": [
+        "run.start", "run.end", "model.request", "model.response",
+        "tool.call", "tool.result", "mcp.request", "mcp.response",
+        "shell.exec", "shell.result", "fs.snapshot", "fs.change",
+        "net.request", "net.response", "error", "divergence",
+        "checkpoint", "fork", "route.decision", "note"
+      ]
+    },
+    "actor": {
+      "type": "string",
+      "enum": ["agent", "harness", "model", "orca", "gateway", "tool", "user"]
+    },
+    "causes": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+    "attrs": { "type": "object" },
+    "payload": {
+      "oneOf": [
+        { "$ref": "#/$defs/blobRef" },
+        { "not": { "type": "object", "required": ["$blob"] } }
+      ]
+    },
+    "redacted": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": {
+    "blobRef": {
+      "type": "object",
+      "required": ["$blob", "bytes"],
+      "additionalProperties": false,
+      "properties": {
+        "$blob": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "media_type": { "type": "string" }
+      }
+    }
+  }
+}

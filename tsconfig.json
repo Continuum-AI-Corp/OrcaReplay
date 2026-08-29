@@ -1,0 +1,15 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/schema" },
+    { "path": "packages/plugin-api" },
+    { "path": "packages/core" },
+    { "path": "packages/fs-capture" },
+    { "path": "packages/providers" },
+    { "path": "packages/proxy" },
+    { "path": "packages/mcp-shim" },
+    { "path": "packages/adapters" },
+    { "path": "packages/viewer" },
+    { "path": "packages/cli" }
+  ]
+}

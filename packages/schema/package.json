@@ -1,0 +1,11 @@
+{
+  "name": "@orcareplay/schema",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": "./dist/index.js", "./schema/*": "./schema/*" },
+  "files": ["dist", "schema"],
+  "dependencies": { "ajv": "^8.17.1", "ajv-formats": "^3.0.1" }
+}

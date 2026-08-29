@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://orcareplay.dev/schema/v0/manifest.schema.json",
+  "title": "Orca Trace Manifest",
+  "type": "object",
+  "required": ["schema_version", "run_id", "created_at", "orca_version", "adapter", "argv", "cwd"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string" },
+    "run_id": { "type": "string", "pattern": "^run_[0-9a-f]{6,32}$" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "ended_at": { "type": "string", "format": "date-time" },
+    "orca_version": { "type": "string" },
+    "adapter": {
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "version": { "type": "string" },
+        "harness_version": { "type": "string" }
+      }
+    },
+    "argv": { "type": "array", "items": { "type": "string" } },
+    "cwd": { "type": "string" },
+    "env_allowlisted": { "type": "object", "additionalProperties": { "type": "string" } },
+    "git": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "head": { "type": "string" },
+        "branch": { "type": "string" },
+        "dirty": { "type": "boolean" }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "required": ["os", "arch", "node"],
+      "additionalProperties": false,
+      "properties": {
+        "os": { "type": "string" }, "arch": { "type": "string" }, "node": { "type": "string" }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "events": { "type": "integer" }, "blobs": { "type": "integer" } }
+    },
+    "redaction": {
+      "type": "object",
+      "required": ["policy_version"],
+      "additionalProperties": false,
+      "properties": {
+        "policy_version": { "type": "integer" },
+        "rules_fired": { "type": "object", "additionalProperties": { "type": "integer" } }
+      }
+    },
+    "parent_run": { "type": "string", "pattern": "^run_[0-9a-f]{6,32}$" },
+    "fork_point": { "type": "integer", "minimum": 0 },
+    "fork_model": { "type": "string" },
+    "exit_code": { "type": "integer" },
+    "integrity": {
+      "type": "object",
+      "required": ["events_sha256", "blob_count"],
+      "additionalProperties": false,
+      "properties": {
+        "events_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "blob_count": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

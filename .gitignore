@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.orca/
+coverage/
+.DS_Store
+*.log
