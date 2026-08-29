@@ -6,6 +6,7 @@ import { createProxy, type RecordedExchange } from '@orcareplay/proxy';
 import { defaultAdapters } from '@orcareplay/adapters';
 import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver } from '../exchange-events.js';
+import { setupMcpCapture, type McpCapture } from '../mcp.js';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
 import { upstreamOverrides } from '../upstream.js';
@@ -65,6 +66,14 @@ export async function recordCommand(
       // not abort the run the user actually wanted to record.
       out.warn('fs.unavailable', { reason: String(err) });
     }
+  }
+
+  // MCP capture is opt-in by pointing at a config: the file lives in a different place for every
+  // harness, and guessing wrong would rewrite something the user did not mean us to touch.
+  let mcp: McpCapture | undefined;
+  const mcpConfigPath = args.str('mcp-config');
+  if (mcpConfigPath) {
+    mcp = await setupMcpCapture({ sourceConfigPath: mcpConfigPath, runDir: writer.runDir, out });
   }
 
   const deriver = new ExchangeEventDeriver();
@@ -150,6 +159,13 @@ export async function recordCommand(
     env: process.env,
   };
   const launch = await adapter.prepare(ctx);
+  if (mcp) {
+    // Every target harness reads one of these; setting all three costs nothing and avoids making
+    // the user work out which one their agent uses.
+    launch.env.MCP_CONFIG_PATH = mcp.configPath;
+    launch.env.CLAUDE_MCP_CONFIG = mcp.configPath;
+    launch.env.OPENCODE_MCP_CONFIG = mcp.configPath;
+  }
 
   out.phase('recording', {
     run: writer.runId,
@@ -170,6 +186,18 @@ export async function recordCommand(
   );
 
   await Promise.all(pendingWrites);
+
+  if (mcp) {
+    for (const frame of await mcp.drain()) {
+      await writer.append({
+        type: frame.direction === 'in' ? 'mcp.request' : 'mcp.response',
+        actor: 'agent',
+        turn,
+        attrs: { server: frame.server, kind: frame.kind, method: frame.method, id: frame.id },
+        payload: frame.raw,
+      });
+    }
+  }
 
   const orphans = deriver.unresolved();
   if (orphans.length > 0) {

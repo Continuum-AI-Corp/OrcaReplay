@@ -50,9 +50,11 @@ Early. `v0` is the walking skeleton of the three commands above.
 | Compare across models | working |
 | Filesystem snapshots and diffs | working |
 | Single-file HTML export | working |
-| MCP call recording | working |
-| Shell capture (`PATH` shim) | partial — protocol-level fallback always available |
+| MCP call recording | working — opt in with `--mcp-config <path>` |
+| Post-hoc scrubbing (`orca scrub`) | working |
+| Shell capture (`PATH` shim) | **not implemented.** The protocol layer records the command and its merged output, one turn late |
 | Non-model network capture | not implemented; out of scope for v0 |
+| Subscription-auth harnesses | Claude Code works. A Codex CLI signed in with a ChatGPT subscription talks to its own backend, so base-URL redirection does not capture it |
 
 ## Install
 
@@ -69,8 +71,15 @@ redacted in the write path: environment capture is deny-by-default, auth headers
 and known key shapes plus high-entropy strings are replaced with stable placeholders.
 
 Redaction is best-effort mitigation, not a guarantee. **Treat a trace as sensitive** — roughly as
-sensitive as a shell history plus a heap dump. Run `orca scrub` before sharing anything you are
-unsure about.
+sensitive as a shell history plus a heap dump.
+
+```console
+orca export last -o bug.html          # prints exactly what it is about to write
+orca scrub last --match my-hostname   # remove something after the fact
+```
+
+`orca scrub` rewrites `events.jsonl` and every text blob, re-runs the standard detectors, refreshes
+the integrity digest, and leaves binary blobs byte-identical.
 
 ## What is open, and what is not
 

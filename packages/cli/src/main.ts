@@ -10,6 +10,7 @@ import {
   uiCommand,
 } from './commands/inspect.js';
 import { compareCommand } from './commands/compare.js';
+import { scrubCommand } from './commands/scrub.js';
 import { ORCA_VERSION } from './version.js';
 
 const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI agents
@@ -23,6 +24,7 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
   orca show [run]                the timeline, in the terminal
   orca checkpoints [run]         where you can fork from
   orca export [run] -o file.html a single self-contained file you can attach
+  orca scrub [run] --match X      remove something from a recorded trace
   orca ui [run]                  serve the viewer locally
   orca list                      runs recorded here
 
@@ -31,6 +33,7 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
 Flags
   --loose        on replay, continue live past an unmatched request
   --no-fs        skip filesystem capture
+  --mcp-config <path>  instrument MCP servers from this config
   --ci           machine-readable output, no progress
   --verbose      more detail
   --no-color     also honours NO_COLOR
@@ -80,6 +83,9 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
         return 0;
       case 'ui':
         await uiCommand(args, out, cwd);
+        return 0;
+      case 'scrub':
+        await scrubCommand(args, out, cwd);
         return 0;
       case 'list':
         await listCommand(args, out, cwd);
