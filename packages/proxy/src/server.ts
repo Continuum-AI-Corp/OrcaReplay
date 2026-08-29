@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { AUTH_REQUEST_HEADERS } from '@orcareplay/core';
+import { AUTH_REQUEST_HEADERS, Redactor } from '@orcareplay/core';
 import type { CanonicalRequest, CanonicalResponse, Usage } from '@orcareplay/plugin-api';
 import {
   anthropicToCanonicalRequest,
@@ -96,6 +96,8 @@ export interface ProxyStats {
   mode: ProxyMode;
   recorded: number;
   matchedExact: number;
+  /** Served from the recording, but only after the ladder had to approximate. */
+  matchedInexact: number;
   divergences: number;
   liveCalls: number;
   unmatched: number;
@@ -203,6 +205,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     mode: options.mode,
     recorded: recorded.length,
     matchedExact: 0,
+    matchedInexact: 0,
     divergences: 0,
     liveCalls: 0,
     unmatched: 0,
@@ -214,7 +217,14 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
   // it must go live, which is exactly what makes a fork a fork.
   const replayable =
     options.mode === 'hybrid' ? recorded.slice(0, options.forkAt ?? recorded.length) : recorded;
-  const matcher = new RequestMatcher(replayable.map((e) => e.canonicalRequest));
+  // The recorded requests carry placeholders where secrets were; a live replay request carries the
+  // secrets themselves. Without a redactor on this side the two are never in the same
+  // representation, and a recording of any real harness — whose own system prompt carries a
+  // session id — cannot match itself.
+  const matcher = new RequestMatcher(
+    replayable.map((e) => e.canonicalRequest),
+    { redactor: new Redactor() },
+  );
 
   const server = createServer((req, res) => {
     void handle(req, res).catch((err: unknown) => {
@@ -535,6 +545,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       if (result.matched) {
         const exchange = replayable[result.index]!;
         if (result.divergence) {
+          stats.matchedInexact += 1;
           stats.divergences += 1;
           options.onDivergence?.({ ...result.divergence, seq: exchange.seq });
         } else {

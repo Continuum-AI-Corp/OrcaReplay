@@ -104,6 +104,17 @@ MUST match using this ladder and MUST record which rung matched:
 | 3 | Identical trailing message, different prefix (typical after compaction) | `divergence` level `major` |
 | 4 | No match | halt and report; `--loose` continues live instead |
 
+Redaction (§5) makes rung 1 unreachable for any request that contained a secret: the placeholder's
+digest is salted per run, so the same value becomes a different placeholder on replay. Implementations
+MUST therefore put both sides in the same representation before comparing — redacting the incoming
+request with the same policy — and MUST compare the *kind* of secret rather than its digest, which
+is the most a trace can know about a value it deliberately destroyed. A request that is equal only
+after that fold is a rung 2 `minor` divergence, never rung 1.
+
+Distance MUST be measured per field rather than over the serialized body as a whole. A whole-body
+longest-common-prefix-and-suffix measure counts everything between two distant edits as changed, so
+two drifting identifiers in a large prompt score as a total rewrite and no request can reach rung 2.
+
 **Replay MUST NOT silently approximate.** Every inexact match is an event in the trace.
 
 ## 5. Redaction

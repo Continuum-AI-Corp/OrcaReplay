@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { Redactor } from '@orcareplay/core';
 import type { CanonicalRequest } from '@orcareplay/plugin-api';
 import {
   RequestMatcher,
@@ -207,5 +208,117 @@ describe('RequestMatcher — the ladder from spec §4', () => {
     const past = m.match(req());
     expect(past.matched).toBe(false);
     expect(past.reason).toContain('exhausted');
+  });
+});
+
+describe('structuralDistance — bounded to the leaves that differ', () => {
+  /**
+   * The regression that a real recording found. Claude Code carries a session-scoped id in both its
+   * system prompt and its tool descriptions, and the old prefix/suffix metric counted everything
+   * between the two as changed: a sixteen-character drift scored 217,568, so rung 2 could not fire
+   * on any real harness and every replay halted at rung 4.
+   */
+  it('does not count the identical body between two far-apart edits', () => {
+    const filler = 'x'.repeat(50_000);
+    const tool = (tail: string) => [
+      { name: 'bash', description: `${filler}${tail}`, input_schema: {} },
+    ];
+    const a = req({ system: `A${filler}`, tools: tool('A') });
+    const b = req({ system: `B${filler}`, tools: tool('B') });
+
+    expect(structuralDistance(a, b)).toBeLessThan(64);
+  });
+
+  it('still counts a whole message that only one side has', () => {
+    const long = 'y'.repeat(5_000);
+    const a = req();
+    const b = req({
+      messages: [
+        ...req().messages,
+        { role: 'assistant', content: [{ type: 'text', text: long }] },
+      ],
+    });
+    expect(structuralDistance(a, b)).toBeGreaterThan(5_000);
+  });
+});
+
+describe('RequestMatcher — a live request meeting a redacted recording', () => {
+  const secret = 'sk-live-9f2c14a03b71d4e8a7c5';
+
+  function redactedWith(salt: string, text: string): string {
+    return new Redactor({ salt }).redactString(text).value;
+  }
+
+  /** A secret in the *ask* is the case that decides the run: rung 2 will not stretch to cover it. */
+  function asked(text: string): CanonicalRequest {
+    return req({ messages: [{ role: 'user', content: [{ type: 'tool_result', content: text }] }] });
+  }
+
+  it('matches a placeholder against the secret it stands for, and says it approximated', () => {
+    const recorded = asked(redactedWith('recording', `key ${secret}`));
+    expect(JSON.stringify(recorded)).toContain('<secret:sk_api_key:');
+
+    const m = new RequestMatcher([recorded], { redactor: new Redactor({ salt: 'replay' }) });
+    const r = m.match(asked(`key ${secret}`));
+
+    expect(r.matched).toBe(true);
+    expect(r.rung).toBe(2);
+    expect(r.divergence?.level).toBe('minor');
+    expect(r.divergence?.detail).toContain('1 redacted value');
+  });
+
+  it('cannot match it without a redactor, because the two are not in the same representation', () => {
+    const recorded = asked(redactedWith('recording', `key ${secret}`));
+    const r = new RequestMatcher([recorded]).match(asked(`key ${secret}`));
+    expect(r.matched).toBe(false);
+    expect(r.rung).toBe(4);
+  });
+
+  it('rung 1 stays exact: a request with nothing redacted in it reports no divergence', () => {
+    const m = new RequestMatcher([req()], { redactor: new Redactor({ salt: 'replay' }) });
+    const r = m.match(req());
+    expect(r.rung).toBe(1);
+    expect(r.divergence).toBeUndefined();
+  });
+});
+
+describe('RequestMatcher — how far the ask itself may drift', () => {
+  function result(text: string) {
+    return req({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'fix the auth test' }] },
+        { role: 'user', content: [{ type: 'tool_result', content: text }] },
+      ],
+    });
+  }
+
+  it('tolerates a regenerated path inside a large tool result', () => {
+    const body = 'skill body\n'.repeat(400);
+    const m = new RequestMatcher([result(`/cache/50248ab48d3dd46003f12c11173be1b5/run\n${body}`)]);
+    const r = m.match(result(`/cache/75c3aa9fd9090d6443ba7077a82fea4a/run\n${body}`));
+
+    expect(r.matched).toBe(true);
+    expect(r.rung).toBe(2);
+    expect(r.divergence?.detail).toContain('in the trailing message');
+  });
+
+  it('refuses a short question that was swapped for another of the same shape', () => {
+    const m = new RequestMatcher([
+      req({ messages: [{ role: 'user', content: [{ type: 'text', text: 'fix the auth test' }] }] }),
+    ]);
+    const r = m.match(
+      req({ messages: [{ role: 'user', content: [{ type: 'text', text: 'fix the auth code' }] }] }),
+    );
+    expect(r.matched).toBe(false);
+    expect(r.rung).toBe(4);
+  });
+
+  it('caps the tolerance absolutely, so a huge result cannot buy a huge licence to differ', () => {
+    const body = 'z'.repeat(200_000);
+    const m = new RequestMatcher([result(`${body}${'a'.repeat(1_000)}`)]);
+    const r = m.match(result(`${body}${'b'.repeat(1_000)}`));
+
+    expect(r.matched).toBe(false);
+    expect(r.rung).toBe(4);
   });
 });

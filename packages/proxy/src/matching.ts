@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { Redactor } from '@orcareplay/core';
 import type { CanonicalContent, CanonicalRequest } from '@orcareplay/plugin-api';
 import { DIVERGENCE_LEVELS, MATCH_RUNGS } from '@orcareplay/schema';
 
@@ -112,34 +113,179 @@ function sortKeys<T>(value: T): T {
   return value;
 }
 
-export function canonicalHash(req: CanonicalRequest): string {
-  return createHash('sha256')
-    .update(JSON.stringify(normalizeRequest(req)))
-    .digest('hex');
+/**
+ * A redaction placeholder is `<secret:kind:hash8>` and the digest is salted **per run** (spec §5),
+ * so the same secret, in the same position, becomes a different placeholder in a different run.
+ * That is deliberate — it is what stops a short secret being brute-forced out of a published trace
+ * — but it means a recorded request can never be byte-equal to the same request made again. Every
+ * comparison below rung 1 is therefore made on the *kind* of secret rather than on its digest.
+ */
+const PLACEHOLDER_DIGEST = /(<secret:[a-z0-9_]+):[0-9a-f]{8}>/g;
+
+function foldPlaceholders(text: string): string {
+  return text.replace(PLACEHOLDER_DIGEST, '$1>');
 }
 
-/** Character-level difference between the normalized forms, as a rough structural distance. */
-export function structuralDistance(a: CanonicalRequest, b: CanonicalRequest): number {
-  const sa = JSON.stringify(normalizeRequest(a));
-  const sb = JSON.stringify(normalizeRequest(b));
-  if (sa === sb) return 0;
+/** Deep map over string leaves, structure untouched. */
+function mapStrings<T>(value: T, f: (s: string) => string): T {
+  if (typeof value === 'string') return f(value) as unknown as T;
+  if (Array.isArray(value)) return value.map((v) => mapStrings(v, f)) as unknown as T;
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = mapStrings(v, f);
+    return out as unknown as T;
+  }
+  return value;
+}
 
-  // Common prefix and suffix, which is enough to separate "one field edited" from "rewritten".
+/**
+ * The recorded side was redacted on its way to disk. An incoming replay request has never been near
+ * the write path, so it holds the real values and cannot match a recording that holds placeholders
+ * — the two have to be put in the same representation first. Pass the redactor for the live side;
+ * the recorded side is already in it.
+ */
+function redactedForm(req: CanonicalRequest, redactor?: Redactor): Record<string, unknown> {
+  const normalized = normalizeRequest(req);
+  if (!redactor) return normalized;
+  return mapStrings(normalized, (s) => redactor.redactString(s).value);
+}
+
+/**
+ * What rungs 2 and below compare: the redacted form with placeholder digests folded away, so what
+ * survives is *which kind of secret sat here*. That is the most a trace can honestly claim to know
+ * about a value it deliberately destroyed.
+ */
+export function comparableRequest(
+  req: CanonicalRequest,
+  redactor?: Redactor,
+): Record<string, unknown> {
+  return mapStrings(redactedForm(req, redactor), foldPlaceholders);
+}
+
+function hashOf(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+export function canonicalHash(req: CanonicalRequest): string {
+  return hashOf(normalizeRequest(req));
+}
+
+function countPlaceholders(value: unknown): number {
+  let n = 0;
+  mapStrings(value, (s) => {
+    n += s.match(PLACEHOLDER_DIGEST)?.length ?? 0;
+    return s;
+  });
+  return n;
+}
+
+/**
+ * Character distance summed over the leaves that actually differ.
+ *
+ * The obvious implementation — longest common prefix and suffix of the two serialized bodies — is
+ * wrong in a way only a real harness shows you. Claude Code carries a session-scoped id in both its
+ * system prompt and its tool descriptions; two drifting tokens that far apart leave the entire
+ * 200 KB between them counted as changed, so a sixteen-character difference scored 217,568 and
+ * rung 2 could not fire on any real recording. Walking the two structures in parallel bounds each
+ * difference to the leaf that contains it.
+ *
+ * Arrays align by index, which is right for `messages` and for the name-sorted `tools`, and
+ * deliberately pessimistic when an element is *inserted* in the middle: everything after it counts
+ * as changed. Over-counting sends a request down the ladder rather than up it, which is the safe
+ * direction for a matcher to be wrong in.
+ */
+export function structuralDistance(a: CanonicalRequest, b: CanonicalRequest): number {
+  return leafDistance(comparableRequest(a), comparableRequest(b));
+}
+
+function leafDistance(a: unknown, b: unknown): number {
+  if (a === b) return 0;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    let total = 0;
+    const shared = Math.min(a.length, b.length);
+    for (let i = 0; i < shared; i += 1) total += leafDistance(a[i], b[i]);
+    for (let i = shared; i < a.length; i += 1) total += weight(a[i]);
+    for (let i = shared; i < b.length; i += 1) total += weight(b[i]);
+    return total;
+  }
+  if (isRecord(a) && isRecord(b)) {
+    let total = 0;
+    for (const key of new Set([...Object.keys(a), ...Object.keys(b)])) {
+      if (!(key in a)) total += weight(b[key]);
+      else if (!(key in b)) total += weight(a[key]);
+      else total += leafDistance(a[key], b[key]);
+    }
+    return total;
+  }
+  if (typeof a === 'string' && typeof b === 'string') return textDistance(a, b);
+  return Math.max(weight(a), weight(b));
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function weight(v: unknown): number {
+  return JSON.stringify(v ?? null).length;
+}
+
+/** Prefix and suffix — the old whole-body heuristic, now scoped to one leaf, where it holds. */
+function textDistance(a: string, b: string): number {
   let prefix = 0;
-  const max = Math.min(sa.length, sb.length);
-  while (prefix < max && sa[prefix] === sb[prefix]) prefix += 1;
+  const max = Math.min(a.length, b.length);
+  while (prefix < max && a[prefix] === b[prefix]) prefix += 1;
   let suffix = 0;
-  while (suffix < max - prefix && sa[sa.length - 1 - suffix] === sb[sb.length - 1 - suffix]) {
+  while (suffix < max - prefix && a[a.length - 1 - suffix] === b[b.length - 1 - suffix]) {
     suffix += 1;
   }
-  return Math.max(sa.length, sb.length) - prefix - suffix;
+  return Math.max(a.length, b.length) - prefix - suffix;
 }
 
-function trailingMessageKey(req: CanonicalRequest): string {
-  const last = req.messages[req.messages.length - 1];
-  return last
-    ? JSON.stringify({ role: last.role, content: last.content.map(normalizeContent) })
-    : '';
+function trailingMessage(form: Record<string, unknown>): unknown {
+  const messages = (form.messages ?? []) as unknown[];
+  return messages[messages.length - 1];
+}
+
+function messageCount(form: Record<string, unknown>): number {
+  return ((form.messages ?? []) as unknown[]).length;
+}
+
+/**
+ * How far the ask may drift and still be the same ask: a share of its own size, capped in absolute
+ * terms. Both halves earn their place. The ratio has no floor, so on a short question a fraction of
+ * a short string is a fraction of a character and "same ask" collapses back to equality — which is
+ * what stops a swapped question being served the recorded answer. The cap stops a very large tool
+ * result buying a proportionally large licence to differ: however big the message, at most this
+ * many characters of it may move.
+ *
+ * The number that motivated it, from the first real recording this was pointed at: a Claude Code
+ * tool result quoting the on-disk path of a bundled skill, whose 32-character content-addressed
+ * directory name is regenerated per install. Thirty-two characters, in a message of several
+ * kilobytes, and the run could not be replayed at all.
+ */
+const ASK_DRIFT_RATIO = 0.02;
+const ASK_DRIFT_MAX = 512;
+
+/** `Infinity` when one side has no trailing message at all and the other does. */
+function askDistance(live: Record<string, unknown>, recorded: Record<string, unknown>): number {
+  const a = trailingMessage(live);
+  const b = trailingMessage(recorded);
+  if (a === undefined || b === undefined) return a === b ? 0 : Number.POSITIVE_INFINITY;
+  return leafDistance(a, b);
+}
+
+function askTolerance(recorded: Record<string, unknown>): number {
+  const ask = trailingMessage(recorded);
+  return ask === undefined ? 0 : Math.min(weight(ask) * ASK_DRIFT_RATIO, ASK_DRIFT_MAX);
+}
+
+export interface MatcherOptions {
+  /**
+   * Applied to incoming requests before they are compared, so a live body meets the recording in
+   * the representation the recording is stored in. Leave it out and the two are compared raw,
+   * which only ever matches a recording that had nothing redacted in it at all.
+   */
+  redactor?: Redactor;
 }
 
 /**
@@ -149,12 +295,21 @@ function trailingMessageKey(req: CanonicalRequest): string {
  */
 export class RequestMatcher {
   readonly #recorded: CanonicalRequest[];
-  readonly #hashes: string[];
+  /** Redacted but unfolded — rung 1 compares these, so "exact" still means exact. */
+  readonly #strict: string[];
+  readonly #comparable: Record<string, unknown>[];
+  /** Counted before the fold, which is the only point at which the digests are still there. */
+  readonly #secrets: number[];
+  readonly #redactor?: Redactor;
   #cursor = 0;
 
-  constructor(recorded: CanonicalRequest[]) {
+  constructor(recorded: CanonicalRequest[], options: MatcherOptions = {}) {
     this.#recorded = recorded;
-    this.#hashes = recorded.map(canonicalHash);
+    this.#redactor = options.redactor;
+    const normalized = recorded.map((r) => normalizeRequest(r));
+    this.#strict = normalized.map(hashOf);
+    this.#secrets = normalized.map(countPlaceholders);
+    this.#comparable = normalized.map((n) => mapStrings(n, foldPlaceholders));
   }
 
   remaining(): number {
@@ -176,16 +331,40 @@ export class RequestMatcher {
     }
 
     const index = this.#cursor;
-    const candidate = this.#recorded[index]!;
+    const recorded = this.#comparable[index]!;
 
-    // Rung 1 — canonical hash.
-    if (canonicalHash(incoming) === this.#hashes[index]) {
+    // Rung 1 — canonical hash. Redacted the same way the recording was, but not folded: a request
+    // only counts as exact when nothing in it had to be approximated.
+    if (hashOf(redactedForm(incoming, this.#redactor)) === this.#strict[index]) {
       this.#cursor += 1;
       return { matched: true, rung: 1, index };
     }
 
-    const distance = structuralDistance(incoming, candidate);
-    const size = JSON.stringify(normalizeRequest(candidate)).length;
+    const live = comparableRequest(incoming, this.#redactor);
+    const distance = leafDistance(live, recorded);
+    const size = JSON.stringify(recorded).length;
+
+    // Rung 2a — identical everywhere the trace kept a value. The digests differ because they are
+    // salted per run, which is the one difference orca can neither reproduce nor rule out, so it
+    // is reported rather than waved through: this is the ordinary shape of replaying a real
+    // harness, whose own prompt carries a session id.
+    if (distance === 0) {
+      this.#cursor += 1;
+      const secrets = this.#secrets[index]!;
+      return {
+        matched: true,
+        rung: 2,
+        index,
+        divergence: {
+          level: 'minor',
+          rung: 2,
+          distance: 0,
+          detail:
+            `request ${index} is identical apart from ${secrets} redacted ` +
+            `${secrets === 1 ? 'value' : 'values'}, whose digests are salted per run`,
+        },
+      };
+    }
 
     // Rung 2 — same position, same ask, small difference around it.
     //
@@ -195,10 +374,11 @@ export class RequestMatcher {
     // inside tolerance and was served the recorded answer under a `minor` label. Rung 2 exists for
     // drift *around* the question: a regenerated id, a different cwd in the system prompt, a
     // reordered tool list. A changed question is a different run, and it belongs at rung 4.
-    const sameAsk = trailingMessageKey(incoming) === trailingMessageKey(candidate);
+    const askDrift = askDistance(live, recorded);
+    const sameAsk = askDrift <= askTolerance(recorded);
     if (
       sameAsk &&
-      incoming.messages.length === candidate.messages.length &&
+      messageCount(live) === messageCount(recorded) &&
       distance <= Math.max(64, size * MINOR_DISTANCE_RATIO)
     ) {
       this.#cursor += 1;
@@ -210,7 +390,10 @@ export class RequestMatcher {
           level: 'minor',
           rung: 2,
           distance,
-          detail: `request ${index} differs by ${distance} chars with an identical message count`,
+          detail:
+            `request ${index} differs by ${distance} ${distance === 1 ? 'char' : 'chars'} ` +
+            `with an identical message count` +
+            (askDrift > 0 ? `, ${askDrift} of them in the trailing message` : ''),
         },
       };
     }
@@ -227,8 +410,9 @@ export class RequestMatcher {
           rung: 3,
           distance,
           detail:
-            `request ${index} has an identical trailing message but a different prefix ` +
-            `(${candidate.messages.length} recorded vs ${incoming.messages.length} replayed)`,
+            `request ${index} has ${askDrift === 0 ? 'an identical' : 'an equivalent'} trailing ` +
+            `message but a different prefix ` +
+            `(${messageCount(recorded)} recorded vs ${messageCount(live)} replayed)`,
         },
       };
     }
@@ -240,8 +424,8 @@ export class RequestMatcher {
       index,
       reason:
         `request ${index} does not match the recording ` +
-        `(distance ${distance}, ${candidate.messages.length} recorded vs ` +
-        `${incoming.messages.length} replayed messages)`,
+        `(distance ${distance}, ${messageCount(recorded)} recorded vs ` +
+        `${messageCount(live)} replayed messages)`,
     };
   }
 }

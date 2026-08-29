@@ -363,8 +363,12 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
   }
 
   out.phase('replay.done', {
-    matched: stats.matchedExact,
-    total: ctx.exchanges.length,
+    // `matched=1 total=13` was the old shape, and on a healthy replay of a real harness it read as
+    // a failure: rung 1 is only reachable when nothing in the request was redacted, so a run whose
+    // every request was served from disk still reported one match. What someone wants to know here
+    // is how much of the recording was reused, and how much of that reuse was exact.
+    reused: `${stats.matchedExact + stats.matchedInexact}/${ctx.exchanges.length}`,
+    exact: stats.matchedExact,
     divergences: stats.divergences,
     unmatched: stats.unmatched,
     exit: exitCode,
