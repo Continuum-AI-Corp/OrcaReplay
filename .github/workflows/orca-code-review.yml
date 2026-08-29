@@ -49,6 +49,6 @@ jobs:
           # This file is authoritative. The dashboard fetch is skipped entirely,
           # so workspace defaults and other repos' settings cannot reach this
           # repo — and nothing changed in the console applies here.
-          settings: "false"
+          settings: 'false'
           # Every severity blocks the merge, including advisory P2.
-          block-on: "P0,P1,P2"
+          block-on: 'P0,P1,P2'
