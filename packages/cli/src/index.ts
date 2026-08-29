@@ -3,6 +3,8 @@ export * from './out.js';
 export * from './main.js';
 export * from './exchange-events.js';
 export * from './mcp.js';
+export * from './serial.js';
+export * from './snapshot.js';
 export * from './commands/record.js';
 export * from './commands/replay.js';
 export * from './commands/compare.js';

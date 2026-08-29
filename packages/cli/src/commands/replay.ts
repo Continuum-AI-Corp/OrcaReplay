@@ -17,6 +17,7 @@ import { isBlobRef, type TraceEvent } from '@orcareplay/schema';
 import { ExchangeEventDeriver } from '../exchange-events.js';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
+import { SerialQueue } from '../serial.js';
 import { upstreamOverrides } from '../upstream.js';
 import { ORCA_VERSION } from '../version.js';
 
@@ -234,7 +235,7 @@ async function replayFork(
 
   const deriver = new ExchangeEventDeriver();
   let turn = 0;
-  const writes: Promise<unknown>[] = [];
+  const writes = new SerialQueue();
 
   const proxy = await createProxy({
     mode: 'hybrid',
@@ -243,30 +244,28 @@ async function replayFork(
     exchanges: ctx.exchanges,
     upstream: upstreamOverrides(args),
     onExchange: (exchange) => {
-      writes.push(
-        (async () => {
-          turn += 1;
-          for (const d of deriver.derive(exchange, turn)) {
-            await writer.append({
-              type: d.type,
-              actor: d.actor,
-              turn,
-              attrs: d.attrs,
-              payload: d.payload as never,
-            });
-          }
-        })(),
-      );
+      writes.push(async () => {
+        turn += 1;
+        for (const d of deriver.derive(exchange, turn)) {
+          await writer.append({
+            type: d.type,
+            actor: d.actor,
+            turn,
+            attrs: d.attrs,
+            payload: d.payload as never,
+          });
+        }
+      });
     },
     onDivergence: (d) => {
-      writes.push(
-        writer.append({
+      writes.push(async () => {
+        await writer.append({
           type: 'divergence',
           actor: 'orca',
           turn,
           attrs: { level: d.level, rung: d.rung, detail: d.detail, source_seq: d.seq },
-        }),
-      );
+        });
+      });
     },
   });
 
@@ -306,7 +305,7 @@ async function replayFork(
     { ...process.env, ...launch.env },
     worktree,
   );
-  await Promise.all(writes);
+  await writes.drain();
 
   const stats = proxy.stats();
   await writer.append({ type: 'run.end', actor: 'orca', turn, attrs: { exit_code: exitCode } });

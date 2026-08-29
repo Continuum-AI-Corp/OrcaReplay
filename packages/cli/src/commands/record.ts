@@ -7,6 +7,8 @@ import { defaultAdapters } from '@orcareplay/adapters';
 import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver } from '../exchange-events.js';
 import { setupMcpCapture, type McpCapture } from '../mcp.js';
+import { SerialQueue } from '../serial.js';
+import { snapshotWithRetry } from '../snapshot.js';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
 import { upstreamOverrides } from '../upstream.js';
@@ -78,13 +80,15 @@ export async function recordCommand(
 
   const deriver = new ExchangeEventDeriver();
   let turn = 0;
-  const pendingWrites: Promise<unknown>[] = [];
+  // Serial, not parallel: each persist snapshots the workspace, and two overlapping `git add`
+  // calls collide on index.lock. It also keeps seq in the order exchanges actually happened.
+  const writes = new SerialQueue();
 
   const proxy = await createProxy({
     mode: 'record',
     upstream: upstreamOverrides(args),
     onExchange: (exchange: RecordedExchange) => {
-      pendingWrites.push(persist(exchange));
+      writes.push(() => persist(exchange));
     },
   });
 
@@ -110,25 +114,38 @@ export async function recordCommand(
     }
 
     if (fs) {
-      const snap = await fs.snapshotTurn(turn);
-      await writer.append({
-        type: 'fs.snapshot',
-        actor: 'orca',
-        turn,
-        attrs: { tree: snap.tree, changes: snap.changes.length },
-      });
-      for (const change of snap.changes) {
+      const outcome = await snapshotWithRetry(fs, turn);
+      if (!outcome.ok || !outcome.snapshot) {
+        // Degrade, never abort: losing a snapshot costs one checkpoint, whereas throwing here
+        // would cost the user the run they were trying to record.
+        out.warn('fs.snapshot_failed', { turn, attempts: outcome.attempts, error: outcome.error });
         await writer.append({
-          type: 'fs.change',
+          type: 'note',
           actor: 'orca',
           turn,
-          attrs: {
-            path: change.path,
-            status: change.status,
-            insertions: change.insertions,
-            deletions: change.deletions,
-          },
+          attrs: { rule: 'fs_snapshot_skipped', attempts: outcome.attempts, error: outcome.error },
         });
+      } else {
+        const snap = outcome.snapshot;
+        await writer.append({
+          type: 'fs.snapshot',
+          actor: 'orca',
+          turn,
+          attrs: { tree: snap.tree, changes: snap.changes.length },
+        });
+        for (const change of snap.changes) {
+          await writer.append({
+            type: 'fs.change',
+            actor: 'orca',
+            turn,
+            attrs: {
+              path: change.path,
+              status: change.status,
+              insertions: change.insertions,
+              deletions: change.deletions,
+            },
+          });
+        }
       }
     }
   }
@@ -141,13 +158,17 @@ export async function recordCommand(
   });
 
   if (fs) {
-    const initial = await fs.snapshotTurn(0);
-    await writer.append({
-      type: 'fs.snapshot',
-      actor: 'orca',
-      turn: 0,
-      attrs: { tree: initial.tree, changes: 0, initial: true },
-    });
+    const initial = await snapshotWithRetry(fs, 0);
+    if (initial.ok && initial.snapshot) {
+      await writer.append({
+        type: 'fs.snapshot',
+        actor: 'orca',
+        turn: 0,
+        attrs: { tree: initial.snapshot.tree, changes: 0, initial: true },
+      });
+    } else {
+      out.warn('fs.snapshot_failed', { turn: 0, error: initial.error });
+    }
   }
 
   const ctx: RecordContext = {
@@ -185,7 +206,7 @@ export async function recordCommand(
     launch.cwd ?? cwd,
   );
 
-  await Promise.all(pendingWrites);
+  await writes.drain();
 
   if (mcp) {
     for (const frame of await mcp.drain()) {
