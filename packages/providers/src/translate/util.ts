@@ -73,11 +73,23 @@ export function parseToolInput(json: string): unknown {
 export function stringifyToolInput(input: unknown): string {
   const rec = asRecord(input);
   const raw = rec['_raw'];
-  if (typeof raw === 'string' && Object.keys(rec).length === 1) return raw;
+  // `{_raw: "..."}` is the marker parseToolInput leaves for arguments that were not valid JSON,
+  // so emit it verbatim. But a model may legitimately name a parameter `_raw`: if the string
+  // parses as a JSON object it is real data and must be re-serialized, not unwrapped.
+  if (typeof raw === 'string' && Object.keys(rec).length === 1 && !isJsonObject(raw)) return raw;
   if (input === undefined) return '{}';
   try {
     return JSON.stringify(input) ?? '{}';
   } catch {
     return '{}';
+  }
+}
+
+function isJsonObject(text: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === 'object' && parsed !== null;
+  } catch {
+    return false;
   }
 }

@@ -67,7 +67,11 @@ export function normalizeRequest(req: CanonicalRequest): Record<string, unknown>
       content: m.content.map(normalizeContent),
     })),
     tools: (req.tools ?? [])
-      .map((t) => ({ name: t.name, description: t.description ?? null, input_schema: t.input_schema }))
+      .map((t) => ({
+        name: t.name,
+        description: t.description ?? null,
+        input_schema: t.input_schema,
+      }))
       .sort((a, b) => a.name.localeCompare(b.name)),
     max_tokens: req.max_tokens ?? null,
     temperature: req.temperature ?? null,
@@ -105,7 +109,9 @@ function sortKeys<T>(value: T): T {
 }
 
 export function canonicalHash(req: CanonicalRequest): string {
-  return createHash('sha256').update(JSON.stringify(normalizeRequest(req))).digest('hex');
+  return createHash('sha256')
+    .update(JSON.stringify(normalizeRequest(req)))
+    .digest('hex');
 }
 
 /** Character-level difference between the normalized forms, as a rough structural distance. */
@@ -119,10 +125,7 @@ export function structuralDistance(a: CanonicalRequest, b: CanonicalRequest): nu
   const max = Math.min(sa.length, sb.length);
   while (prefix < max && sa[prefix] === sb[prefix]) prefix += 1;
   let suffix = 0;
-  while (
-    suffix < max - prefix &&
-    sa[sa.length - 1 - suffix] === sb[sb.length - 1 - suffix]
-  ) {
+  while (suffix < max - prefix && sa[sa.length - 1 - suffix] === sb[sb.length - 1 - suffix]) {
     suffix += 1;
   }
   return Math.max(sa.length, sb.length) - prefix - suffix;
@@ -130,7 +133,9 @@ export function structuralDistance(a: CanonicalRequest, b: CanonicalRequest): nu
 
 function trailingMessageKey(req: CanonicalRequest): string {
   const last = req.messages[req.messages.length - 1];
-  return last ? JSON.stringify({ role: last.role, content: last.content.map(normalizeContent) }) : '';
+  return last
+    ? JSON.stringify({ role: last.role, content: last.content.map(normalizeContent) })
+    : '';
 }
 
 /**

@@ -118,13 +118,14 @@ export class ShadowIndex {
       throw new Error(`failed to create shadow git dir at ${gitDir}: ${init.stderr.trim()}`);
     }
     // Byte fidelity on materialize, and no chance of git running a filesystem-monitor hook.
-    for (const [key, value] of [
+    const settings: ReadonlyArray<readonly [string, string]> = [
       ['core.autocrlf', 'false'],
       ['core.eol', 'lf'],
       ['core.fsmonitor', 'false'],
       ['gc.auto', '0'],
-    ]) {
-      await runGit(['config', key as string, value as string], { gitDir });
+    ];
+    for (const [key, value] of settings) {
+      await runGit(['config', key, value], { gitDir });
     }
     await mkdir(join(gitDir, 'info'), { recursive: true });
     await writeFile(join(gitDir, 'info', 'exclude'), `${SENSITIVE_PATTERNS.join('\n')}\n`, 'utf8');
@@ -237,7 +238,8 @@ export class ShadowIndex {
   }
 
   /**
-   * Writes the whole tree into `destDir`. Fork replay debugs whatever this produces, so it refuses
+   * Writes the whole tree into `destDir`, which should be fresh: files already there that the tree
+   * does not name are left where they are. Fork replay debugs whatever this produces, so it refuses
    * a tree holding a nested repository: `git add` records those as a gitlink whose contents were
    * never stored, and checkout would silently leave an empty directory in their place.
    */

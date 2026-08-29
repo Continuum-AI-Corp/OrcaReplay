@@ -116,6 +116,13 @@ Redaction happens in the write path, before bytes reach disk. Implementations MU
   replay still matches structurally and repeat occurrences remain equal;
 - record removals in `redactions.json` by rule and identifier, never by value.
 
+High-entropy detection MUST additionally require a **mixed alphabet** — the token must contain
+both a digit and a letter. Shannon entropy alone has false positives on ordinary source code
+(`getUserAuthenticationTokenFromRequestHeaders` scores 4.08 bits/char), and since agent traces are
+mostly source code, an unguarded rule corrupts exactly the payloads the trace exists to preserve.
+Recall is essentially unaffected: random base64url of 20+ characters contains a digit with
+probability ≈0.98.
+
 Redaction is best-effort mitigation, not a guarantee. A trace is sensitive material.
 
 ## 6. Integrity

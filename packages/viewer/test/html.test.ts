@@ -10,7 +10,9 @@ beforeEach(() => resetSeq());
 function ruleBody(css: string, selector: string): string {
   const at = css.indexOf(selector);
   if (at < 0) throw new Error(`selector not found: ${selector}`);
-  const open = css.indexOf('{', at + selector.length);
+  // From `at`, not past the selector: several selectors here already carry their `{`, and
+  // skipping past it silently returns the *next* rule's body instead.
+  const open = css.indexOf('{', at);
   if (open < 0) throw new Error(`no block for: ${selector}`);
   let depth = 0;
   for (let i = open; i < css.length; i += 1) {
@@ -174,9 +176,7 @@ describe('theme tokens', () => {
       [...block.matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/g)]
         .map((m) => `${m[1]}:${m[2]!.trim()}`)
         .sort();
-    expect(pairs(ruleBody(VIEWER_CSS, DARK_ATTR))).toEqual(
-      pairs(ruleBody(VIEWER_CSS, DARK_MEDIA)),
-    );
+    expect(pairs(ruleBody(VIEWER_CSS, DARK_ATTR))).toEqual(pairs(ruleBody(VIEWER_CSS, DARK_MEDIA)));
   });
 
   it('paints the body ground explicitly rather than borrowing the host', () => {
@@ -245,13 +245,33 @@ describe('document structure', () => {
 
   it('renders one tab and one tabpanel per event, wired together', () => {
     const html = basic();
-    expect((html.match(/role="tab"/g) ?? []).length).toBe(3);
-    expect((html.match(/role="tabpanel"/g) ?? []).length).toBe(3);
-    expect((html.match(/aria-selected="true"/g) ?? []).length).toBe(1);
+    // Count in the markup only: the stylesheet mentions these selectors too.
+    const markup = html.slice(html.indexOf('</style>'));
+    expect((markup.match(/role="tab"/g) ?? []).length).toBe(3);
+    expect((markup.match(/role="tabpanel"/g) ?? []).length).toBe(3);
+    expect((markup.match(/aria-selected="true"/g) ?? []).length).toBe(1);
+    expect((markup.match(/aria-selected="false"/g) ?? []).length).toBe(2);
     expect(html).toContain('role="tablist"');
     expect(html).toContain('aria-controls="orca-pane-0"');
     expect(html).toContain('aria-labelledby="orca-row-0"');
     expect((html.match(/<button/g) ?? []).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('marks the first row of each turn so turns read as groups', () => {
+    const html = renderTraceHtml({
+      manifest: manifest(),
+      events: [
+        ev({ type: 'run.start', turn: 0 }),
+        ev({ type: 'tool.call', turn: 0 }),
+        ev({ type: 'tool.call', turn: 1 }),
+        ev({ type: 'tool.call', turn: 1 }),
+        ev({ type: 'run.end', turn: 2 }),
+      ],
+    });
+    const markup = html.slice(html.indexOf('</style>'));
+    // Turn 0 opens the list, so only turns 1 and 2 draw a boundary.
+    expect((markup.match(/data-turn-start="true"/g) ?? []).length).toBe(2);
+    expect(VIEWER_CSS).toContain('.row[data-turn-start="true"]');
   });
 
   it('shows the run summary in the band', () => {

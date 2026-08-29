@@ -145,9 +145,9 @@ describe('TraceWriter.append', () => {
   it('validates before writing — an invalid event never reaches disk', async () => {
     const w = await TraceWriter.create(runs, INIT);
     await w.append({ type: 'note', actor: 'orca' });
-    await expect(
-      w.append({ type: 'model.telepathy' as 'note', actor: 'orca' }),
-    ).rejects.toThrow(/invalid trace event/);
+    await expect(w.append({ type: 'model.telepathy' as 'note', actor: 'orca' })).rejects.toThrow(
+      /invalid trace event/,
+    );
     await expect(w.append({ type: 'note', actor: 'wizard' as 'orca' })).rejects.toThrow(
       /invalid trace event/,
     );
@@ -197,9 +197,7 @@ describe('TraceWriter.append', () => {
   it('keeps concurrent appends dense and unmangled', async () => {
     const w = await TraceWriter.create(runs, INIT);
     await Promise.all(
-      Array.from({ length: 40 }, (_, i) =>
-        w.append({ type: 'note', actor: 'orca', attrs: { i } }),
-      ),
+      Array.from({ length: 40 }, (_, i) => w.append({ type: 'note', actor: 'orca', attrs: { i } })),
     );
     const written = await lines(w);
     expect(written.map((e) => e.seq)).toEqual(Array.from({ length: 40 }, (_, i) => i));
@@ -225,7 +223,11 @@ describe('redaction is on the write path', () => {
 
   it('never writes a secret found in attrs', async () => {
     const w = await TraceWriter.create(runs, INIT);
-    await w.append({ type: 'shell.exec', actor: 'tool', attrs: { cmd: 'curl -H "x: AKIAIOSFODNN7EXAMPLE"' } });
+    await w.append({
+      type: 'shell.exec',
+      actor: 'tool',
+      attrs: { cmd: 'curl -H "x: AKIAIOSFODNN7EXAMPLE"' },
+    });
     const raw = await readFile(join(w.runDir, 'events.jsonl'), 'utf8');
     expect(raw).not.toContain('AKIAIOSFODNN7EXAMPLE');
     await w.close();

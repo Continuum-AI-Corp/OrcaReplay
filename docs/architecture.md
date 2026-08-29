@@ -41,6 +41,21 @@ Reusing git plumbing for the filesystem layer gives content-addressed storage, c
 `.gitignore` handling and worktree materialization — the exact four things fork replay needs — for
 about a hundred lines of code.
 
+### Auth, verified against a real agent
+
+Claude Code under a subscription login authenticates with its **own** `authorization: Bearer`
+header and ignores an injected `ANTHROPIC_API_KEY`. So the proxy forwards auth headers upstream
+verbatim while never writing them to the trace — §7 forbids *recording* auth material, which is a
+different requirement from relaying it. A proxy that dropped the header would break the agent
+outright, and only for subscription users, which is the worst kind of bug to ship.
+
+It also probes `GET /v1/code/agent-proxy/ca-cert` and a websocket upgrade at
+`/v1/code/agent-proxy/ws`. The proxy answers both with a clean 404 rather than an error.
+
+One capture gap follows from the same place: a Codex CLI signed in with a ChatGPT subscription
+talks to its own backend rather than the OpenAI API base URL, so base-URL redirection alone does
+not capture that auth mode. OpenCode's provider-OAuth logins carry the same shape of risk.
+
 ## Three modes, one proxy
 
 Exact, fork and compare are not three subsystems. They are one proxy with a **cursor**: the

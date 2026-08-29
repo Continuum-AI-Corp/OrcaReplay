@@ -149,7 +149,9 @@ export class Output {
       parts.push(`${k}=${formatValue(k, v)}`);
     }
     const body = parts.join(' ');
-    this.#write(`${style ? this.#paint(style) : ''}${body}${style ? this.#paint(STYLE.reset) : ''}\n`);
+    this.#write(
+      `${style ? this.#paint(style) : ''}${body}${style ? this.#paint(STYLE.reset) : ''}\n`,
+    );
   }
 }
 

@@ -1,0 +1,138 @@
+import { TraceReader, deriveCheckpoints, resolveRunSelector } from '@orcareplay/core';
+import { priceFor } from '@orcareplay/providers';
+import { parseArgs, type ParsedArgs } from '../args.js';
+import type { Output } from '../out.js';
+import { replayCommand } from './replay.js';
+
+/** Each fork is a fresh argv, so upstream overrides have to be forwarded explicitly. */
+function upstreamFlags(args: ParsedArgs): string[] {
+  const out: string[] = [];
+  const a = args.str('upstream-anthropic');
+  const o = args.str('upstream-openai');
+  if (a) out.push('--upstream-anthropic', a);
+  if (o) out.push('--upstream-openai', o);
+  return out;
+}
+
+export interface CompareRow {
+  model: string;
+  verdict: 'pass' | 'fail';
+  exitCode: number;
+  divergences: number;
+  inputTokens: number;
+  outputTokens: number;
+  cost: number | null;
+  wallMs: number;
+  forkRunId?: string;
+  error?: string;
+}
+
+/**
+ * `orca compare <run> --models a,b,c`
+ *
+ * N forks from one checkpoint. The comparison only means anything because every branch starts
+ * from an identical filesystem tree and conversation prefix — the model is the only variable, so
+ * the difference in outcome is attributable to it rather than to drift.
+ */
+export async function compareCommand(
+  args: ParsedArgs,
+  out: Output,
+  cwd = process.cwd(),
+): Promise<CompareRow[]> {
+  const models = args.list('models');
+  if (models.length === 0) {
+    throw new Error(
+      'compare needs models to compare\n  orca compare last --models claude-opus-5,glm-5.3-flash',
+    );
+  }
+
+  const selector = args.positionals[0] ?? 'last';
+  const runDir = (await resolveRunSelector(cwd, selector)).dir;
+  const reader = await TraceReader.open(runDir);
+  const events = await reader.events();
+  const checkpoints = deriveCheckpoints(events);
+  if (checkpoints.length === 0) {
+    throw new Error('this run has no checkpoints, so there is nothing to fork from');
+  }
+
+  const from = args.num('from') ?? checkpoints[checkpoints.length - 1]!.seq;
+  const runId = reader.manifest().run_id;
+
+  out.phase('compare', { run: runId, from, models: models.join(',') });
+
+  const rows: CompareRow[] = [];
+  // Sequential rather than parallel: each fork spawns a real agent against a real worktree, and
+  // running four of those concurrently on one machine measures the machine, not the models.
+  for (const model of models) {
+    const startedAt = Date.now();
+    try {
+      const forkArgs = parseArgs([
+        'replay',
+        selector,
+        '--from',
+        String(from),
+        '--model',
+        model,
+        ...(args.bool('loose') ? ['--loose'] : []),
+        ...upstreamFlags(args),
+      ]);
+      const result = await replayCommand(forkArgs, out, cwd);
+      const usage = result.forkRunId
+        ? await usageOf(cwd, result.forkRunId)
+        : { input: 0, output: 0 };
+      const money = priceFor({ input_tokens: usage.input, output_tokens: usage.output }, model);
+      rows.push({
+        model,
+        verdict: result.exitCode === 0 ? 'pass' : 'fail',
+        exitCode: result.exitCode,
+        divergences: result.divergences,
+        inputTokens: usage.input,
+        outputTokens: usage.output,
+        cost: money ? money.amount : null,
+        wallMs: Date.now() - startedAt,
+        forkRunId: result.forkRunId,
+      });
+    } catch (err) {
+      rows.push({
+        model,
+        verdict: 'fail',
+        exitCode: -1,
+        divergences: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cost: null,
+        wallMs: Date.now() - startedAt,
+        error: err instanceof Error ? err.message.split('\n')[0] : String(err),
+      });
+    }
+  }
+
+  out.plain('');
+  out.table(
+    ['MODEL', 'VERDICT', 'TOKENS', 'COST', 'WALL', 'RUN'],
+    rows.map((r) => [
+      r.model,
+      r.verdict,
+      `${r.inputTokens}/${r.outputTokens}`,
+      // An unknown model prices as a dash, never as $0.00 — a confidently wrong cost is worse
+      // than an absent one when it lands in a table someone decides from.
+      r.cost === null ? '—' : `$${r.cost.toFixed(4)}`,
+      `${(r.wallMs / 1000).toFixed(1)}s`,
+      r.forkRunId ?? r.error ?? '',
+    ]),
+  );
+
+  return rows;
+}
+
+async function usageOf(cwd: string, runId: string): Promise<{ input: number; output: number }> {
+  const reader = await TraceReader.open((await resolveRunSelector(cwd, runId)).dir);
+  let input = 0;
+  let output = 0;
+  for (const e of await reader.events()) {
+    if (e.type !== 'model.response') continue;
+    input += Number(e.attrs?.input_tokens ?? 0);
+    output += Number(e.attrs?.output_tokens ?? 0);
+  }
+  return { input, output };
+}

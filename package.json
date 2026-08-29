@@ -3,8 +3,12 @@
   "private": true,
   "type": "module",
   "license": "Apache-2.0",
-  "engines": { "node": ">=20.0.0" },
-  "workspaces": ["packages/*"],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "build": "tsc --build",
     "clean": "tsc --build --clean",

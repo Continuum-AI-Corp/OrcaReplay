@@ -148,8 +148,10 @@ describe('gitInfo', () => {
     const { cwd, capture } = await fixture();
     await runGit(['init', '-q', '-b', 'trunk'], { cwd });
     await write(cwd, 'a.txt', 'one\n');
-    await runGit(['add', '-A'], { cwd });
-    await runGit(['-c', 'user.email=a@b.c', '-c', 'user.name=a', 'commit', '-qm', 'first'], { cwd });
+    await runGit(['add', 'a.txt'], { cwd });
+    await runGit(['-c', 'user.email=a@b.c', '-c', 'user.name=a', 'commit', '-qm', 'first'], {
+      cwd,
+    });
 
     const clean = await capture.gitInfo(cwd);
     expect(clean.head).toMatch(/^[0-9a-f]{40}$/);
@@ -175,12 +177,32 @@ describe('gitInfo', () => {
     expect(info.dirty).toBe(false);
   });
 
+  // The run dir normally lives inside the workspace, so orca's own files must not be what makes
+  // the user's repo look dirty in the manifest.
+  itGit('ignores its own run dir when deciding whether the workspace is dirty', async () => {
+    const { cwd, runDir, capture } = await fixture();
+    await runGit(['init', '-q', '-b', 'trunk'], { cwd });
+    await write(cwd, 'a.txt', 'one\n');
+    await runGit(['add', 'a.txt'], { cwd });
+    await runGit(['-c', 'user.email=a@b.c', '-c', 'user.name=a', 'commit', '-qm', 'first'], {
+      cwd,
+    });
+    await capture.snapshotTurn(0);
+    await write(runDir, 'events.jsonl', '{"seq":0}\n');
+    expect((await capture.gitInfo(cwd)).dirty).toBe(false);
+
+    await write(cwd, 'untracked-by-the-user.txt', 'mine\n');
+    expect((await capture.gitInfo(cwd)).dirty).toBe(true);
+  });
+
   itGit('omits branch when HEAD is detached', async () => {
     const { cwd, capture } = await fixture();
     await runGit(['init', '-q'], { cwd });
     await write(cwd, 'a.txt', 'one\n');
-    await runGit(['add', '-A'], { cwd });
-    await runGit(['-c', 'user.email=a@b.c', '-c', 'user.name=a', 'commit', '-qm', 'first'], { cwd });
+    await runGit(['add', 'a.txt'], { cwd });
+    await runGit(['-c', 'user.email=a@b.c', '-c', 'user.name=a', 'commit', '-qm', 'first'], {
+      cwd,
+    });
     const head = (await runGit(['rev-parse', 'HEAD'], { cwd })).stdout.trim();
     await runGit(['checkout', '-q', head], { cwd });
     const info = await capture.gitInfo(cwd);

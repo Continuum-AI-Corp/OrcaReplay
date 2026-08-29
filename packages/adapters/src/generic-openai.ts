@@ -27,6 +27,8 @@ export const genericOpenAiAdapter: Adapter = {
       ANTHROPIC_BASE_URL: proxyBase(ctx.proxyUrl),
     };
     passKey(env, ctx.env, 'OPENAI_API_KEY');
+    // Only passed on if the user already had one: an invented Anthropic key could flip an unknown
+    // agent's provider auto-selection and change which model it calls.
     passThrough(env, ctx.env, 'ANTHROPIC_API_KEY');
     return { command, args, env };
   },

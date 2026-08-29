@@ -125,7 +125,11 @@ describe('buildTimeline', () => {
     const rows = buildTimeline([
       ev({ type: 'fs.change', attrs: { files: 3, added: 12, removed: 4 } }),
       ev({ type: 'mcp.request', actor: 'gateway', attrs: { method: 'tools/call', server: 'fsx' } }),
-      ev({ type: 'mcp.response', actor: 'gateway', attrs: { method: 'tools/call', error: 'boom' } }),
+      ev({
+        type: 'mcp.response',
+        actor: 'gateway',
+        attrs: { method: 'tools/call', error: 'boom' },
+      }),
       ev({ type: 'route.decision', actor: 'gateway', attrs: { model: 'haiku', reason: 'cheap' } }),
       ev({ type: 'fork', attrs: { child_run: 'run_ffff', from_seq: 7 } }),
       ev({ type: 'run.start', attrs: { adapter: 'claude-code' } }),
@@ -161,9 +165,7 @@ describe('buildTimeline', () => {
   });
 
   it('truncates a very long label so one row cannot swamp the list', () => {
-    const rows = buildTimeline([
-      ev({ type: 'shell.exec', attrs: { command: 'x'.repeat(500) } }),
-    ]);
+    const rows = buildTimeline([ev({ type: 'shell.exec', attrs: { command: 'x'.repeat(500) } })]);
     expect(rows[0]!.label.length).toBeLessThanOrEqual(120);
     expect(rows[0]!.label.endsWith('…')).toBe(true);
   });
@@ -247,9 +249,9 @@ describe('summarize', () => {
 
   it('prefers the manifest exit code and falls back to run.end', () => {
     expect(summarize(manifest({ exit_code: 3 }), []).exitCode).toBe(3);
-    expect(
-      summarize(manifest(), [ev({ type: 'run.end', attrs: { exit_code: 7 } })]).exitCode,
-    ).toBe(7);
+    expect(summarize(manifest(), [ev({ type: 'run.end', attrs: { exit_code: 7 } })]).exitCode).toBe(
+      7,
+    );
     expect(summarize(manifest(), []).exitCode).toBe(null);
   });
 

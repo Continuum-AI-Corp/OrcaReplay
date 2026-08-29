@@ -1,4 +1,15 @@
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdir,
+  readFile,
+  readlink,
+  rename,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import type { FileChange } from '../src/index.js';
@@ -237,6 +248,22 @@ describe('exclusions', () => {
     await write(workTree, 'ok.txt', 'fine\n');
     expect(await filesIn(shadow, await shadow.snapshot())).toEqual(['.gitignore', 'ok.txt']);
   });
+  // GIT_LITERAL_PATHSPECS turns `:(exclude,glob)...` into an ordinary filename, which would
+  // quietly disarm every exclusion above. Nothing in the ambient environment may weaken this.
+  itGit('never captures secrets when the environment tampers with pathspec parsing', async () => {
+    const { workTree, shadow } = await fixture();
+    await write(workTree, '.env', 'API_KEY=sk-live-secret\n');
+    await write(workTree, '.gitignore', '!.env\n');
+    await write(workTree, 'ok.txt', 'fine\n');
+    const saved = process.env.GIT_LITERAL_PATHSPECS;
+    process.env.GIT_LITERAL_PATHSPECS = '1';
+    try {
+      expect(await filesIn(shadow, await shadow.snapshot())).toEqual(['.gitignore', 'ok.txt']);
+    } finally {
+      if (saved === undefined) delete process.env.GIT_LITERAL_PATHSPECS;
+      else process.env.GIT_LITERAL_PATHSPECS = saved;
+    }
+  });
 });
 
 describe('readFileAt', () => {
@@ -311,6 +338,18 @@ describe('materialize', () => {
     expect((await stat(join(dest, 'run.sh'))).mode & 0o111).toBeGreaterThan(0);
   });
 
+  itGit('round-trips a symlink as a symlink, without following it', async () => {
+    const { root, workTree, shadow } = await fixture();
+    await write(workTree, 'target.txt', 'pointed at\n');
+    await symlink('target.txt', join(workTree, 'link.txt'));
+    await symlink('/etc/passwd', join(workTree, 'escape.txt'));
+    const dest = join(root, 'materialized-links');
+    await shadow.materialize(await shadow.snapshot(), dest);
+    expect(await readlink(join(dest, 'link.txt'))).toBe('target.txt');
+    expect(await readlink(join(dest, 'escape.txt'))).toBe('/etc/passwd');
+    expect((await lstat(join(dest, 'escape.txt'))).isSymbolicLink()).toBe(true);
+  });
+
   itGit('creates the destination directory if it does not exist', async () => {
     const { root, workTree, shadow } = await fixture();
     await write(workTree, 'a.txt', 'x\n');
@@ -343,7 +382,9 @@ describe('materialize', () => {
     const tree = await shadow.snapshot();
     const dest = join(root, 'dest');
     await expect(shadow.materialize(tree, dest)).rejects.toThrow(/embedded git repositor/i);
-    await expect(shadow.materialize(tree, dest, { allowIncomplete: true })).resolves.toBeUndefined();
+    await expect(
+      shadow.materialize(tree, dest, { allowIncomplete: true }),
+    ).resolves.toBeUndefined();
     expect(await readFile(join(dest, 'a.txt'), 'utf8')).toBe('x\n');
   });
 });

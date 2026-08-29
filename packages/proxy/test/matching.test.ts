@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { CanonicalRequest } from '@orcareplay/plugin-api';
-import { RequestMatcher, canonicalHash, normalizeRequest, structuralDistance } from '../src/matching.js';
+import {
+  RequestMatcher,
+  canonicalHash,
+  normalizeRequest,
+  structuralDistance,
+} from '../src/matching.js';
 
 function req(over: Partial<CanonicalRequest> = {}): CanonicalRequest {
   return {
@@ -89,7 +94,10 @@ describe('structuralDistance', () => {
 });
 
 describe('RequestMatcher — the ladder from spec §4', () => {
-  const recorded = [req(), req({ messages: [{ role: 'user', content: [{ type: 'text', text: 'second' }] }] })];
+  const recorded = [
+    req(),
+    req({ messages: [{ role: 'user', content: [{ type: 'text', text: 'second' }] }] }),
+  ];
 
   it('rung 1: an identical request matches exactly and reports no divergence', () => {
     const m = new RequestMatcher(recorded);
@@ -156,8 +164,10 @@ describe('RequestMatcher — the ladder from spec §4', () => {
     const m = new RequestMatcher(recorded);
     const r = m.match(req({ system: 'be terse.' }));
     expect(r.rung).toBeGreaterThan(1);
-    expect(r.divergence, 'an inexact match without a divergence is the bug we must not ship')
-      .toBeDefined();
+    expect(
+      r.divergence,
+      'an inexact match without a divergence is the bug we must not ship',
+    ).toBeDefined();
   });
 
   it('reports exhaustion rather than matching past the end of the recording', () => {

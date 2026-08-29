@@ -72,7 +72,10 @@ describe('ExchangeEventDeriver', () => {
           model: 'claude-opus-5',
           messages: [
             { role: 'user', content: [{ type: 'text', text: 'fix it' }] },
-            { role: 'assistant', content: [{ type: 'tool_use', id: 'tu_1', name: 'bash', input: {} }] },
+            {
+              role: 'assistant',
+              content: [{ type: 'tool_use', id: 'tu_1', name: 'bash', input: {} }],
+            },
             {
               role: 'user',
               content: [
@@ -111,7 +114,10 @@ describe('ExchangeEventDeriver', () => {
         canonicalRequest: {
           model: 'm',
           messages: [
-            { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: 'ok' }] },
+            {
+              role: 'user',
+              content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: 'ok' }],
+            },
           ],
         },
       }),
@@ -137,7 +143,10 @@ describe('ExchangeEventDeriver', () => {
     const withResult = {
       model: 'm',
       messages: [
-        { role: 'user' as const, content: [{ type: 'tool_result' as const, tool_use_id: 'tu_1', content: 'ok' }] },
+        {
+          role: 'user' as const,
+          content: [{ type: 'tool_result' as const, tool_use_id: 'tu_1', content: 'ok' }],
+        },
       ],
     };
     d.derive(exchange({ canonicalRequest: withResult }), 2);

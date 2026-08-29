@@ -38,7 +38,9 @@ describe('Output', () => {
       total: 68,
       divergences: 0,
     });
-    expect(stripAnsi(s.lines[0]!).trim()).toBe('info replay.done matched=68 total=68 divergences=0');
+    expect(stripAnsi(s.lines[0]!).trim()).toBe(
+      'info replay.done matched=68 total=68 divergences=0',
+    );
   });
 
   it('quotes values containing spaces so the line stays parseable', () => {

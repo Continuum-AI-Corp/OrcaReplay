@@ -40,14 +40,37 @@ function assertSafeArgs(args: readonly string[]): void {
 }
 
 /**
- * Ambient GIT_* variables are inherited whenever orca runs from inside a hook or another git
- * process, and would silently retarget commands at the wrong repository. System and global config
- * are dropped so a snapshot depends only on the workspace, never on who is running it.
+ * Variables that redirect git at another repository, reinterpret a pathspec, or inject config.
+ * Orca can be launched from inside a hook or another git process, and any of these would change
+ * what a snapshot means: GIT_DIR retargets the store, GIT_LITERAL_PATHSPECS would turn the
+ * `:(exclude)` guards into ordinary filenames, and GIT_CONFIG_* can set any option at all.
+ * Anything else git puts in the environment (GIT_EXEC_PATH, for one) belongs to the installation
+ * and is left alone.
  */
+const HOSTILE_ENV_VARS = [
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+  'GIT_INDEX_VERSION',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_COMMON_DIR',
+  'GIT_NAMESPACE',
+  'GIT_CEILING_DIRECTORIES',
+  'GIT_DISCOVERY_ACROSS_FILESYSTEM',
+  'GIT_PREFIX',
+  'GIT_LITERAL_PATHSPECS',
+  'GIT_GLOB_PATHSPECS',
+  'GIT_NOGLOB_PATHSPECS',
+  'GIT_ICASE_PATHSPECS',
+  'GIT_ATTR_NOSYSTEM',
+];
+
+/** System and global config are dropped so a snapshot depends only on the workspace. */
 function childEnv(opts: GitOptions): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const key of Object.keys(env)) {
-    if (key.startsWith('GIT_')) delete env[key];
+    if (HOSTILE_ENV_VARS.includes(key) || key.startsWith('GIT_CONFIG')) delete env[key];
   }
   env.GIT_CONFIG_NOSYSTEM = '1';
   env.GIT_CONFIG_GLOBAL = '/dev/null';
@@ -85,7 +108,9 @@ export function runGitRaw(args: string[], opts: GitOptions = {}): Promise<GitRaw
     };
     child.stdout.on('data', (chunk: Buffer) => out.push(chunk));
     child.stderr.on('data', (chunk: Buffer) => err.push(chunk));
-    child.on('error', (error: Error) => settle(GIT_NOT_EXECUTABLE, `failed to run git: ${error.message}`));
+    child.on('error', (error: Error) =>
+      settle(GIT_NOT_EXECUTABLE, `failed to run git: ${error.message}`),
+    );
     child.on('close', (code, signal) => settle(code ?? (signal ? GIT_NOT_EXECUTABLE : 0)));
     // A git subcommand may exit before draining stdin; that EPIPE is not our problem.
     child.stdin.on('error', () => {});

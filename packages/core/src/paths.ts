@@ -54,7 +54,7 @@ export async function listRuns(cwd: string): Promise<RunRef[]> {
   );
 }
 
-/** Resolves the CLI's run argument: `last` for the newest run, otherwise a run id. */
+/** Resolves the CLI's run argument: `last` for the newest run, anything else as a run id. */
 export async function resolveRunSelector(cwd: string, selector: string): Promise<RunRef> {
   if (selector === 'last') {
     const [newest] = await listRuns(cwd);

@@ -129,7 +129,11 @@ describe('openaiToCanonicalRequest', () => {
           role: 'assistant',
           content: null,
           tool_calls: [
-            { id: 'call_x', type: 'function', function: { name: 'bash', arguments: '{"cmd": "np' } },
+            {
+              id: 'call_x',
+              type: 'function',
+              function: { name: 'bash', arguments: '{"cmd": "np' },
+            },
           ],
         },
       ],
@@ -231,7 +235,11 @@ describe('openai request round trip', () => {
           role: 'assistant',
           content: null,
           tool_calls: [
-            { id: 'call_x', type: 'function', function: { name: 'bash', arguments: '{"cmd": "np' } },
+            {
+              id: 'call_x',
+              type: 'function',
+              function: { name: 'bash', arguments: '{"cmd": "np' },
+            },
           ],
         },
       ],
@@ -323,7 +331,11 @@ describe('cross dialect', () => {
         role: 'assistant',
         content: null,
         tool_calls: [
-          { id: 'toolu_1', type: 'function', function: { name: 'bash', arguments: '{"cmd":"npm test"}' } },
+          {
+            id: 'toolu_1',
+            type: 'function',
+            function: { name: 'bash', arguments: '{"cmd":"npm test"}' },
+          },
         ],
       },
       { role: 'tool', tool_call_id: 'toolu_1', content: 'FAIL' },

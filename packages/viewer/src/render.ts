@@ -161,7 +161,9 @@ function parts(event: TraceEvent): RowParts {
       const usage = usageOf(a);
       return {
         label: pick(a, 'model'),
-        detail: pick(a, 'stop_reason', 'finish_reason') ? `stop: ${pick(a, 'stop_reason', 'finish_reason')}` : '',
+        detail: pick(a, 'stop_reason', 'finish_reason')
+          ? `stop: ${pick(a, 'stop_reason', 'finish_reason')}`
+          : '',
         meta:
           usage.input || usage.output
             ? `${formatTokens(usage.input)} in · ${formatTokens(usage.output)} out`
@@ -208,7 +210,10 @@ function parts(event: TraceEvent): RowParts {
       const files = num(a['files']);
       const added = num(a['added']);
       const removed = num(a['removed']);
-      const counts = [added === undefined ? '' : `+${added}`, removed === undefined ? '' : `-${removed}`]
+      const counts = [
+        added === undefined ? '' : `+${added}`,
+        removed === undefined ? '' : `-${removed}`,
+      ]
         .filter(Boolean)
         .join(' ');
       return {
@@ -264,7 +269,11 @@ function parts(event: TraceEvent): RowParts {
     case 'route.decision':
       return { label: pick(a, 'model', 'target'), detail: pick(a, 'reason', 'rule') };
     case 'note':
-      return { label: pick(a, 'text', 'message', 'note'), detail: pick(a, 'analyzer'), tone: 'quiet' };
+      return {
+        label: pick(a, 'text', 'message', 'note'),
+        detail: pick(a, 'analyzer'),
+        tone: 'quiet',
+      };
     default:
       return { detail: pick(a, 'message', 'name', 'summary') };
   }

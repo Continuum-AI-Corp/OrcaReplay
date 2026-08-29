@@ -13,11 +13,26 @@
     "type": {
       "type": "string",
       "enum": [
-        "run.start", "run.end", "model.request", "model.response",
-        "tool.call", "tool.result", "mcp.request", "mcp.response",
-        "shell.exec", "shell.result", "fs.snapshot", "fs.change",
-        "net.request", "net.response", "error", "divergence",
-        "checkpoint", "fork", "route.decision", "note"
+        "run.start",
+        "run.end",
+        "model.request",
+        "model.response",
+        "tool.call",
+        "tool.result",
+        "mcp.request",
+        "mcp.response",
+        "shell.exec",
+        "shell.result",
+        "fs.snapshot",
+        "fs.change",
+        "net.request",
+        "net.response",
+        "error",
+        "divergence",
+        "checkpoint",
+        "fork",
+        "route.decision",
+        "note"
       ]
     },
     "actor": {

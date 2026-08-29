@@ -27,7 +27,8 @@ afterEach(() => {
   // Restore in place: assigning `process.env` a fresh object detaches it from the real OS
   // environment, and os.homedir() then reads stale values for the rest of the file.
   for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
-  for (const [key, value] of Object.entries(saved)) if (value !== undefined) process.env[key] = value;
+  for (const [key, value] of Object.entries(saved))
+    if (value !== undefined) process.env[key] = value;
   rmSync(scratch, { recursive: true, force: true });
 });
 

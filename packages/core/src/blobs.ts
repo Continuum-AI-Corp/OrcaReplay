@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { BlobRef } from '@orcareplay/schema';
@@ -85,6 +86,13 @@ export class BlobStore {
     }
     return n;
   }
+}
+
+/** SHA-256 of a whole file, streamed — this is the integrity root of a run (spec §6). */
+export async function sha256File(path: string): Promise<string> {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+  return hash.digest('hex');
 }
 
 async function exists(path: string): Promise<boolean> {

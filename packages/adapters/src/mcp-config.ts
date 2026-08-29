@@ -43,7 +43,7 @@ export function rewriteMcpConfig(
     return { config, rewritten, skipped };
   }
 
-  const servers = config['mcpServers'];
+  const { mcpServers: servers, ...rest } = config as { mcpServers: Record<string, unknown> };
   const nextServers: Record<string, unknown> = {};
 
   for (const [name, raw] of Object.entries(servers)) {
@@ -80,5 +80,5 @@ export function rewriteMcpConfig(
     rewritten.push(name);
   }
 
-  return { config: { ...structuredClone(config), mcpServers: nextServers }, rewritten, skipped };
+  return { config: { ...structuredClone(rest), mcpServers: nextServers }, rewritten, skipped };
 }

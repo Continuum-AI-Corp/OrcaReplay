@@ -81,6 +81,37 @@ describe('proxy — record mode', () => {
     expect(ex.usage?.input_tokens).toBe(12);
   });
 
+  it('forwards the caller auth header upstream but never records it', async () => {
+    // Both halves matter. Claude Code under a subscription login authenticates with its own
+    // `authorization: Bearer` header and ignores any injected key, so a proxy that drops it
+    // breaks the agent outright. §7 says never *write* auth material — not never forward it.
+    const up = stubUpstream(ANTHROPIC_REPLY);
+    const seen: RecordedExchange[] = [];
+    const proxy = await createProxy({
+      mode: 'record',
+      fetchImpl: up.fetchImpl,
+      onExchange: (e) => void seen.push(e),
+    });
+    closers.push(proxy.close);
+
+    await post(`${proxy.url}/v1/messages`, ANTHROPIC_BODY, {
+      authorization: 'Bearer oauth-subscription-token',
+    });
+
+    const forwarded = up.calls[0]!.init.headers as Record<string, string>;
+    expect(forwarded.authorization).toBe('Bearer oauth-subscription-token');
+    expect(JSON.stringify(seen[0]!.requestHeaders ?? {})).not.toContain('oauth-subscription-token');
+  });
+
+  it('answers the agent-proxy probes Claude Code makes, without touching the recording', async () => {
+    const up = stubUpstream(ANTHROPIC_REPLY);
+    const proxy = await createProxy({ mode: 'record', fetchImpl: up.fetchImpl });
+    closers.push(proxy.close);
+    const res = await fetch(`${proxy.url}/v1/code/agent-proxy/ca-cert`);
+    expect([200, 404]).toContain(res.status);
+    expect(up.calls).toHaveLength(0);
+  });
+
   it('never records the caller auth header', async () => {
     const up = stubUpstream(ANTHROPIC_REPLY);
     const seen: RecordedExchange[] = [];
@@ -243,7 +274,10 @@ describe('proxy — hybrid (fork) mode', () => {
     dialect: 'anthropic',
     path: '/v1/messages',
     rawRequest: JSON.stringify({ ...ANTHROPIC_BODY, messages: [{ role: 'user', content: text }] }),
-    rawResponse: JSON.stringify({ ...ANTHROPIC_REPLY, content: [{ type: 'text', text: `recorded ${seq}` }] }),
+    rawResponse: JSON.stringify({
+      ...ANTHROPIC_REPLY,
+      content: [{ type: 'text', text: `recorded ${seq}` }],
+    }),
     status: 200,
     streamed: false,
     canonicalRequest: {
@@ -254,7 +288,10 @@ describe('proxy — hybrid (fork) mode', () => {
   });
 
   it('serves from the trace below the cursor and goes live at it', async () => {
-    const up = stubUpstream({ ...ANTHROPIC_REPLY, content: [{ type: 'text', text: 'live answer' }] });
+    const up = stubUpstream({
+      ...ANTHROPIC_REPLY,
+      content: [{ type: 'text', text: 'live answer' }],
+    });
     const proxy = await createProxy({
       mode: 'hybrid',
       forkAt: 1,

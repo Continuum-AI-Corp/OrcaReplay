@@ -2,13 +2,7 @@ import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import {
-  listRuns,
-  orcaDir,
-  resolveRunSelector,
-  runDirFor,
-  runsDir,
-} from '../src/paths.js';
+import { listRuns, orcaDir, resolveRunSelector, runDirFor, runsDir } from '../src/paths.js';
 
 let cwd: string;
 
@@ -88,8 +82,10 @@ describe('listRuns', () => {
 describe('resolveRunSelector', () => {
   it('resolves "last" to the newest run', async () => {
     await seedRun('run_aaaaaa', '2026-08-01T00:00:00.000Z');
-    await seedRun('run_bbbbbb', '2026-08-29T00:00:00.000Z');
-    expect((await resolveRunSelector(cwd, 'last')).runId).toBe('run_bbbbbb');
+    const newest = await seedRun('run_bbbbbb', '2026-08-29T00:00:00.000Z');
+    const run = await resolveRunSelector(cwd, 'last');
+    expect(run.runId).toBe('run_bbbbbb');
+    expect(run.dir).toBe(newest);
   });
 
   it('resolves anything else as a run id', async () => {
@@ -98,6 +94,7 @@ describe('resolveRunSelector', () => {
     const run = await resolveRunSelector(cwd, 'run_aaaaaa');
     expect(run.runId).toBe('run_aaaaaa');
     expect(run.dir).toBe(dir);
+    expect(run.createdAt).toBe('2026-08-01T00:00:00.000Z');
   });
 
   it('names the command to run when the workspace has no runs', async () => {

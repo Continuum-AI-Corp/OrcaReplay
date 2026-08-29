@@ -1,10 +1,13 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { AddressInfo } from 'node:net';
+import type { AddressInfo } from 'node:net';
 import type { CanonicalRequest, CanonicalResponse, Usage } from '@orcareplay/plugin-api';
 import {
   anthropicToCanonicalRequest,
   anthropicToCanonicalResponse,
+  openaiToCanonicalRequest,
+  openaiToCanonicalResponse,
   parseAnthropicSse,
+  parseOpenaiSse,
 } from '@orcareplay/providers';
 import { anthropicDialect, openaiDialect, selectDialect, type Dialect } from './dialects.js';
 import { RequestMatcher, type Divergence } from './matching.js';
@@ -75,12 +78,18 @@ export interface ProxyHandle {
   close: () => Promise<void>;
 }
 
-/** Headers that must never be forwarded or recorded. §7 applies to the proxy first of all. */
-const STRIPPED_REQUEST_HEADERS = new Set([
-  'host',
-  'connection',
-  'content-length',
-  'accept-encoding',
+/**
+ * Hop-by-hop headers, dropped before forwarding because they describe *this* connection.
+ */
+const HOP_BY_HOP_HEADERS = new Set(['host', 'connection', 'content-length', 'accept-encoding']);
+
+/**
+ * Auth material. Forwarded upstream — an agent that cannot authenticate is an agent that cannot
+ * run — but never written into a trace. Claude Code under a subscription login sends its own
+ * `authorization: Bearer` and ignores any injected key, so dropping these would break it outright.
+ * §7 says never *write* auth material, which is a different requirement from never relaying it.
+ */
+const SECRET_REQUEST_HEADERS = new Set([
   'authorization',
   'x-api-key',
   'cookie',
@@ -95,9 +104,9 @@ export function defaultDialects(): Dialect[] {
       parseSse: parseAnthropicSse,
     }),
     openaiDialect({
-      toCanonicalRequest: anthropicToCanonicalRequest,
-      toCanonicalResponse: anthropicToCanonicalResponse,
-      parseSse: parseAnthropicSse,
+      toCanonicalRequest: openaiToCanonicalRequest,
+      toCanonicalResponse: openaiToCanonicalResponse,
+      parseSse: parseOpenaiSse,
     }),
   ];
 }
@@ -145,7 +154,10 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     dialect: Dialect,
     path: string,
     rawBody: string,
+    /** Sent upstream, auth included. */
     headers: Record<string, string>,
+    /** Written to the trace, auth removed. */
+    recordableHeaders: Record<string, string>,
     res: ServerResponse,
     startedAt: number,
   ): Promise<void> {
@@ -181,7 +193,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
         rawResponse: text,
         status: upstreamRes.status,
         streamed,
-        headers,
+        headers: recordableHeaders,
         seq: captured.length,
         durationMs: Date.now() - startedAt,
       });
@@ -247,13 +259,17 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
 
     const rawBody = await readBody(req);
     const headers: Record<string, string> = {};
+    const recordableHeaders: Record<string, string> = {};
     for (const [k, v] of Object.entries(req.headers)) {
-      if (STRIPPED_REQUEST_HEADERS.has(k.toLowerCase())) continue;
-      if (typeof v === 'string') headers[k] = v;
+      const key = k.toLowerCase();
+      if (HOP_BY_HOP_HEADERS.has(key)) continue;
+      if (typeof v !== 'string') continue;
+      headers[k] = v;
+      if (!SECRET_REQUEST_HEADERS.has(key)) recordableHeaders[k] = v;
     }
 
     if (options.mode === 'record') {
-      await goLive(dialect, path, rawBody, headers, res, startedAt);
+      await goLive(dialect, path, rawBody, headers, recordableHeaders, res, startedAt);
       return;
     }
 
@@ -300,7 +316,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       }
     }
 
-    await goLive(dialect, path, rawBody, headers, res, startedAt);
+    await goLive(dialect, path, rawBody, headers, recordableHeaders, res, startedAt);
   }
 
   const host = options.host ?? '127.0.0.1';
