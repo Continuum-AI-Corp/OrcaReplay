@@ -23,6 +23,7 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
   orca compare [run] --models a,b,c
                                  fork the same checkpoint onto several models
         --verify <cmd>           run this in each fork; its exit code is the verdict
+        --share [file.svg]       write the verdict table as a shareable card
   orca show [run]                the timeline, in the terminal
   orca checkpoints [run]         where you can fork from
   orca export [run] -o file.html a single self-contained file you can attach

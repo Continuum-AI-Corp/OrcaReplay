@@ -2,6 +2,9 @@ import { TraceReader, deriveCheckpoints, resolveRunSelector } from '@orcareplay/
 import { priceFor } from '@orcareplay/providers';
 import { parseArgs, type ParsedArgs } from '../args.js';
 import type { Output } from '../out.js';
+import { writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { renderCompareCard } from '../share-card.js';
 import { replayCommand } from './replay.js';
 
 /** Run the verdict command inside the fork's worktree. Shell so `npm test -- auth` just works. */
@@ -146,6 +149,17 @@ export async function compareCommand(
       r.forkRunId ?? r.error ?? '',
     ]),
   );
+
+  if (args.has('share')) {
+    const target = resolve(cwd, args.str('share') ?? 'compare.svg');
+    const svg = renderCompareCard(rows, {
+      runId,
+      forkPoint: from,
+      verify: args.str('verify'),
+    });
+    await writeFile(target, svg, { mode: 0o644 });
+    out.phase('shared', { path: target, bytes: Buffer.byteLength(svg) });
+  }
 
   return rows;
 }
