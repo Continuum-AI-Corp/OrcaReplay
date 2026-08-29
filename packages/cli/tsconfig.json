@@ -32,6 +32,9 @@
     },
     {
       "path": "../mcp-shim"
+    },
+    {
+      "path": "../shell-shim"
     }
   ]
 }

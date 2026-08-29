@@ -35,6 +35,7 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
 Flags
   --loose        on replay, continue live past an unmatched request
   --no-fs        skip filesystem capture
+  --no-shell     skip shell capture (PATH shim in front of sh/bash)
   --mcp-config <path>  instrument MCP servers from this config
   --ci           machine-readable output, no progress
   --verbose      more detail

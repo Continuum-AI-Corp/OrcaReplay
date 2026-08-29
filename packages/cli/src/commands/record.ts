@@ -1,11 +1,13 @@
 import { spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
+import { delimiter } from 'node:path';
 import { TraceWriter, runsDir } from '@orcareplay/core';
 import { FsCapture } from '@orcareplay/fs-capture';
 import { createProxy, type RecordedExchange } from '@orcareplay/proxy';
 import { defaultAdapters } from '@orcareplay/adapters';
 import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver } from '../exchange-events.js';
+import { installShellShim, readShellFrames } from '@orcareplay/shell-shim';
 import { setupMcpCapture, type McpCapture } from '../mcp.js';
 import { SerialQueue } from '../serial.js';
 import { snapshotWithRetry } from '../snapshot.js';
@@ -76,6 +78,19 @@ export async function recordCommand(
   const mcpConfigPath = args.str('mcp-config');
   if (mcpConfigPath) {
     mcp = await setupMcpCapture({ sourceConfigPath: mcpConfigPath, runDir: writer.runDir, out });
+  }
+
+  // Shell capture: a PATH shim in front of sh/bash. The protocol layer already reports the command
+  // and its merged output one turn late; what only the shim can see is the exit code, the real
+  // duration, and which stream each byte came out of.
+  let shell: Awaited<ReturnType<typeof installShellShim>> | undefined;
+  if (args.bool('shell', true)) {
+    try {
+      shell = await installShellShim({ runDir: writer.runDir });
+    } catch (err) {
+      // Same posture as filesystem capture: degrade the trace, never abort the run.
+      out.warn('shell.unavailable', { reason: String(err) });
+    }
   }
 
   const deriver = new ExchangeEventDeriver();
@@ -180,6 +195,9 @@ export async function recordCommand(
     env: process.env,
   };
   const launch = await adapter.prepare(ctx);
+  if (shell) {
+    launch.env.PATH = `${shell.dir}${delimiter}${process.env.PATH ?? ''}`;
+  }
   if (mcp) {
     // Every target harness reads one of these; setting all three costs nothing and avoids making
     // the user work out which one their agent uses.
@@ -193,6 +211,7 @@ export async function recordCommand(
     adapter: adapter.id,
     proxy: proxy.url,
     fs: fs ? 'on' : 'off',
+    shell: shell ? 'on' : 'off',
   });
 
   const exitCode = await runChild(
@@ -207,6 +226,30 @@ export async function recordCommand(
   );
 
   await writes.drain();
+
+  if (shell) {
+    for (const frame of await readShellFrames(shell.framesPath)) {
+      const exec = await writer.append({
+        type: 'shell.exec',
+        actor: 'harness',
+        turn,
+        attrs: { argv: [frame.name, ...frame.argv], cwd: frame.cwd },
+      });
+      await writer.append({
+        type: 'shell.result',
+        actor: 'harness',
+        turn,
+        causes: [exec.seq],
+        attrs: {
+          exit_code: frame.exitCode,
+          signal: frame.signal,
+          duration_ms: frame.durationMs,
+          stdout_bytes: frame.stdoutBytes,
+          stderr_bytes: frame.stderrBytes,
+        },
+      });
+    }
+  }
 
   if (mcp) {
     for (const frame of await mcp.drain()) {

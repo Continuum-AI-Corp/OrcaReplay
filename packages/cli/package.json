@@ -43,6 +43,7 @@
     "@orcareplay/adapters": "*",
     "@orcareplay/fs-capture": "*",
     "@orcareplay/viewer": "*",
-    "@orcareplay/mcp-shim": "*"
+    "@orcareplay/mcp-shim": "*",
+    "@orcareplay/shell-shim": "*"
   }
 }

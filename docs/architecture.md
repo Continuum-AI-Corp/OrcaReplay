@@ -33,7 +33,7 @@ workspace ─────(snapshot per turn)───────▶ shadow git 
 | Model calls | `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` injected into the child; proxy speaks the native wire protocol and tees a canonical copy while streaming through | high | opt-in per-run ephemeral CA, never installed system-wide |
 | Tools & results | free — reconstructed from the protocol | high | — |
 | MCP | config rewritten to launch `orca mcp-shim -- <original>`, a transparent JSON-RPC tee | high | protocol layer, one turn late |
-| Shell | `PATH` shim capturing argv, exit code, duration, stdout/stderr split | medium | protocol layer gives the command and merged output |
+| Shell | `PATH` shim in front of `sh`/`bash`, capturing argv, exit code, duration, stdout/stderr split | medium | protocol layer gives the command and merged output |
 | Filesystem | shadow git index (`--git-dir=.orca/runs/<id>/fs --work-tree=.`), one snapshot per turn | high | — |
 | Network | same proxy when the child honours `HTTPS_PROXY` | low | out of scope for v0 |
 

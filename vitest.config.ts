@@ -18,6 +18,7 @@ export default defineConfig({
       '@orcareplay/proxy': pkg('proxy'),
       '@orcareplay/adapters': pkg('adapters'),
       '@orcareplay/mcp-shim': pkg('mcp-shim'),
+      '@orcareplay/shell-shim': pkg('shell-shim'),
       '@orcareplay/viewer': pkg('viewer'),
     },
   },

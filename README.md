@@ -52,7 +52,7 @@ Early. `v0` is the walking skeleton of the three commands above.
 | Single-file HTML export | working |
 | MCP call recording | working — opt in with `--mcp-config <path>` |
 | Post-hoc scrubbing (`orca scrub`) | working |
-| Shell capture (`PATH` shim) | **not implemented.** The protocol layer records the command and its merged output, one turn late |
+| Shell capture (`PATH` shim) | working — exit codes, duration and the stdout/stderr split. `--no-shell` to skip |
 | Non-model network capture | not implemented; out of scope for v0 |
 | Subscription-auth harnesses | Claude Code works. A Codex CLI signed in with a ChatGPT subscription talks to its own backend, so base-URL redirection does not capture it |
 
