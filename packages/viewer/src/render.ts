@@ -14,6 +14,8 @@ export interface TimelineRow {
   /** Dense total order from the envelope (spec §2.1). */
   seq: number;
   turn: number;
+  /** Microseconds since run start. Authoritative for playback timing; wall clocks lie. */
+  monoUs: number;
   /** Short uppercase token, at most 7 chars, used as the row chip. */
   kind: string;
   /** The one thing worth reading at a glance. Never empty. */
@@ -285,6 +287,7 @@ export function buildTimeline(events: TraceEvent[]): TimelineRow[] {
     const derived = parts(event);
     return {
       seq: event.seq,
+      monoUs: event.mono_us,
       turn: event.turn,
       kind: kindForType(event.type),
       label: clamp(oneLine(derived.label || humanize(event.type)), LABEL_MAX),
@@ -442,4 +445,32 @@ export function formatTokens(n: number): string {
   const rounded = Math.round(n);
   const grouped = String(Math.abs(rounded)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   return rounded < 0 ? `-${grouped}` : grouped;
+}
+
+/** Playback rates offered by the viewer. Real time first — it is the honest default. */
+export const PLAYBACK_SPEEDS = [1, 4, 16] as const;
+
+/** Shortest pause that still reads as a distinct step rather than a flicker. */
+const MIN_STEP_MS = 60;
+/** Longest pause worth watching. A ten-minute stall should register, not be endured. */
+const MAX_STEP_MS = 1000;
+
+/**
+ * How long to hold on each row when playing a trace back.
+ *
+ * The recorded gaps are the only thing playback adds over pressing `j` repeatedly — they are what
+ * makes a stall or a tight retry loop *feel* different. So the shape is preserved and merely
+ * compressed: a square-root curve keeps small gaps distinguishable while stopping a long wait
+ * from becoming a long animation. A uniform tick would be simpler and would say nothing.
+ */
+export function playbackDelays(rows: Array<{ monoUs: number }>, speed: number): number[] {
+  const rate = speed > 0 ? speed : 1;
+  return rows.map((row, i) => {
+    if (i === 0) return 0;
+    const previous = rows[i - 1];
+    // A trace is external input; a clock that went backwards must not produce a negative wait.
+    const gapMs = Math.max(0, (row.monoUs - (previous?.monoUs ?? row.monoUs)) / 1000);
+    const compressed = Math.sqrt(gapMs / rate) * 24;
+    return Math.min(MAX_STEP_MS, Math.max(MIN_STEP_MS, Math.round(compressed)));
+  });
 }

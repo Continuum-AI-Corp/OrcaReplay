@@ -262,7 +262,94 @@ footer {
   .stats { margin-left: 0; }
 }
 
+
+/* ── Motion ──────────────────────────────────────────────────────────────
+   A debugger is read mid-incident, so motion here is functional or absent.
+   Playback exists because this is a replay tool: the recorded gaps are the
+   only thing it adds over pressing j, so they are preserved and compressed.
+   The playhead slides to give that a physical position. Everything animates
+   transform/opacity only, so nothing reflows on a large trace. */
+
+.rows { position: relative; }
+
+.playhead {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 2px;
+  height: 0;
+  background: var(--ink);
+  transform: translateY(0);
+  transition: transform 160ms cubic-bezier(0.2, 0, 0, 1), height 160ms cubic-bezier(0.2, 0, 0, 1);
+  pointer-events: none;
+  opacity: 0;
+}
+.playhead[data-on='true'] { opacity: 1; }
+
+.progress {
+  height: 2px;
+  background: var(--rule);
+  overflow: hidden;
+}
+.progress > span {
+  display: block;
+  height: 100%;
+  background: var(--ink);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 160ms linear;
+}
+
+#orca-play .glyph {
+  display: block;
+  width: 0;
+  height: 0;
+  /* A play triangle and a pause bar from one element: no icon font, no SVG, no second asset. */
+  border-style: solid;
+  border-width: 5px 0 5px 8px;
+  border-color: transparent transparent transparent currentColor;
+  transition: border-width 120ms ease, border-color 120ms ease;
+}
+#orca-play[aria-pressed='true'] .glyph {
+  border-width: 5px 0 5px 8px;
+  border-color: transparent transparent transparent currentColor;
+  border-left-style: double;
+  border-left-width: 8px;
+}
+
+/* Direction of travel: forward enters from below, backward from above. Tells you which way you
+   moved without a label, which matters when playback is stepping for you. */
+@keyframes orca-enter-down {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes orca-enter-up {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.pane[data-dir='down'] { animation: orca-enter-down 130ms cubic-bezier(0.2, 0, 0, 1); }
+.pane[data-dir='up'] { animation: orca-enter-up 130ms cubic-bezier(0.2, 0, 0, 1); }
+
+/* One-shot wash when playback lands on something that needs attention. No shadow — the design
+   system uses hairlines and weight, never depth — and no hue, since state here is carried by
+   form. An overlay whose opacity animates stays on the compositor and never repaints the row. */
+.row { position: relative; }
+.row[data-pulse='true']::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--ink);
+  pointer-events: none;
+  animation: orca-attention 420ms ease-out;
+}
+@keyframes orca-attention {
+  from { opacity: 0.14; }
+  to { opacity: 0; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+  /* Playback still works — it just steps instantly instead of gliding. */
+  .playhead, .progress > span { transition: none !important; }
 }
 `;

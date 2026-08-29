@@ -15,6 +15,10 @@ interface StubElement {
   value: string;
   textContent: string;
   attrs: Record<string, string>;
+  style: Record<string, string>;
+  offsetTop: number;
+  offsetHeight: number;
+  offsetWidth: number;
   focused: boolean;
   setAttribute(name: string, value: string): void;
   getAttribute(name: string): string | null;
@@ -35,6 +39,10 @@ function element(tagName: string, textContent = ''): StubElement {
     value: '',
     textContent,
     attrs: {},
+    style: {} as Record<string, string>,
+    offsetTop: 0,
+    offsetHeight: 24,
+    offsetWidth: 400,
     focused: false,
     setAttribute(name, value) {
       this.attrs[name] = value;
@@ -67,11 +75,21 @@ function mount(labels: string[]) {
   const filterBox = element('INPUT');
   const countBox = element('SPAN');
   const themeBtn = element('BUTTON');
+  const playBtn = element('BUTTON');
+  // Mirrors the shipped markup, which renders the control already in its resting state.
+  playBtn.setAttribute('aria-pressed', 'false');
+  const speedBtn = element('BUTTON');
+  const progressBar = element('SPAN');
+  const playhead = element('SPAN');
   const root = element('HTML');
   const byId: Record<string, StubElement> = {
     'orca-filter': filterBox,
     'orca-count': countBox,
     'orca-theme': themeBtn,
+    'orca-play': playBtn,
+    'orca-speed': speedBtn,
+    'orca-progress': progressBar,
+    'orca-playhead': playhead,
   };
   const docListeners: Record<string, ((e: unknown) => void)[]> = {};
   const store: Record<string, string> = {};
@@ -81,6 +99,9 @@ function mount(labels: string[]) {
   });
   rows.forEach((row, i) => {
     row.setAttribute('aria-selected', i === 0 ? 'true' : 'false');
+    // One recorded second between events, so playback timing has something real to compress.
+    row.setAttribute('data-mono', String(i * 1_000_000));
+    row.offsetTop = i * 24;
   });
 
   const document = {
@@ -92,8 +113,26 @@ function mount(labels: string[]) {
     },
   };
 
+  // A manual clock: playback is time-driven, and a test that waits on real timers is a test that
+  // flakes. `flush` runs whatever is currently due, one step at a time.
+  let pending: Array<{ id: number; fn: () => void }> = [];
+  let nextTimerId = 1;
+
   const sandbox = {
     document,
+    window: {
+      matchMedia: (query: string) => ({ matches: query.includes('reduce') ? false : false }),
+      addEventListener: () => {},
+    },
+    setTimeout: (fn: () => void) => {
+      const id = nextTimerId++;
+      pending.push({ id, fn });
+      return id;
+    },
+    clearTimeout: (id: number) => {
+      pending = pending.filter((t) => t.id !== id);
+    },
+    Number,
     localStorage: {
       getItem: (k: string) => store[k] ?? null,
       setItem: (k: string, v: string) => {
@@ -114,8 +153,20 @@ function mount(labels: string[]) {
     filterBox,
     countBox,
     themeBtn,
+    playBtn,
+    speedBtn,
+    progressBar,
+    playhead,
     root,
     store,
+    /** Run every currently-scheduled timer once; returns how many fired. */
+    tick() {
+      const due = pending;
+      pending = [];
+      for (const t of due) t.fn();
+      return due.length;
+    },
+    pendingTimers: () => pending.length,
     key(key: string, target: StubElement | null = null, mods: Record<string, boolean> = {}) {
       for (const fn of docListeners['keydown'] ?? []) {
         fn({ key, target, preventDefault() {}, ...mods });
@@ -228,5 +279,100 @@ describe('client runtime', () => {
 
   it('survives a page with no rows at all', () => {
     expect(() => mount([])).not.toThrow();
+  });
+});
+
+describe('playback', () => {
+  let ui: ReturnType<typeof mount>;
+  beforeEach(() => {
+    ui = mount(['run started', 'npm test', 'exit 1', 'checkpoint']);
+  });
+
+  it('space starts playback and advances one row per tick', () => {
+    ui.key(' ');
+    expect(ui.playBtn.getAttribute('aria-pressed')).toBe('true');
+    expect(ui.selectedIndex()).toBe(1);
+    ui.tick();
+    expect(ui.selectedIndex()).toBe(2);
+  });
+
+  it('space again pauses, and cancels the pending step', () => {
+    ui.key(' ');
+    expect(ui.pendingTimers()).toBe(1);
+    ui.key(' ');
+    expect(ui.playBtn.getAttribute('aria-pressed')).toBe('false');
+    expect(ui.pendingTimers()).toBe(0);
+  });
+
+  it('stops of its own accord at the last row', () => {
+    ui.key(' ');
+    while (ui.pendingTimers() > 0) ui.tick();
+    expect(ui.selectedIndex()).toBe(3);
+    expect(ui.playBtn.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('restarts from the top when played again from the end', () => {
+    ui.key(' ');
+    while (ui.pendingTimers() > 0) ui.tick();
+    ui.key(' ');
+    expect(ui.selectedIndex()).toBe(0);
+    expect(ui.playBtn.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('hands the wheel back the moment you navigate manually', () => {
+    ui.key(' ');
+    expect(ui.playBtn.getAttribute('aria-pressed')).toBe('true');
+    ui.key('j');
+    expect(ui.playBtn.getAttribute('aria-pressed')).toBe('false');
+    expect(ui.pendingTimers()).toBe(0);
+  });
+
+  it('is interrupted by filtering too, which reflows the list under it', () => {
+    ui.key(' ');
+    ui.filterBox.value = 'test';
+    ui.filterBox.fire('input');
+    expect(ui.playBtn.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('moves the playhead to the selected row and marks it live', () => {
+    expect(ui.playhead.getAttribute('data-on')).toBe('true');
+    expect(ui.playhead.style.transform).toBe('translateY(0px)');
+    ui.key('j');
+    expect(ui.playhead.style.transform).toBe('translateY(24px)');
+    expect(ui.playhead.style.height).toBe('24px');
+  });
+
+  it('advances the progress bar from empty to full', () => {
+    expect(ui.progressBar.style.transform).toBe('scaleX(0)');
+    ui.key('End');
+    expect(ui.progressBar.style.transform).toBe('scaleX(1)');
+  });
+
+  it('cycles the speed control through the offered rates', () => {
+    expect(ui.speedBtn.textContent).toBe('');
+    ui.speedBtn.fire('click');
+    expect(ui.speedBtn.textContent).toBe('4×');
+    ui.speedBtn.fire('click');
+    expect(ui.speedBtn.textContent).toBe('16×');
+    ui.speedBtn.fire('click');
+    expect(ui.speedBtn.textContent).toBe('1×');
+  });
+
+  it('the play button does the same thing as the key', () => {
+    ui.playBtn.fire('click');
+    expect(ui.playBtn.getAttribute('aria-pressed')).toBe('true');
+    expect(ui.selectedIndex()).toBe(1);
+  });
+
+  it('does not hijack space while typing in the filter box', () => {
+    ui.key(' ', ui.filterBox);
+    expect(ui.playBtn.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('marks the direction of travel on the pane it reveals', () => {
+    ui.key('j');
+    expect(ui.panes[1]!.getAttribute('data-dir')).toBe('down');
+    ui.key('k');
+    expect(ui.panes[0]!.getAttribute('data-dir')).toBe('up');
   });
 });

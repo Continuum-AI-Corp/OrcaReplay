@@ -198,6 +198,7 @@ function rowHtml(row: TimelineRow, index: number, previous: TimelineRow | undefi
     `<button class="row" type="button" role="tab" id="orca-row-${index}"`,
     ` aria-controls="orca-pane-${index}" aria-selected="${index === 0}"`,
     ` tabindex="${index === 0 ? 0 : -1}" data-tone="${row.tone}"`,
+    ` data-mono="${row.monoUs}"`,
     turnStart ? ' data-turn-start="true"' : '',
     '>',
     `<span class="seq">${escapeHtml(row.seq)}</span>`,
@@ -260,7 +261,7 @@ export function renderTraceHtml(input: RenderInput, options: RenderOptions = {})
     : '';
 
   const list = rows.length
-    ? `<div class="rows" role="tablist" aria-orientation="vertical" aria-label="Events">${rows
+    ? `<div class="rows" role="tablist" aria-orientation="vertical" aria-label="Events"><span class="playhead" id="orca-playhead" aria-hidden="true"></span>${rows
         .map((row, index) => rowHtml(row, index, rows[index - 1]))
         .join('')}</div>`
     : '<div class="rows"><p class="empty">This trace has no events.</p></div>';
@@ -291,9 +292,12 @@ ${findings}
 <main class="split">
 <section class="list" aria-label="Timeline">
 <div class="filterbar">
-<input id="orca-filter" type="text" aria-label="Filter events" autocomplete="off" spellcheck="false" placeholder="filter · / to focus · j k to move">
+<button id="orca-play" type="button" aria-label="Play the run back" aria-pressed="false"><span class="glyph" aria-hidden="true"></span></button>
+<button id="orca-speed" type="button" aria-label="Playback speed">1&times;</button>
+<input id="orca-filter" type="text" aria-label="Filter events" autocomplete="off" spellcheck="false" placeholder="filter · / to focus · space to play">
 <span id="orca-count" aria-live="polite">${escapeHtml(countLabel)}</span>
 </div>
+<div class="progress" aria-hidden="true"><span id="orca-progress"></span></div>
 ${list}
 </section>
 <section class="pane-col" aria-label="Event detail">${panes}</section>
