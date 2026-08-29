@@ -68,7 +68,10 @@ export async function compareCommand(
     try {
       const forkArgs = parseArgs([
         'replay',
-        selector,
+        // The concrete run id, never the caller's selector. "last" is re-resolved on every fork,
+        // so after the first branch it would point at the child we just created — which has no
+        // checkpoints — and every later model would fail for a reason that is not about the model.
+        runId,
         '--from',
         String(from),
         '--model',
@@ -115,14 +118,24 @@ export async function compareCommand(
       r.verdict,
       `${r.inputTokens}/${r.outputTokens}`,
       // An unknown model prices as a dash, never as $0.00 — a confidently wrong cost is worse
-      // than an absent one when it lands in a table someone decides from.
-      r.cost === null ? '—' : `$${r.cost.toFixed(4)}`,
+      // than an absent one when it lands in a table someone decides from. And a real cost too
+      // small for four decimals still gets shown: "cheaper" is the whole reason for this column.
+      formatCost(r.cost),
       `${(r.wallMs / 1000).toFixed(1)}s`,
       r.forkRunId ?? r.error ?? '',
     ]),
   );
 
   return rows;
+}
+
+/** Dash for unknown. Otherwise enough precision that a genuinely cheap model does not read $0. */
+export function formatCost(amount: number | null): string {
+  if (amount === null) return '—';
+  if (amount === 0) return '$0';
+  if (amount < 0.0001) return `$${amount.toExponential(2)}`;
+  if (amount < 0.01) return `$${amount.toFixed(6)}`;
+  return `$${amount.toFixed(4)}`;
 }
 
 async function usageOf(cwd: string, runId: string): Promise<{ input: number; output: number }> {
