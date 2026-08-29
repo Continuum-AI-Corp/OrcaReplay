@@ -17,14 +17,30 @@ export const DEFAULT_ENV_ALLOWLIST = [
   'PWD',
 ];
 
-/** Header names whose value is never written, whatever it looks like (spec §5). */
-export const AUTH_HEADERS = [
+/**
+ * Request headers whose value is never written, whatever it looks like (spec §5).
+ *
+ * The single list. There were three — here, in the recording proxy, and in the TLS interceptor —
+ * and they had drifted: `api-key` and `x-goog-api-key` were known to exactly one of them, so the
+ * same Azure or Google credential was stripped on the intercepted path and written on the recorded
+ * one. Nothing about a header set that has to stay identical in three places will keep it that
+ * way, so it is defined once and imported.
+ */
+export const AUTH_REQUEST_HEADERS = [
   'authorization',
   'x-api-key',
+  // Azure OpenAI sends the key under its own name, and Google under another.
+  'api-key',
+  'x-goog-api-key',
   'cookie',
   'proxy-authorization',
-  'set-cookie',
 ];
+
+/** A response can hand out credentials too. `set-cookie` is a session, not metadata. */
+export const AUTH_RESPONSE_HEADERS = ['set-cookie'];
+
+/** Every header name whose value is never written, in either direction. */
+export const AUTH_HEADERS = [...AUTH_REQUEST_HEADERS, ...AUTH_RESPONSE_HEADERS];
 
 interface Rule {
   kind: string;

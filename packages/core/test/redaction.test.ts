@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_ENV_ALLOWLIST, REDACTION_POLICY_VERSION, Redactor } from '../src/redaction.js';
+import {
+  AUTH_REQUEST_HEADERS,
+  AUTH_RESPONSE_HEADERS,
+  DEFAULT_ENV_ALLOWLIST,
+  REDACTION_POLICY_VERSION,
+  Redactor,
+} from '../src/redaction.js';
 
 const PLACEHOLDER = /^<secret:[a-z_]+:[0-9a-f]{8}>$/;
 
@@ -193,6 +199,30 @@ describe('redactHeaders', () => {
       'proxy-authorization': 'Basic dXNlcjpwYXNz',
       'set-cookie': 'session=1; HttpOnly',
     });
+    for (const v of Object.values(value)) expect(v).toMatch(PLACEHOLDER);
+  });
+
+  it('knows the vendor header names, not only the standard ones', () => {
+    // Pinned by name rather than only iterated, because a table-driven test over this list gets
+    // *smaller* when a name is deleted from it — it never goes red. Azure OpenAI sends the key as
+    // `api-key` and Google as `x-goog-api-key`; both were known to one of the three copies of this
+    // set that used to exist, which is how the same credential ended up stripped on one code path
+    // and written on another.
+    for (const name of [
+      'authorization',
+      'x-api-key',
+      'api-key',
+      'x-goog-api-key',
+      'cookie',
+      'proxy-authorization',
+    ]) {
+      expect(AUTH_REQUEST_HEADERS, name).toContain(name);
+    }
+    expect(AUTH_RESPONSE_HEADERS).toContain('set-cookie');
+    // Every request header is redacted whatever its value looks like — the list is the contract.
+    const { value } = fresh().redactHeaders(
+      Object.fromEntries(AUTH_REQUEST_HEADERS.map((h) => [h, 'plain-looking-value'])),
+    );
     for (const v of Object.values(value)) expect(v).toMatch(PLACEHOLDER);
   });
 

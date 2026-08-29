@@ -41,6 +41,10 @@ describe('shell capture', () => {
         "import { execFileSync } from 'node:child_process';",
         "try { execFileSync('sh', ['-c', 'printf hello; printf boom 1>&2; exit 4'], { stdio: 'pipe' }); }",
         'catch { /* the non-zero exit is the point */ }',
+        // Then keep running. Frames are drained after the agent exits, so a command that ran and a
+        // command that was *stamped* at the drain are indistinguishable unless there is measurable
+        // time between them — without this gap the timestamp test passes either way.
+        'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400);',
         "console.log('agent done');",
       ].join('\n'),
     );
@@ -81,9 +85,12 @@ describe('shell capture', () => {
     const runEnd = events.find((e) => e.type === 'run.end');
     expect(exec, 'no shell.exec event was recorded').toBeDefined();
 
-    // It ran during the run, not after it.
-    expect(Date.parse(exec!.ts)).toBeLessThanOrEqual(Date.parse(runEnd!.ts));
-    expect(exec!.mono_us).toBeLessThanOrEqual(runEnd!.mono_us);
+    // It ran during the run, not after it — and by a margin the drain cannot fake. The agent sits
+    // for 400ms after the command finishes, so a timestamp taken at the drain lands within a few
+    // milliseconds of `run.end` while a timestamp taken when the command ran is 400ms clear of it.
+    // `toBeLessThanOrEqual` was true of both, which is why the bug survived a passing test.
+    expect(Date.parse(runEnd!.ts) - Date.parse(exec!.ts)).toBeGreaterThan(300);
+    expect(runEnd!.mono_us - exec!.mono_us).toBeGreaterThan(300_000);
   });
 
   it('attributes a shell command to the turn it happened during', async () => {

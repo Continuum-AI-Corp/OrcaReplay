@@ -3,6 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { rewriteMcpConfig } from '@orcareplay/adapters';
+import type { McpFrameRecord } from '@orcareplay/mcp-shim';
 import type { Output } from './out.js';
 
 export interface McpCapture {
@@ -14,22 +15,16 @@ export interface McpCapture {
   drain(): Promise<McpFrameRecord[]>;
 }
 
-export interface McpFrameRecord {
-  server: string;
-  direction: 'in' | 'out';
-  kind: string;
-  method?: string;
-  id?: string | number;
-  raw: string;
-  /**
-   * RFC3339, written by the shim when the frame passed through it.
-   *
-   * The shim has always recorded this; the recorder simply did not read it, so every MCP event
-   * landed in the trace stamped with the moment the file was drained instead of the moment the
-   * call happened. Optional because a frame from an older shim will not carry one.
-   */
-  ts?: string;
-}
+/**
+ * A captured frame, as the shim writes it.
+ *
+ * Re-exported rather than redeclared. The version that used to live here named two of the same
+ * fields differently — `server` for `name`, `direction` for `dir` — and since `JSON.parse` casts to
+ * whatever the call site claims, nothing anywhere disagreed: every MCP event went into the trace
+ * with an undefined server, and `direction === 'in'` was false for all of them, so every request
+ * was recorded as a response. A format has one owner, and it is the thing that writes it.
+ */
+export type { McpFrameRecord };
 
 /**
  * Set up MCP capture for a run.
@@ -97,21 +92,55 @@ export async function setupMcpCapture(opts: {
   };
 }
 
-/** Locate the installed shim entry point, whether running from source or from a published dist. */
+/**
+ * Locate the installed shim entry point, whether running from source or from a published dist.
+ *
+ * This used to ask for `@orcareplay/mcp-shim/dist/cli.js` and fall back to `@orcareplay/mcp-shim`
+ * when that threw. It always threw — the package declares an `exports` map, and an exports map
+ * blocks every subpath it does not list — so the fallback ran every time and resolved to
+ * `dist/index.js`, which is the library.
+ *
+ * The consequence was not a missing capture layer. Every stdio MCP server in the agent's config was
+ * rewritten to launch that module, which exports and exits: the real server was never started at
+ * all, so `--mcp-config` silently broke the agent's MCP servers *and* recorded nothing, while
+ * `orca doctor` reported the shim runnable because the wrong process exited 0.
+ *
+ * So: one declared subpath, and no fallback that can succeed with the wrong file. A resolution
+ * failure has to stay a failure — `setupMcpCapture` reports it, and the run continues without MCP
+ * capture, which is the honest outcome.
+ */
 function resolveShimEntry(): string {
   const require = createRequire(import.meta.url);
-  try {
-    return require.resolve('@orcareplay/mcp-shim/dist/cli.js');
-  } catch {
-    return require.resolve('@orcareplay/mcp-shim');
-  }
+  return require.resolve('@orcareplay/mcp-shim/cli');
 }
 
-/** Exposed for the doctor command: is the shim runnable at all? */
+/**
+ * Exposed for the doctor command: is the shim runnable at all?
+ *
+ * It checks that the thing it launched *is the shim*, not merely that a process started and
+ * stopped. Asking only for a clean exit is what let doctor vouch for a resolution that had landed
+ * on the library: that module exits 0 having done nothing, which is indistinguishable from success
+ * unless you look at what it said.
+ */
 export async function shimIsRunnable(): Promise<boolean> {
+  let entry: string;
+  try {
+    entry = resolveShimEntry();
+  } catch {
+    return false;
+  }
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [resolveShimEntry(), '--help'], { stdio: 'ignore' });
+    const child = spawn(process.execPath, [entry, '--help'], {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr?.setEncoding('utf8');
+    child.stderr?.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
     child.on('error', () => resolve(false));
-    child.on('close', () => resolve(true));
+    // `--help` is not a flag the shim takes, so it prints its usage and exits non-zero. That usage
+    // line is the identification: any other program is not this one.
+    child.on('close', () => resolve(stderr.includes('orca-mcp-shim --name')));
   });
 }

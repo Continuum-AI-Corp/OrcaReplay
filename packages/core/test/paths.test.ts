@@ -171,7 +171,7 @@ describe('resolveRunSelector', () => {
   it('names the missing run and how to list runs', async () => {
     await seedRun('run_aaaaaa', '2026-08-01T00:00:00.000Z');
     await expect(resolveRunSelector(cwd, 'run_beef99')).rejects.toThrow(/run_beef99/);
-    await expect(resolveRunSelector(cwd, 'run_beef99')).rejects.toThrow(/orca ls/);
+    await expect(resolveRunSelector(cwd, 'run_beef99')).rejects.toThrow(/orca list/);
   });
 
   it('rejects a selector that is not a run id at all', async () => {

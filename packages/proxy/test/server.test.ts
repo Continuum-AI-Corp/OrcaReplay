@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { AUTH_REQUEST_HEADERS } from '@orcareplay/core';
 import type { RecordedExchange } from '../src/server.js';
 import { createProxy } from '../src/server.js';
 
@@ -100,7 +101,9 @@ describe('proxy — record mode', () => {
 
     const forwarded = up.calls[0]!.init.headers as Record<string, string>;
     expect(forwarded.authorization).toBe('Bearer oauth-subscription-token');
-    expect(JSON.stringify(seen[0]!.requestHeaders ?? {})).not.toContain('oauth-subscription-token');
+    // The whole exchange, not just its header map: `?? {}` on a field nobody populated would have
+    // made this pass over an exchange carrying the token somewhere else entirely.
+    expect(JSON.stringify(seen[0]!)).not.toContain('oauth-subscription-token');
   });
 
   it('answers the agent-proxy probes Claude Code makes, without touching the recording', async () => {
@@ -124,9 +127,32 @@ describe('proxy — record mode', () => {
 
     await post(`${proxy.url}/v1/messages`, ANTHROPIC_BODY);
 
-    const dumped = JSON.stringify(seen[0]!.requestHeaders ?? {});
-    expect(dumped).not.toContain('sk-secret-key');
+    expect(JSON.stringify(seen[0]!)).not.toContain('sk-secret-key');
   });
+
+  // Driven off the list itself, so a header added to core is exercised here without anyone
+  // remembering to. Three copies of this set had drifted apart before it was unified, and the two
+  // names only one copy knew about were an Azure key and a Google one — which meant the same
+  // credential was stripped on the intercepted path and written on the recorded one.
+  for (const header of AUTH_REQUEST_HEADERS) {
+    it(`forwards ${header} upstream and records none of it`, async () => {
+      const up = stubUpstream(ANTHROPIC_REPLY);
+      const seen: RecordedExchange[] = [];
+      const proxy = await createProxy({
+        mode: 'record',
+        fetchImpl: up.fetchImpl,
+        onExchange: (e) => void seen.push(e),
+      });
+      closers.push(proxy.close);
+
+      const secret = `secret-value-for-${header}`;
+      await post(`${proxy.url}/v1/messages`, ANTHROPIC_BODY, { [header]: secret });
+
+      const forwarded = up.calls[0]!.init.headers as Record<string, string>;
+      expect(forwarded[header], 'an agent that cannot authenticate cannot run').toBe(secret);
+      expect(JSON.stringify(seen[0]!), 'spec §7: never written').not.toContain(secret);
+    });
+  }
 
   it('routes OpenAI chat completions and labels the dialect', async () => {
     const up = stubUpstream({

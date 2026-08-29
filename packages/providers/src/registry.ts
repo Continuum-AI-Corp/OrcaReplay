@@ -1,8 +1,15 @@
 /**
  * Provider lookup by id.
  *
- * The registry exists so `orca fork --model X` can name a provider in config without the CLI
- * importing every one of them, and so a user can drop in their own without patching OrcaReplay.
+ * A published extension point with no in-tree consumer. It used to say this exists so
+ * `orca fork --model X` can name a provider in config — which sends a contributor looking for the
+ * wiring that reads it, and there is none: `--model` selects a dialect and a model name, and the
+ * proxy forwards raw bytes to the upstream `orca setup` or `--upstream-*` configured. See the note
+ * in `index.ts` for why the live path does not go through a `Provider` at all.
+ *
+ * What it is for is the other half of the original sentence, which is true: a user can register
+ * their own without patching OrcaReplay, through the `Provider` interface in
+ * `@orcareplay/plugin-api`.
  */
 
 import type { Provider, ProviderFactory, ProviderOptions } from '@orcareplay/plugin-api';

@@ -56,16 +56,37 @@ export function parseArgs(argv: string[]): ShimCliArgs {
   return { name, out, command, args: argv.slice(i + 2) };
 }
 
+/**
+ * One line of the capture file, as written.
+ *
+ * Exported because the recorder reads these back, and it used to do so through a type of its own
+ * that named the same fields differently — `server` for `name`, `direction` for `dir`. Nothing
+ * caught it: JSON.parse casts to whatever you claim, so every frame arrived with an undefined
+ * server, and `direction === 'in'` was false for all of them, which recorded every request as a
+ * response. The writer owns the format; the reader imports it.
+ */
+export interface McpFrameRecord {
+  /** RFC3339, stamped when the frame passed through the shim — not when it was read back. */
+  ts: string;
+  /** The server's name in the agent's own config. */
+  name: string;
+  dir: FrameDirection;
+  kind: string;
+  raw: string;
+  id?: string | number;
+  method?: string;
+}
+
 function toRecord(name: string, dir: FrameDirection, frame: JsonRpcFrame): string {
-  const record: Record<string, unknown> = {
+  const record: McpFrameRecord = {
     ts: new Date().toISOString(),
     name,
     dir,
     kind: frame.kind,
     raw: frame.raw,
   };
-  if (frame.id !== undefined) record['id'] = frame.id;
-  if (frame.method !== undefined) record['method'] = frame.method;
+  if (frame.id !== undefined) record.id = frame.id;
+  if (frame.method !== undefined) record.method = frame.method;
   return `${JSON.stringify(record)}\n`;
 }
 

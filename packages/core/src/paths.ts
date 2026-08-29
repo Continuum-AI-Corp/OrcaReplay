@@ -107,6 +107,6 @@ export async function resolveRunSelector(cwd: string, selector: string): Promise
   }
   const dir = runDirFor(cwd, selector);
   const found = (await listRuns(cwd)).find((r) => r.dir === dir);
-  if (!found) throw new Error(`no run ${selector} in ${runsDir(cwd)} — list runs with: orca ls`);
+  if (!found) throw new Error(`no run ${selector} in ${runsDir(cwd)} — list runs with: orca list`);
   return found;
 }

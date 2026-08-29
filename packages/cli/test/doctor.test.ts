@@ -25,25 +25,39 @@ describe('orca doctor — the capture layers', () => {
    * `mcp.ts` even had a `shimIsRunnable()` whose docstring reads "Exposed for the doctor command".
    * Nothing imported it.
    */
+  // A temp directory, not `process.cwd()`. Both of these used to run doctor against the repository
+  // root, where the `.orca writable` check writes a probe file — a test that mutates the checkout
+  // it is testing. Neither shim check reads the working directory at all; each installs into a
+  // temp dir of its own.
+  let cwd: string;
+  let out: Output;
+
+  beforeEach(async () => {
+    cwd = await mkdtemp(join(tmpdir(), 'orca-doctor-shims-'));
+    out = new Output({ write: () => undefined, isTTY: false });
+  });
+  afterEach(async () => {
+    await rm(cwd, { recursive: true, force: true });
+  });
+
+  /** Both shims run out of `dist/`, so a source checkout has to be built before this can pass. */
+  const NEEDS_BUILD = 'is the workspace built? both shims run out of dist/ — try: npm run build';
+
   it('checks the shell shim, since a broken one loses exit codes silently', async () => {
-    const lines: string[] = [];
-    const out = new Output({ write: (l) => void lines.push(l), isTTY: false });
-    const result = await doctorCommand(parseArgs(['doctor']), out, process.cwd());
+    const result = await doctorCommand(parseArgs(['doctor']), out, cwd);
     const check = result.checks.find((c) => c.name.includes('shell'));
     expect(
       check,
       `no shell check in: ${result.checks.map((c) => c.name).join(', ')}`,
     ).toBeDefined();
-    expect(check!.status).toBe('ok');
+    expect(check!.status, `${check!.detail} — ${NEEDS_BUILD}`).toBe('ok');
   });
 
   it('checks the MCP shim', async () => {
-    const lines: string[] = [];
-    const out = new Output({ write: (l) => void lines.push(l), isTTY: false });
-    const result = await doctorCommand(parseArgs(['doctor']), out, process.cwd());
+    const result = await doctorCommand(parseArgs(['doctor']), out, cwd);
     const check = result.checks.find((c) => c.name.includes('mcp'));
     expect(check, `no mcp check in: ${result.checks.map((c) => c.name).join(', ')}`).toBeDefined();
-    expect(check!.status).toBe('ok');
+    expect(check!.status, `${check!.detail} — ${NEEDS_BUILD}`).toBe('ok');
   });
 });
 

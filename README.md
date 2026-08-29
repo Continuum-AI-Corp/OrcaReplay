@@ -89,8 +89,9 @@ some-local-model  —          —
 ```
 
 `orca setup` asks the gateway what it actually serves rather than just writing the file, so a wrong
-URL or a dead key is an answer now instead of a 401 in the middle of a comparison. After that,
-`orca compare --models a,b,c` needs no flags. `orca models` prices what it recognises and shows a
+URL or a dead key is an answer now instead of a 401 in the middle of a comparison. It also stores the
+models you picked, so after that `orca compare last --verify "npm test"` needs no model list and no
+upstream flags at all. `orca models` prices what it recognises and shows a
 dash for what it does not, because inventing a number for an unknown model is how a comparison
 table ends up quoting a cost that was never real.
 
@@ -104,6 +105,27 @@ recorded is built from the *incoming* request with auth stripped — so it is in
 recording by construction, not by a rule someone has to remember. It is withheld entirely if a flag
 sends that traffic somewhere other than the gateway that issued it.
 
+## When the harness will not be redirected
+
+Base-URL injection captures every harness that reads a base-URL variable, which is most of them. A
+Codex CLI signed in with a ChatGPT subscription reads none: it talks to its own backend over TLS,
+and orca sees nothing. `--tls-intercept` is the answer to that, and it is deliberately a separate
+decision you have to make, because it mints a certificate authority.
+
+```console
+orca record codex --tls-intercept
+orca record codex --tls-intercept --tls-hosts 'api.openai.com,*.chatgpt.com'
+```
+
+The CA is unique to the run, trusted only by the agent orca launches — through that child's own
+environment, never a system or browser trust store — and deleted when the run ends. Orca will not
+offer to install it anywhere. Hosts outside the allowlist are tunnelled unread and recorded as an
+address and a byte count, with no path and no body, because orca never held the plaintext. Asking
+to intercept everything is refused rather than honoured.
+
+It works on `orca replay --model`, `orca fork` and `orca compare` too, which launch a live agent for
+the same reason.
+
 ## Status
 
 Early. `v0` is the walking skeleton of the three commands above.
@@ -112,7 +134,7 @@ Early. `v0` is the walking skeleton of the three commands above.
 |---|---|
 | Trace format v0 + JSON Schema | working |
 | Anthropic / OpenAI-compatible model capture | working |
-| Exact replay with divergence reporting | working — restores the recorded filesystem over your working tree, then puts it back; `--worktree` for a scratch copy, `--in-place` to restore nothing |
+| Exact replay with divergence reporting | working — restores the recorded filesystem over your working tree, then puts it back; `--worktree` for a scratch copy, `--in-place` to restore nothing. Writes a run of its own recording what the replay *discovered* — divergences, unmatched requests — and points at the parent for what it merely repeated; `--no-trace` to skip |
 | Fork replay from a checkpoint | working |
 | Compare across models | working — `orca setup` stores a gateway, key and default model list, so `orca compare` needs no flags |
 | Filesystem snapshots and diffs | working |
@@ -120,8 +142,8 @@ Early. `v0` is the walking skeleton of the three commands above.
 | MCP call recording | working — opt in with `--mcp-config <path>` |
 | Post-hoc scrubbing (`orca scrub`) | working |
 | Shell capture (`PATH` shim) | working — exit codes, duration and the stdout/stderr split. `--no-shell` to skip |
-| Non-model network capture | not implemented; out of scope for v0 |
-| Subscription-auth harnesses | Claude Code works. A Codex CLI signed in with a ChatGPT subscription talks to its own backend, so base-URL redirection does not capture it |
+| Non-model network capture | working — opt in with `--tls-intercept`; mints a per-run CA the launched agent alone trusts, decrypts an allowlist of hosts, tunnels the rest unread, and deletes the key when the run ends |
+| Subscription-auth harnesses | Claude Code works. A Codex CLI signed in with a ChatGPT subscription talks to its own backend and reads no base-URL variable, so it needs `--tls-intercept` |
 
 ## Install
 
@@ -168,10 +190,11 @@ outright, at the cost of being able to fork the run.
 ## What is open, and what is not
 
 Always open, under Apache-2.0: the trace format, the core, the CLI, the viewer, the adapters, and
-the provider interface. OrcaRouter is an optional plugin that uses only the public `Provider`
-interface — it gets no privileged API, and CI enforces that by building it against the published
-package rather than workspace source. If it ever needs a capability, that capability lands in the
-public interface first.
+the provider interface. OrcaRouter is an optional plugin that may use only the public `Provider`
+interface — no privileged API. No vendor plugin exists yet, so the CI job that enforces this
+(`scripts/check-neutrality.mjs`) says so and passes as a no-op; it starts building against the
+published package rather than workspace source the moment one lands. If a plugin ever needs a
+capability, that capability goes into the public interface first.
 
 ## Documentation
 

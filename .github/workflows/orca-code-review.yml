@@ -43,7 +43,11 @@ jobs:
           startsWith(github.event.comment.body, '@orcacode review')) &&
         contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
     steps:
-      - uses: Continuum-AI-Corp/orca-code-review@v1
+      # Pinned to a commit, not to `@v1`. This job runs on `pull_request_target` with a secret
+      # in scope, so whoever can move that tag can run code here with it — and `v1` is a floating
+      # alias its own repo repoints. This is the commit `v1` resolved to when it was pinned; to
+      # update, resolve the tag again and change the SHA in the same commit as the comment.
+      - uses: Continuum-AI-Corp/orca-code-review@5ecfbf339ccbe5e6a6107259e0369d424846deb4 # v1
         with:
           orcarouter-api-key: ${{ secrets.ORCAROUTER_API_KEY }}
           # This file is authoritative. The dashboard fetch is skipped entirely,

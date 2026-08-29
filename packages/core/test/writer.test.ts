@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { join } from 'node:path';
 import type { BlobRef, Manifest, TraceEvent } from '@orcareplay/schema';
 import { INLINE_PAYLOAD_LIMIT, RUN_ID_PATTERN, validateManifest } from '@orcareplay/schema';
@@ -51,7 +52,9 @@ describe('events that happened before they were written', () => {
       cwd: dir,
       orcaVersion: '0.0.0',
     });
-    const happened = new Date(Date.now() - 60_000);
+    // The frame happened here, and is written 250ms later — the drain the real recorder does.
+    const happened = new Date();
+    await sleep(250);
     const event = await writer.append({
       type: 'shell.exec',
       actor: 'harness',
@@ -59,10 +62,36 @@ describe('events that happened before they were written', () => {
       occurredAt: happened,
       attrs: { argv: ['sh', '-c', 'true'] },
     });
+    const written = await writer.append({ type: 'note', actor: 'orca' });
     await writer.close(0);
 
     expect(event.ts).toBe(happened.toISOString());
-    expect(event.mono_us).toBeGreaterThanOrEqual(0);
+    // `toBeGreaterThanOrEqual(0)` used to stand here, which every possible number satisfies —
+    // including the drain reading this test exists to rule out. The gap is the assertion: an event
+    // stamped when it happened is a quarter of a second behind one stamped now.
+    expect(written.mono_us - event.mono_us).toBeGreaterThan(200_000);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('clamps an event that happened before the run to the start of it', async () => {
+    // A shell frame can carry a clock reading fractionally behind the writer's own start, and a
+    // negative offset into a run is not a thing spec §2.1 can express.
+    const dir = await mkdtemp(join(tmpdir(), 'orca-when-'));
+    const writer = await TraceWriter.create(dir, {
+      adapter: { id: 'claude-code', version: '0.0.0' },
+      argv: ['claude-code'],
+      cwd: dir,
+      orcaVersion: '0.0.0',
+    });
+    const event = await writer.append({
+      type: 'shell.exec',
+      actor: 'harness',
+      occurredAt: new Date(Date.now() - 60_000),
+      attrs: { argv: ['sh', '-c', 'true'] },
+    });
+    await writer.close(0);
+
+    expect(event.mono_us).toBe(0);
     await rm(dir, { recursive: true, force: true });
   });
 

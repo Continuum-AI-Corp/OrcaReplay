@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { AUTH_REQUEST_HEADERS } from '@orcareplay/core';
 import type { CanonicalRequest, CanonicalResponse, Usage } from '@orcareplay/plugin-api';
 import {
   anthropicToCanonicalRequest,
@@ -133,13 +134,11 @@ const HOP_BY_HOP_HEADERS = new Set(['host', 'connection', 'content-length', 'acc
  * run — but never written into a trace. Claude Code under a subscription login sends its own
  * `authorization: Bearer` and ignores any injected key, so dropping these would break it outright.
  * §7 says never *write* auth material, which is a different requirement from never relaying it.
+ *
+ * From core, not restated here: this list had drifted from the interceptor's copy of it, and the
+ * two headers only the interceptor knew about were an Azure key and a Google one.
  */
-const SECRET_REQUEST_HEADERS = new Set([
-  'authorization',
-  'x-api-key',
-  'cookie',
-  'proxy-authorization',
-]);
+const SECRET_REQUEST_HEADERS = new Set(AUTH_REQUEST_HEADERS);
 
 export function defaultDialects(): Dialect[] {
   return [

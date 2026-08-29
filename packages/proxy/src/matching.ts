@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { CanonicalContent, CanonicalRequest } from '@orcareplay/plugin-api';
+import { DIVERGENCE_LEVELS, MATCH_RUNGS } from '@orcareplay/schema';
 
 /**
  * The replay matching ladder (spec §4).
@@ -13,8 +14,11 @@ import type { CanonicalContent, CanonicalRequest } from '@orcareplay/plugin-api'
  * worse than no debugger, because you will believe it.
  */
 
-export type MatchRung = 1 | 2 | 3 | 4;
-export type DivergenceLevel = 'minor' | 'major';
+// Derived from the schema's own constants rather than restated. Both of these were written out a
+// second time here, which is how the normative list and the code implementing it drift: nothing
+// referenced `MATCH_RUNGS` at all, so it could have been changed without a single test noticing.
+export type MatchRung = (typeof MATCH_RUNGS)[number];
+export type DivergenceLevel = (typeof DIVERGENCE_LEVELS)[number];
 
 export interface Divergence {
   level: DivergenceLevel;

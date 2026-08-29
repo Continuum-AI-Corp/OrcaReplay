@@ -6,6 +6,7 @@ import {
 import { Agent, request as httpsRequest } from 'node:https';
 import { connect as netConnect, isIP, type Socket } from 'node:net';
 import { createSecureContext, rootCertificates, TLSSocket, type SecureContext } from 'node:tls';
+import { AUTH_REQUEST_HEADERS, AUTH_RESPONSE_HEADERS } from '@orcareplay/core';
 import type { RunCa } from './ca.js';
 import { HostPolicy } from './tls-hosts.js';
 
@@ -41,17 +42,10 @@ const HOP_BY_HOP = new Set([
  * agent that cannot authenticate cannot run, and spec §7 forbids writing auth material, which is
  * a different requirement from relaying it.
  */
-const SECRET_REQUEST_HEADERS = new Set([
-  'authorization',
-  'x-api-key',
-  'cookie',
-  'proxy-authorization',
-  'api-key',
-  'x-goog-api-key',
-]);
+const SECRET_REQUEST_HEADERS = new Set(AUTH_REQUEST_HEADERS);
 
 /** A response can hand out credentials too. `set-cookie` is a session, not metadata. */
-const SECRET_RESPONSE_HEADERS = new Set(['set-cookie']);
+const SECRET_RESPONSE_HEADERS = new Set(AUTH_RESPONSE_HEADERS);
 
 /** Enough to hold any model exchange; short of enough to hold somebody's video download. */
 const DEFAULT_MAX_CAPTURED_BYTES = 1024 * 1024;

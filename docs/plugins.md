@@ -116,7 +116,18 @@ the whole point: the fixture diff is where a reviewer sees "this adapter now set
 variable", and `verified_at` is the cue to ask whether you ran the harness or guessed. A fixture
 nobody has to touch only records what the adapter used to do.
 
-## Provider — how to reach a model when replay goes live
+## Provider — a published interface with no caller yet
+
+**Read this first.** `Provider` is exported from `@orcareplay/plugin-api` and nothing in OrcaReplay
+calls it. When a replay cursor goes live the proxy forwards the agent's own request bytes to a
+configured upstream, translating only where a fork changed the model — routing that through a
+`Provider` would mean re-serialising a request orca already holds verbatim, which loses fidelity for
+no gain. To point orca at a different model API today, use `orca setup`, or `--upstream-anthropic` /
+`--upstream-openai` per run.
+
+So implement this to be *ready* for a future live path, or to reuse the shape in your own tooling —
+not because registering one changes what `orca replay --model` does. It does not, yet.
+
 
 ```ts
 import type { Provider, CanonicalRequest, CanonicalChunk } from '@orcareplay/plugin-api';

@@ -346,11 +346,11 @@ async function runRecording(
       const at = frame.ts === undefined ? Number.NaN : Date.parse(frame.ts);
       const when = Number.isNaN(at) ? undefined : new Date(at);
       await writer.append({
-        type: frame.direction === 'in' ? 'mcp.request' : 'mcp.response',
+        type: frame.dir === 'in' ? 'mcp.request' : 'mcp.response',
         actor: 'agent',
         turn: when === undefined ? turn : turnAt(at),
         ...(when === undefined ? {} : { occurredAt: when }),
-        attrs: { server: frame.server, kind: frame.kind, method: frame.method, id: frame.id },
+        attrs: { server: frame.name, kind: frame.kind, method: frame.method, id: frame.id },
         payload: frame.raw,
       });
     }
