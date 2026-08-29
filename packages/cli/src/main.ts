@@ -17,10 +17,12 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
 
   orca record <agent>            run an agent and capture everything
   orca replay [run]              reproduce a run exactly, network off
+        --ui                     open the timeline when it finishes
   orca replay [run] --from N     fork from a checkpoint and continue live
         --model <id>             continue on a different model
   orca compare [run] --models a,b,c
                                  fork the same checkpoint onto several models
+        --verify <cmd>           run this in each fork; its exit code is the verdict
   orca show [run]                the timeline, in the terminal
   orca checkpoints [run]         where you can fork from
   orca export [run] -o file.html a single self-contained file you can attach

@@ -13,6 +13,7 @@ import {
 import { FsCapture } from '@orcareplay/fs-capture';
 import { createProxy, defaultDialects, type RecordedExchange } from '@orcareplay/proxy';
 import { defaultAdapters } from '@orcareplay/adapters';
+import { serveViewer } from '@orcareplay/viewer';
 import { isBlobRef, type TraceEvent } from '@orcareplay/schema';
 import { ExchangeEventDeriver } from '../exchange-events.js';
 import type { Output } from '../out.js';
@@ -29,6 +30,8 @@ export interface ReplayResult {
   liveCalls: number;
   exitCode: number;
   forkRunId?: string;
+  /** Scratch worktree a fork ran in, so a verify command can be run against its result. */
+  worktree?: string;
 }
 
 /**
@@ -108,10 +111,29 @@ export async function replayCommand(
   const model = args.str('model');
   const isFork = from !== undefined || model !== undefined;
 
-  if (!isFork) {
-    return replayExact(args, out, { manifest, events, exchanges, runDir });
+  const result = isFork
+    ? await replayFork(args, out, { manifest, events, exchanges, runDir, cwd, from, model })
+    : await replayExact(args, out, { manifest, events, exchanges, runDir });
+
+  if (args.bool('ui')) {
+    // Show the run you just produced: after a fork that is the child, not the parent, because
+    // the child is the one carrying the outcome you asked the question about.
+    const target = result.forkRunId
+      ? (await resolveRunSelector(cwd, result.forkRunId)).dir
+      : runDir;
+    await openViewer(target, args, out);
   }
-  return replayFork(args, out, { manifest, events, exchanges, runDir, cwd, from, model });
+
+  return result;
+}
+
+async function openViewer(runDir: string, args: ParsedArgs, out: Output): Promise<void> {
+  const server = await serveViewer({ runDir, port: args.num('port') ?? 0 });
+  out.phase('viewer', { url: server.url });
+  out.plain('  ctrl-c to stop');
+  await new Promise<void>((resolve) => {
+    process.once('SIGINT', () => void server.close().then(resolve));
+  });
 }
 
 interface Ctx {
@@ -324,6 +346,7 @@ async function replayFork(
   return {
     runId: ctx.manifest.run_id,
     forkRunId: writer.runId,
+    worktree,
     mode: 'fork',
     matchedExact: stats.matchedExact,
     divergences: stats.divergences,

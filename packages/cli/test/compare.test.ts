@@ -161,3 +161,88 @@ describe('cost formatting', () => {
     expect(formatCost(0.000_002)).not.toMatch(/^\$0\.0000$/);
   });
 });
+
+describe('verify command', () => {
+  let workspace: string;
+  let model: Awaited<ReturnType<typeof startFakeModel>>;
+  let out: Output;
+
+  beforeEach(async () => {
+    workspace = await mkdtemp(join(tmpdir(), 'orca-verify-'));
+    model = await startFakeModel();
+    out = new Output({ write: () => {}, isTTY: false });
+    await run('git', ['init', '-q'], { cwd: workspace });
+    await run('git', ['config', 'user.email', 't@e.com'], { cwd: workspace });
+    await run('git', ['config', 'user.name', 'T'], { cwd: workspace });
+    await writeFile(join(workspace, 'auth.ts'), 'export const fixed = false;\n');
+    process.env.FAKE_AGENT_TURNS = '3';
+    // Deliberately NOT pinning FAKE_AGENT_CWD: the agent should write to its own working
+    // directory, which is the fork worktree during a fork — that is what a real agent does, and
+    // it is the only way this test can tell the worktree and the workspace apart.
+    delete process.env.FAKE_AGENT_CWD;
+  });
+
+  afterEach(async () => {
+    await model.close();
+    await rm(workspace, { recursive: true, force: true });
+  });
+
+  async function compareWith(verify: string[]) {
+    const first = await recordCommand(
+      parseArgs([
+        'record',
+        'generic-openai',
+        '--upstream-anthropic',
+        model.url,
+        '--',
+        'node',
+        FAKE_AGENT,
+      ]),
+      out,
+      workspace,
+    );
+    const events = await (await TraceReader.open(first.runDir)).events();
+    const from = deriveCheckpoints(events)[0]!.seq;
+    return compareCommand(
+      parseArgs([
+        'compare',
+        'last',
+        '--from',
+        String(from),
+        '--models',
+        'claude-opus-5',
+        '--upstream-anthropic',
+        model.url,
+        ...verify,
+      ]),
+      out,
+      workspace,
+    );
+  }
+
+  it('fails the verdict when the verify command fails, even though the agent exited 0', async () => {
+    const rows = await compareWith(['--verify', 'exit 1']);
+    // Without --verify, "pass" only means the agent did not crash — which is not the question
+    // anyone is asking of a comparison table.
+    expect(rows[0]!.verdict).toBe('fail');
+    expect(rows[0]!.verifyExitCode).toBe(1);
+  });
+
+  it('passes the verdict when the verify command passes', async () => {
+    const rows = await compareWith(['--verify', 'exit 0']);
+    expect(rows[0]!.verdict).toBe('pass');
+    expect(rows[0]!.verifyExitCode).toBe(0);
+  });
+
+  it('runs the verify command inside the fork worktree, not the original workspace', async () => {
+    // auth.ts only contains "fixed = true" in the fork, where the agent wrote it.
+    const rows = await compareWith(['--verify', 'grep -q "fixed = true" auth.ts']);
+    expect(rows[0]!.verdict).toBe('pass');
+  });
+
+  it('falls back to the agent exit code when no verify command is given', async () => {
+    const rows = await compareWith([]);
+    expect(rows[0]!.verifyExitCode).toBeUndefined();
+    expect(rows[0]!.verdict).toBe('pass');
+  });
+});

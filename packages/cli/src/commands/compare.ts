@@ -4,6 +4,17 @@ import { parseArgs, type ParsedArgs } from '../args.js';
 import type { Output } from '../out.js';
 import { replayCommand } from './replay.js';
 
+/** Run the verdict command inside the fork's worktree. Shell so `npm test -- auth` just works. */
+async function runVerify(command: string, cwd: string): Promise<number> {
+  const { spawn } = await import('node:child_process');
+  return new Promise((resolve) => {
+    const child = spawn(command, { cwd, shell: true, stdio: 'ignore' });
+    // A verify command that cannot even start is a failed verdict, not a crashed comparison.
+    child.on('error', () => resolve(127));
+    child.on('close', (code) => resolve(code ?? 1));
+  });
+}
+
 /** Each fork is a fresh argv, so upstream overrides have to be forwarded explicitly. */
 function upstreamFlags(args: ParsedArgs): string[] {
   const out: string[] = [];
@@ -15,6 +26,8 @@ function upstreamFlags(args: ParsedArgs): string[] {
 }
 
 export interface CompareRow {
+  /** Exit code of --verify, when one was given. This, not the agent's exit code, is the verdict. */
+  verifyExitCode?: number;
   model: string;
   verdict: 'pass' | 'fail';
   exitCode: number;
@@ -80,13 +93,21 @@ export async function compareCommand(
         ...upstreamFlags(args),
       ]);
       const result = await replayCommand(forkArgs, out, cwd);
+
+      // The agent exiting 0 only means it did not crash. "Did the task actually get done" needs
+      // a command that answers it — otherwise the verdict column is a number nobody should act on.
+      const verify = args.str('verify');
+      const verifyExitCode =
+        verify && result.worktree ? await runVerify(verify, result.worktree) : undefined;
+      const failed = verifyExitCode === undefined ? result.exitCode !== 0 : verifyExitCode !== 0;
       const usage = result.forkRunId
         ? await usageOf(cwd, result.forkRunId)
         : { input: 0, output: 0 };
       const money = priceFor({ input_tokens: usage.input, output_tokens: usage.output }, model);
       rows.push({
         model,
-        verdict: result.exitCode === 0 ? 'pass' : 'fail',
+        verdict: failed ? 'fail' : 'pass',
+        verifyExitCode,
         exitCode: result.exitCode,
         divergences: result.divergences,
         inputTokens: usage.input,
