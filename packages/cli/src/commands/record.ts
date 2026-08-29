@@ -99,6 +99,9 @@ export async function recordCommand(
 
   const deriver = new ExchangeEventDeriver();
   let turn = 0;
+  // When each turn began, so an out-of-band frame can be attributed to the turn it happened during
+  // rather than to whichever turn happened to be last when we drained the file.
+  const turnStartedAt: { turn: number; at: number }[] = [];
   // Serial, not parallel: each persist snapshots the workspace, and two overlapping `git add`
   // calls collide on index.lock. It also keeps seq in the order exchanges actually happened.
   const writes = new SerialQueue();
@@ -113,6 +116,7 @@ export async function recordCommand(
 
   async function persist(exchange: RecordedExchange): Promise<void> {
     turn += 1;
+    turnStartedAt.push({ turn, at: Date.now() });
     for (const derived of deriver.derive(exchange, turn)) {
       const causes: number[] = [];
       if (derived.causesToolId) {
@@ -231,19 +235,39 @@ export async function recordCommand(
 
   await writes.drain();
 
+  /** The turn an out-of-band frame belongs to: the last one that had begun when it happened. */
+  function turnAt(at: number): number {
+    let found = 0;
+    for (const mark of turnStartedAt) {
+      if (mark.at > at) break;
+      found = mark.turn;
+    }
+    return found;
+  }
+
   if (shell) {
+    // Timestamped from the frame, not from now. These are read off disk after the agent has
+    // exited, so stamping them at write time put every shell command at the end of the run with
+    // the final turn number — which makes `mono_us` describe the drain rather than the command,
+    // and leaves the commands unable to interleave with the model turns they happened between.
     for (const frame of await readShellFrames(shell.framesPath)) {
+      const startedAt = Date.parse(frame.startedAt);
+      const at = Number.isNaN(startedAt) ? undefined : new Date(startedAt);
+      const frameTurn = at === undefined ? turn : turnAt(startedAt);
       const exec = await writer.append({
         type: 'shell.exec',
         actor: 'harness',
-        turn,
+        turn: frameTurn,
+        ...(at === undefined ? {} : { occurredAt: at }),
         attrs: { argv: [frame.name, ...frame.argv], cwd: frame.cwd },
       });
       await writer.append({
         type: 'shell.result',
         actor: 'harness',
-        turn,
+        turn: frameTurn,
         causes: [exec.seq],
+        // The result happened when the command finished, which is what its duration measures.
+        ...(at === undefined ? {} : { occurredAt: new Date(startedAt + frame.durationMs) }),
         attrs: {
           exit_code: frame.exitCode,
           signal: frame.signal,
@@ -257,10 +281,13 @@ export async function recordCommand(
 
   if (mcp) {
     for (const frame of await mcp.drain()) {
+      const at = frame.ts === undefined ? Number.NaN : Date.parse(frame.ts);
+      const when = Number.isNaN(at) ? undefined : new Date(at);
       await writer.append({
         type: frame.direction === 'in' ? 'mcp.request' : 'mcp.response',
         actor: 'agent',
-        turn,
+        turn: when === undefined ? turn : turnAt(at),
+        ...(when === undefined ? {} : { occurredAt: when }),
         attrs: { server: frame.server, kind: frame.kind, method: frame.method, id: frame.id },
         payload: frame.raw,
       });

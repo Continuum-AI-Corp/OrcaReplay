@@ -21,6 +21,14 @@ export interface McpFrameRecord {
   method?: string;
   id?: string | number;
   raw: string;
+  /**
+   * RFC3339, written by the shim when the frame passed through it.
+   *
+   * The shim has always recorded this; the recorder simply did not read it, so every MCP event
+   * landed in the trace stamped with the moment the file was drained instead of the moment the
+   * call happened. Optional because a frame from an older shim will not carry one.
+   */
+  ts?: string;
 }
 
 /**

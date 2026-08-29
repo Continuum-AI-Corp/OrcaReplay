@@ -51,6 +51,15 @@ export interface EventInit {
   causes?: number[];
   attrs?: Record<string, unknown>;
   payload?: Payload;
+  /**
+   * When the event actually happened, for anything captured out of band.
+   *
+   * Shell and MCP frames are drained from disk after the agent exits, so stamping them at write
+   * time puts every one of them at the end of the run — `ts` and `mono_us` describing the drain
+   * rather than the event, which spec §2.1 makes authoritative for duration. Supplying the real
+   * moment is what lets them interleave with the model turns they happened between.
+   */
+  occurredAt?: Date;
 }
 
 /**
@@ -70,6 +79,7 @@ export class TraceWriter {
   readonly #handle: FileHandle;
   readonly #base: Manifest;
   readonly #started = process.hrtime.bigint();
+  readonly #startedAtMs = Date.now();
   #seq = 0;
   #turn = 0;
   #git: Manifest['git'];
@@ -158,8 +168,14 @@ export class TraceWriter {
     if (this.#sealed) throw new Error(`run ${this.#runId} is closed`);
     // Clocks are read at call time so they describe the event, not the queue drain; seq is
     // assigned inside the queue so a rejected event leaves no hole in the dense order.
-    const ts = new Date().toISOString();
-    const mono_us = Number((process.hrtime.bigint() - this.#started) / 1000n);
+    const when = init.occurredAt ?? new Date();
+    const ts = when.toISOString();
+    // Monotonic for events stamped now; derived from the wall clock for one that happened earlier,
+    // since there is no hrtime reading to recover. Clamped at zero rather than going negative for a
+    // frame whose clock ran slightly behind the run's start.
+    const mono_us = init.occurredAt
+      ? Math.max(0, (when.getTime() - this.#startedAtMs) * 1000)
+      : Number((process.hrtime.bigint() - this.#started) / 1000n);
     const turn = init.turn ?? this.#turn;
     this.#turn = turn;
     const written = this.#tail.then(() => this.#write(ts, mono_us, turn, init));

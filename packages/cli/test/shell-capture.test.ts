@@ -70,6 +70,65 @@ describe('shell capture', () => {
     );
   }
 
+  it('timestamps a shell command when it ran, not when the file was drained', async () => {
+    // Shell frames are read off disk after the agent exits. Stamping them at write time put every
+    // command at the very end of the run, so `mono_us` — which spec §2.1 calls authoritative for
+    // duration — described the drain rather than the command, and a command could never be seen to
+    // have happened between the model turns it actually sat between.
+    const result = await record();
+    const events = await (await TraceReader.open(result.runDir)).events();
+    const exec = events.find((e) => e.type === 'shell.exec');
+    const runEnd = events.find((e) => e.type === 'run.end');
+    expect(exec, 'no shell.exec event was recorded').toBeDefined();
+
+    // It ran during the run, not after it.
+    expect(Date.parse(exec!.ts)).toBeLessThanOrEqual(Date.parse(runEnd!.ts));
+    expect(exec!.mono_us).toBeLessThanOrEqual(runEnd!.mono_us);
+  });
+
+  it('attributes a shell command to the turn it happened during', async () => {
+    // The turn used to be whichever one was current when the frames file was drained — always the
+    // last — so every shell command in a run claimed to belong to the final turn, and `causes`
+    // could never link a tool call to the command it produced.
+    //
+    // This agent shells out *between* two model calls, so there is a right answer and a wrong one:
+    // turn 1, not turn 2.
+    const agent = join(workspace, 'interleaving-agent.mjs');
+    await writeFile(
+      agent,
+      [
+        "import { execFileSync } from 'node:child_process';",
+        'const base = process.env.OPENAI_BASE_URL ?? process.env.ANTHROPIC_BASE_URL;',
+        'const call = async () => {',
+        '  const res = await fetch(`${base}/chat/completions`, {',
+        "    method: 'POST',",
+        "    headers: { 'content-type': 'application/json' },",
+        "    body: JSON.stringify({ model: 'gpt-5.2', messages: [{ role: 'user', content: 'hi' }] }),",
+        '  });',
+        '  await res.text();',
+        '};',
+        'await call();',
+        "execFileSync('sh', ['-c', 'exit 0'], { stdio: 'pipe' });",
+        'await call();',
+      ].join('\n'),
+    );
+
+    const result = await recordCommand(
+      parseArgs(['record', 'generic-openai', '--upstream-openai', model.url, '--', 'node', agent]),
+      out,
+      workspace,
+    );
+
+    const events = await (await TraceReader.open(result.runDir)).events();
+    const turns = events.filter((e) => e.type === 'model.request').map((e) => e.turn);
+    const exec = events.find((e) => e.type === 'shell.exec');
+    expect(exec, 'no shell.exec event was recorded').toBeDefined();
+    expect(turns, 'the fixture must make two model calls for this to mean anything').toEqual([
+      1, 2,
+    ]);
+    expect(exec!.turn).toBe(1);
+  });
+
   it('records the exit code the model never sees', async () => {
     const result = await record();
     const events = await (await TraceReader.open(result.runDir)).events();

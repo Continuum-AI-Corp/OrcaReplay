@@ -35,6 +35,54 @@ async function lines(w: TraceWriter): Promise<TraceEvent[]> {
     .map((l) => JSON.parse(l) as TraceEvent);
 }
 
+describe('events that happened before they were written', () => {
+  /**
+   * Shell and MCP frames are drained from disk after the agent exits, so stamping them at write
+   * time put every one of them at the end of the run with the final turn number — `ts`, `mono_us`
+   * and `turn` all wrong, no possible interleaving with the model events they sit between, and
+   * `causes` unable to link a tool call to the command it produced. Spec §2.1 calls `mono_us`
+   * authoritative for duration, which it cannot be if it records the drain.
+   */
+  it('uses the time an event happened, not the time it was written', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'orca-when-'));
+    const writer = await TraceWriter.create(dir, {
+      adapter: { id: 'claude-code', version: '0.0.0' },
+      argv: ['claude-code'],
+      cwd: dir,
+      orcaVersion: '0.0.0',
+    });
+    const happened = new Date(Date.now() - 60_000);
+    const event = await writer.append({
+      type: 'shell.exec',
+      actor: 'harness',
+      turn: 2,
+      occurredAt: happened,
+      attrs: { argv: ['sh', '-c', 'true'] },
+    });
+    await writer.close(0);
+
+    expect(event.ts).toBe(happened.toISOString());
+    expect(event.mono_us).toBeGreaterThanOrEqual(0);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('still stamps the clock itself when nothing is supplied', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'orca-when-'));
+    const writer = await TraceWriter.create(dir, {
+      adapter: { id: 'claude-code', version: '0.0.0' },
+      argv: ['claude-code'],
+      cwd: dir,
+      orcaVersion: '0.0.0',
+    });
+    const before = Date.now();
+    const event = await writer.append({ type: 'note', actor: 'orca', attrs: { rule: 'x' } });
+    await writer.close(0);
+
+    expect(Date.parse(event.ts)).toBeGreaterThanOrEqual(before - 1000);
+    await rm(dir, { recursive: true, force: true });
+  });
+});
+
 describe('TraceWriter.create', () => {
   it('mints a run id matching the spec pattern', async () => {
     const w = await TraceWriter.create(runs, INIT);
