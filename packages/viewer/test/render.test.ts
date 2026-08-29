@@ -121,6 +121,38 @@ describe('buildTimeline', () => {
     expect(rows[2]!.label).toContain('tree_aaaa');
   });
 
+  /**
+   * The renderer and the writer have to agree on attribute names, and for filesystem events they
+   * did not. `orca record` emits `{ path, status, insertions, deletions }` for fs.change and
+   * `{ tree, changes, initial }` for fs.snapshot; the renderer read `added`, `removed` and
+   * `files` — names nothing produces. Every FILE row therefore rendered with an empty detail and
+   * never said whether the file was added, modified or deleted, and every SNAP row dropped its
+   * change count.
+   *
+   * It survived because the tests below invented their own attribute shape and the renderer
+   * agreed with the invention. So these cases use the writer's real payload, copied from
+   * packages/cli/src/commands/record.ts, and are the reason the bug is now visible.
+   */
+  it('renders the filesystem attributes orca record actually writes', () => {
+    const rows = buildTimeline([
+      ev({
+        type: 'fs.change',
+        attrs: { path: 'auth.ts', status: 'modified', insertions: 1, deletions: 1 },
+      }),
+      ev({
+        type: 'fs.change',
+        attrs: { path: 'new.ts', status: 'added', insertions: 12, deletions: 0 },
+      }),
+      ev({ type: 'fs.snapshot', attrs: { tree: 'cafebabe', changes: 3 } }),
+    ]);
+    expect(rows[0]!.label).toBe('auth.ts');
+    expect(rows[0]!.detail).toContain('+1');
+    expect(rows[0]!.detail).toContain('1');
+    expect(rows[0]!.detail).toContain('modified');
+    expect(rows[1]!.detail).toContain('added');
+    expect(rows[2]!.detail).toContain('3');
+  });
+
   it('summarises fs.change, mcp, route, fork and run events', () => {
     const rows = buildTimeline([
       ev({ type: 'fs.change', attrs: { files: 3, added: 12, removed: 4 } }),

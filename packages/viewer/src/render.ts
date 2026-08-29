@@ -201,20 +201,24 @@ function parts(event: TraceEvent): RowParts {
     }
     case 'fs.snapshot': {
       const tree = pick(a, 'tree');
-      const files = num(a['files']);
+      const files = num(a['changes']) ?? num(a['files']);
       return {
         label: tree ? `tree ${tree}` : '',
-        detail: files === undefined ? '' : `${files} files`,
+        // `changes` is the writer's name; `files` kept for traces from an older build.
+        detail: files === undefined ? '' : `${files} changed`,
         tone: 'quiet',
       };
     }
     case 'fs.change': {
-      const files = num(a['files']);
-      const added = num(a['added']);
-      const removed = num(a['removed']);
+      // `insertions`/`deletions` are what `orca record` writes; `added`/`removed` are accepted so
+      // a trace from an older build still renders rather than silently losing its counts.
+      const files = num(a['files']) ?? num(a['changes']);
+      const added = num(a['insertions']) ?? num(a['added']);
+      const removed = num(a['deletions']) ?? num(a['removed']);
       const counts = [
+        pick(a, 'status'),
         added === undefined ? '' : `+${added}`,
-        removed === undefined ? '' : `-${removed}`,
+        removed === undefined ? '' : `−${removed}`,
       ]
         .filter(Boolean)
         .join(' ');

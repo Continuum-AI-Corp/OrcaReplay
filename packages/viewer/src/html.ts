@@ -302,7 +302,7 @@ ${list}
 </section>
 <section class="pane-col" aria-label="Event detail">${panes}</section>
 </main>
-<footer>Recorded with OrcaReplay · npx orcareplay</footer>
+<footer>Recorded with OrcaReplay · github.com/Continuum-AI-Corp/OrcaReplay</footer>
 <script>${script}</script>
 </body>
 </html>

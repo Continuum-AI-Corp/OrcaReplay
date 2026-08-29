@@ -144,9 +144,27 @@ input, button, .pane-title, .sub, footer, .finding {
 .finding + .finding { border-top: 1px solid var(--rule); }
 
 /* ---- split ---- */
-.split { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(20rem, 38%) 1fr; }
-.list { min-width: 0; display: flex; flex-direction: column; border-right: 1px solid var(--rule); }
-.pane-col { min-width: 0; overflow: auto; background: var(--paper); }
+/* minmax(0, 1fr) on the row and min-height: 0 on both items, for the same reason each time: a
+   grid item defaults to min-height auto and grows to its content, which silently unbounds the
+   scroll container inside it. The rows list then reports nothing to scroll and paints over into
+   the body's overflow:hidden, where it is clipped — so on any trace taller than the viewport,
+   every event past the fold becomes unreachable. Measured before this fix: the last row of a
+   42-event trace sat at y=1228 in a 900px viewport with no way to scroll to it. */
+.split {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(20rem, 38%) 1fr;
+  grid-template-rows: minmax(0, 1fr);
+}
+.list {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--rule);
+}
+.pane-col { min-width: 0; min-height: 0; overflow: auto; background: var(--paper); }
 
 .filterbar {
   flex: none;

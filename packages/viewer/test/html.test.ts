@@ -130,6 +130,35 @@ describe('single-file constraint', () => {
     expect(basic()).not.toContain('://');
   });
 
+  /**
+   * The timeline has to scroll, and whether it does is decided three elements above it.
+   *
+   * `body` is `100vh` with `overflow: hidden`, so nothing outside it is reachable. `.rows` asks to
+   * scroll with `flex: 1; min-height: 0; overflow: auto`, but that only works if every ancestor
+   * between it and the viewport is itself height-constrained. `.list` and `.pane-col` are grid
+   * items, and a grid item's default `min-height: auto` lets it grow to its content instead of to
+   * its track — so `.rows` was handed an unbounded height, grew to 1099px inside an 869px column,
+   * reported `scrollHeight === clientHeight` (nothing to scroll), and painted its overflow under
+   * the footer where `overflow: hidden` clipped it.
+   *
+   * Measured in a real browser on a 42-event trace: the last row sat at y=1228 in a 900px
+   * viewport and could not be scrolled to. Every event past the fold was unreachable, and the
+   * bigger the trace the more of it vanished. None of the other tests here could see it, because
+   * they assert on markup and this is a layout property.
+   */
+  it('keeps every ancestor of a scroll region height-constrained', () => {
+    for (const selector of ['.split', '.list', '.pane-col']) {
+      expect(ruleBody(VIEWER_CSS, selector), `${selector} must not grow to its content`).toMatch(
+        /min-height:\s*0/,
+      );
+    }
+  });
+
+  it('gives the timeline something to scroll inside', () => {
+    expect(ruleBody(VIEWER_CSS, '.rows')).toMatch(/overflow:\s*auto/);
+    expect(ruleBody(VIEWER_CSS, '.rows')).toMatch(/min-height:\s*0/);
+  });
+
   it('loads no font over the network', () => {
     expect(VIEWER_CSS).not.toMatch(/@font-face/i);
     expect(VIEWER_CSS).toMatch(/ui-monospace/);
@@ -239,7 +268,7 @@ describe('document structure', () => {
   });
 
   it('ends with the exact footer line', () => {
-    expect(basic()).toContain('Recorded with OrcaReplay · npx orcareplay');
+    expect(basic()).toContain('Recorded with OrcaReplay · github.com/Continuum-AI-Corp/OrcaReplay');
     expect(basic()).not.toMatch(/<img|<svg/i);
   });
 
