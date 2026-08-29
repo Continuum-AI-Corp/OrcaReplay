@@ -1,0 +1,4 @@
+src/auth.ts:14  import { verify } from "jsonwebtoken"
+src/auth.ts:88  // JWT exp is seconds since epoch
+src/auth.ts:91  if (payload.exp < Date.now()) {
+src/session.ts:22  const JWT_TTL = 900

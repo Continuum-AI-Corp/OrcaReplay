@@ -1,0 +1,17 @@
+{
+  "policy_version": 1,
+  "records": [
+    {
+      "rule": "auth_header",
+      "identifier": "header.x-api-key",
+      "placeholder": "<secret:api_key:8f3ad91c>",
+      "count": 12
+    },
+    {
+      "rule": "high_entropy",
+      "identifier": "shell.env.DEPLOY_TOKEN",
+      "placeholder": "<secret:high_entropy:2b7c40de>",
+      "count": 1
+    }
+  ]
+}
