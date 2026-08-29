@@ -8,6 +8,8 @@ import { passKey, passThrough, proxyBase } from './env.js';
  */
 export const claudeCodeAdapter: Adapter = {
   id: 'claude-code',
+  // What people type. The binary is `claude`, and so is every example in the docs.
+  aliases: ['claude'],
   harnessVersions: '>=1.0.0',
 
   async detect(_cwd: string): Promise<boolean> {

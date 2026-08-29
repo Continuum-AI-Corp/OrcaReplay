@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { TraceReader, deriveCheckpoints, listRuns, resolveRunSelector } from '@orcareplay/core';
-import { validateEvent, validateManifest } from '@orcareplay/schema';
+import { isBlobRef, validateEvent, validateManifest } from '@orcareplay/schema';
 import { parseArgs } from '../src/args.js';
 import { Output } from '../src/out.js';
 import { recordCommand } from '../src/commands/record.js';
@@ -121,6 +121,48 @@ describe('end to end: record → replay → fork', () => {
     expect(model.calls.length, 'exact replay must not reach the network at all').toBe(
       callsAfterRecording,
     );
+  });
+
+  it('replays exactly when the recorded bodies are large enough to spill to blobs', async () => {
+    // The size is the test. Under the inline limit a body is stored as itself; over it, the writer
+    // spills `JSON.stringify(payload)` and the body becomes a quoted, escaped JSON string literal.
+    // Replay read those bytes back without undoing the encoding, so it canonicalized an escaped
+    // copy — `model: ''`, `messages: []` — and matched nothing against any real harness, which all
+    // send a system prompt big enough to spill on turn one. Every other test here stayed under the
+    // limit, so all of them passed while replay was completely broken in practice.
+    process.env.FAKE_AGENT_PAD = '400';
+    try {
+      const recorded = await record();
+      const events = await (await TraceReader.open(recorded.runDir)).events();
+      const request = events.find((e) => e.type === 'model.request');
+      expect(isBlobRef(request?.payload), 'fixture must cross the spill boundary').toBe(true);
+
+      const result = await replayCommand(parseArgs(['replay', 'last']), out, workspace);
+
+      expect(result.matchedExact).toBeGreaterThan(0);
+      expect(result.divergences).toBe(0);
+      expect(result.liveCalls).toBe(0);
+    } finally {
+      delete process.env.FAKE_AGENT_PAD;
+    }
+  });
+
+  it('halts with a reason, not a hang, when the agent asks something else', async () => {
+    await record();
+
+    // Same recording, different question: nothing can match, and the operator has to be told why.
+    process.env.FAKE_AGENT_PROMPT = 'do something completely different';
+    try {
+      const result = await replayCommand(parseArgs(['replay', 'last']), out, workspace);
+
+      expect(result.matchedExact).toBe(0);
+      expect(result.exitCode, 'a halted replay must not look like a clean run').not.toBe(0);
+      const halt = lines.find((l) => l.includes('replay.unmatched'));
+      expect(halt, `no halt reason in output:\n${lines.join('\n')}`).toBeDefined();
+      expect(halt).toContain('does not match the recording');
+    } finally {
+      delete process.env.FAKE_AGENT_PROMPT;
+    }
   });
 
   it('derives checkpoints you can fork from', async () => {

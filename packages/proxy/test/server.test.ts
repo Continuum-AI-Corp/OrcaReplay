@@ -224,27 +224,80 @@ describe('proxy — replay mode', () => {
     });
     closers.push(proxy.close);
 
+    // Drift is what changes *around* the question between two runs of the same task: the harness
+    // stamps a different cwd or date into its system prompt. The question itself is deliberately
+    // byte-identical — a request that asks something else is not drift, and the matcher refuses it
+    // rather than answering it from the recording.
     await post(`${proxy.url}/v1/messages`, {
       ...ANTHROPIC_BODY,
-      messages: [{ role: 'user', content: 'fix the auth test.' }],
+      system: 'You are a coding agent. cwd=/tmp/other',
     });
 
     expect(divergences).toHaveLength(1);
     expect(divergences[0]!.level).toBe('minor');
   });
 
-  it('fails loudly with a 409 when nothing matches, rather than inventing a reply', async () => {
+  /** The request no recording can answer, used by the halt tests below. */
+  const unmatchable = {
+    model: 'other-model',
+    max_tokens: 8,
+    messages: [{ role: 'user', content: 'something else entirely' }],
+  };
+
+  it('fails loudly when nothing matches, rather than inventing a reply', async () => {
     const proxy = await createProxy({ mode: 'replay', exchanges: [exchange] });
     closers.push(proxy.close);
 
-    const res = await post(`${proxy.url}/v1/messages`, {
-      model: 'other-model',
-      max_tokens: 8,
-      messages: [{ role: 'user', content: 'something else entirely' }],
-    });
+    const res = await post(`${proxy.url}/v1/messages`, unmatchable);
 
-    expect(res.status).toBe(409);
+    expect(res.status).toBe(400);
     expect(JSON.stringify(res.json)).toContain('does not match the recording');
+  });
+
+  it('halts with a status the harness will not retry', async () => {
+    // This was a real, silent failure. The halt used to be a 409, which sits in the Anthropic and
+    // OpenAI SDKs' default retry set alongside 408, 429 and 5xx — so the harness quietly re-sent
+    // the same unmatched request until its retry budget ran out and then stalled, and the operator
+    // saw a hung terminal instead of the reason. A halt that is retried is not a halt.
+    const retriable = new Set([408, 409, 429, 500, 502, 503, 504]);
+    const proxy = await createProxy({ mode: 'replay', exchanges: [exchange] });
+    closers.push(proxy.close);
+
+    const res = await post(`${proxy.url}/v1/messages`, unmatchable);
+
+    expect(retriable.has(res.status)).toBe(false);
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBeLessThan(500);
+  });
+
+  it('shapes the halt as an error the harness will surface to the operator', async () => {
+    // The message only helps if it reaches a human. Both dialects' clients read `error.message`
+    // off the body and print it, so the halt speaks their error shape rather than inventing one.
+    const proxy = await createProxy({ mode: 'replay', exchanges: [exchange] });
+    closers.push(proxy.close);
+
+    const res = await post(`${proxy.url}/v1/messages`, unmatchable);
+    const body = res.json as { type?: string; error?: { type?: string; message?: string } };
+
+    expect(body.type).toBe('error');
+    expect(body.error?.message).toContain('orca');
+    expect(body.error?.message).toContain('--loose');
+  });
+
+  it('reports the unmatched request to the caller instead of only counting it', async () => {
+    // `unmatched: 12` with no reason is what the operator used to be left with.
+    const unmatched: { seq: number; reason: string }[] = [];
+    const proxy = await createProxy({
+      mode: 'replay',
+      exchanges: [exchange],
+      onUnmatched: (u) => void unmatched.push(u),
+    });
+    closers.push(proxy.close);
+
+    await post(`${proxy.url}/v1/messages`, unmatchable);
+
+    expect(unmatched).toHaveLength(1);
+    expect(unmatched[0]!.reason).toContain('does not match the recording');
   });
 
   it('continues live past an unmatched request when loose is set', async () => {

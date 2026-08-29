@@ -113,6 +113,37 @@ describe('RequestMatcher — the ladder from spec §4', () => {
     expect(m.match(req({ metadata: { request_id: 'fresh' } })).rung).toBe(1);
   });
 
+  it('never treats a changed question as a minor difference, however small the edit', () => {
+    // The failure this locks out: rung 2 used to accept *any* difference within tolerance, and the
+    // tolerance has a 64-character floor. On a short request that floor is a large share of the
+    // whole body, so replacing "fix the auth test" with "do something completely different" landed
+    // inside it — and OrcaReplay answered a different question with the recorded reply and filed it
+    // as `minor`. The ask is the one thing that can never be incidental: rung 2 is for drift around
+    // the question (a regenerated id, a changed cwd), not the question itself.
+    const m = new RequestMatcher(recorded);
+    const r = m.match(
+      req({
+        messages: [
+          { role: 'user', content: [{ type: 'text', text: 'do something completely different' }] },
+        ],
+      }),
+    );
+    expect(r.matched).toBe(false);
+    expect(r.rung).toBe(4);
+  });
+
+  it('does not advance the cursor when it refuses a request', () => {
+    // A refusal is not consumption. If the cursor moved, a retrying harness would be matched
+    // against the *next* recorded exchange and could be handed an answer from further down the run.
+    const m = new RequestMatcher(recorded);
+    const other = req({
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'unrelated question' }] }],
+    });
+    expect(m.match(other).matched).toBe(false);
+    expect(m.cursor).toBe(0);
+    expect(m.match(req()).rung).toBe(1);
+  });
+
   it('rung 2: same position and message count with a small difference is a minor divergence', () => {
     const m = new RequestMatcher(recorded);
     const r = m.match(req({ system: 'be terse.' }));

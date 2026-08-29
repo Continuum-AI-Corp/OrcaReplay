@@ -54,6 +54,12 @@ export interface ProxyOptions {
   dialects?: Dialect[];
   onExchange?: (e: RecordedExchange) => void;
   onDivergence?: (d: Divergence & { seq: number }) => void;
+  /**
+   * Called when strict replay refuses a request. Separate from `onDivergence` because it is not a
+   * divergence: nothing was served, and the run is over. A count alone leaves the operator staring
+   * at `unmatched: 12` with no reason, which is how this failure stayed invisible.
+   */
+  onUnmatched?: (u: { seq: number; index: number; reason: string }) => void;
   fetchImpl?: typeof fetch;
   host?: string;
   port?: number;
@@ -305,11 +311,28 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       stats.unmatched += 1;
       if (!options.loose && options.mode === 'replay') {
         // Halt loudly. Inventing a reply here would make every downstream conclusion worthless.
-        json(res, 409, {
+        const reason = result.reason ?? 'request does not match the recording';
+        options.onUnmatched?.({
+          seq: replayable[result.index]?.seq ?? -1,
+          index: result.index,
+          reason,
+        });
+
+        // 400, emphatically not 409. Every mainstream client retries 408/409/429/5xx by default,
+        // so a 409 halt is re-sent until the retry budget is gone — the operator gets a stalled
+        // terminal and no reason, which is strictly worse than a wrong answer because it looks
+        // like a hang in orca rather than a mismatch in the recording. 400 is terminal everywhere.
+        //
+        // The envelope is the provider's own error shape for the same reason: clients read
+        // `error.message` and print it, so this sentence is what actually reaches the human.
+        json(res, 400, {
+          type: 'error',
           error: {
-            type: 'orca_replay_divergence',
-            message: result.reason ?? 'request does not match the recording',
-            next: 'orca replay <run> --loose  # continue live from this point',
+            type: 'invalid_request_error',
+            message:
+              `orca: replay halted — ${reason}. ` +
+              'Re-run with `orca replay <run> --loose` to continue live from this point, ' +
+              'or `orca show <run>` to see what was recorded.',
           },
         });
         return;

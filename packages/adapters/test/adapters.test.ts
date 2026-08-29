@@ -57,6 +57,57 @@ function isolate(homeContents: string[] = []): string {
   return home;
 }
 
+describe('adapter aliases', () => {
+  /**
+   * The id is an internal handle; what a user types is the name of the binary they run. Every
+   * doc, the README headline and the demo say `orca record claude`, and that command failed with
+   * "unknown adapter 'claude'" because the adapter is registered as `claude-code`. The first
+   * command in the README is the worst possible place to make someone read an error message.
+   */
+  it('resolves an adapter by the name of the binary a user actually runs', () => {
+    const registry = defaultAdapters();
+    expect(registry.get('claude')).toBe(registry.get('claude-code'));
+  });
+
+  it('records the canonical id, so a run made via an alias replays like any other', () => {
+    // The manifest carries `adapter.id`, and replay looks the adapter back up by it. An alias that
+    // leaked into the manifest would produce a run that could be recorded but never replayed.
+    expect(defaultAdapters().get('claude').id).toBe('claude-code');
+  });
+
+  it('lists canonical ids only, so the id space stays unambiguous', () => {
+    const ids = defaultAdapters().ids();
+    expect(ids).toContain('claude-code');
+    expect(ids).not.toContain('claude');
+  });
+
+  it('names the aliases when an adapter cannot be found', () => {
+    let message = '';
+    try {
+      defaultAdapters().get('claude-cod');
+    } catch (err) {
+      message = String(err);
+    }
+    expect(message).toContain('claude-code');
+    expect(message, 'the error has to show what is typeable, not just what is canonical').toContain(
+      'claude',
+    );
+  });
+
+  it('refuses an alias that collides with another adapter id', () => {
+    const registry = new AdapterRegistry();
+    registry.register(claudeCodeAdapter);
+    expect(() =>
+      registry.register({
+        id: 'other',
+        aliases: ['claude-code'],
+        detect: async () => false,
+        prepare: async () => ({ command: 'x', args: [], env: {} }),
+      }),
+    ).toThrow(/claude-code/);
+  });
+});
+
 describe('hasBinary', () => {
   it('finds a binary that is on PATH', async () => {
     const bin = join(scratch, 'bin');

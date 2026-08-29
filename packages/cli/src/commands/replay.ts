@@ -75,13 +75,31 @@ export async function loadExchanges(reader: TraceReader): Promise<RecordedExchan
 /**
  * Read a recorded body back as the exact bytes that were sent.
  *
- * Deliberately not `resolvePayload`: that JSON-parses a spilled blob, so a raw JSON string would
- * come back as a string when it fitted inline and as an object once it spilled — and an SSE body
- * would throw outright. Exact replay means handing the agent the same bytes, so we decode them.
+ * The subtlety is the spill boundary. The writer stores `JSON.stringify(payload)` in a blob once a
+ * payload crosses `INLINE_PAYLOAD_LIMIT`, and every wire body is a *string* — so the same body is
+ * kept as itself while it fits inline and as a quoted, backslash-escaped JSON string literal once
+ * it spills. Reading the blob bytes straight back therefore returns an escaped copy: canonicalizing
+ * it yields `model: ''` and `messages: []`, every request falls to rung 4, and replay against any
+ * real harness matches nothing at all. Undoing the writer's encoding is what makes the two forms
+ * identical again.
+ *
+ * Not `resolvePayload`, which would hand back a parsed object for a body that was recorded as one;
+ * exact replay means the agent gets the same bytes, so anything that is not a JSON string is
+ * returned verbatim.
  */
 async function rawBodyOf(reader: TraceReader, event: TraceEvent): Promise<string> {
   const payload = event.payload;
-  if (isBlobRef(payload)) return new TextDecoder().decode(await reader.blob(payload));
+  if (isBlobRef(payload)) {
+    const text = new TextDecoder().decode(await reader.blob(payload));
+    try {
+      const decoded: unknown = JSON.parse(text);
+      return typeof decoded === 'string' ? decoded : text;
+    } catch {
+      // Not JSON at all — a blob written by something else, or a future media type. The bytes are
+      // still the best answer available.
+      return text;
+    }
+  }
   if (typeof payload === 'string') return payload;
   return JSON.stringify(payload ?? {});
 }
@@ -149,12 +167,25 @@ interface Ctx {
  */
 async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<ReplayResult> {
   const divergences: { level: string; detail: string; seq: number }[] = [];
+  const unmatched: { seq: number; reason: string }[] = [];
   const proxy = await createProxy({
     mode: 'replay',
     exchanges: ctx.exchanges,
     loose: args.bool('loose'),
     upstream: upstreamOverrides(args),
     onDivergence: (d) => void divergences.push(d),
+    // Printed as it happens rather than tallied at the end. A halted replay stops the agent, so
+    // the count in `replay.done` arrives after the operator has already seen the run die — and a
+    // bare `unmatched=1` with no reason is indistinguishable from a bug in orca itself.
+    onUnmatched: (u) => {
+      unmatched.push(u);
+      out.warn('replay.unmatched', {
+        seq: u.seq,
+        index: u.index,
+        reason: u.reason,
+        next: 'orca replay <run> --loose',
+      });
+    },
   });
 
   out.phase('replaying', {
@@ -200,7 +231,10 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
     matchedExact: stats.matchedExact,
     divergences: stats.divergences,
     liveCalls: stats.liveCalls,
-    exitCode,
+    // A halted replay is a failed replay even if the harness chose to exit 0 on the error. The
+    // exit code is what a script reads, so it has to reflect what happened rather than what the
+    // agent decided to do about it.
+    exitCode: exitCode === 0 && unmatched.length > 0 ? 1 : exitCode,
   };
 }
 

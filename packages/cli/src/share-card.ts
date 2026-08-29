@@ -77,7 +77,7 @@ ${text(470, HEADER - 30, 'COST', { size: 9, mono: true, fill: '#6B7578' })}
 ${text(600, HEADER - 30, 'WALL', { size: 9, mono: true, fill: '#6B7578' })}
 ${body}${empty}
 <line x1="0" y1="${height - FOOTER + 14}" x2="${WIDTH}" y2="${height - FOOTER + 14}" stroke="#1F2426"/>
-${text(28, height - 16, 'Recorded with OrcaReplay · npx orcareplay', { size: 11, mono: true, fill: '#6B7578' })}
+${text(28, height - 16, 'Recorded with OrcaReplay · github.com/Continuum-AI-Corp/OrcaReplay', { size: 11, mono: true, fill: '#6B7578' })}
 </svg>`;
 }
 

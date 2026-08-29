@@ -44,7 +44,8 @@ export async function recordCommand(
     if (!adapter) {
       throw new Error(
         `could not detect an agent in ${cwd}\n` +
-          `  name one explicitly: orca record <${registry.ids().join('|')}>`,
+          `  name one explicitly: orca record <${registry.ids().join('|')}>\n` +
+          `  known agents: ${registry.names().join('; ')}`,
       );
     }
     out.info('adapter.detected', { id: adapter.id });

@@ -6,7 +6,7 @@ gives you a different failure. This is the situation OrcaReplay exists for.
 ## 1. Record the run
 
 ```console
-npx orcareplay record claude
+orca record claude
 ```
 
 Your agent runs normally. Nothing about it is patched — it is started with a couple of environment

@@ -183,8 +183,17 @@ export class RequestMatcher {
     const distance = structuralDistance(incoming, candidate);
     const size = JSON.stringify(normalizeRequest(candidate)).length;
 
-    // Rung 2 — same position and shape, small difference.
+    // Rung 2 — same position, same ask, small difference around it.
+    //
+    // The trailing-message condition is load-bearing, not belt-and-braces. Tolerance has an
+    // absolute floor, and on a short request that floor is a large fraction of the entire body —
+    // so without this, swapping the user's question for an unrelated one of similar length fell
+    // inside tolerance and was served the recorded answer under a `minor` label. Rung 2 exists for
+    // drift *around* the question: a regenerated id, a different cwd in the system prompt, a
+    // reordered tool list. A changed question is a different run, and it belongs at rung 4.
+    const sameAsk = trailingMessageKey(incoming) === trailingMessageKey(candidate);
     if (
+      sameAsk &&
       incoming.messages.length === candidate.messages.length &&
       distance <= Math.max(64, size * MINOR_DISTANCE_RATIO)
     ) {
@@ -203,7 +212,7 @@ export class RequestMatcher {
     }
 
     // Rung 3 — the ask is the same, the history is not. Typical after context compaction.
-    if (trailingMessageKey(incoming) === trailingMessageKey(candidate)) {
+    if (sameAsk) {
       this.#cursor += 1;
       return {
         matched: true,

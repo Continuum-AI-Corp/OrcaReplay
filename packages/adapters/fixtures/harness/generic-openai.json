@@ -1,0 +1,14 @@
+{
+  "adapter": "generic-openai",
+  "harness_versions": null,
+  "verified_at": "2026-08-29",
+  "command": "my-agent",
+  "env_vars": ["ANTHROPIC_BASE_URL", "OPENAI_API_BASE", "OPENAI_API_KEY", "OPENAI_BASE_URL"],
+  "base_urls": {
+    "OPENAI_BASE_URL": "/v1",
+    "OPENAI_API_BASE": "/v1",
+    "ANTHROPIC_BASE_URL": ""
+  },
+  "optional_env_vars": ["ANTHROPIC_API_KEY"],
+  "note": "The escape hatch: the command is the first user arg, so 'my-agent' here is the test's argv rather than a fixed binary. OPENAI_API_BASE is set alongside OPENAI_BASE_URL for pre-1.0 SDKs and ports."
+}

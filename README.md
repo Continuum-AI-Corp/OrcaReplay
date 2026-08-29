@@ -60,9 +60,19 @@ Early. `v0` is the walking skeleton of the three commands above.
 
 ## Install
 
+Not published to npm yet — `v0` is unreleased, so install from source:
+
 ```console
-npx orcareplay --help
+git clone https://github.com/Continuum-AI-Corp/OrcaReplay && cd OrcaReplay
+npm ci && npm run build
+npm install -g ./packages/cli     # puts `orca` (and `orcareplay`) on PATH
+orca doctor                       # checks Node, git, and which agents it can find
 ```
+
+`npm install -g .` from the repository root installs nothing: the root is a workspace with no
+binary of its own, and the `orca` command lives in `packages/cli`.
+
+Once `v0` ships, `npx orcareplay --help` will be the one-liner and this section will say so.
 
 Node 20+. No account, no signup, no API key changes.
 

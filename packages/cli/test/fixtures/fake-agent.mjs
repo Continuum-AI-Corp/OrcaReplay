@@ -18,6 +18,13 @@ if (!base) {
 
 const turns = Number(process.env.FAKE_AGENT_TURNS ?? '3');
 const cwd = process.env.FAKE_AGENT_CWD ?? process.cwd();
+const prompt = process.env.FAKE_AGENT_PROMPT ?? 'fix the auth test';
+// Real harnesses open with a system prompt and a tool catalogue that put the very first request
+// well past the trace's inline payload limit, so the recorded body spills to a blob. Padding lets a
+// test cross that boundary on purpose, because the code either side of it is not the same code.
+const pad = Number(process.env.FAKE_AGENT_PAD ?? '0');
+const system =
+  pad > 0 ? `You are a coding agent. ${'Follow the conventions. '.repeat(pad)}` : undefined;
 
 const tools = [
   {
@@ -31,7 +38,7 @@ const tools = [
   },
 ];
 
-const messages = [{ role: 'user', content: [{ type: 'text', text: 'fix the auth test' }] }];
+const messages = [{ role: 'user', content: [{ type: 'text', text: prompt }] }];
 
 for (let turn = 0; turn < turns; turn += 1) {
   const res = await fetch(`${base}/v1/messages`, {
@@ -41,7 +48,13 @@ for (let turn = 0; turn < turns; turn += 1) {
       'x-api-key': process.env.ANTHROPIC_API_KEY ?? 'test-key',
       'anthropic-version': '2023-06-01',
     },
-    body: JSON.stringify({ model: 'claude-opus-5', max_tokens: 1024, tools, messages }),
+    body: JSON.stringify({
+      model: 'claude-opus-5',
+      max_tokens: 1024,
+      tools,
+      messages,
+      ...(system === undefined ? {} : { system }),
+    }),
   });
 
   if (!res.ok) {

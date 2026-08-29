@@ -1,0 +1,10 @@
+{
+  "adapter": "opencode",
+  "harness_versions": null,
+  "verified_at": "2026-08-29",
+  "command": "opencode",
+  "env_vars": ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY", "OPENAI_BASE_URL"],
+  "base_urls": { "OPENAI_BASE_URL": "/v1", "ANTHROPIC_BASE_URL": "" },
+  "optional_env_vars": [],
+  "note": "Both origins are redirected because OpenCode picks its provider per model. Credentials pass through when the user has either one; the placeholders recorded here appear only when the user has neither, so recording never makes a provider look configured that is not."
+}

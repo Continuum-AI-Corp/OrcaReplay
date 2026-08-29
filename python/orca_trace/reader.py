@@ -123,8 +123,8 @@ class TraceReader:
     def problems(self) -> list[str]:
         """Everything the last read pass could not use, or could not vouch for.
 
-        Reading the trace if nobody has yet: returning an empty list for an unread trace would
-        hide precisely what this method exists to surface.
+        Reads the trace first if nobody has yet, because returning an empty list for an unread
+        trace would hide precisely what this method exists to surface.
         """
         if not self._has_read:
             for _ in self.stream():
