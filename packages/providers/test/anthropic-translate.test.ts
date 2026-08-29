@@ -3,9 +3,11 @@ import {
   anthropicToCanonicalRequest,
   anthropicToCanonicalResponse,
   canonicalToAnthropicRequest,
+  canonicalToAnthropicResponse,
+  canonicalToAnthropicSse,
   parseAnthropicSse,
 } from '../src/index.js';
-import type { CanonicalRequest } from '@orcareplay/plugin-api';
+import type { CanonicalRequest, CanonicalResponse } from '@orcareplay/plugin-api';
 
 /** A request shaped like what Claude Code actually puts on the wire. */
 function toolRequest(): Record<string, unknown> {
@@ -418,5 +420,268 @@ describe('parseAnthropicSse', () => {
     expect(() => parseAnthropicSse('')).not.toThrow();
     expect(() => parseAnthropicSse(['event: unknown_future\ndata: {"a":1}\n\n'])).not.toThrow();
     expect(() => parseAnthropicSse('data: {not json}\n\n')).not.toThrow();
+  });
+});
+
+/** An assistant turn carrying everything a response can hold: thinking, text and a tool call. */
+function toolResponse(): CanonicalResponse {
+  return {
+    id: 'msg_01ROUND',
+    model: 'claude-opus-5-20260101',
+    stop_reason: 'tool_use',
+    content: [
+      { type: 'thinking', text: 'The build is red, so run the tests.' },
+      { type: 'text', text: 'Running it.' },
+      { type: 'tool_use', id: 'toolu_02B', name: 'bash', input: { cmd: 'npm test', timeout: 60 } },
+    ],
+    usage: {
+      input_tokens: 1200,
+      output_tokens: 85,
+      cache_read_tokens: 8000,
+      cache_write_tokens: 300,
+    },
+  };
+}
+
+/**
+ * Serialize both ways, then read each form back with the parser that defines what the canonical
+ * shape means. A serializer is correct exactly when this returns the response it was handed.
+ */
+function anthropicRoundTrip(res: CanonicalResponse): CanonicalResponse[] {
+  return [
+    anthropicToCanonicalResponse(canonicalToAnthropicResponse(res)),
+    parseAnthropicSse(canonicalToAnthropicSse(res)),
+  ];
+}
+
+/** The `event:` names of an SSE body, in order. */
+function eventNames(sse: string): string[] {
+  return [...sse.matchAll(/^event: (.+)$/gm)].map((m) => m[1] ?? '');
+}
+
+describe('canonicalToAnthropicResponse', () => {
+  it('emits the Messages API body shape', () => {
+    const body = canonicalToAnthropicResponse(toolResponse());
+    expect(body['type']).toBe('message');
+    expect(body['role']).toBe('assistant');
+    expect(body['id']).toBe('msg_01ROUND');
+    expect(body['model']).toBe('claude-opus-5-20260101');
+    expect(body['stop_reason']).toBe('tool_use');
+    // Canonical has no room for the matched stop sequence, so the field is always present-but-null.
+    expect(body['stop_sequence']).toBeNull();
+    expect(body['content']).toEqual([
+      { type: 'thinking', thinking: 'The build is red, so run the tests.' },
+      { type: 'text', text: 'Running it.' },
+      {
+        type: 'tool_use',
+        id: 'toolu_02B',
+        name: 'bash',
+        input: { cmd: 'npm test', timeout: 60 },
+      },
+    ]);
+    expect(body['usage']).toEqual({
+      input_tokens: 1200,
+      output_tokens: 85,
+      cache_read_input_tokens: 8000,
+      cache_creation_input_tokens: 300,
+    });
+  });
+
+  it('omits cache counters the canonical response never had', () => {
+    const body = canonicalToAnthropicResponse({
+      id: 'msg_1',
+      model: 'claude-sonnet-5',
+      stop_reason: 'end_turn',
+      content: [],
+      usage: { input_tokens: 3, output_tokens: 1 },
+    });
+    expect(body['usage']).toEqual({ input_tokens: 3, output_tokens: 1 });
+  });
+
+  it('emits an error envelope for an error stop reason', () => {
+    const body = canonicalToAnthropicResponse({
+      id: 'msg_err',
+      model: 'claude-opus-5',
+      stop_reason: 'error',
+      content: [{ type: 'text', text: 'Overloaded' }],
+      usage: { input_tokens: 0, output_tokens: 0 },
+    });
+    // `error` is not a Messages API stop_reason; the API says so with a different envelope.
+    expect(body['type']).toBe('error');
+    expect(body['error']).toEqual({ type: 'error', message: 'Overloaded' });
+  });
+});
+
+describe('canonicalToAnthropicSse', () => {
+  it('frames the event sequence the Messages API streams', () => {
+    expect(eventNames(canonicalToAnthropicSse(toolResponse()))).toEqual([
+      'message_start',
+      'content_block_start',
+      'content_block_delta',
+      'content_block_stop',
+      'content_block_start',
+      'content_block_delta',
+      'content_block_stop',
+      'content_block_start',
+      'content_block_delta',
+      'content_block_stop',
+      'message_delta',
+      'message_stop',
+    ]);
+  });
+
+  it('gives every frame a data payload whose type matches its event name', () => {
+    const frames = canonicalToAnthropicSse(toolResponse())
+      .split('\n\n')
+      .filter((f) => f !== '');
+    expect(frames).toHaveLength(12);
+    for (const frame of frames) {
+      const [eventLine, dataLine, ...rest] = frame.split('\n');
+      expect(rest).toEqual([]);
+      const data: unknown = JSON.parse((dataLine ?? '').replace(/^data: /, ''));
+      expect((data as Record<string, unknown>)['type']).toBe(
+        (eventLine ?? '').slice('event: '.length),
+      );
+    }
+  });
+
+  it('indexes content blocks in order', () => {
+    const sse = canonicalToAnthropicSse(toolResponse());
+    expect([...sse.matchAll(/"index":(\d+)/g)].map((m) => Number(m[1]))).toEqual([
+      0, 0, 0, 1, 1, 1, 2, 2, 2,
+    ]);
+  });
+
+  it('decodes the same however the bytes are re-chunked', () => {
+    const sse = canonicalToAnthropicSse(toolResponse());
+    for (const size of [1, 7, 64, 999]) {
+      expect(parseAnthropicSse(reslice(sse, size))).toEqual(toolResponse());
+    }
+  });
+
+  it('streams an error as an error event', () => {
+    const sse = canonicalToAnthropicSse({
+      id: 'msg_err',
+      model: 'claude-opus-5',
+      stop_reason: 'error',
+      content: [{ type: 'text', text: 'Overloaded' }],
+      usage: { input_tokens: 0, output_tokens: 0 },
+    });
+    expect(eventNames(sse)).toEqual(['message_start', 'error']);
+  });
+});
+
+describe('anthropic response round trip', () => {
+  it('preserves thinking, text, a tool call, usage and stop reason', () => {
+    const res = toolResponse();
+    expect(anthropicRoundTrip(res)).toEqual([res, res]);
+  });
+
+  it('preserves plain text with no tools', () => {
+    const res: CanonicalResponse = {
+      id: 'msg_text',
+      model: 'claude-sonnet-5',
+      stop_reason: 'end_turn',
+      content: [{ type: 'text', text: 'The build is red because a test fails.' }],
+      usage: { input_tokens: 42, output_tokens: 9 },
+    };
+    expect(anthropicRoundTrip(res)).toEqual([res, res]);
+  });
+
+  it('preserves several content blocks of the same kind', () => {
+    const res: CanonicalResponse = {
+      id: 'msg_many',
+      model: 'claude-opus-5',
+      stop_reason: 'tool_use',
+      content: [
+        { type: 'text', text: 'first' },
+        { type: 'text', text: 'second' },
+        { type: 'tool_use', id: 'toolu_a', name: 'read', input: { path: 'a.ts' } },
+        { type: 'tool_use', id: 'toolu_b', name: 'read', input: { path: 'b.ts' } },
+      ],
+      usage: { input_tokens: 10, output_tokens: 20 },
+    };
+    expect(anthropicRoundTrip(res)).toEqual([res, res]);
+  });
+
+  it('preserves an empty content list', () => {
+    const res: CanonicalResponse = {
+      id: 'msg_empty',
+      model: 'claude-haiku-4-5',
+      stop_reason: 'end_turn',
+      content: [],
+      usage: { input_tokens: 7, output_tokens: 0 },
+    };
+    expect(anthropicRoundTrip(res)).toEqual([res, res]);
+  });
+
+  it('preserves every stop reason', () => {
+    for (const stop of ['end_turn', 'tool_use', 'max_tokens', 'stop_sequence'] as const) {
+      const res: CanonicalResponse = {
+        id: 'msg_stop',
+        model: 'claude-opus-5',
+        stop_reason: stop,
+        content: [{ type: 'text', text: 'done' }],
+        usage: { input_tokens: 1, output_tokens: 2 },
+      };
+      expect(anthropicRoundTrip(res)).toEqual([res, res]);
+    }
+  });
+
+  it('preserves an error response', () => {
+    const res: CanonicalResponse = {
+      id: 'msg_err',
+      model: 'claude-opus-5',
+      stop_reason: 'error',
+      content: [{ type: 'text', text: 'Overloaded' }],
+      usage: { input_tokens: 0, output_tokens: 0 },
+    };
+    expect(anthropicRoundTrip(res)).toEqual([res, res]);
+  });
+
+  it('drops usage from a failed call in the JSON body but not in the stream', () => {
+    const res: CanonicalResponse = {
+      id: 'msg_err',
+      model: 'claude-opus-5',
+      stop_reason: 'error',
+      content: [{ type: 'text', text: 'Overloaded' }],
+      usage: { input_tokens: 1200, output_tokens: 2 },
+    };
+    const [json, sse] = anthropicRoundTrip(res);
+    // Documented loss: the Messages API error envelope has no usage block at all, so a failed
+    // call reads back as zero-cost. A failed *stream* already sent message_start, so its usage
+    // survives — which is also why an error response parsed from the wire always has zeros here.
+    expect(json?.usage).toEqual({ input_tokens: 0, output_tokens: 0 });
+    expect(json?.content).toEqual(res.content);
+    expect(sse).toEqual(res);
+  });
+
+  it('preserves an empty tool input and a tool input that never parsed', () => {
+    const res: CanonicalResponse = {
+      id: 'msg_tools',
+      model: 'claude-opus-5',
+      stop_reason: 'tool_use',
+      content: [
+        { type: 'tool_use', id: 'toolu_now', name: 'now', input: {} },
+        { type: 'tool_use', id: 'toolu_bad', name: 'bash', input: { _raw: '{"cmd": "np' } },
+      ],
+      usage: { input_tokens: 5, output_tokens: 6 },
+    };
+    expect(anthropicRoundTrip(res)).toEqual([res, res]);
+  });
+
+  it('keeps an image block in the JSON body but not in the stream', () => {
+    const res: CanonicalResponse = {
+      id: 'msg_img',
+      model: 'claude-opus-5',
+      stop_reason: 'end_turn',
+      content: [{ type: 'image', media_type: 'image/png', data: 'iVBORw0KGgo=' }],
+      usage: { input_tokens: 4, output_tokens: 0 },
+    };
+    const [json, sse] = anthropicRoundTrip(res);
+    expect(json).toEqual(res);
+    // Documented loss: a Messages *stream* only ever carries text, thinking and tool_use blocks,
+    // so the stream assembler has nowhere to put an image. Assistant turns never contain one.
+    expect(sse?.content).toEqual([]);
   });
 });

@@ -64,6 +64,21 @@ function parseFrame(raw: string): SseFrame | undefined {
   return event === undefined ? { data: data.join('\n') } : { event, data: data.join('\n') };
 }
 
+/**
+ * Encode one frame, the inverse of the decoder.
+ *
+ * A payload with newlines becomes one `data:` line per line, which is what the SSE grammar says
+ * and what `parseFrame` joins back together, so encode/decode is a round trip.
+ */
+export function encodeSseFrame(frame: SseFrame): string {
+  const head = frame.event === undefined ? '' : `event: ${frame.event}\n`;
+  const body = frame.data
+    .split('\n')
+    .map((line) => `data: ${line}\n`)
+    .join('');
+  return `${head}${body}\n`;
+}
+
 /** JSON-parse a frame payload, returning undefined for `[DONE]` and for garbage. */
 export function frameJson(frame: SseFrame): Record<string, unknown> | undefined {
   const text = frame.data.trim();

@@ -4,6 +4,11 @@
  * The load-bearing asymmetry is tool arguments: OpenAI sends a JSON *string*, canonical holds a
  * parsed *object*. Both directions round trip, including arguments the model truncated into
  * invalid JSON, which are kept under `_raw` rather than thrown away or thrown on.
+ *
+ * Responses translate both ways too, in both wire forms, so a reply recorded from Anthropic can
+ * be handed to an agent that speaks this dialect. Where this dialect has no equivalent field —
+ * one content body instead of a block list, no stop-sequence finish reason, no cache-write
+ * counter — the loss is documented at the point it happens and asserted in the tests.
  */
 
 import type {
@@ -16,13 +21,14 @@ import type {
   StopReason,
   Usage,
 } from '@orcareplay/plugin-api';
-import { SseDecoder, frameJson, toChunks } from './sse.js';
+import { SseDecoder, encodeSseFrame, frameJson, toChunks } from './sse.js';
 import {
   asArray,
   asBoolean,
   asNumber,
   asRecord,
   asString,
+  canonicalErrorText,
   omitUndefined,
   parseToolInput,
   stringifyToolInput,
@@ -362,6 +368,162 @@ export function openaiUsage(value: unknown): Usage {
     input_tokens: Math.max(0, prompt - (cached ?? 0)),
     output_tokens: asNumber(u['completion_tokens']) ?? 0,
     cache_read_tokens: cached,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// response: canonical -> wire
+// ---------------------------------------------------------------------------
+
+/**
+ * The `created` timestamp every chat-completions body carries.
+ *
+ * Canonical holds no creation time, and reading the clock here would make one recorded response
+ * serialize to different bytes on every replay — the one thing a replay tool cannot afford. The
+ * field stays present because clients type it as required; they only ever display it.
+ */
+const CREATED = 0;
+
+/**
+ * The non-streamed chat-completions body for one assistant turn.
+ *
+ * This is the half of translation a cross-provider fork needs: a reply obtained from any provider
+ * has to be handed back to the agent in the dialect that agent speaks.
+ */
+export function canonicalToOpenaiResponse(res: CanonicalResponse): Record<string, unknown> {
+  const head = { id: res.id, object: 'chat.completion', created: CREATED, model: res.model };
+  if (res.stop_reason === 'error') {
+    // `error` is not a finish_reason; a failed call answers with an error envelope instead, which
+    // is exactly what `openaiToCanonicalResponse` looks for first.
+    return { ...head, error: { type: 'error', message: canonicalErrorText(res.content) } };
+  }
+  const parts = splitCanonicalContent(res.content);
+  return {
+    ...head,
+    choices: [
+      {
+        index: 0,
+        message: omitUndefined({
+          role: 'assistant',
+          // `null`, not `""`, is what the API sends for a turn that is only tool calls.
+          content: parts.text === '' ? null : parts.text,
+          reasoning_content: parts.thinking === '' ? undefined : parts.thinking,
+          tool_calls: parts.tools.length > 0 ? parts.tools.map(openaiToolCall) : undefined,
+        }),
+        finish_reason: openaiFinishReason(res.stop_reason),
+      },
+    ],
+    usage: canonicalToOpenaiUsage(res.usage),
+  };
+}
+
+/**
+ * The `chat.completion.chunk` sequence for one assistant turn, terminated by `[DONE]`.
+ *
+ * Tool calls are announced by name in their own chunk before any argument bytes, the way the API
+ * frames them, and usage arrives in a final choice-less chunk as it does under
+ * `stream_options.include_usage` — `OpenAiStreamAssembler` reads this back unchanged.
+ */
+export function canonicalToOpenaiSse(res: CanonicalResponse): string {
+  const head = { id: res.id, object: 'chat.completion.chunk', created: CREATED, model: res.model };
+  const frames: string[] = [];
+  const emit = (body: Record<string, unknown>): void => {
+    frames.push(encodeSseFrame({ data: JSON.stringify({ ...head, ...body }) }));
+  };
+  const delta = (d: Record<string, unknown>): void => {
+    emit({ choices: [{ index: 0, delta: d, finish_reason: null }] });
+  };
+
+  delta({ role: 'assistant', content: '' });
+
+  if (res.stop_reason === 'error') {
+    // Usage goes out before the error frame: a reader stops at the error, so anything the failed
+    // call already accounted for has to have reached it by then.
+    emit({ choices: [], usage: canonicalToOpenaiUsage(res.usage) });
+    frames.push(
+      encodeSseFrame({
+        data: JSON.stringify({
+          error: { type: 'error', message: canonicalErrorText(res.content) },
+        }),
+      }),
+    );
+    frames.push(encodeSseFrame({ data: '[DONE]' }));
+    return frames.join('');
+  }
+
+  const parts = splitCanonicalContent(res.content);
+  if (parts.thinking !== '') delta({ reasoning_content: parts.thinking });
+  if (parts.text !== '') delta({ content: parts.text });
+  parts.tools.forEach((block, index) => {
+    delta({
+      tool_calls: [
+        { index, id: block.id, type: 'function', function: { name: block.name, arguments: '' } },
+      ],
+    });
+    // One chunk with the whole argument string: the fragment boundaries a live stream happened to
+    // use are not canonical, and the assembler only ever sees the concatenation.
+    delta({
+      tool_calls: [{ index, function: { arguments: stringifyToolInput(block.input) } }],
+    });
+  });
+  emit({ choices: [{ index: 0, delta: {}, finish_reason: openaiFinishReason(res.stop_reason) }] });
+  emit({ choices: [], usage: canonicalToOpenaiUsage(res.usage) });
+  frames.push(encodeSseFrame({ data: '[DONE]' }));
+  return frames.join('');
+}
+
+type ToolUseBlock = Extract<CanonicalContent, { type: 'tool_use' }>;
+
+/** A chat-completions message has one reasoning field, one content body and a tool_calls list. */
+function splitCanonicalContent(content: CanonicalContent[]): {
+  thinking: string;
+  text: string;
+  tools: ToolUseBlock[];
+} {
+  const thinking: string[] = [];
+  const text: string[] = [];
+  const tools: ToolUseBlock[] = [];
+  for (const block of content) {
+    if (block.type === 'thinking') {
+      if (block.text !== '') thinking.push(block.text);
+    } else if (block.type === 'text') {
+      if (block.text !== '') text.push(block.text);
+    } else if (block.type === 'tool_use') {
+      tools.push(block);
+    }
+    // An assistant turn never contains a tool_result, and an assistant message cannot carry an
+    // image in this dialect at all, so neither has anywhere to go here.
+  }
+  // Joining several text blocks is lossy — the block list cannot be recovered — but the dialect
+  // has exactly one content body, and joining beats dropping everything after the first.
+  return { thinking: thinking.join('\n'), text: text.join('\n'), tools };
+}
+
+function openaiToolCall(block: ToolUseBlock): Record<string, unknown> {
+  return {
+    id: block.id,
+    type: 'function',
+    function: { name: block.name, arguments: stringifyToolInput(block.input) },
+  };
+}
+
+function openaiFinishReason(stop: StopReason): string {
+  if (stop === 'tool_use') return 'tool_calls';
+  if (stop === 'max_tokens') return 'length';
+  // `end_turn`, plus `stop_sequence`, which OpenAI's vocabulary cannot tell apart from it.
+  return 'stop';
+}
+
+function canonicalToOpenaiUsage(usage: Usage): Record<string, unknown> {
+  const cached = usage.cache_read_tokens;
+  // OpenAI counts cached tokens inside prompt_tokens; canonical follows Anthropic and does not.
+  const prompt = usage.input_tokens + (cached ?? 0);
+  return omitUndefined({
+    prompt_tokens: prompt,
+    completion_tokens: usage.output_tokens,
+    total_tokens: prompt + usage.output_tokens,
+    // A cache *write* has no counter anywhere in this dialect: cache_write_tokens stops here.
+    prompt_tokens_details: cached === undefined ? undefined : { cached_tokens: cached },
   });
 }
 

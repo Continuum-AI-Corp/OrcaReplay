@@ -6,6 +6,22 @@
  * an unfamiliar field is worse than useless.
  */
 
+import type { CanonicalContent } from '@orcareplay/plugin-api';
+
+/**
+ * The provider message inside a canonical error response: its text blocks, joined.
+ *
+ * Both dialects report a failed call with an envelope carrying one message string, and both
+ * parsers land that string in a text block, so this is the inverse both of them need.
+ */
+export function canonicalErrorText(content: CanonicalContent[]): string {
+  const text = content
+    .map((block) => (block.type === 'text' ? block.text : ''))
+    .filter((t) => t !== '')
+    .join('\n');
+  return text === '' ? 'unknown provider error' : text;
+}
+
 export function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)

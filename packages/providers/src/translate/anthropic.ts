@@ -6,6 +6,11 @@
  * (`top_k`, `tool_choice`, `thinking`, per-tool `cache_control`, block-form system prompts) are
  * parked under namespaced `metadata` keys and restored on the way out. Canonical values always
  * win over the parked originals, so a fork that edits the system prompt is not silently ignored.
+ *
+ * Responses translate both ways too, in both wire forms — the JSON body and the SSE event
+ * sequence — because a forked replay has to hand the agent a reply in the dialect it speaks.
+ * Serializing a canonical response and re-parsing it here returns it unchanged; the parsers in
+ * this file are the specification for what the canonical form means.
  */
 
 import type {
@@ -18,15 +23,17 @@ import type {
   StopReason,
   Usage,
 } from '@orcareplay/plugin-api';
-import { SseDecoder, frameJson, toChunks } from './sse.js';
+import { SseDecoder, encodeSseFrame, frameJson, toChunks } from './sse.js';
 import {
   asArray,
   asBoolean,
   asNumber,
   asRecord,
   asString,
+  canonicalErrorText,
   omitUndefined,
   parseToolInput,
+  stringifyToolInput,
   unknownKeys,
 } from './util.js';
 
@@ -298,6 +305,126 @@ export function anthropicUsage(value: unknown): Usage {
     output_tokens: asNumber(u['output_tokens']) ?? 0,
     cache_read_tokens: asNumber(u['cache_read_input_tokens']),
     cache_write_tokens: asNumber(u['cache_creation_input_tokens']),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// response: canonical -> wire
+// ---------------------------------------------------------------------------
+
+/**
+ * The non-streamed body the Messages API returns for one assistant turn.
+ *
+ * This is the half of translation a cross-provider fork needs: a reply obtained from any provider
+ * has to be handed back to the agent in the dialect that agent speaks.
+ */
+export function canonicalToAnthropicResponse(res: CanonicalResponse): Record<string, unknown> {
+  if (res.stop_reason === 'error') {
+    // `error` is not one of the API's stop reasons; a failed call answers with a different
+    // envelope entirely, which is exactly what `anthropicToCanonicalResponse` reads back.
+    return {
+      type: 'error',
+      id: res.id,
+      model: res.model,
+      error: { type: 'error', message: canonicalErrorText(res.content) },
+    };
+  }
+  return {
+    id: res.id,
+    type: 'message',
+    role: 'assistant',
+    model: res.model,
+    content: res.content.map(canonicalBlockToAnthropic),
+    stop_reason: res.stop_reason,
+    // The matched stop sequence has no canonical home, so the field is present but never filled.
+    stop_sequence: null,
+    usage: canonicalToAnthropicUsage(res.usage),
+  };
+}
+
+/**
+ * The event sequence the Messages API streams for one assistant turn.
+ *
+ * Every frame carries both an `event:` name and a `type` inside its payload because SDKs dispatch
+ * on one or the other, and blocks are announced empty and then filled by deltas the way a real
+ * stream fills them — `AnthropicStreamAssembler` has to be able to read this back unchanged.
+ */
+export function canonicalToAnthropicSse(res: CanonicalResponse): string {
+  const frames: string[] = [];
+  const emit = (event: string, data: Record<string, unknown>): void => {
+    frames.push(encodeSseFrame({ event, data: JSON.stringify({ type: event, ...data }) }));
+  };
+
+  emit('message_start', {
+    message: {
+      id: res.id,
+      type: 'message',
+      role: 'assistant',
+      model: res.model,
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: canonicalToAnthropicUsage(res.usage),
+    },
+  });
+
+  if (res.stop_reason === 'error') {
+    // A stream that fails ends at its `error` event: no message_delta, no message_stop.
+    emit('error', { error: { type: 'error', message: canonicalErrorText(res.content) } });
+    return frames.join('');
+  }
+
+  res.content.forEach((block, index) => {
+    const { start, deltas } = anthropicBlockFrames(block);
+    emit('content_block_start', { index, content_block: start });
+    for (const delta of deltas) emit('content_block_delta', { index, delta });
+    emit('content_block_stop', { index });
+  });
+
+  emit('message_delta', {
+    delta: { stop_reason: res.stop_reason, stop_sequence: null },
+    usage: { output_tokens: res.usage.output_tokens },
+  });
+  emit('message_stop', {});
+  return frames.join('');
+}
+
+/** The empty shell a block is announced with, plus the deltas that fill it. */
+function anthropicBlockFrames(block: CanonicalContent): {
+  start: Record<string, unknown>;
+  deltas: Record<string, unknown>[];
+} {
+  switch (block.type) {
+    case 'text':
+      return {
+        start: { type: 'text', text: '' },
+        deltas: block.text === '' ? [] : [{ type: 'text_delta', text: block.text }],
+      };
+    case 'thinking':
+      return {
+        start: { type: 'thinking', thinking: '' },
+        deltas: block.text === '' ? [] : [{ type: 'thinking_delta', thinking: block.text }],
+      };
+    case 'tool_use':
+      return {
+        start: { type: 'tool_use', id: block.id, name: block.name, input: {} },
+        // One delta with the whole argument object: the fragment boundaries a live stream happened
+        // to use are not canonical, and the assembler only ever sees the concatenation.
+        deltas: [{ type: 'input_json_delta', partial_json: stringifyToolInput(block.input) }],
+      };
+    default:
+      // An assistant turn never contains a tool_result or an image, and the stream protocol has no
+      // delta type for either, so announce the whole block at once and let the reader ignore it.
+      return { start: canonicalBlockToAnthropic(block), deltas: [] };
+  }
+}
+
+function canonicalToAnthropicUsage(usage: Usage): Record<string, unknown> {
+  return omitUndefined({
+    input_tokens: usage.input_tokens,
+    output_tokens: usage.output_tokens,
+    cache_read_input_tokens: usage.cache_read_tokens,
+    cache_creation_input_tokens: usage.cache_write_tokens,
   });
 }
 
