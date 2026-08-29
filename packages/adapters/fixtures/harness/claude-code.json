@@ -1,0 +1,10 @@
+{
+  "adapter": "claude-code",
+  "harness_versions": ">=1.0.0",
+  "verified_at": "2026-08-29",
+  "command": "claude",
+  "env_vars": ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"],
+  "base_urls": { "ANTHROPIC_BASE_URL": "" },
+  "optional_env_vars": ["ANTHROPIC_AUTH_TOKEN"],
+  "note": "Claude Code appends its own /v1 paths, so the origin goes in bare. A subscription login sends its own authorization header and ignores ANTHROPIC_API_KEY; the proxy relays that header rather than recording it."
+}

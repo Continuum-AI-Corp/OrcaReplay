@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orca-trace"
+version = "0.1.0"
+description = "Read-only reader for the Orca trace format v0 — record/replay/fork traces for AI agents."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+keywords = ["agents", "tracing", "observability", "evaluation", "orcareplay"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Debuggers",
+  "Typing :: Typed",
+]
+
+# Deliberately empty, and meant to stay that way: this package is what makes an Orca trace
+# readable from a notebook that already has its own pinned scientific stack, so it must never
+# force a resolver conflict on the way in.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.urls]
+Homepage = "https://github.com/Continuum-AI-Corp/OrcaReplay"
+Specification = "https://github.com/Continuum-AI-Corp/OrcaReplay/blob/main/spec/orca-trace-v0.md"
+
+[tool.setuptools]
+packages = ["orca_trace"]
+
+[tool.setuptools.package-data]
+orca_trace = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

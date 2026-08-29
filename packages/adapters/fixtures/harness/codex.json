@@ -1,0 +1,10 @@
+{
+  "adapter": "codex",
+  "harness_versions": null,
+  "verified_at": "2026-08-29",
+  "command": "codex",
+  "env_vars": ["OPENAI_API_KEY", "OPENAI_BASE_URL"],
+  "base_urls": { "OPENAI_BASE_URL": "/v1" },
+  "optional_env_vars": [],
+  "note": "OpenAI SDK clients expect the version segment in the base url. A Codex signed in with a ChatGPT subscription talks to its own backend, which base-url redirection does not capture."
+}

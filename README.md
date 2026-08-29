@@ -1,21 +1,47 @@
 # OrcaReplay
 
-**Time travel for AI agents.** Record an agent run, reproduce exactly what happened, and fork
-execution from any step with a different model, prompt or config.
+<sub>**English** · [简体中文](docs/i18n/README.zh-CN.md) · [日本語](docs/i18n/README.ja.md) · [한국어](docs/i18n/README.ko.md) · [Deutsch](docs/i18n/README.de.md) · [Français](docs/i18n/README.fr.md) · [Español](docs/i18n/README.es.md) · [العربية](docs/i18n/README.ar.md)</sub>
+
+### Your agent broke something at 2am. Replay it at 9am — exactly, offline, as many times as you like.
+
+Record any coding agent. Reproduce the run byte-for-byte with the network off. Fork it from any step
+onto a different model and see who gets it right.
+
+<a href="https://www.orcarouter.ai">
+  <img src="docs/orcarouter.svg" alt="OrcaRouter" height="28" align="left" hspace="10">
+</a>
+
+**Built by the team behind [OrcaRouter](https://www.orcarouter.ai)** — one API key and one endpoint
+for Claude, GPT, Gemini, Grok, DeepSeek, Qwen and the rest. It is what `orca setup` points at by
+default, and what makes `orca compare` a single command instead of four provider accounts.
+
+[All models](https://www.orcarouter.ai/models) · [OrcaCode Review](https://www.orcarouter.ai/code-review) · [X](https://x.com/OrcaRouter) · [Hugging Face](https://huggingface.co/orcarouter)
+
+<br clear="left">
+
+[![License](https://img.shields.io/badge/code-Apache--2.0-blue)](LICENSE)
+[![Spec](https://img.shields.io/badge/trace%20spec-CC%20BY%204.0-blue)](spec/orca-trace-v0.md)
+[![Node](https://img.shields.io/badge/node-20%2B-brightgreen)](#install)
+[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20opencode%20%C2%B7%20any-black)](#install)
+[![Good first issues](https://img.shields.io/badge/good%20first%20issues-12-orange)](docs/good-first-issues.md)
+
+![Recording a Claude Code run, replaying it offline, then forking it onto two models](docs/demo-cli.gif)
+
+<sup>Real output from one session — a Claude Code run recorded, replayed with the network off, then
+forked at checkpoint 4 onto two models and graded by `npx tsc --noEmit`. Nothing here is mocked up.</sup>
+
+## Try it in three commands
 
 ```console
-$ orca record claude                        # run your agent; capture everything
-  recording run_9f2c14 · proxy :51733 · 3 capture layers active
-
-$ orca replay last                          # reproduce it exactly, network off
-  replaying offline · 68/68 matched exact · 0 divergences
-
-$ orca replay last --from 17 --model glm-5.3-flash    # fork from the failure, live
-  forked run_a71e08 from run_9f2c14 @ checkpoint 17
-  ✓ 14/14 tests · $0.61 · 4m02s
+orca record claude              # your agent, unmodified, doing whatever it does
+orca replay last                # the same run again — no network, no tokens, no charge
+orca replay last --from 4 --model claude-haiku-4-5 --ui
 ```
 
-Your agent broke something. Replay exactly why.
+The third line is the one people stay for: same files, same conversation prefix, different model
+from step 4 onward. The model is the only variable, which is what makes the answer mean anything.
+
+Not on npm yet — [install from source](#install), it takes about a minute.
 
 ## Why this exists
 
@@ -26,16 +52,240 @@ you have. The question you have is *why did it delete my migration file.*
 
 OrcaReplay answers that by giving you the run back.
 
-## How it works, in one paragraph
+|  | Observability tools | OrcaReplay |
+|---|---|---|
+| Tells you what a run cost | ✅ | ✅ |
+| Tells you which tool call deleted the file | sometimes | ✅ |
+| Runs the agent again and gets the same answer | ❌ | ✅ offline, byte-for-byte |
+| Lets you change the model and re-run from step 4 | ❌ | ✅ |
+| Needs you to modify your agent | usually an SDK wrapper | ❌ two env vars |
+| Works after you close the terminal | ❌ | ✅ it is a file |
+
+## How it works
 
 Model APIs are stateless, so on every turn an agent resends the entire conversation — including the
-previous turn's tool results. A proxy sitting in front of the model therefore sees the whole loop:
-each request, each streamed response, every tool call the model emitted, and every tool result the
-harness produced. That means **OrcaReplay does not patch your agent**. It stands up a local
-recording proxy, injects a couple of environment variables, and gets out of the way.
+previous turn's tool results. **A proxy in front of the model therefore sees the whole loop**: each
+request, each streamed response, every tool call the model emitted, and every tool result the
+harness produced. That one property is what the tool is built on, and it is why **OrcaReplay does
+not patch your agent** — it stands up a local proxy, sets two environment variables, and gets out of
+the way.
 
-Three more capture layers fill the gaps: an MCP shim, a `PATH` shim for shell exit codes and
-timing, and a shadow git index for filesystem diffs.
+Three more layers catch what the protocol cannot see: an exit code, a real duration, which stream a
+byte came out of, a file written without telling anyone.
+
+```mermaid
+%%{init: {'theme':'neutral'}}%%
+flowchart LR
+    A["<b>your agent</b><br/><i>unmodified</i>"]
+
+    subgraph orca["orca · four capture layers"]
+        direction TB
+        P["<b>proxy</b><br/>base-URL env var"]
+        SH["<b>PATH shim</b><br/>exit code · timing · streams"]
+        MC["<b>JSON-RPC tee</b><br/>MCP config rewrite"]
+        FS["<b>shadow git index</b><br/>workspace per turn"]
+    end
+
+    A --> P & SH & MC & FS
+    P -->|"forwarded, auth intact"| U["<b>the model API</b><br/><i>or OrcaRouter · any gateway</i>"]
+    orca ==> T[("<b>one trace</b><br/>.orca/runs/run_a1b2c3")]
+```
+
+All four land in the same timeline, ordered by when they actually happened rather than when orca
+got around to reading them.
+
+### Exact, fork and compare are one thing
+
+They are not three subsystems. They are the same proxy with a **cursor** — the position in the
+recorded stream where it stops answering from disk and starts answering from the network.
+
+```mermaid
+%%{init: {'theme':'neutral'}}%%
+flowchart LR
+    subgraph disk["from disk · byte-for-byte · network blocked"]
+        direction LR
+        T1["turn 1"] --> T2["turn 2"] --> T3["turn 3"] --> T4["turn 4"]
+    end
+    T4 ==> CUR{{"<b>cursor</b>"}}
+    CUR ==> T5
+    subgraph net["from the network · any model you name"]
+        direction LR
+        T5["turn 5"] --> T6["turn 6"] --> T7["…"]
+    end
+```
+
+| command | where the cursor sits | what you get |
+|---|---|---|
+| `orca replay last` | at the end | the whole run again, **network blocked** — no tokens, no charge, no variance |
+| `orca replay last --from 4 --model X` | at checkpoint 4 | turns up to 4 identical, then a different model takes over |
+| `orca compare last --from 4 --models a,b` | at checkpoint 4, several times | one table, one variable — the model |
+
+A **checkpoint** is not recorded; it is *derived* — any point where the conversation prefix is
+complete and the workspace was snapshotted. Every fork therefore starts from a state that provably
+existed.
+
+## What a bug hunt actually looks like
+
+Your agent was supposed to fix a failing auth test. It exited 0 and the test still fails. Start with
+what it actually did:
+
+```console
+$ orca show last
+run_6473f858b59e  generic-openai@0.1.0  14 events  exit 0
+
+SEQ  KIND   WHAT                                            DETAIL
+0    RUN    run started                                     generic-openai
+1    SNAP   tree 919d32ba037537b43814c83779963b2cc3023db7   0 changed
+2    MODEL  claude-opus-5                                   1 messages
+3    MODEL  claude-opus-5                                   stop: tool_use · 100 in · 20 out
+4    TOOL   edit_file                                       {"path":"auth.ts",…}
+5    SNAP   tree c6af62b75c0c8b8938bd6087328b5148f3dcd534   1 changed
+6    FILE   auth.ts                                         modified +1 −3
+7    TOOL   edit_file                                       ok
+8    MODEL  claude-opus-5                                   3 messages
+9    MODEL  claude-opus-5                                   stop: end_turn · 101 in · 5 out
+10   SNAP   tree c6af62b75c0c8b8938bd6087328b5148f3dcd534   0 changed
+11   SHELL  ["sh","-c","node --check nonexistent-file.ts"]  /tmp/hunt
+12   SHELL  shell result                                    exit 1 · 43ms
+13   RUN    run ended                                       exit 0
+
+info usage input=201 output=25 cost=$0.004890
+```
+
+Three facts the model's own transcript could not have told you, and the run's exit code hid: the
+file really changed (seq 6, `+1 −3`), the check the agent ran **failed** (seq 12, `exit 1`), and it
+finished anyway. The run exited 0 because the *agent* exited 0.
+
+Now reproduce it as often as you like, for nothing:
+
+```console
+$ orca replay last
+info replay.done reused=2/2 exact=2 divergences=0 unmatched=0 exit=0
+```
+
+No network, no tokens, no variance. Then ask the question you actually have — *would a different
+model have got this right?*
+
+```console
+$ orca compare last --from 5 --models claude-opus-5,claude-haiku-4-5 --verify "npm test"
+MODEL             VERDICT  TOKENS  COST       WALL  RUN
+claude-opus-5     pass     201/25  $0.004890  0.3s  run_1457b35062ba
+claude-haiku-4-5  pass     201/25  $0.000326  0.3s  run_b8ee08479fb6
+```
+
+Both pass. One costs **15× less**. Same files, same conversation prefix, same checkpoint — the model
+is the only thing that changed, which is the only reason that number means anything.
+
+## The timeline
+
+`orca replay last --ui` (or `orca ui`) opens the run as one self-contained HTML file — no server
+to keep running, no network, nothing to install. Filter it, step it, or press space and watch the
+run play back at the pace it actually happened.
+
+![The OrcaReplay timeline: filtering a 42-event run down to its tool loop](docs/demo-viewer.gif)
+
+Every layer lands in the same timeline, so you can read the run as one story rather than four:
+the model turns and their token counts, each tool call with its arguments and result, the shell
+commands with their exit codes and timing, and the filesystem changes with the tree they produced.
+
+`orca export last -o bug.html` writes exactly that page to a single file you can attach to an
+issue. It carries no external reference of any kind — CI asserts that — so it renders from a
+download folder, on a plane, in five years.
+
+## Same task, different model
+
+`orca compare` forks one recorded run onto several models from the same checkpoint, with the same
+files and the same conversation prefix, and grades each one with a command you choose. The model
+is the only variable, which is what makes the answer mean anything.
+
+![A comparison table: two models forked from the same checkpoint, both passing, with real token counts and costs](docs/compare-card.png)
+
+```console
+orca compare last --from 4 \
+  --models claude-sonnet-5,claude-haiku-4-5 \
+  --verify "npm test" \
+  --share verdict.svg          # the card above, ready to paste into an issue
+```
+
+### Pointing it at several models
+
+Comparing models means reaching several providers, and doing that by hand means knowing that
+`--upstream-anthropic` and `--upstream-openai` exist, that one gateway can serve both wire formats,
+and where the key goes. All of that is real and none of it is discoverable, so there is a command
+that asks instead:
+
+```console
+$ orca setup
+Gateway URL (serves the model APIs) [https://api.orcarouter.ai]:
+  get a key at https://www.orcarouter.ai/console/token — OrcaRouter keys start sk-orca-
+API key (stored 0600; leave blank for none):
+  info config.saved path=~/.config/orca/config.json mode=0600 gateway=https://api.orcarouter.ai auth=stored
+
+  6 models available:
+    anthropic/claude-opus-5
+    anthropic/claude-haiku-4-5
+    openai/gpt-5.2
+    ...
+
+$ orca models
+MODEL                      $/MTOK IN  $/MTOK OUT
+anthropic/claude-opus-5    15         75
+anthropic/claude-haiku-4-5 1          5
+openai/gpt-5.2             1.25       10
+some-local-model           —          —
+```
+
+`orca setup` asks the gateway what it actually serves rather than just writing the file, so a wrong
+URL or a dead key is an answer now instead of a 401 in the middle of a comparison. It also stores the
+models you picked, so after that `orca compare last --verify "npm test"` needs no model list and no
+upstream flags at all. `orca models` prices what it recognises and shows a
+dash for what it does not, because inventing a number for an unknown model is how a comparison
+table ends up quoting a cost that was never real.
+
+[**OrcaRouter**](https://www.orcarouter.ai) is the default answer to that first question — press
+Enter and you have one origin and one key serving Claude, GPT, Gemini, Grok, DeepSeek, Qwen and the
+rest, which is exactly the shape `orca compare` wants. Its model ids are namespaced by provider
+(`anthropic/claude-sonnet-4.6`, `openai/gpt-4o-mini`), which orca handles: the namespace picks the
+wire format and is stripped before pricing.
+
+It is a *default*, not a destination: type over it, or pass `--gateway <url>`, and anything that
+speaks the OpenAI-compatible `/v1/models` and chat endpoints works just as well — another hosted
+gateway, or something you run yourself.
+
+It is also only ever a default for traffic **you** asked to send somewhere. With no gateway
+configured, `orca record` proxies your agent's own calls straight to whatever provider it was
+already talking to, on the agent's own key. Orca does not reroute a recording you never configured:
+that would post your source code to a third party as a side effect of pressing record.
+
+Non-interactive: `orca setup --key <k>` takes the default, `orca setup --gateway <url> --key <k>`
+names another, and `--key-env <VAR>` reads the key from the environment rather than keeping a
+credential on disk.
+
+The key never reaches a trace. It is attached to the outbound request only, while what gets
+recorded is built from the *incoming* request with auth stripped — so it is invisible to the
+recording by construction, not by a rule someone has to remember. It is withheld entirely if a flag
+sends that traffic somewhere other than the gateway that issued it.
+
+## When the harness will not be redirected
+
+Base-URL injection captures every harness that reads a base-URL variable, which is most of them. A
+Codex CLI signed in with a ChatGPT subscription reads none: it talks to its own backend over TLS,
+and orca sees nothing. `--tls-intercept` is the answer to that, and it is deliberately a separate
+decision you have to make, because it mints a certificate authority.
+
+```console
+orca record codex --tls-intercept
+orca record codex --tls-intercept --tls-hosts 'api.openai.com,*.chatgpt.com'
+```
+
+The CA is unique to the run, trusted only by the agent orca launches — through that child's own
+environment, never a system or browser trust store — and deleted when the run ends. Orca will not
+offer to install it anywhere. Hosts outside the allowlist are tunnelled unread and recorded as an
+address and a byte count, with no path and no body, because orca never held the plaintext. Asking
+to intercept everything is refused rather than honoured.
+
+It works on `orca replay --model`, `orca fork` and `orca compare` too, which launch a live agent for
+the same reason.
 
 ## Status
 
@@ -45,22 +295,95 @@ Early. `v0` is the walking skeleton of the three commands above.
 |---|---|
 | Trace format v0 + JSON Schema | working |
 | Anthropic / OpenAI-compatible model capture | working |
-| Exact replay with divergence reporting | working |
-| Fork replay from a checkpoint | working |
-| Compare across models | working |
+| Exact replay with divergence reporting | working — restores the recorded filesystem over your working tree, then puts it back; `--worktree` for a scratch copy, `--in-place` to restore nothing. Writes a run of its own recording what the replay *discovered* — divergences, unmatched requests — and points at the parent for what it merely repeated; `--no-trace` to skip |
+| Fork replay from a checkpoint | working — a fork records its own filesystem snapshots, so it is a run you can fork again |
+| Compare across models | working — `orca setup` stores a gateway (OrcaRouter by default, any URL you name otherwise), key and model list, so `orca compare` needs no flags |
 | Filesystem snapshots and diffs | working |
 | Single-file HTML export | working |
-| MCP call recording | working |
-| Shell capture (`PATH` shim) | partial — protocol-level fallback always available |
-| Non-model network capture | not implemented; out of scope for v0 |
+| MCP call recording | working — opt in with `--mcp-config <path>`. Replay and fork re-instrument from the config the recording used, so the layer does not stop at the fork point |
+| Post-hoc scrubbing (`orca scrub`) | working |
+| Shell capture (`PATH` shim) | working — exit codes, duration and the stdout/stderr split. `--no-shell` to skip |
+| Non-model network capture | working — opt in with `--tls-intercept`; mints a per-run CA the launched agent alone trusts, decrypts an allowlist of hosts, tunnels the rest unread, and deletes the key when the run ends |
+| Validated against a real agent | Claude Code, recording a real fix to a real bug: recorded, replayed offline end to end, forked from a checkpoint and exported. Four bugs found doing it, all fixed — see below |
+| Subscription-auth harnesses | Claude Code works. A Codex CLI signed in with a ChatGPT subscription talks to its own backend and reads no base-URL variable, so it needs `--tls-intercept` |
+
+### What a real agent found
+
+Everything above was built against fixtures. The first Claude Code run recorded through it broke
+four things, each of a kind no fixture can produce:
+
+- **A sixteen-character drift scored 217,568.** Distance was the common prefix and suffix of the
+  whole request body, and Claude Code carries a session id in its system prompt *and* another in a
+  tool description — so all 200 KB between them counted as changed and nothing could reach rung 2.
+  Distance is now summed per field, and per line within a field.
+- **Redaction made an exact match unreachable.** Placeholder digests are salted per run by design,
+  so a recorded request could never equal itself again. The matcher now redacts the incoming
+  request the same way and compares the *kind* of secret rather than its digest — and reports that
+  fold, because it is an approximation.
+- **Redaction also broke every fork.** `tool_use` ids and thinking-block signatures are
+  high-entropy strings, so the sweep replaced them; a fork replays those turns, the agent echoes
+  them back, and the API answers `400`. Protocol values that have to round-trip are now exempt from
+  the guess — never from the credential rules.
+- **Replaying re-runs the tools.** Orca does not intercept tool execution, so the agent really runs
+  `npm test` again and it really reprints its own durations. A request whose only difference is
+  inside tool output is now served from the recording as a `major` divergence instead of halting.
+
+That run replays offline end to end — `reused=7/7 exact=2 divergences=5 unmatched=0 exit=0`, with
+every approximation named — and a fork of it reaches the same tree the recording did. If you have a
+recording it still gets wrong, that is the single most useful thing you can send.
 
 ## Install
 
+Not on npm yet — the packages are built and verified for it, but nothing has been published, so
+today it is from source:
+
 ```console
-npx orcareplay --help
+git clone https://github.com/Continuum-AI-Corp/OrcaReplay && cd OrcaReplay
+npm ci && npm run build
+npm install -g ./packages/cli     # puts `orca` (and `orcareplay`) on PATH
+orca doctor                       # checks node, git, and which agents it can find
 ```
 
-Node 20+. No account, no signup, no API key changes.
+`npm install -g .` from the repository root installs nothing: the root is a workspace with no
+binary of its own, and `orca` lives in `packages/cli`.
+
+The moment `v0` is published, `npx orcareplay doctor` is the whole install and this section will say
+so instead. The release is a tagged, gated workflow — see [`RELEASING.md`](RELEASING.md).
+
+**Node 20+ to run it** (the CLI's own `engines` says `>=20.0.0`). Contributing needs `^20.19.0 ||
+>=22.12.0`, because the test toolchain does; the root `package.json` declares that separately so
+`npm ci` tells you up front. No account, no signup, no API key changes.
+
+## Where your runs are kept
+
+Everything lands in **`.orca/runs/` inside the project you recorded in** — per-project, never a
+global store, so a run travels with the checkout it belongs to. One run directory is one
+self-describing thing:
+
+```
+.orca/
+  .gitignore          # just `*` — the store excludes itself, so a trace cannot be committed by accident
+  runs/run_d0a2ee7ce615/
+    manifest.json     # who, when, which adapter, the git commit, counts, integrity digest
+    events.jsonl      # the timeline, one JSON object per line, append-only
+    blobs/            # content-addressed payloads over 4 KB, deduplicated
+    fs/               # shadow git index: the workspace at every turn
+    shell-frames.jsonl
+    redactions.json   # what was removed, by rule and count — never by value
+```
+
+Finding an old session:
+
+```console
+orca list                       # every run here, newest first, with what it was forked from
+orca show run_d0a2ee7ce615      # the timeline in the terminal
+orca replay last                # `last` = newest recording (it skips replay traces)
+orca replay run_d0a2ee7ce615    # or name one outright
+orca gc --older-than 7d --dry-run   # what would be reclaimed, before anything is
+```
+
+`orca list` reads the run directories directly, so it works on a trace someone sent you: drop it in
+`.orca/runs/` and every command sees it. Nothing indexes, and there is no database to corrupt.
 
 ## Privacy
 
@@ -69,24 +392,85 @@ redacted in the write path: environment capture is deny-by-default, auth headers
 and known key shapes plus high-entropy strings are replaced with stable placeholders.
 
 Redaction is best-effort mitigation, not a guarantee. **Treat a trace as sensitive** — roughly as
-sensitive as a shell history plus a heap dump. Run `orca scrub` before sharing anything you are
-unsure about.
+sensitive as a shell history plus a heap dump.
+
+```console
+orca export last -o bug.html          # prints exactly what it is about to write
+orca scrub last --match my-hostname   # remove something after the fact
+```
+
+`orca scrub` rewrites `events.jsonl`, the manifest and every text blob, re-runs the standard
+detectors, refreshes the integrity digest, and leaves binary blobs byte-identical.
+
+It cannot rewrite the filesystem snapshots. Git objects are addressed by the hash of their own
+contents, so editing one changes its id, which forces every tree naming it to be rewritten and
+every event naming those trees after that — a history rewrite whose failure mode is a run that no
+longer restores. So scrub *searches* the snapshot store and tells you when your string is still in
+there, rather than reporting a clean trace it could not clean. `--drop-fs` deletes the store
+outright, at the cost of being able to fork the run.
 
 ## What is open, and what is not
 
 Always open, under Apache-2.0: the trace format, the core, the CLI, the viewer, the adapters, and
-the provider interface. OrcaRouter is an optional plugin that uses only the public `Provider`
-interface — it gets no privileged API, and CI enforces that by building it against the published
-package rather than workspace source. If it ever needs a capability, that capability lands in the
-public interface first.
+the provider interface.
+
+OrcaReplay is built by the people who build [OrcaRouter](https://www.orcarouter.ai), and that shows
+up in exactly one place: `orca setup` suggests it when you do not name a gateway. That is a default
+you can see and overtype, on a question you chose to answer — not a route anything takes on its own.
+Every model path stays a plain URL you can point anywhere, and there is no code path that treats
+that origin differently from any other.
+
+What the vendor does *not* get is privilege. A plugin — OrcaRouter's included — may use only the
+public `Provider` interface in `@orcareplay/plugin-api`, with no private API behind it. No vendor
+plugin exists yet, so the CI job that enforces this (`scripts/check-neutrality.mjs`) says so and
+passes as a no-op; it starts building against the published package rather than workspace source the
+moment one lands. If a plugin ever needs a capability, that capability goes into the public
+interface first, with a second implementation showing it is not shaped around one vendor.
 
 ## Documentation
+
+**Start here if you have a problem right now:**
+
+- [My agent broke something. How do I find out why?](docs/how-to/debug-a-failing-agent-run.md)
+- [Why did my agent delete that file?](docs/how-to/why-did-my-agent-delete-my-file.md)
+- [Would a different model have got this right?](docs/how-to/compare-models-on-the-same-failure.md)
+
+**Reference:**
 
 - [`spec/orca-trace-v0.md`](spec/orca-trace-v0.md) — the normative trace format
 - [`docs/architecture.md`](docs/architecture.md) — how capture, replay and fork actually work
 - [`docs/plugins.md`](docs/plugins.md) — writing an adapter or a provider
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — five-minute dev loop
+- [Good first issues](docs/good-first-issues.md) — twelve of them, with the file to start in
+
+## Help wanted
+
+The format is v0 and the walking skeleton works, which is the interesting point in a project's life:
+the decisions are still cheap to change and there is a lot of obvious work with the file to start in
+already written down.
+
+- **[Twelve good first issues](docs/good-first-issues.md)**, each naming the file and the test.
+- **Write an adapter.** One file, one fixture. If your harness reads a base-URL variable it is
+  about twenty lines — [docs/plugins.md](docs/plugins.md).
+- **Reimplement the reader.** The spec is CC BY 4.0 on purpose. There is already a Python reader;
+  Go and Rust are open.
+- **Break the replay.** The matching ladder is the heart of this and the fastest way to improve it
+  is a real recording it gets wrong. Open an issue with `orca export last -o bug.html` attached — it
+  is one self-contained file, and `orca scrub` is there for anything you need out of it first.
+
+If it saved you an afternoon, a ⭐ helps other people find it.
 
 ## License
 
 Apache-2.0 for the code. The trace specification is CC BY 4.0, so anyone may reimplement it.
+
+---
+
+<sub>
+Built by the OrcaRouter team ·
+<a href="https://www.orcarouter.ai">orcarouter.ai</a> ·
+<a href="https://www.orcarouter.ai/models">all models</a> ·
+<a href="https://www.orcarouter.ai/code-review">OrcaCode Review</a> ·
+<a href="https://x.com/OrcaRouter">X</a> ·
+<a href="https://huggingface.co/orcarouter">Hugging Face</a>
+</sub>

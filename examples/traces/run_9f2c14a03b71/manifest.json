@@ -28,7 +28,7 @@
     "node": "v22.22.2"
   },
   "counts": {
-    "events": 27,
+    "events": 26,
     "blobs": 5
   },
   "redaction": {
@@ -40,7 +40,7 @@
   },
   "exit_code": 1,
   "integrity": {
-    "events_sha256": "1a4bf78fb5930243f6831075ce49ac2cc5e9ecb602a439a56f77b1f1a8227a00",
+    "events_sha256": "4c1541f0b1e64c605b2be207f77a84b63674d0a22ba67bf1ee5e8e8d16e8c93b",
     "blob_count": 5
   }
 }

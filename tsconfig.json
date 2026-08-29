@@ -8,6 +8,7 @@
     { "path": "packages/providers" },
     { "path": "packages/proxy" },
     { "path": "packages/mcp-shim" },
+    { "path": "packages/shell-shim" },
     { "path": "packages/adapters" },
     { "path": "packages/viewer" },
     { "path": "packages/cli" }

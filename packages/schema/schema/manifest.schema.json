@@ -38,7 +38,9 @@
       "required": ["os", "arch", "node"],
       "additionalProperties": false,
       "properties": {
-        "os": { "type": "string" }, "arch": { "type": "string" }, "node": { "type": "string" }
+        "os": { "type": "string" },
+        "arch": { "type": "string" },
+        "node": { "type": "string" }
       }
     },
     "counts": {

@@ -1,0 +1,49 @@
+{
+  "name": "orcareplay",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "description": "Record, replay and fork debugger for AI agents",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "orca": "./dist/cli.js",
+    "orcareplay": "./dist/cli.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "debugger",
+    "replay",
+    "record",
+    "llm",
+    "observability",
+    "claude",
+    "openai"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Continuum-AI-Corp/OrcaReplay.git"
+  },
+  "dependencies": {
+    "@orcareplay/schema": "0.1.0",
+    "@orcareplay/plugin-api": "0.1.0",
+    "@orcareplay/core": "0.1.0",
+    "@orcareplay/proxy": "0.1.0",
+    "@orcareplay/providers": "0.1.0",
+    "@orcareplay/adapters": "0.1.0",
+    "@orcareplay/fs-capture": "0.1.0",
+    "@orcareplay/viewer": "0.1.0",
+    "@orcareplay/mcp-shim": "0.1.0",
+    "@orcareplay/shell-shim": "0.1.0"
+  }
+}

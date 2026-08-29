@@ -1,5 +1,22 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "outDir": "dist", "rootDir": "src" },
-  "include": ["src/**/*.ts"]
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    {
+      "path": "../schema"
+    },
+    {
+      "path": "../plugin-api"
+    },
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../providers"
+    }
+  ]
 }
