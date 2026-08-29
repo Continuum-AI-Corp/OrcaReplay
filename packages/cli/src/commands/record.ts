@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { mkdir, readFile } from 'node:fs/promises';
-import { delimiter } from 'node:path';
+import { delimiter, resolve } from 'node:path';
 import { TraceWriter, runsDir } from '@orcareplay/core';
 import { FsCapture } from '@orcareplay/fs-capture';
 import { createProxy, RunCa, type RecordedExchange } from '@orcareplay/proxy';
@@ -8,7 +8,7 @@ import { defaultAdapters } from '@orcareplay/adapters';
 import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver } from '../exchange-events.js';
 import { installShellShim, readShellFrames } from '@orcareplay/shell-shim';
-import { setupMcpCapture, type McpCapture } from '../mcp.js';
+import { drainMcpFrames, pointAtMcpConfig, setupMcpCapture, type McpCapture } from '../mcp.js';
 import { SerialQueue } from '../serial.js';
 import { appendSnapshot } from '../fs-events.js';
 import type { Output } from '../out.js';
@@ -106,6 +106,22 @@ async function runRecording(
   const mcpConfigPath = args.str('mcp-config');
   if (mcpConfigPath) {
     mcp = await setupMcpCapture({ sourceConfigPath: mcpConfigPath, runDir: writer.runDir, out });
+    if (mcp) {
+      // The source path, written down because a replay needs it and can get it nowhere else:
+      // `manifest.argv` holds the agent's own arguments, and `--mcp-config` is orca's. Without this
+      // a replay of an MCP-using run either loses the layer or cannot start the harness at all.
+      await writer.append({
+        type: 'note',
+        actor: 'orca',
+        turn: 0,
+        attrs: {
+          rule: 'mcp_instrumented',
+          source: resolve(cwd, mcpConfigPath),
+          servers: mcp.rewritten.join(',') || undefined,
+          skipped: mcp.skipped.join(',') || undefined,
+        },
+      });
+    }
   }
 
   // Shell capture: a PATH shim in front of sh/bash. The protocol layer already reports the command
@@ -200,13 +216,7 @@ async function runRecording(
   if (shell) {
     launch.env.PATH = `${shell.dir}${delimiter}${process.env.PATH ?? ''}`;
   }
-  if (mcp) {
-    // Every target harness reads one of these; setting all three costs nothing and avoids making
-    // the user work out which one their agent uses.
-    launch.env.MCP_CONFIG_PATH = mcp.configPath;
-    launch.env.CLAUDE_MCP_CONFIG = mcp.configPath;
-    launch.env.OPENCODE_MCP_CONFIG = mcp.configPath;
-  }
+  if (mcp) pointAtMcpConfig(launch.env, mcp.configPath);
 
   if (proxy.tls) {
     await trustRunCa(writer, proxy.tls, proxy.url, launch.env, out);
@@ -295,20 +305,7 @@ async function runRecording(
     }
   }
 
-  if (mcp) {
-    for (const frame of await mcp.drain()) {
-      const at = frame.ts === undefined ? Number.NaN : Date.parse(frame.ts);
-      const when = Number.isNaN(at) ? undefined : new Date(at);
-      await writer.append({
-        type: frame.dir === 'in' ? 'mcp.request' : 'mcp.response',
-        actor: 'agent',
-        turn: when === undefined ? turn : turnAt(at),
-        ...(when === undefined ? {} : { occurredAt: when }),
-        attrs: { server: frame.name, kind: frame.kind, method: frame.method, id: frame.id },
-        payload: frame.raw,
-      });
-    }
-  }
+  if (mcp) await drainMcpFrames(mcp, writer, turnAt, turn);
 
   const orphans = deriver.unresolved();
   if (orphans.length > 0) {

@@ -1,15 +1,16 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { TraceReader } from '@orcareplay/core';
+import { TraceReader, deriveCheckpoints, resolveRunSelector } from '@orcareplay/core';
 import { validateEvent } from '@orcareplay/schema';
 import { parseArgs } from '../src/args.js';
 import { Output } from '../src/out.js';
 import { recordCommand } from '../src/commands/record.js';
+import { replayCommand } from '../src/commands/replay.js';
 import { startFakeModel } from './fixtures/fake-model.mjs';
 
 const run = promisify(execFile);
@@ -74,7 +75,7 @@ describe('mcp capture', () => {
     await rm(workspace, { recursive: true, force: true });
   });
 
-  async function record() {
+  async function record(configPath = join(workspace, 'mcp.json')) {
     return recordCommand(
       parseArgs([
         'record',
@@ -82,7 +83,7 @@ describe('mcp capture', () => {
         '--upstream-anthropic',
         model.url,
         '--mcp-config',
-        join(workspace, 'mcp.json'),
+        configPath,
         '--no-shell',
         '--',
         'node',
@@ -119,6 +120,87 @@ describe('mcp capture', () => {
     // milliseconds of `run.end` while a real one is clear of it by that margin.
     expect(Date.parse(runEnd!.ts) - Date.parse(request!.ts)).toBeGreaterThan(300);
     expect(runEnd!.mono_us - request!.mono_us).toBeGreaterThan(300_000);
+  });
+
+  describe('replay and fork', () => {
+    // Replay and fork launch the same agent the recording did, so they share its blind spot: with
+    // no config the harness talks to servers orca cannot see, or — for one that requires the
+    // variable — does not start at all. Found by building a demo: replaying a working recording
+    // exited 2 with `matched=0` for a reason that had nothing to do with the recording.
+    it('re-instruments MCP from what the recording used, with no flag', async () => {
+      const recorded = await record();
+      const result = await replayCommand(parseArgs(['replay', 'last']), out, workspace);
+
+      expect(result.exitCode, `the agent must still run:\n${lines.join('\n')}`).toBe(0);
+      expect(result.matchedExact).toBeGreaterThan(0);
+
+      const traceDir = (await resolveRunSelector(workspace, result.traceRunId!)).dir;
+      const events = await (await TraceReader.open(traceDir)).events();
+      const mcp = events.filter((e) => e.type.startsWith('mcp.'));
+      expect(mcp.length, 'the replay discovered these calls; they exist nowhere else').toBe(2);
+      expect(mcp[0]!.attrs?.server).toBe('echo');
+      expect(recorded.runDir).not.toBe(traceDir);
+    });
+
+    it('records which config the recording used, since argv cannot carry it', async () => {
+      // `manifest.argv` holds the agent's own arguments and `--mcp-config` is orca's, so without
+      // this note a replay has no way to find the source config at all.
+      const recorded = await record();
+      const events = await (await TraceReader.open(recorded.runDir)).events();
+      const note = events.find((e) => e.type === 'note' && e.attrs?.rule === 'mcp_instrumented');
+      expect(note, 'no mcp_instrumented note').toBeDefined();
+      expect(note!.attrs?.source).toBe(join(workspace, 'mcp.json'));
+    });
+
+    it('captures MCP past the fork point too', async () => {
+      await record();
+      const checkpoints = deriveCheckpoints(
+        await (await TraceReader.open((await resolveRunSelector(workspace, 'last')).dir)).events(),
+      );
+      const result = await replayCommand(
+        parseArgs([
+          'replay',
+          'last',
+          '--from',
+          String(checkpoints[0]!.seq),
+          '--model',
+          'claude-haiku-4-5',
+          '--upstream-anthropic',
+          model.url,
+        ]),
+        out,
+        workspace,
+      );
+
+      const forkDir = (await resolveRunSelector(workspace, result.forkRunId!)).dir;
+      const events = await (await TraceReader.open(forkDir)).events();
+      const mcp = events.filter((e) => e.type.startsWith('mcp.'));
+      expect(mcp.length, `no mcp events in the fork:\n${lines.join('\n')}`).toBe(2);
+      for (const event of mcp) expect(validateEvent(event).valid).toBe(true);
+    });
+
+    it('says so rather than silently dropping the layer when the config has moved', async () => {
+      // The config lives *outside* the workspace here, because exact replay restores the recorded
+      // tree over the working directory — deleting a file that was in the snapshot just brings it
+      // back, which is the restore working correctly and would make this test pass for the wrong
+      // reason.
+      const elsewhere = await mkdtemp(join(tmpdir(), 'orca-mcp-cfg-'));
+      const configPath = join(elsewhere, 'mcp.json');
+      await writeFile(configPath, await readFile(join(workspace, 'mcp.json'), 'utf8'));
+      await record(configPath);
+      await rm(elsewhere, { recursive: true, force: true });
+      // Only what the replay said: the recording legitimately printed `mcp.instrumented`, and
+      // asserting over both would check the wrong half of the session.
+      lines.length = 0;
+
+      await replayCommand(parseArgs(['replay', 'last']), out, workspace);
+
+      const printed = lines.join('');
+      expect(printed).toContain('mcp.source_missing');
+      expect(printed, 'a dropped capture layer must not read as a quiet success').not.toContain(
+        'mcp.instrumented',
+      );
+    });
   });
 
   it('attributes a call to the turn it happened during', async () => {

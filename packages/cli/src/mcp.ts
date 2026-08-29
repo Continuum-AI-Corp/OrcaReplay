@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { rewriteMcpConfig } from '@orcareplay/adapters';
+import type { TraceWriter } from '@orcareplay/core';
 import type { McpFrameRecord } from '@orcareplay/mcp-shim';
 import type { Output } from './out.js';
 
@@ -25,6 +26,112 @@ export interface McpCapture {
  * was recorded as a response. A format has one owner, and it is the thing that writes it.
  */
 export type { McpFrameRecord };
+
+/**
+ * The MCP config a *replay* should instrument: the flag if one was given, else whatever the
+ * recording itself used.
+ *
+ * Replay and fork launch the same agent the recording did, so they hit the same blind spot record
+ * had before `--mcp-config` existed: without a config the harness either talks to servers orca
+ * cannot see, or — for one that requires the variable — does not start at all. The recording knows
+ * the answer; it just had nowhere to write it down, since `manifest.argv` holds only the agent's
+ * own arguments and `--mcp-config` is orca's.
+ *
+ * The path is read back from the run's own `mcp_instrumented` note. Nothing is re-instrumented from
+ * the *rewritten* config in the parent run directory: its servers already point at the parent's
+ * frames file, so reusing it would append this replay's traffic to the recording it is replaying.
+ */
+export function mcpSourceFrom(
+  flagValue: string | undefined,
+  events: { type: string; attrs?: Record<string, unknown> }[],
+): string | undefined {
+  if (flagValue) return flagValue;
+  for (const event of events) {
+    if (event.type !== 'note' || event.attrs?.rule !== 'mcp_instrumented') continue;
+    const source = event.attrs.source;
+    if (typeof source === 'string' && source !== '') return source;
+  }
+  return undefined;
+}
+
+/** Did this run capture MCP at all? Decides whether a replay without a config is worth warning about. */
+export function usedMcp(events: { type: string }[]): boolean {
+  return events.some((e) => e.type === 'mcp.request' || e.type === 'mcp.response');
+}
+
+/**
+ * Set up MCP capture for a replay or a fork, from the flag or from what the recording used.
+ *
+ * Returns undefined — quietly — when the run never had MCP, which is most runs. When it did and the
+ * source config has since moved or been deleted, that is said out loud rather than silently
+ * dropping a capture layer: an absent `mcp.*` in the replay would otherwise read as "the agent made
+ * no MCP calls" instead of "orca was not looking".
+ */
+export async function mcpForReplay(
+  args: { str(name: string): string | undefined },
+  events: { type: string; attrs?: Record<string, unknown> }[],
+  writer: TraceWriter,
+  out: Output,
+): Promise<McpCapture | undefined> {
+  const source = mcpSourceFrom(args.str('mcp-config'), events);
+  if (source === undefined) {
+    if (usedMcp(events)) {
+      out.warn('mcp.not_instrumented', {
+        why: 'the recording captured MCP but did not record which config it came from',
+        next: 'pass --mcp-config <path> to capture it here too',
+      });
+    }
+    return undefined;
+  }
+  if (!(await stat(source).catch(() => null))) {
+    out.warn('mcp.source_missing', {
+      path: source,
+      note: 'the config the recording used is no longer there; MCP will not be captured',
+    });
+    return undefined;
+  }
+  return setupMcpCapture({ sourceConfigPath: source, runDir: writer.runDir, out });
+}
+
+/**
+ * Point the launched agent at the instrumented config.
+ *
+ * Every target harness reads one of these; setting all three costs nothing and avoids making the
+ * user work out which one their agent uses.
+ */
+export function pointAtMcpConfig(env: Record<string, string>, configPath: string): void {
+  env.MCP_CONFIG_PATH = configPath;
+  env.CLAUDE_MCP_CONFIG = configPath;
+  env.OPENCODE_MCP_CONFIG = configPath;
+}
+
+/**
+ * Drain captured frames into a trace as `mcp.request` / `mcp.response`.
+ *
+ * Frames are read off disk after the agent exits, so each carries the moment it passed through the
+ * shim and is stamped with that rather than with the drain — `mono_us` is authoritative for
+ * duration (spec §2.1), and a frame stamped at the drain can never interleave with the model turns
+ * it actually sat between.
+ */
+export async function drainMcpFrames(
+  mcp: McpCapture,
+  writer: TraceWriter,
+  turnAt: (at: number) => number,
+  fallbackTurn: number,
+): Promise<void> {
+  for (const frame of await mcp.drain()) {
+    const at = frame.ts === undefined ? Number.NaN : Date.parse(frame.ts);
+    const when = Number.isNaN(at) ? undefined : new Date(at);
+    await writer.append({
+      type: frame.dir === 'in' ? 'mcp.request' : 'mcp.response',
+      actor: 'agent',
+      turn: when === undefined ? fallbackTurn : turnAt(at),
+      ...(when === undefined ? {} : { occurredAt: when }),
+      attrs: { server: frame.name, kind: frame.kind, method: frame.method, id: frame.id },
+      payload: frame.raw as never,
+    });
+  }
+}
 
 /**
  * Set up MCP capture for a run.

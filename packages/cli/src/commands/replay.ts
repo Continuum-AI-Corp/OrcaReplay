@@ -20,6 +20,7 @@ import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
 import { SerialQueue } from '../serial.js';
 import { appendSnapshot } from '../fs-events.js';
+import { drainMcpFrames, mcpForReplay, pointAtMcpConfig } from '../mcp.js';
 import { setupTlsCapture, trustRunCa } from '../tls-capture.js';
 import { upstreamPlan } from '../upstream.js';
 import { ORCA_VERSION } from '../version.js';
@@ -297,6 +298,12 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
     cwd: workspace.dir,
   });
 
+  // The agent runs live for everything that is not a model call, MCP included. Without a config it
+  // talks to servers orca cannot see — or, for a harness that requires the variable, does not start
+  // at all, which is how a replay of a working recording exits non-zero for a reason that has
+  // nothing to do with the recording.
+  const mcp = trace === undefined ? undefined : await mcpForReplay(args, ctx.events, trace, out);
+
   const adapter = defaultAdapters().get(ctx.manifest.adapter.id);
   const launch = await adapter.prepare({
     runId: ctx.manifest.run_id,
@@ -306,6 +313,7 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
     userArgs: ctx.manifest.argv.slice(1),
     env: process.env,
   });
+  if (mcp) pointAtMcpConfig(launch.env, mcp.configPath);
 
   let exitCode: number;
   try {
@@ -336,6 +344,9 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
   const verdict = exitCode === 0 && unmatched.length > 0 ? 1 : exitCode;
 
   if (trace) {
+    // What the replay discovered rather than repeated: these calls really happened just now, and
+    // exist nowhere in the parent.
+    if (mcp) await drainMcpFrames(mcp, trace, () => 0, 0);
     await trace.append({
       type: 'run.end',
       actor: 'orca',
@@ -475,6 +486,17 @@ async function replayFork(
 
   const deriver = new ExchangeEventDeriver();
   let turn = 0;
+  // When each turn began, so an MCP frame drained after the agent exits is attributed to the turn
+  // it happened during rather than to whichever turn happened to be last.
+  const turnStartedAt: { turn: number; at: number }[] = [];
+  const turnAtFork = (at: number): number => {
+    let found = 0;
+    for (const mark of turnStartedAt) {
+      if (mark.at > at) break;
+      found = mark.turn;
+    }
+    return found;
+  };
   const writes = new SerialQueue();
 
   /**
@@ -506,6 +528,10 @@ async function replayFork(
   // half — the operator believes they captured that traffic.
   const tls = await setupTlsCapture({ args, out, writer, writes, turn: () => turn });
 
+  // A fork continues the run live past the checkpoint, so its MCP traffic is new and belongs in the
+  // fork's own trace. Without this the layer simply stopped at the fork point.
+  const mcp = await mcpForReplay(args, ctx.events, writer, out);
+
   const proxy = await createProxy({
     mode: 'hybrid',
     forkAt,
@@ -517,6 +543,7 @@ async function replayFork(
     onExchange: (exchange) => {
       writes.push(async () => {
         turn += 1;
+        turnStartedAt.push({ turn, at: Date.now() });
         for (const d of deriver.derive(exchange, turn)) {
           await writer.append({
             type: d.type,
@@ -578,6 +605,7 @@ async function replayFork(
   if (proxy.tls) {
     await trustRunCa(writer, proxy.tls, proxy.url, launch.env, out);
   }
+  if (mcp) pointAtMcpConfig(launch.env, mcp.configPath);
 
   let exitCode: number;
   try {
@@ -602,6 +630,7 @@ async function replayFork(
     throw err;
   }
   await writes.drain();
+  if (mcp) await drainMcpFrames(mcp, writer, turnAtFork, turn);
 
   const stats = proxy.stats();
   await writer.append({ type: 'run.end', actor: 'orca', turn, attrs: { exit_code: exitCode } });

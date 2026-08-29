@@ -139,7 +139,7 @@ Early. `v0` is the walking skeleton of the three commands above.
 | Compare across models | working — `orca setup` stores a gateway, key and default model list, so `orca compare` needs no flags |
 | Filesystem snapshots and diffs | working |
 | Single-file HTML export | working |
-| MCP call recording | working — opt in with `--mcp-config <path>` |
+| MCP call recording | working — opt in with `--mcp-config <path>`. Replay and fork re-instrument from the config the recording used, so the layer does not stop at the fork point |
 | Post-hoc scrubbing (`orca scrub`) | working |
 | Shell capture (`PATH` shim) | working — exit codes, duration and the stdout/stderr split. `--no-shell` to skip |
 | Non-model network capture | working — opt in with `--tls-intercept`; mints a per-run CA the launched agent alone trusts, decrypts an allowlist of hosts, tunnels the rest unread, and deletes the key when the run ends |
