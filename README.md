@@ -3,6 +3,8 @@
 **Time travel for AI agents.** Record an agent run, reproduce exactly what happened, and fork
 execution from any step with a different model, prompt or config.
 
+![Recording, replaying and forking an agent run](docs/demo.svg)
+
 ```console
 $ orca record claude                        # run your agent; capture everything
   recording run_9f2c14 · proxy :51733 · 3 capture layers active

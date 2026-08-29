@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 450" width="760" height="450" role="img" aria-label="Recording, replaying and forking an agent run with OrcaReplay">
+<style>
+  text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+  .cmd { fill: #E8ECEC; }
+  .dim { fill: #6B7578; }
+  .ok { fill: #C6D6DA; }
+  .head { fill: #6B7578; font-size: 11px; letter-spacing: 0.08em; }
+  .row { fill: #9AA4A7; }
+  .fail { fill: #E8ECEC; font-weight: 600; }
+  .chrome { fill: #6B7578; font-size: 11px; letter-spacing: 0.14em; }
+  /* Honour a reader who has asked for less motion: show the finished session, no animation. */
+  @media (prefers-reduced-motion: reduce) {
+    text animate { display: none; }
+    text { opacity: 1 !important; }
+  }
+</style>
+<rect width="760" height="450" fill="#08090A"/>
+<text x="22" y="26" class="chrome">ORCAREPLAY — RECORD, REPLAY, FORK</text>
+<line x1="0" y1="34" x2="760" y2="34" stroke="#1F2426"/>
+<text x="22" y="46" class="cmd" xml:space="preserve" opacity="0">$ orca record claude<animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.0000;0.0120;1" dur="11s" repeatCount="indefinite"/></text>
+<text x="22" y="66" class="dim" xml:space="preserve" opacity="0">  info recording run=run_9f2c14 proxy=:51733 fs=on shell=on mcp=on<animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.0545;0.0665;1" dur="11s" repeatCount="indefinite"/></text>
+<text x="22" y="86" class="dim" xml:space="preserve" opacity="0">  … agent edits auth.ts, runs the tests, they fail, it retries …<animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.1273;0.1393;1" dur="11s" repeatCount="indefinite"/></text>
+<text x="22" y="106" class="dim" xml:space="preserve" opacity="0">  info recorded run=run_9f2c14 events=68 blobs=22 exit=1<animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.2364;0.2484;1" dur="11s" repeatCount="indefinite"/></text>
+<text x="22" y="126" class="dim" xml:space="preserve" opacity="0"><animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.2909;0.3029;1" dur="11s" repeatCount="indefinite"/></text>
+<text x="22" y="146" class="cmd" xml:space="preserve" opacity="0">$ orca replay last<animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.3091;0.3211;1" dur="11s" repeatCount="indefinite"/></text>
+<text x="22" y="166" class="dim" xml:space="preserve" opacity="0">  info replaying exchanges=24 egress=blocked<animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.3636;0.3756;1" dur="11s" repeatCount="indefinite"/></text>
+<text x="22" y="186" class="ok" xml:space="preserve" opacity="0">  info replay.done matched=24 total=24 divergences=0 exit=1<animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.4364;0.4484;1" dur="11s" repeatCount="indefinite"/></text>
+<text x="22" y="206" class="dim" xml:space="preserve" opacity="0"><animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.4909;0.5029;1" dur="11s" repeatCount="indefinite"/></text>
+<text x="22" y="226" class="cmd" xml:space="preserve" opacity="0">$ orca compare last --from 17 \<animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.5091;0.5211;1" dur="11s" repeatCount="indefinite"/></text>
+<text x="22" y="246" class="cmd" xml:space="preserve" opacity="0">      --models claude-opus-5,glm-5.3-flash,qwen3-coder \<animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.5273;0.5393;1" dur="11s" repeatCount="indefinite"/></text>
+<text x="22" y="266" class="cmd" xml:space="preserve" opacity="0">      --verify &quot;npm test&quot;<animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.5455;0.5575;1" dur="11s" repeatCount="indefinite"/></text>
+<text x="22" y="286" class="dim" xml:space="preserve" opacity="0"><animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.6182;0.6302;1" dur="11s" repeatCount="indefinite"/></text>
+<text x="22" y="306" class="head" xml:space="preserve" opacity="0">  MODEL          VERDICT  TOKENS  COST    WALL<animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.6364;0.6484;1" dur="11s" repeatCount="indefinite"/></text>
+<text x="22" y="326" class="row" xml:space="preserve" opacity="0">  claude-opus-5  pass     186k    $5.81   312s<animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.6636;0.6756;1" dur="11s" repeatCount="indefinite"/></text>
+<text x="22" y="346" class="row" xml:space="preserve" opacity="0">  glm-5.3-flash  pass     200k    $0.61   242s<animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.6909;0.7029;1" dur="11s" repeatCount="indefinite"/></text>
+<text x="22" y="366" class="fail" xml:space="preserve" opacity="0">  qwen3-coder    fail     178k    $0.29   191s<animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.7182;0.7302;1" dur="11s" repeatCount="indefinite"/></text>
+<text x="22" y="386" class="dim" xml:space="preserve" opacity="0"><animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.7818;0.7938;1" dur="11s" repeatCount="indefinite"/></text>
+<text x="22" y="406" class="dim" xml:space="preserve" opacity="0">  same task, same files, same prefix — the model is the only variable<animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.8000;0.8120;1" dur="11s" repeatCount="indefinite"/></text>
+</svg>
