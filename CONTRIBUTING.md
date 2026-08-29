@@ -25,6 +25,12 @@ done one by the time you get there.
 Run those four and CI has nothing left to tell you, with one caveat it cannot: the `check` job runs
 on node 20 as well as 22, so a 22-only API passes locally and fails there.
 
+**Contributing needs a newer node than using.** The published CLI runs on node 20.0 and its
+`engines` says so; the *test toolchain* does not, because vitest pulls a vite that wants
+`^20.19.0 || >=22.12.0`. The root `package.json` declares that range, so `npm ci` tells you up front
+instead of letting the mismatch surface later as something stranger. Nobody running `orca` is
+affected.
+
 Working on one package:
 
 ```console
