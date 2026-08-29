@@ -144,6 +144,27 @@ describe('gitInfo', () => {
     await expect(capture.gitInfo(join(root, 'nowhere'))).resolves.toEqual({});
   });
 
+  itGit('does not count orca\'s own runs as changes to the user\'s tree', async () => {
+    // The exclusion only covered *this* run's directory, so the second run in a workspace reported
+    // dirty: true because the first run's directory was sitting there untracked. That is exactly
+    // the failure the exclusion exists to prevent, just one run later — and it makes the flag
+    // useless, since almost nobody records only once.
+    const { cwd, capture } = await fixture();
+    await runGit(['init', '-q', '-b', 'trunk'], { cwd });
+    await write(cwd, 'a.txt', 'one\n');
+    await runGit(['add', 'a.txt'], { cwd });
+    await runGit(['-c', 'user.email=a@b.c', '-c', 'user.name=a', 'commit', '-qm', 'first'], { cwd });
+    expect((await capture.gitInfo(cwd)).dirty).toBe(false);
+
+    // A previous run's directory, which orca wrote and the user did not.
+    await write(cwd, '.orca/runs/run_deadbeef0001/events.jsonl', '{}\n');
+    expect((await capture.gitInfo(cwd)).dirty).toBe(false);
+
+    // Anything the user actually changed still counts.
+    await write(cwd, 'b.txt', 'theirs\n');
+    expect((await capture.gitInfo(cwd)).dirty).toBe(true);
+  });
+
   itGit("reads the user's real repo, not the shadow store", async () => {
     const { cwd, capture } = await fixture();
     await runGit(['init', '-q', '-b', 'trunk'], { cwd });

@@ -187,6 +187,74 @@ describe('proxy — record mode', () => {
   });
 });
 
+describe('proxy — hybrid mode below the fork point', () => {
+  /**
+   * Spec §4: replay MUST NOT silently approximate, and every inexact match is an event in the
+   * trace. The halt was guarded by `mode === 'replay'`, so in hybrid mode a request that failed to
+   * match *below* the fork point fell straight through to the live path — no `onUnmatched`, no
+   * divergence, nothing but a counter nobody prints. A fork could start diverging before its own
+   * fork point and every artifact it produced would look clean.
+   *
+   * Going live is right here: that is what hybrid means. Being quiet about it is not.
+   */
+  const exchange: RecordedExchange = {
+    seq: 0,
+    dialect: 'anthropic',
+    path: '/v1/messages',
+    rawRequest: JSON.stringify(ANTHROPIC_BODY),
+    rawResponse: JSON.stringify(ANTHROPIC_REPLY),
+    status: 200,
+    streamed: false,
+    canonicalRequest: {
+      model: 'claude-opus-5',
+      max_tokens: 1024,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'fix the auth test' }] }],
+    },
+  };
+
+  const elsewhere = {
+    model: 'claude-opus-5',
+    max_tokens: 8,
+    messages: [{ role: 'user', content: 'something else entirely' }],
+  };
+
+  it('records a divergence before continuing live', async () => {
+    const up = stubUpstream(ANTHROPIC_REPLY);
+    const divergences: { level: string; rung: number; detail: string }[] = [];
+    const proxy = await createProxy({
+      mode: 'hybrid',
+      forkAt: 1,
+      exchanges: [exchange],
+      fetchImpl: up.fetchImpl,
+      onDivergence: (d) => void divergences.push(d),
+    });
+    closers.push(proxy.close);
+
+    await post(`${proxy.url}/v1/messages`, elsewhere);
+
+    expect(divergences).toHaveLength(1);
+    expect(divergences[0]!.level).toBe('major');
+    expect(divergences[0]!.rung).toBe(4);
+    expect(divergences[0]!.detail).toContain('does not match');
+  });
+
+  it('still serves the request live rather than halting', async () => {
+    const up = stubUpstream(ANTHROPIC_REPLY);
+    const proxy = await createProxy({
+      mode: 'hybrid',
+      forkAt: 1,
+      exchanges: [exchange],
+      fetchImpl: up.fetchImpl,
+    });
+    closers.push(proxy.close);
+
+    const res = await post(`${proxy.url}/v1/messages`, elsewhere);
+
+    expect(res.status).toBe(200);
+    expect(up.calls).toHaveLength(1);
+  });
+});
+
 describe('proxy — forking onto another provider', () => {
   /**
    * The README's headline compare example is `--models claude-opus-5,glm-5.3-flash,qwen3-coder`,

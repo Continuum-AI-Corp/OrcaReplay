@@ -432,6 +432,23 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       }
 
       stats.unmatched += 1;
+
+      // Hybrid mode is *supposed* to continue live here — that is what forking means — but spec §4
+      // says replay must not silently approximate, and every inexact match is an event in the
+      // trace. Without this a fork could start diverging below its own fork point and every
+      // artifact it produced would look clean. Going live is the right behaviour; being quiet
+      // about it is not.
+      if (options.mode === 'hybrid' || options.loose) {
+        stats.divergences += 1;
+        options.onDivergence?.({
+          level: 'major',
+          rung: 4,
+          distance: -1,
+          detail: result.reason ?? 'request does not match the recording; served live instead',
+          seq: replayable[result.index]?.seq ?? -1,
+        });
+      }
+
       if (!options.loose && options.mode === 'replay') {
         // Halt loudly. Inventing a reply here would make every downstream conclusion worthless.
         const reason = result.reason ?? 'request does not match the recording';

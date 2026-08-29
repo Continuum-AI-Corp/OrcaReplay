@@ -72,6 +72,7 @@ export class TraceWriter {
   readonly #started = process.hrtime.bigint();
   #seq = 0;
   #turn = 0;
+  #git: Manifest['git'];
   #tail: Promise<unknown> = Promise.resolve();
   #sealed: Manifest | undefined;
 
@@ -128,6 +129,18 @@ export class TraceWriter {
     return new TraceWriter(runId, runDir, base, redactor, handle);
   }
 
+  /**
+   * Record the repository state the run started from (spec §1).
+   *
+   * A setter rather than a constructor argument because the honest answer needs the run directory
+   * to exist: the dirty check has to exclude orca's own files, or every run in a clean checkout
+   * reports dirty. So the caller reads it once the capture layer is up and hands it back, and it
+   * lands in the manifest at close alongside the counts.
+   */
+  setGit(info: Manifest['git']): void {
+    this.#git = info;
+  }
+
   get runDir(): string {
     return this.#runDir;
   }
@@ -170,6 +183,9 @@ export class TraceWriter {
         rules_fired: this.#redactor.rulesFired(),
       },
       integrity: { events_sha256: await sha256File(this.#eventsPath), blob_count: blobs },
+      // Conditional for the same reason the fork keys are: the schema forbids unknown keys, and a
+      // run outside a repository should carry no git block rather than three empty fields.
+      ...(this.#git === undefined || Object.keys(this.#git).length === 0 ? {} : { git: this.#git }),
     };
     if (exitCode !== undefined) manifest.exit_code = exitCode;
     assertManifest(manifest);

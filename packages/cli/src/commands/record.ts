@@ -66,6 +66,9 @@ export async function recordCommand(
   if (captureFs) {
     try {
       fs = await FsCapture.start({ runDir: writer.runDir, cwd });
+      // Read once, before the agent touches anything: `git` describes the state the run started
+      // from, which is what makes it a reproduction instruction rather than a postscript.
+      writer.setGit(await fs.gitInfo());
     } catch (err) {
       // Filesystem capture is valuable but not essential; losing it should degrade the trace,
       // not abort the run the user actually wanted to record.

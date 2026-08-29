@@ -95,6 +95,11 @@ export class FsCapture {
   /**
    * The run dir usually sits inside the workspace, so without this every run in a clean checkout
    * would report `dirty: true` because of orca's own files.
+   *
+   * The whole `.orca` directory is excluded, not just this run's own directory inside it.
+   * Excluding one run left every *earlier* run counting as an untracked change, so the second
+   * recording in a workspace reported the user's tree dirty — the same failure this exists to
+   * prevent, one run later, and almost nobody records only once.
    */
   private async statusPathspec(cwd: string): Promise<string[]> {
     const top = await runGit(['rev-parse', '--show-toplevel'], { cwd });
@@ -103,7 +108,13 @@ export class FsCapture {
     const run = await resolvePath(this.runDir);
     const rel = relative(root, run);
     if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return [];
-    return ['--', ':/', `:(top,exclude,literal)${rel.split(sep).join('/')}`];
+
+    // Cut the path back to its `.orca` segment rather than assuming a depth, so this keeps working
+    // if the layout under `.orca` ever changes. No such segment: exclude the run dir alone.
+    const parts = rel.split(sep);
+    const orcaAt = parts.indexOf('.orca');
+    const exclude = (orcaAt === -1 ? parts : parts.slice(0, orcaAt + 1)).join('/');
+    return ['--', ':/', `:(top,exclude,literal)${exclude}`];
   }
 }
 

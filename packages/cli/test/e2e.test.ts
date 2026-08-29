@@ -289,6 +289,26 @@ describe('end to end: record → replay → fork', () => {
     }
   });
 
+  it('records the commit the run started from', async () => {
+    // `manifest.git` is in the schema, the Python reader parses it, and nothing ever wrote it — so
+    // every trace was missing the single most useful piece of provenance for "why did my agent
+    // delete my file": which commit it was looking at.
+    // The shared fixture inits a repo but never commits, so HEAD is unborn there. Commit here
+    // rather than in `beforeEach`: other tests assert on a dirty tree and should keep doing so.
+    await run('git', ['add', '-A'], { cwd: workspace });
+    await run('git', ['commit', '-qm', 'initial'], { cwd: workspace });
+
+    const result = await record();
+    const manifest = (await TraceReader.open(result.runDir)).manifest();
+    const head = (await run('git', ['rev-parse', 'HEAD'], { cwd: workspace })).stdout.trim();
+
+    expect(manifest.git?.head).toBe(head);
+    expect(manifest.git?.branch).toBeDefined();
+    // The agent edits a file, so by the end the tree is dirty — but `git` describes the state the
+    // run *started* from, which is what makes it a reproduction instruction.
+    expect(manifest.git?.dirty).toBe(false);
+  });
+
   it('derives checkpoints you can fork from', async () => {
     const result = await record();
     const events = await (await TraceReader.open(result.runDir)).events();
