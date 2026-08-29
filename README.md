@@ -91,10 +91,19 @@ public interface first.
 
 ## Documentation
 
+**Start here if you have a problem right now:**
+
+- [My agent broke something. How do I find out why?](docs/how-to/debug-a-failing-agent-run.md)
+- [Why did my agent delete that file?](docs/how-to/why-did-my-agent-delete-my-file.md)
+- [Would a different model have got this right?](docs/how-to/compare-models-on-the-same-failure.md)
+
+**Reference:**
+
 - [`spec/orca-trace-v0.md`](spec/orca-trace-v0.md) — the normative trace format
 - [`docs/architecture.md`](docs/architecture.md) — how capture, replay and fork actually work
 - [`docs/plugins.md`](docs/plugins.md) — writing an adapter or a provider
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — five-minute dev loop
+- [Good first issues](docs/good-first-issues.md) — twelve of them, with the file to start in
 
 ## License
 
