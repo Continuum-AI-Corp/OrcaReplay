@@ -19,6 +19,7 @@ import { ExchangeEventDeriver } from '../exchange-events.js';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
 import { SerialQueue } from '../serial.js';
+import { appendSnapshot } from '../fs-events.js';
 import { setupTlsCapture, trustRunCa } from '../tls-capture.js';
 import { upstreamPlan } from '../upstream.js';
 import { ORCA_VERSION } from '../version.js';
@@ -476,6 +477,27 @@ async function replayFork(
   let turn = 0;
   const writes = new SerialQueue();
 
+  /**
+   * The fork's own filesystem capture, over its worktree.
+   *
+   * A fork had none, so its trace carried no `fs.snapshot` — and a checkpoint is derived from a
+   * snapshot (spec §3), so a fork had no checkpoints and could not itself be forked. `orca compare
+   * last` immediately after a fork failed with "this run has no checkpoints", because `last` had
+   * resolved to the fork. The tool is pitched on iterative exploration; a branch you cannot branch
+   * again is a dead end one step in.
+   *
+   * Same posture as recording: a capture layer that will not start degrades the trace and never
+   * stops the run.
+   */
+  let forkFs: FsCapture | undefined;
+  if (args.bool('fs', true)) {
+    try {
+      forkFs = await FsCapture.start({ runDir: writer.runDir, cwd: worktree });
+    } catch (err) {
+      out.warn('fs.unavailable', { reason: String(err) });
+    }
+  }
+
   const plan = await upstreamPlan(args);
 
   // A fork runs a real agent live, so it has exactly the same blind spot `orca record` does: a
@@ -504,6 +526,7 @@ async function replayFork(
             payload: d.payload as never,
           });
         }
+        if (forkFs) await appendSnapshot(forkFs, writer, out, turn);
       });
     },
     onDivergence: (d) => {
@@ -529,6 +552,10 @@ async function replayFork(
       worktree,
     },
   });
+
+  // The state the fork starts from, so its first checkpoint is the checkpoint it branched at
+  // rather than whatever the first live turn happened to leave behind.
+  if (forkFs) await appendSnapshot(forkFs, writer, out, 0, { initial: true });
 
   out.phase('forked', {
     from: ctx.manifest.run_id,

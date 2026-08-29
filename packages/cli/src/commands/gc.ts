@@ -196,9 +196,15 @@ export async function gcCommand(
  * Does this path look like a directory orca made for a fork to run in?
  *
  * Deliberately narrow, and deliberately only half the test — the caller also requires the run to
- * be a fork. Directly inside the OS temp directory, with the prefix `replayFork` and `replayExact`
- * use. Anything else is left alone, including a fork whose worktree someone moved somewhere they
- * care about: an unreclaimed directory costs disk, and the alternative costs somebody's work.
+ * carry a `fork_point`. Directly inside the OS temp directory, with the prefix `replayFork` uses.
+ * Anything else is left alone, including a fork whose worktree someone moved somewhere they care
+ * about: an unreclaimed directory costs disk, and the alternative costs somebody's work.
+ *
+ * So `orca replay --worktree` is out of reach here, because an exact replay's trace has no fork
+ * point. That is the right way round: you asked for a scratch copy to look at, orca printed where
+ * it put it, and a garbage collector that deletes the thing you asked to keep is worse than one
+ * that leaves a directory behind. The pre-replay safety snapshot is not gc's problem either —
+ * replay owns that one and removes it once your files are back.
  */
 function isScratchWorktree(dir: string): boolean {
   return resolve(dirname(dir)) === resolve(tmpdir()) && basename(dir).startsWith('orca-');

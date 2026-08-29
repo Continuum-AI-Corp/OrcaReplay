@@ -10,7 +10,7 @@ import { ExchangeEventDeriver } from '../exchange-events.js';
 import { installShellShim, readShellFrames } from '@orcareplay/shell-shim';
 import { setupMcpCapture, type McpCapture } from '../mcp.js';
 import { SerialQueue } from '../serial.js';
-import { snapshotWithRetry } from '../snapshot.js';
+import { appendSnapshot } from '../fs-events.js';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
 import { setupTlsCapture, trustRunCa } from '../tls-capture.js';
@@ -176,41 +176,7 @@ async function runRecording(
       }
     }
 
-    if (fs) {
-      const outcome = await snapshotWithRetry(fs, turn);
-      if (!outcome.ok || !outcome.snapshot) {
-        // Degrade, never abort: losing a snapshot costs one checkpoint, whereas throwing here
-        // would cost the user the run they were trying to record.
-        out.warn('fs.snapshot_failed', { turn, attempts: outcome.attempts, error: outcome.error });
-        await writer.append({
-          type: 'note',
-          actor: 'orca',
-          turn,
-          attrs: { rule: 'fs_snapshot_skipped', attempts: outcome.attempts, error: outcome.error },
-        });
-      } else {
-        const snap = outcome.snapshot;
-        await writer.append({
-          type: 'fs.snapshot',
-          actor: 'orca',
-          turn,
-          attrs: { tree: snap.tree, changes: snap.changes.length },
-        });
-        for (const change of snap.changes) {
-          await writer.append({
-            type: 'fs.change',
-            actor: 'orca',
-            turn,
-            attrs: {
-              path: change.path,
-              status: change.status,
-              insertions: change.insertions,
-              deletions: change.deletions,
-            },
-          });
-        }
-      }
-    }
+    if (fs) await appendSnapshot(fs, writer, out, turn);
   }
 
   await writer.append({
@@ -220,19 +186,7 @@ async function runRecording(
     attrs: { adapter: adapter.id, cwd, proxy: proxy.url },
   });
 
-  if (fs) {
-    const initial = await snapshotWithRetry(fs, 0);
-    if (initial.ok && initial.snapshot) {
-      await writer.append({
-        type: 'fs.snapshot',
-        actor: 'orca',
-        turn: 0,
-        attrs: { tree: initial.snapshot.tree, changes: 0, initial: true },
-      });
-    } else {
-      out.warn('fs.snapshot_failed', { turn: 0, error: initial.error });
-    }
-  }
+  if (fs) await appendSnapshot(fs, writer, out, 0, { initial: true });
 
   const ctx: RecordContext = {
     runId: writer.runId,

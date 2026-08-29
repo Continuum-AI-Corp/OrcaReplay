@@ -136,6 +136,8 @@ export async function scrubCommand(
   }
 
   const pending: PendingWrite[] = [];
+  /** The redaction ledger, which is appended to rather than scrubbed — reported, never counted. */
+  let ledger: string | undefined;
 
   const nextEvents = `${scrubbedLines.join('\n')}\n`;
   const eventsRewritten = nextEvents !== original;
@@ -197,11 +199,21 @@ export async function scrubCommand(
       { rule: 'scrub', identifier: `manual:${literals.length} literal(s)`, count: removals },
     ];
     pending.push({ path: redactionsPath, contents: `${JSON.stringify(doc, null, 2)}\n` });
+    ledger = redactionsPath;
   }
 
   if (dryRun) {
     out.phase('scrub.dry_run', { run: runDir, would_remove: removals, would_change: filesChanged });
-    for (const write of pending) out.plain(`  would rewrite ${relative(runDir, write.path)}`);
+    // The ledger is listed apart from the count. `files=N` has always meant files whose *contents*
+    // were scrubbed, and `redactions.json` only gains a line saying how many removals happened —
+    // folding it in would inflate the number, and listing it without saying so left a plan that
+    // named three files under a heading that said two.
+    for (const write of pending) {
+      if (write.path === ledger) continue;
+      out.plain(`  would rewrite ${relative(runDir, write.path)}`);
+    }
+    if (ledger !== undefined)
+      out.plain(`  would record the removals in ${relative(runDir, ledger)}`);
     if (fs.matches > 0) out.plain(`  ${fs.matches} shadow-store object(s) would still match`);
   } else {
     await commit(pending);

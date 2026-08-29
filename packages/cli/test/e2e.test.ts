@@ -425,6 +425,60 @@ describe('end to end: record → replay → fork', () => {
     expect(forkEvent?.attrs?.fork_point).toBe(checkpoint.seq);
   });
 
+  it('records the filesystem as a fork runs, so a fork can be forked again', async () => {
+    // A fork used to record only the conversation. A checkpoint is derived from a snapshot
+    // (spec §3), so a fork had no checkpoints and could not be forked — and `orca compare last`
+    // straight after a fork failed with "this run has no checkpoints", because `last` resolves to
+    // the fork. A branch you cannot branch again is a dead end one step in.
+    const recorded = await record();
+    const checkpoints = deriveCheckpoints(await (await TraceReader.open(recorded.runDir)).events());
+    const first = await replayCommand(
+      parseArgs([
+        'replay',
+        'last',
+        '--from',
+        String(checkpoints[0]!.seq),
+        '--model',
+        'glm-5.3-flash',
+        '--upstream-anthropic',
+        model.url,
+      ]),
+      out,
+      workspace,
+    );
+
+    const forkDir = (await resolveRunSelector(workspace, first.forkRunId!)).dir;
+    const forkEvents = await (await TraceReader.open(forkDir)).events();
+    expect(
+      forkEvents.filter((e) => e.type === 'fs.snapshot').length,
+      'the fork recorded no filesystem snapshot',
+    ).toBeGreaterThan(0);
+
+    const forkCheckpoints = deriveCheckpoints(forkEvents);
+    expect(forkCheckpoints.length, 'a fork with no checkpoints cannot be forked').toBeGreaterThan(
+      0,
+    );
+
+    // And the property that actually matters: forking it works.
+    const second = await replayCommand(
+      parseArgs([
+        'replay',
+        first.forkRunId!,
+        '--from',
+        String(forkCheckpoints[0]!.seq),
+        '--model',
+        'claude-haiku-4-5',
+        '--upstream-anthropic',
+        model.url,
+      ]),
+      out,
+      workspace,
+    );
+    expect(second.forkRunId).toBeDefined();
+    expect(second.forkRunId).not.toBe(first.forkRunId);
+    expect(second.exitCode, 'the twice-forked agent must actually run').toBe(0);
+  });
+
   it('lists both runs afterwards, newest first', async () => {
     await record();
     const before = (await listRuns(workspace)).length;

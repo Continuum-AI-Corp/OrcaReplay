@@ -116,6 +116,37 @@ try {
     turn: 1,
     attrs: { host: 'api.example.com', status: 200, duration_ms: 12 },
   });
+  // An MCP pair, which `--mcp-config` emits for real. It reached this list only after the shim
+  // resolution was fixed — until then the recorder rewrote every stdio server to launch a module
+  // that exits without starting it, so this type was unexercised because the layer did not work,
+  // which is exactly what the coverage line below exists to surface.
+  await writer.append({
+    type: 'mcp.request',
+    actor: 'agent',
+    turn: 1,
+    attrs: { server: 'files', kind: 'request', method: 'tools/list', id: 1 },
+    payload: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+  });
+  await writer.append({
+    type: 'mcp.response',
+    actor: 'agent',
+    turn: 1,
+    attrs: { server: 'files', kind: 'response', id: 1 },
+    payload: JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools: [] } }),
+  });
+  // A fork and the divergence a fork reports. Both come out of `orca replay --from N --model X`.
+  await writer.append({
+    type: 'fork',
+    actor: 'orca',
+    turn: 1,
+    attrs: { parent_run: 'run_000000000000', fork_point: 2, model: 'gpt-5.2' },
+  });
+  await writer.append({
+    type: 'divergence',
+    actor: 'orca',
+    turn: 1,
+    attrs: { level: 'minor', rung: 2, detail: 'trailing message differs', source_seq: 2 },
+  });
   await writer.append({ type: 'run.end', actor: 'orca', turn: 1, attrs: { exit_code: 0 } });
   await writer.close(0);
   await checkTrace(writer.runDir, 'this writer, freshly recorded');
@@ -125,6 +156,10 @@ try {
 
 // Not a failure: the format deliberately declares more than v0 emits, and a reader is better
 // served by knowing which is which than by the schema and the recorder quietly disagreeing.
+//
+// Only types this repository actually emits are added above. Writing a synthetic event for a type
+// nothing produces would empty this list while making it a lie — the line is worth having precisely
+// because it is what noticed that MCP capture emitted nothing.
 const unexercised = EVENT_TYPES.filter((t) => !seen.has(t));
 if (unexercised.length > 0) {
   console.log(`\ndeclared but not exercised by any trace here: ${unexercised.join(', ')}`);

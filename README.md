@@ -135,7 +135,7 @@ Early. `v0` is the walking skeleton of the three commands above.
 | Trace format v0 + JSON Schema | working |
 | Anthropic / OpenAI-compatible model capture | working |
 | Exact replay with divergence reporting | working — restores the recorded filesystem over your working tree, then puts it back; `--worktree` for a scratch copy, `--in-place` to restore nothing. Writes a run of its own recording what the replay *discovered* — divergences, unmatched requests — and points at the parent for what it merely repeated; `--no-trace` to skip |
-| Fork replay from a checkpoint | working |
+| Fork replay from a checkpoint | working — a fork records its own filesystem snapshots, so it is a run you can fork again |
 | Compare across models | working — `orca setup` stores a gateway, key and default model list, so `orca compare` needs no flags |
 | Filesystem snapshots and diffs | working |
 | Single-file HTML export | working |
