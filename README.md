@@ -57,16 +57,120 @@ OrcaReplay answers that by giving you the run back.
 | Needs you to modify your agent | usually an SDK wrapper | ❌ two env vars |
 | Works after you close the terminal | ❌ | ✅ it is a file |
 
-## How it works, in one paragraph
+## How it works
 
 Model APIs are stateless, so on every turn an agent resends the entire conversation — including the
-previous turn's tool results. A proxy sitting in front of the model therefore sees the whole loop:
-each request, each streamed response, every tool call the model emitted, and every tool result the
-harness produced. That means **OrcaReplay does not patch your agent**. It stands up a local
-recording proxy, injects a couple of environment variables, and gets out of the way.
+previous turn's tool results. **A proxy in front of the model therefore sees the whole loop**: each
+request, each streamed response, every tool call the model emitted, and every tool result the
+harness produced. That one property is what the tool is built on, and it is why **OrcaReplay does
+not patch your agent** — it stands up a local proxy, sets two environment variables, and gets out of
+the way.
 
-Three more capture layers fill the gaps: an MCP shim, a `PATH` shim for shell exit codes and
-timing, and a shadow git index for filesystem diffs.
+Three more layers catch what the protocol cannot see: an exit code, a real duration, which stream a
+byte came out of, a file written without telling anyone.
+
+```mermaid
+%%{init: {'theme':'neutral'}}%%
+flowchart LR
+    A["<b>your agent</b><br/><i>unmodified</i>"]
+
+    subgraph orca["orca · four capture layers"]
+        direction TB
+        P["<b>proxy</b><br/>base-URL env var"]
+        SH["<b>PATH shim</b><br/>exit code · timing · streams"]
+        MC["<b>JSON-RPC tee</b><br/>MCP config rewrite"]
+        FS["<b>shadow git index</b><br/>workspace per turn"]
+    end
+
+    A --> P & SH & MC & FS
+    P -->|"forwarded, auth intact"| U["<b>the model API</b><br/><i>or OrcaRouter · any gateway</i>"]
+    orca ==> T[("<b>one trace</b><br/>.orca/runs/run_a1b2c3")]
+```
+
+All four land in the same timeline, ordered by when they actually happened rather than when orca
+got around to reading them.
+
+### Exact, fork and compare are one thing
+
+They are not three subsystems. They are the same proxy with a **cursor** — the position in the
+recorded stream where it stops answering from disk and starts answering from the network.
+
+```mermaid
+%%{init: {'theme':'neutral'}}%%
+flowchart LR
+    subgraph disk["from disk · byte-for-byte · network blocked"]
+        direction LR
+        T1["turn 1"] --> T2["turn 2"] --> T3["turn 3"] --> T4["turn 4"]
+    end
+    T4 ==> CUR{{"<b>cursor</b>"}}
+    CUR ==> T5
+    subgraph net["from the network · any model you name"]
+        direction LR
+        T5["turn 5"] --> T6["turn 6"] --> T7["…"]
+    end
+```
+
+| command | where the cursor sits | what you get |
+|---|---|---|
+| `orca replay last` | at the end | the whole run again, **network blocked** — no tokens, no charge, no variance |
+| `orca replay last --from 4 --model X` | at checkpoint 4 | turns up to 4 identical, then a different model takes over |
+| `orca compare last --from 4 --models a,b` | at checkpoint 4, several times | one table, one variable — the model |
+
+A **checkpoint** is not recorded; it is *derived* — any point where the conversation prefix is
+complete and the workspace was snapshotted. Every fork therefore starts from a state that provably
+existed.
+
+## What a bug hunt actually looks like
+
+Your agent was supposed to fix a failing auth test. It exited 0 and the test still fails. Start with
+what it actually did:
+
+```console
+$ orca show last
+run_6473f858b59e  generic-openai@0.1.0  14 events  exit 0
+
+SEQ  KIND   WHAT                                            DETAIL
+0    RUN    run started                                     generic-openai
+1    SNAP   tree 919d32ba037537b43814c83779963b2cc3023db7   0 changed
+2    MODEL  claude-opus-5                                   1 messages
+3    MODEL  claude-opus-5                                   stop: tool_use · 100 in · 20 out
+4    TOOL   edit_file                                       {"path":"auth.ts",…}
+5    SNAP   tree c6af62b75c0c8b8938bd6087328b5148f3dcd534   1 changed
+6    FILE   auth.ts                                         modified +1 −3
+7    TOOL   edit_file                                       ok
+8    MODEL  claude-opus-5                                   3 messages
+9    MODEL  claude-opus-5                                   stop: end_turn · 101 in · 5 out
+10   SNAP   tree c6af62b75c0c8b8938bd6087328b5148f3dcd534   0 changed
+11   SHELL  ["sh","-c","node --check nonexistent-file.ts"]  /tmp/hunt
+12   SHELL  shell result                                    exit 1 · 43ms
+13   RUN    run ended                                       exit 0
+
+info usage input=201 output=25 cost=$0.004890
+```
+
+Three facts the model's own transcript could not have told you, and the run's exit code hid: the
+file really changed (seq 6, `+1 −3`), the check the agent ran **failed** (seq 12, `exit 1`), and it
+finished anyway. The run exited 0 because the *agent* exited 0.
+
+Now reproduce it as often as you like, for nothing:
+
+```console
+$ orca replay last
+info replay.done matched=2 total=2 divergences=0 unmatched=0 exit=0
+```
+
+No network, no tokens, no variance. Then ask the question you actually have — *would a different
+model have got this right?*
+
+```console
+$ orca compare last --from 5 --models claude-opus-5,claude-haiku-4-5 --verify "npm test"
+MODEL             VERDICT  TOKENS  COST       WALL  RUN
+claude-opus-5     pass     201/25  $0.004890  0.3s  run_1457b35062ba
+claude-haiku-4-5  pass     201/25  $0.000326  0.3s  run_b8ee08479fb6
+```
+
+Both pass. One costs **15× less**. Same files, same conversation prefix, same checkpoint — the model
+is the only thing that changed, which is the only reason that number means anything.
 
 ## The timeline
 
