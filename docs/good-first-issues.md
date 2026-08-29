@@ -16,12 +16,14 @@ records the env vars you verified against.
 1. **Aider adapter.** Python-based; check whether it reads `OPENAI_API_BASE`.
 2. **Continue adapter.** VS Code extension — the interesting question is where its model config
    lives and whether a base URL can be injected per-process.
-3. **Cline adapter.** Same shape as Continue; both may need the opt-in CA mode instead.
+3. **Cline adapter.** Same shape as Continue; if neither can be pointed at a base URL per process,
+   there is nothing to fall back on — base-URL injection is the only capture mechanism there is,
+   and no CA mode exists. Finding that out is still a result worth writing down.
 4. **Goose adapter.** Block's agent; confirm its provider configuration path.
 
 **Before writing one, answer one question:** does the agent respect a base-URL environment
-variable? That single fact decides whether this is an afternoon or a week. Put the answer in the
-issue even if you write no code — it is genuinely useful on its own.
+variable? That single fact decides whether this is an afternoon, a week, or not possible yet. Put
+the answer in the issue even if you write no code — it is genuinely useful on its own.
 
 ## Providers — a model you can't currently fork onto
 

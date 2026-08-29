@@ -24,28 +24,56 @@ jq 'select(.type == "fs.change" and .attrs.path == "src/auth.ts")' .orca/runs/*/
 
 ## Read what the agent was doing at that moment
 
-`causes` links events into a chain, so you can walk backwards from the deletion to the tool call
-that made it and the model response that asked for it:
-
 ```console
 orca replay last --ui
 ```
 
-Select seq 15. The pane shows the diff; the rows immediately above it are the `tool.call` that
-performed the write and the `model.response` that decided on it — including the model's own
-reasoning text, verbatim.
+Select seq 15. The pane shows the event's own facts — path, status, insertion and deletion counts —
+and the rows immediately above it are the same turn's `tool.call` and `model.response`. Select the
+`model.response` and you get the raw body it was recorded from, including the model's own reasoning
+text, verbatim. That is the sentence you came for.
+
+Two limits to know before you rely on this. The `fs.change` event stores counts, **not a diff** —
+there is no patch in the trace, only the tree ids either side of it, so the pane has no `-` lines
+to show you. And walking the chain is positional, not linked: `causes` is only populated on
+`shell.result`, pointing at its `shell.exec`. An `fs.change` names nothing, so "the rows just above
+it, in the same turn" is the actual relationship, and it is why turn boundaries are worth watching.
 
 ## Get the file back
 
-The workspace at every turn is a real git tree in the run's shadow store:
+**There is no read-only "materialise this checkpoint" command yet.** Note especially what
+`orca replay last --from 14` is *not*: `--from` is a fork. It serves the conversation up to that
+checkpoint from the recording and then spawns your real agent to continue **live**, against the
+real model API. Reaching for it to recover a file bills you for tokens and turns an agent loose on
+a copy of your workspace.
+
+What you have instead is the shadow store, and it is enough. It is an ordinary bare git object
+store, so plain git reads it — no OrcaReplay code involved:
 
 ```console
-orca checkpoints last          # which turns you can restore from
-orca replay last --from 14     # materialises the workspace as it was, in a scratch worktree
+orca show last | grep SNAP       # the tree id for each turn, full length
+orca checkpoints last            # the same trees, by the seq you could fork from
 ```
 
-The fork runs in a temp directory, so your actual workspace is untouched — you can copy the file
-out of it.
+```console
+# one file, as it was at that tree
+git --git-dir=.orca/runs/<id>/fs cat-file blob <tree>:src/auth.ts > src/auth.ts
+
+# what was in the tree at all
+git --git-dir=.orca/runs/<id>/fs ls-tree -r <tree>
+
+# or the whole workspace, into a scratch directory that is not yours
+mkdir /tmp/before && git --git-dir=.orca/runs/<id>/fs archive <tree> | tar -x -C /tmp/before
+```
+
+Take the tree from the `SNAP` row of the turn **before** the deletion — the snapshot is taken at the
+end of a turn, so the turn that deleted the file already has it gone. An abbreviated tree id works,
+which is what makes the twelve characters `orca checkpoints` prints usable directly.
+
+The objects are dangling on purpose: snapshots are written with `write-tree` and never committed, so
+there are no refs and `git log` in that directory shows nothing. That is also why `orca scrub`
+cannot rewrite the store, and why `--drop-fs` — which deletes it — takes this recovery route with
+it.
 
 ## Stop it happening again
 
@@ -57,3 +85,8 @@ orca replay last --from 14 --model <another-model>
 
 Same files, same conversation up to that point, different model from there. If the second model
 does not delete the file, you have a concrete, reproducible case to file against the first.
+
+This is the one place spending the tokens is the point. The fork restores the checkpoint tree into
+a scratch worktree under the OS temp directory and runs there, so your own checkout is never
+touched, and it prints the path it used. The worktree is deliberately left behind — it holds what
+the model actually did — until `orca gc` reclaims it along with the fork's run.

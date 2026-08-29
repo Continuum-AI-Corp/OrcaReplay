@@ -35,8 +35,12 @@ your harness exposes internal state a fork would otherwise lose (context compact
 lists, memory files).
 
 **Before you write one**, check whether the agent respects a base-URL environment variable. That
-single fact decides whether an adapter is an afternoon or a week. If it does not, the generic
-OpenAI adapter plus the opt-in CA mode may already cover it.
+single fact decides whether an adapter is an afternoon or a week — or whether one can be written at
+all. Base-URL injection is the only capture mechanism there is; there is no CA mode to fall back on
+(see [SECURITY.md](../SECURITY.md)), so a harness that reads no base-URL variable cannot be
+recorded today. If it reads an unusual one, the generic OpenAI adapter probably already covers you:
+it sets `OPENAI_BASE_URL`, `OPENAI_API_BASE` and `ANTHROPIC_BASE_URL` at once and takes the command
+from argv.
 
 ## The adapter contract
 
@@ -50,14 +54,20 @@ import { checkAdapterContract, formatContractResult } from '@orcareplay/adapters
 import { myAgent } from './my-agent.js';
 
 const result = await checkAdapterContract(myAgent);
-console.log(formatContractResult(result)); // "my-agent: ok (8 checks)"
+console.log(formatContractResult(result)); // "my-agent: ok (9 checks)"
 if (!result.ok) process.exitCode = 1;
 ```
 
 It never throws and it runs every check even after one fails, so one pass gives you the whole list.
 Pass `{ ctx: { userArgs: ['my-agent'] } }` if your adapter takes its command from argv.
 
-Nine checks. Each one is here because breaking it fails *silently*:
+Nine checks are registered, and the count in that line is how many actually **ran**: a check that
+does not apply is skipped rather than counted as a pass. Only one skips today —
+`harness-versions`, when an adapter declares no range — so an adapter without a
+`harnessVersions` field prints `ok (8 checks)` and one with a range prints `ok (9 checks)`. The
+adapter above declares `>=1.2.0 <2`, so it gets nine.
+
+Each check is here because breaking it fails *silently*:
 
 - **`id-format`** — lowercase kebab-case. The id is what a user types after `orca record` and what
   the trace records; mixed case and underscores turn into support questions.
