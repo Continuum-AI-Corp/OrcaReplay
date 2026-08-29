@@ -36,6 +36,12 @@ describe('orca record --tls-intercept', () => {
   let envOut: string;
   let resultOut: string;
   let keyOut: string;
+  /**
+   * The environment as it stood before the run. Asserting against `undefined` would be wrong on
+   * any machine that already sets a proxy or a CA bundle of its own — and orca leaving those
+   * exactly as it found them is the property worth pinning anyway.
+   */
+  let ambient: Record<string, string | undefined>;
 
   async function startOrigin(
     handler: (path: string) => { status: number; body: string },
@@ -58,9 +64,9 @@ describe('orca record --tls-intercept', () => {
   }
 
   beforeEach(async () => {
-    workspace = await mkdtemp(join(tmpdir(), 'orca-tls-cli-'));
-    originDir = await mkdtemp(join(tmpdir(), 'orca-tls-origin-'));
-    scratch = await mkdtemp(join(tmpdir(), 'orca-tls-scratch-'));
+    workspace = await mkdtemp(join(tmpdir(), 'orca-mitmcli-'));
+    originDir = await mkdtemp(join(tmpdir(), 'orca-mitmorigin-'));
+    scratch = await mkdtemp(join(tmpdir(), 'orca-mitmscratch-'));
     originCa = await RunCa.create({ runDir: originDir });
     envOut = join(scratch, 'env.json');
     resultOut = join(scratch, 'results.json');
@@ -77,6 +83,7 @@ describe('orca record --tls-intercept', () => {
 
     lines = [];
     out = new Output({ write: (s) => void lines.push(s), isTTY: false });
+    ambient = { ...process.env };
 
     process.env.ORCA_TEST_ENV_OUT = envOut;
     process.env.ORCA_TEST_RESULT_OUT = resultOut;
@@ -131,9 +138,9 @@ describe('orca record --tls-intercept', () => {
     const result = await record([]);
     const env = await childEnv();
 
-    expect(env.HTTPS_PROXY).toBeUndefined();
-    expect(env.NODE_EXTRA_CA_CERTS).toBeUndefined();
-    expect(env.SSL_CERT_FILE).toBeUndefined();
+    for (const key of ['HTTPS_PROXY', 'https_proxy', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE']) {
+      expect(env[key], key).toBe(ambient[key]);
+    }
     await expect(stat(join(result.runDir, 'tls'))).rejects.toThrow();
     expect(lines.join('')).not.toMatch(/tls/i);
   });
@@ -160,9 +167,12 @@ describe('orca record --tls-intercept', () => {
     // The agent's own calls to the recording proxy must not be sent through the recording proxy.
     expect(env.NO_PROXY).toContain('127.0.0.1');
 
-    // Nothing global: this process was never asked to trust the run CA.
-    expect(process.env.NODE_EXTRA_CA_CERTS).toBeUndefined();
-    expect(process.env.SSL_CERT_FILE).toBeUndefined();
+    // Nothing global. Orca's own process was never asked to trust the run CA, and the variables
+    // it set on the child are absent from — or unchanged in — its own environment.
+    for (const key of ['NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE', 'NO_PROXY']) {
+      expect(process.env[key], key).toBe(ambient[key]);
+    }
+    expect(process.env.NODE_EXTRA_CA_CERTS ?? '').not.toContain(result.runDir);
   });
 
   it('captures an allowlisted host and tunnels everything else', async () => {
@@ -184,8 +194,11 @@ describe('orca record --tls-intercept', () => {
     // the tunnel is transparent to everything.
     expect(results[0]!.status).toBe(200);
     expect(results[1]!.status).toBe(200);
-    expect(results[0]!.issuer).toContain('run CA');
-    expect(results[1]!.issuer).not.toContain('run CA');
+    // The intercepted call saw a certificate orca minted; the tunnelled one saw the origin's own.
+    const originIssuer = /CN=(.*)/.exec(new X509Certificate(originCa.certPem).subject)?.[1];
+    expect(results[0]!.issuer).not.toBe(originIssuer);
+    expect(results[0]!.issuer).toContain('OrcaReplay run CA');
+    expect(results[1]!.issuer).toBe(originIssuer);
 
     const events = await (await TraceReader.open(result.runDir)).events();
     const net = events.filter((e) => e.type === 'net.request' || e.type === 'net.response');

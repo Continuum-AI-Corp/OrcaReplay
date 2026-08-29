@@ -59,6 +59,17 @@ Flags
   --no-color     also honours NO_COLOR
   --port <n>     port for --ui and orca ui (default: any free port)
 
+A harness that reads no base-URL variable cannot be captured that way at all — a Codex CLI signed
+in with a ChatGPT subscription is the case. For that, and only for that:
+
+  --tls-intercept              decrypt HTTPS for the hosts below, for this run only
+  --tls-hosts a,b,c            which hosts to decrypt (default: model API hosts)
+                               everything else is tunnelled unread; "*" is refused
+
+  It mints a certificate authority in the run directory, trusts it to the agent through that
+  child's environment alone, and deletes it when the run ends. It installs nothing, anywhere.
+  If a machine is already behind a TLS-inspecting proxy, name its root in ORCA_TLS_UPSTREAM_CA.
+
 Sending traffic somewhere other than the vendor — a gateway, a proxy, a local model — is what
 these two are for. They apply to record, replay, fork and compare alike:
 

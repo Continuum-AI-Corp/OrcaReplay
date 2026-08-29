@@ -126,6 +126,11 @@ export async function recordCommand(
    */
   const interceptTls = args.bool('tls-intercept');
   const tlsHosts = args.list('tls-hosts');
+  // Naming hosts without asking for interception captures nothing and says nothing, which reads
+  // as "orca ignored my traffic" rather than as "orca ignored my flag".
+  if (!interceptTls && tlsHosts.length > 0) {
+    out.warn('tls.hosts_ignored', { hosts: tlsHosts.join(','), next: 'add --tls-intercept' });
+  }
   let ca: RunCa | undefined;
   if (interceptTls) {
     // Validated before anything is minted, so `--tls-hosts '*'` fails without leaving a private
@@ -566,7 +571,10 @@ async function extraOriginRoots(env: NodeJS.ProcessEnv = process.env): Promise<s
   const configured = env.ORCA_TLS_UPSTREAM_CA;
   if (!configured) return [];
   const roots: string[] = [];
-  for (const path of configured.split(',').map((p) => p.trim()).filter(Boolean)) {
+  for (const path of configured
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean)) {
     roots.push(await readFile(path, 'utf8'));
   }
   return roots;
