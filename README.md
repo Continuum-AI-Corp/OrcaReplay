@@ -304,7 +304,33 @@ Early. `v0` is the walking skeleton of the three commands above.
 | Post-hoc scrubbing (`orca scrub`) | working |
 | Shell capture (`PATH` shim) | working — exit codes, duration and the stdout/stderr split. `--no-shell` to skip |
 | Non-model network capture | working — opt in with `--tls-intercept`; mints a per-run CA the launched agent alone trusts, decrypts an allowlist of hosts, tunnels the rest unread, and deletes the key when the run ends |
+| Validated against a real agent | Claude Code, recording a real fix to a real bug: recorded, replayed offline end to end, forked from a checkpoint and exported. Four bugs found doing it, all fixed — see below |
 | Subscription-auth harnesses | Claude Code works. A Codex CLI signed in with a ChatGPT subscription talks to its own backend and reads no base-URL variable, so it needs `--tls-intercept` |
+
+### What a real agent found
+
+Everything above was built against fixtures. The first Claude Code run recorded through it broke
+four things, each of a kind no fixture can produce:
+
+- **A sixteen-character drift scored 217,568.** Distance was the common prefix and suffix of the
+  whole request body, and Claude Code carries a session id in its system prompt *and* another in a
+  tool description — so all 200 KB between them counted as changed and nothing could reach rung 2.
+  Distance is now summed per field, and per line within a field.
+- **Redaction made an exact match unreachable.** Placeholder digests are salted per run by design,
+  so a recorded request could never equal itself again. The matcher now redacts the incoming
+  request the same way and compares the *kind* of secret rather than its digest — and reports that
+  fold, because it is an approximation.
+- **Redaction also broke every fork.** `tool_use` ids and thinking-block signatures are
+  high-entropy strings, so the sweep replaced them; a fork replays those turns, the agent echoes
+  them back, and the API answers `400`. Protocol values that have to round-trip are now exempt from
+  the guess — never from the credential rules.
+- **Replaying re-runs the tools.** Orca does not intercept tool execution, so the agent really runs
+  `npm test` again and it really reprints its own durations. A request whose only difference is
+  inside tool output is now served from the recording as a `major` divergence instead of halting.
+
+That run replays offline end to end — `reused=7/7 exact=2 divergences=5 unmatched=0 exit=0`, with
+every approximation named — and a fork of it reaches the same tree the recording did. If you have a
+recording it still gets wrong, that is the single most useful thing you can send.
 
 ## Install
 

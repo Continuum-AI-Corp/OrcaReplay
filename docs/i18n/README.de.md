@@ -316,7 +316,36 @@ Früh. `v0` ist das lauffähige Gerüst der drei Befehle oben.
 | Nachträgliches Bereinigen (`orca scrub`) | funktioniert |
 | Shell-Aufzeichnung (`PATH`-Shim) | funktioniert — Exit-Codes, Dauer und die Trennung von stdout/stderr. `--no-shell` überspringt das |
 | Aufzeichnung von Nicht-Modell-Verkehr | funktioniert — mit `--tls-intercept` aktivieren; erzeugt eine CA nur für diesen Lauf, der allein der gestartete Agent vertraut, entschlüsselt eine Allowlist von Hosts, tunnelt den Rest ungelesen und löscht den Schlüssel am Ende |
+| Gegen einen echten Agenten geprüft | Claude Code bei einer echten Reparatur eines echten Fehlers: aufgezeichnet, vollständig offline abgespielt, ab einem Checkpoint geforkt und exportiert. Dabei vier Fehler gefunden, alle behoben — siehe unten |
 | Harnesses mit Abo-Auth | Claude Code funktioniert. Eine Codex-CLI mit ChatGPT-Abo spricht mit ihrem eigenen Backend und liest keine Base-URL-Variable, braucht also `--tls-intercept` |
+
+### Was ein echter Agent gefunden hat
+
+Alles oben war gegen Fixtures gebaut. Der erste Claude-Code-Lauf, der damit aufgezeichnet wurde, hat
+vier Dinge zerbrochen — jedes von einer Art, die kein Fixture erzeugen kann:
+
+- **Eine Abweichung von sechzehn Zeichen wurde mit 217.568 bewertet.** Distanz war der gemeinsame
+  Präfix und Suffix des ganzen Requests, und Claude Code trägt eine Session-Id im Systemprompt *und*
+  eine zweite in einer Tool-Beschreibung — also zählten alle 200 KB dazwischen als geändert und kein
+  Request erreichte je Stufe 2. Distanz wird jetzt pro Feld summiert, und innerhalb eines Felds pro
+  Zeile.
+- **Redaktion machte einen exakten Treffer unerreichbar.** Die Platzhalter-Digests sind bewusst pro
+  Lauf gesalzen, ein aufgezeichneter Request konnte sich also nie wieder selbst gleichen. Der
+  Matcher redigiert eingehende Requests jetzt genauso und vergleicht die *Art* des Geheimnisses
+  statt seines Digests — und meldet diese Faltung, weil sie eine Näherung ist.
+- **Redaktion zerbrach auch jeden Fork.** `tool_use`-Ids und Signaturen von Thinking-Blöcken sind
+  Zeichenketten hoher Entropie, also ersetzte der Sweep sie; ein Fork spielt diese Runden ab, der
+  Agent schickt sie zurück, und die API antwortet mit `400`. Protokollwerte, die unverändert
+  zurückkommen müssen, sind jetzt von der *Vermutung* ausgenommen — nie von den Credential-Regeln.
+- **Ein Replay führt die Tools wirklich erneut aus.** Orca fängt keine Tool-Ausführung ab, der Agent
+  startet `npm test` also wirklich noch einmal, und das druckt wirklich seine eigenen Laufzeiten neu.
+  Ein Request, dessen einziger Unterschied in Tool-Ausgabe liegt, wird jetzt aus der Aufzeichnung
+  bedient und als `major`-Divergenz gemeldet, statt das Replay anzuhalten.
+
+Dieser Lauf spielt jetzt vollständig offline ab — `reused=7/7 exact=2 divergences=5 unmatched=0
+exit=0`, jede Näherung benannt — und ein Fork davon erreicht denselben Tree wie die Aufzeichnung.
+Wenn du eine Aufzeichnung hast, bei der es immer noch danebenliegt, ist das das Nützlichste, was du
+schicken kannst.
 
 <a id="install"></a>
 

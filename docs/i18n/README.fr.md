@@ -316,7 +316,39 @@ Précoce. `v0` est le squelette qui marche des trois commandes ci-dessus.
 | Nettoyage a posteriori (`orca scrub`) | fonctionne |
 | Capture du shell (shim `PATH`) | fonctionne — codes de sortie, durée et séparation stdout/stderr. `--no-shell` pour s'en passer |
 | Capture du réseau hors modèle | fonctionne — à activer avec `--tls-intercept` ; crée une autorité propre à l'exécution que seul l'agent lancé approuve, déchiffre une liste d'hôtes autorisés, tunnelle le reste sans le lire et supprime la clé à la fin |
+| Vérifié contre un vrai agent | Claude Code corrigeant vraiment un vrai bug : enregistré, rejoué hors ligne de bout en bout, bifurqué depuis un point de contrôle et exporté. Quatre bugs trouvés en chemin, tous corrigés — voir ci-dessous |
 | Harnais à authentification par abonnement | Claude Code fonctionne. Un Codex CLI connecté avec un abonnement ChatGPT parle à son propre backend et ne lit aucune variable de base-URL : il lui faut `--tls-intercept` |
+
+### Ce qu'un vrai agent a trouvé
+
+Tout ce qui précède a été construit contre des fixtures. La première exécution de Claude Code
+enregistrée à travers l'outil a cassé quatre choses, chacune d'un genre qu'aucune fixture ne peut
+produire :
+
+- **Une dérive de seize caractères a été notée 217 568.** La distance était le préfixe et le suffixe
+  communs du corps entier de la requête, et Claude Code porte un identifiant de
+  session dans son prompt système *et* un autre dans une description d'outil — les 200 Ko entre les
+  deux comptaient donc comme modifiés et aucune requête n'atteignait le barreau 2. La distance est
+  maintenant sommée par champ, et par ligne à l'intérieur d'un champ.
+- **La suppression des secrets rendait une correspondance exacte inatteignable.** Les empreintes des
+  marqueurs sont salées par exécution, à dessein : une requête enregistrée ne pouvait donc plus
+  jamais être égale à elle-même. Le comparateur applique désormais la même suppression à la requête
+  entrante et compare le *genre* de secret plutôt que son empreinte — et signale ce repli, puisque
+  c'est une approximation.
+- **Elle cassait aussi toutes les bifurcations.** Les identifiants `tool_use` et les signatures des
+  blocs de réflexion sont des chaînes à forte entropie : le balayage les remplaçait ; une
+  bifurcation rejoue ces tours, l'agent les renvoie, et l'API répond `400`. Les valeurs de protocole
+  qui doivent revenir intactes sont désormais exemptées de la *supposition* — jamais des règles sur
+  les identifiants secrets.
+- **Rejouer relance vraiment les outils.** Orca n'intercepte pas l'exécution des outils : l'agent
+  relance donc réellement `npm test`, qui réimprime réellement ses propres durées. Une requête dont
+  la seule différence est dans la sortie d'un outil est maintenant servie depuis l'enregistrement en
+  tant que divergence `major`, au lieu d'arrêter le rejeu.
+
+Cette exécution se rejoue maintenant hors ligne de bout en bout — `reused=7/7 exact=2 divergences=5
+unmatched=0 exit=0`, chaque approximation nommée — et une bifurcation aboutit au même arbre que
+l'enregistrement. Si vous avez un enregistrement qu'il rate encore, c'est la chose la plus utile que
+vous puissiez envoyer.
 
 <a id="install"></a>
 
