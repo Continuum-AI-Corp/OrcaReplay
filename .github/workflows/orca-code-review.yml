@@ -1,0 +1,54 @@
+# OrcaCode Review — https://github.com/Continuum-AI-Corp/orca-code-review
+#
+# The review logic lives in the published action, so this file never copies
+# scripts or config — bump the version tag to update. Add one repository
+# secret, ORCAROUTER_API_KEY, and enable the app at
+# OrcaRouter -> Apps -> OrcaCode Review.
+
+name: OrcaCode Review
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  cancel-in-progress: true
+
+on:
+  # `synchronize` re-reviews on every new push. `ready_for_review` makes the
+  # dashboard's trigger=ready_for_review mode fire when a draft becomes ready.
+  pull_request_target:
+    types: [opened, synchronize, ready_for_review]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write # clean/fallback PR comments
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    # Run on PR events, or when a trusted user comments the review command on a
+    # PR. All four spellings are accepted — either prefix (`/` or `@`) with
+    # either separator (hyphen or space). The command runs this privileged
+    # `pull_request_target` workflow with the OrcaRouter secret, so only
+    # maintainers may trigger it — otherwise any participant could burn paid
+    # quota and spam reviews without pushing new commits.
+    if: |
+      github.event_name == 'pull_request_target' ||
+      (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        (startsWith(github.event.comment.body, '/orcacode-review') ||
+          startsWith(github.event.comment.body, '/orcacode review') ||
+          startsWith(github.event.comment.body, '@orcacode-review') ||
+          startsWith(github.event.comment.body, '@orcacode review')) &&
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+    steps:
+      - uses: Continuum-AI-Corp/orca-code-review@v1
+        with:
+          orcarouter-api-key: ${{ secrets.ORCAROUTER_API_KEY }}
+          # This file is authoritative. The dashboard fetch is skipped entirely,
+          # so workspace defaults and other repos' settings cannot reach this
+          # repo — and nothing changed in the console applies here.
+          settings: "false"
+          # Every severity blocks the merge, including advisory P2.
+          block-on: "P0,P1,P2"
