@@ -1,6 +1,6 @@
 import { X509Certificate } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { request as httpRequest, type IncomingMessage } from 'node:http';
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import type { AddressInfo, Socket } from 'node:net';
@@ -378,6 +378,49 @@ describe('TLS interception', () => {
     expect(recorded).not.toContain('sk-live-abcdefghijklmnop');
     expect(recorded).not.toContain('secret-key');
     expect(netExchanges[0]!.requestHeaders.authorization).toBeUndefined();
+  });
+
+  it('never lets the run CA private key reach anything it records', async () => {
+    // The property this whole feature stands on. The key exists so orca can impersonate a host to
+    // the child; a copy of it in a trace someone attaches to an issue is a signing key handed to
+    // whoever reads the issue. Nothing in the capture path has any reason to touch it, which is
+    // exactly why this is worth asserting: it is the kind of invariant a later refactor breaks
+    // silently, and there is no error to notice when it does.
+    const handle = await startProxy([`127.0.0.1:${model.port}`]);
+
+    await through({
+      proxyPort: handle.port,
+      host: '127.0.0.1',
+      port: model.port,
+      trust: [runCa.certPem],
+      method: 'POST',
+      path: '/v1/responses',
+      body: '{"model":"gpt-5.2"}',
+    });
+
+    // Read from disk, because `RunCa` does not expose the key at all — it is a private field, and
+    // the file is the only place it exists. That is the stronger guarantee: the capture path
+    // cannot reach the key even by mistake. This test defends the remaining route, which is
+    // something copying the file's contents into a record.
+    //
+    // Both shapes it could take: the PEM as written, and its base64 body with the armour and
+    // newlines stripped, which is how it would survive being embedded in JSON.
+    const keyPem = await readFile(runCa.keyPath, 'utf8');
+    const keyBody = keyPem.replace(/-----[A-Z ]+-----/g, '').replace(/\s+/g, '');
+    expect(keyBody.length).toBeGreaterThan(64);
+
+    const everythingRecorded = JSON.stringify({
+      net: netExchanges,
+      tunnels,
+      model: modelExchanges,
+    });
+    expect(everythingRecorded).not.toContain(keyPem);
+    expect(everythingRecorded).not.toContain(keyBody);
+    expect(everythingRecorded).not.toContain('PRIVATE KEY');
+    // The certificate is public and may legitimately appear; the key must not. Assert the search
+    // was capable of finding something, so a future refactor cannot make this pass by recording
+    // nothing at all.
+    expect(everythingRecorded.length).toBeGreaterThan(100);
   });
 
   it('forwards a streaming response as it arrives rather than buffering it', async () => {
