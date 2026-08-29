@@ -30,7 +30,10 @@ describe('orca doctor — the capture layers', () => {
     const out = new Output({ write: (l) => void lines.push(l), isTTY: false });
     const result = await doctorCommand(parseArgs(['doctor']), out, process.cwd());
     const check = result.checks.find((c) => c.name.includes('shell'));
-    expect(check, `no shell check in: ${result.checks.map((c) => c.name).join(', ')}`).toBeDefined();
+    expect(
+      check,
+      `no shell check in: ${result.checks.map((c) => c.name).join(', ')}`,
+    ).toBeDefined();
     expect(check!.status).toBe('ok');
   });
 
