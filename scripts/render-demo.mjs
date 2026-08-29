@@ -71,7 +71,8 @@ const lines = SCRIPT.map(([at, text, kind], i) => {
   ).toFixed(4)};1" dur="${TOTAL}s" repeatCount="indefinite"/></text>`;
 }).join('\n');
 
-process.stdout.write(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${WIDTH} ${HEIGHT}" width="${WIDTH}" height="${HEIGHT}" role="img" aria-label="Recording, replaying and forking an agent run with OrcaReplay">
+process.stdout
+  .write(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${WIDTH} ${HEIGHT}" width="${WIDTH}" height="${HEIGHT}" role="img" aria-label="Recording, replaying and forking an agent run with OrcaReplay">
 <style>
   text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
   .cmd { fill: ${FILL.cmd}; }

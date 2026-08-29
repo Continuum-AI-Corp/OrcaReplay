@@ -11,6 +11,8 @@ import {
 } from './commands/inspect.js';
 import { compareCommand } from './commands/compare.js';
 import { scrubCommand } from './commands/scrub.js';
+import { gcCommand } from './commands/gc.js';
+import { doctorCommand } from './commands/doctor.js';
 import { ORCA_VERSION } from './version.js';
 
 const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI agents
@@ -30,6 +32,8 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
   orca scrub [run] --match X      remove something from a recorded trace
   orca ui [run]                  serve the viewer locally
   orca list                      runs recorded here
+  orca gc --older-than 7d        reclaim space; --keep N, --dry-run
+  orca doctor                    check this machine can record at all
 
   [run] is a run id, or "last" (the default).
 
@@ -94,6 +98,12 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
       case 'list':
         await listCommand(args, out, cwd);
         return 0;
+      case 'gc':
+        await gcCommand(args, out, cwd);
+        return 0;
+      case 'doctor':
+        // A failed check is the whole point of running this in CI, so it has to be visible in $?.
+        return (await doctorCommand(args, out, cwd)).ok ? 0 : 1;
       default:
         out.failure({
           event: 'unknown_command',

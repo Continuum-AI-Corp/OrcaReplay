@@ -1,5 +1,6 @@
 export * from './claude-code.js';
 export * from './codex.js';
+export * from './contract.js';
 export * from './detect.js';
 export * from './env.js';
 export * from './generic-openai.js';

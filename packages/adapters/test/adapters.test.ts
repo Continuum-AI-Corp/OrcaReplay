@@ -217,6 +217,28 @@ describe('openCodeAdapter', () => {
     expect(launch.env.ANTHROPIC_API_KEY).toBe('sk-a');
   });
 
+  it('does not invent the other provider key when the user has one of them', async () => {
+    // OpenCode picks its provider per model, and which credentials it can see is part of that
+    // choice — so a fabricated second key can make a recorded run answer from a different model
+    // than the same command does without recording.
+    const openAiOnly = await openCodeAdapter.prepare(ctx({ env: { OPENAI_API_KEY: 'sk-o' } }));
+    expect(openAiOnly.env.OPENAI_API_KEY).toBe('sk-o');
+    expect('ANTHROPIC_API_KEY' in openAiOnly.env).toBe(false);
+
+    const anthropicOnly = await openCodeAdapter.prepare(
+      ctx({ env: { ANTHROPIC_API_KEY: 'sk-a' } }),
+    );
+    expect(anthropicOnly.env.ANTHROPIC_API_KEY).toBe('sk-a');
+    expect('OPENAI_API_KEY' in anthropicOnly.env).toBe(false);
+  });
+
+  it('falls back to placeholders only when the user has no credential at all', async () => {
+    // Nothing to flip here, and an SDK client that refuses to start without a key helps nobody.
+    const none = await openCodeAdapter.prepare(ctx());
+    expect(none.env.OPENAI_API_KEY).toBe('orca-recorded');
+    expect(none.env.ANTHROPIC_API_KEY).toBe('orca-recorded');
+  });
+
   it('detects by ~/.config/opencode, and not at all in a bare environment', async () => {
     isolate(['.config/opencode']);
     expect(await openCodeAdapter.detect('/work')).toBe(true);

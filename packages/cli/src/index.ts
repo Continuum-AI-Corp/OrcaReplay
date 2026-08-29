@@ -11,4 +11,6 @@ export * from './commands/replay.js';
 export * from './commands/compare.js';
 export * from './commands/inspect.js';
 export * from './commands/scrub.js';
+export * from './commands/gc.js';
+export * from './commands/doctor.js';
 export * from './version.js';
