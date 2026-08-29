@@ -5,6 +5,16 @@
 Record any coding agent. Reproduce the run byte-for-byte with the network off. Fork it from any step
 onto a different model and see who gets it right.
 
+<a href="https://www.orcarouter.ai">
+  <img src="docs/orcarouter.svg" alt="OrcaRouter" height="28" align="left" hspace="10">
+</a>
+
+**Built by the team behind [OrcaRouter](https://www.orcarouter.ai)** — one API key and one endpoint
+for Claude, GPT, Gemini, Grok, DeepSeek, Qwen and the rest. It is what `orca setup` points at by
+default, and what makes `orca compare` a single command instead of four provider accounts.
+
+<br clear="left">
+
 [![License](https://img.shields.io/badge/code-Apache--2.0-blue)](LICENSE)
 [![Spec](https://img.shields.io/badge/trace%20spec-CC%20BY%204.0-blue)](spec/orca-trace-v0.md)
 [![Node](https://img.shields.io/badge/node-20%2B-brightgreen)](#install)

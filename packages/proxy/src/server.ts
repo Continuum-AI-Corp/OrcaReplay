@@ -317,9 +317,12 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
         recorded: dialect.id,
         origin,
         crossProvider,
+        // Deliberately does not open with the model name: the viewer already renders that as the
+        // row's label, so a reason that repeats it produces `gpt-5.2  gpt-5.2 is served by…` and
+        // spends the row's width saying the same thing twice.
         reason: crossProvider
-          ? `${options.forkModel} is served by ${target.id}, not the recorded ${dialect.id}`
-          : `${options.forkModel} is served by the recorded dialect ${dialect.id}`,
+          ? `served by ${target.id}, not the recorded ${dialect.id}`
+          : `served by the recorded dialect ${dialect.id}`,
       });
     }
     const upstreamRes = await doFetch(`${origin}${upstreamPath}`, {

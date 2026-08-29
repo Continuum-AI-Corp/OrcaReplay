@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="150" height="28" viewBox="0 0 150 28" role="img" aria-label="OrcaRouter">
+  <title>OrcaRouter</title>
+  <!--
+    PLACEHOLDER. This is a neutral wordmark, not OrcaRouter's real brand asset — this environment
+    blocks orcarouter.ai, so the actual logo could not be fetched or its URL verified. Replace this
+    file with the real mark and the README needs no change; it is referenced by path.
+  -->
+  <rect width="150" height="28" rx="5" fill="#111"/>
+  <circle cx="16" cy="14" r="6.5" fill="none" stroke="#fff" stroke-width="1.6"/>
+  <path d="M16 8.5v11M10.5 14h11" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/>
+  <text x="31" y="18.5" font-family="ui-sans-serif, -apple-system, Segoe UI, Helvetica, Arial, sans-serif"
+        font-size="12.5" font-weight="600" fill="#fff" letter-spacing="0.2">OrcaRouter</text>
+</svg>

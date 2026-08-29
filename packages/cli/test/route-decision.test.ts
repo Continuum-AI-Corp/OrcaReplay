@@ -100,6 +100,10 @@ describe('route.decision', () => {
     // told apart from a run that was OpenAI all along.
     expect(attrs.recorded).toBe('anthropic');
     expect(attrs.crossProvider).toBe(true);
+    // The viewer renders `model` as the row label and `reason` as its detail, so a reason that
+    // opens with the model name spends the row saying the same thing twice.
+    expect(String(attrs.reason)).not.toMatch(/^gpt-5\.2/);
+    expect(String(attrs.reason)).toContain('not the recorded anthropic');
     expect(String(attrs.origin)).toContain('127.0.0.1');
     expect(routes[0]!.actor).toBe('gateway');
   });
