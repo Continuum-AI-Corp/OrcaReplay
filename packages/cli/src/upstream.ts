@@ -26,12 +26,19 @@ export async function upstreamPlan(
   const config = await readConfig(env);
   const upstream = await resolveUpstream(args, env);
   const headers = gatewayHeaders(config, env);
-  // Only attach a key when the traffic is actually going to the gateway that issued it. Sending a
-  // gateway credential to api.anthropic.com because a flag redirected one dialect would hand a
-  // third party a key they were never meant to see.
+  // Unanimity, not `some`. `upstreamHeaders` are attached to every live call the proxy makes —
+  // there is no per-dialect header channel — so if any origin we might reach is not the gateway,
+  // attaching the key sends it there. A `.some()` check passed whenever *one* dialect still
+  // defaulted to the gateway, which is exactly what happens when a flag redirects the other: the
+  // gateway's credential went to api.anthropic.com. Verified against the built CLI.
+  //
+  // Erring towards withholding costs an unauthenticated request and a clear 401. Erring the other
+  // way hands a third party a key they were never meant to see, and nothing says it happened.
+  const origins = Object.values(upstream ?? {});
   const goingToGateway =
     config.gateway?.url !== undefined &&
-    Object.values(upstream ?? {}).some((origin) => sameOrigin(origin, config.gateway!.url));
+    origins.length > 0 &&
+    origins.every((origin) => sameOrigin(origin, config.gateway!.url));
   return {
     upstream,
     headers: goingToGateway && Object.keys(headers).length > 0 ? headers : undefined,

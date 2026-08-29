@@ -23,6 +23,37 @@ export interface ParsedArgs {
   bool(name: string, fallback?: boolean): boolean;
 }
 
+/**
+ * Flags that never take a value.
+ *
+ * Without this list any flag followed by a non-flag token swallowed it, so the flag read as false
+ * *and* the positional vanished. `orca replay --worktree last` then restored the recorded tree over
+ * the working directory — the exact opposite of what `--worktree` promises — and
+ * `orca record --tls-intercept codex` turned interception off while losing the agent name, so
+ * record auto-detected and could capture a different harness. Neither said anything.
+ *
+ * A list rather than a heuristic, because the alternative is guessing from the shape of the next
+ * token, and `orca compare --models last` would guess wrong. `--flag=value` and `--no-flag` still
+ * work for these; they are handled before this point.
+ */
+const VALUELESS = new Set([
+  'ui',
+  'loose',
+  'in-place',
+  'worktree',
+  'trace',
+  'fs',
+  'shell',
+  'ci',
+  'verbose',
+  'color',
+  'dry-run',
+  'drop-fs',
+  'tls-intercept',
+  'version',
+  'help',
+]);
+
 function coerce(raw: string): FlagValue {
   if (raw === 'true') return true;
   if (raw === 'false') return false;
@@ -67,7 +98,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     }
 
     const next = own[i + 1];
-    if (next !== undefined && !isFlag(next)) {
+    if (!VALUELESS.has(body) && next !== undefined && !isFlag(next)) {
       flags[body] = coerce(next);
       i += 1;
     } else {

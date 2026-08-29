@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { listRuns, orcaDir, resolveRunSelector, runDirFor, runsDir } from '../src/paths.js';
+import { TraceWriter } from '../src/writer.js';
 
 let cwd: string;
 
@@ -25,6 +26,72 @@ async function seedRun(runId: string, createdAt?: string): Promise<string> {
   }
   return dir;
 }
+
+describe('"last" after a replay', () => {
+  /**
+   * Since exact replay writes its own run, the newest run in a directory is usually a replay
+   * trace — which holds divergences and nothing else: no exchanges, no blobs, no filesystem store.
+   * Every command defaults to `last`, so that quietly redirected all of them.
+   *
+   * The sharpest case is `orca scrub last --match my-hostname`, which is the line in the README:
+   * it scrubbed the empty trace, found nothing, and printed "nothing matched — the trace is
+   * unchanged". A security tool telling you a trace is clean while the secret sits in the
+   * recording next to it.
+   *
+   * A fork stays eligible — it has exchanges and a worktree and is a thing you act on. A replay
+   * trace is a report about another run, so `last` skips it.
+   */
+  async function writeRun(dir: string, opts: { parentRun?: string; forkPoint?: number } = {}) {
+    const writer = await TraceWriter.create(join(dir, '.orca', 'runs'), {
+      adapter: { id: 'claude-code', version: '0.0.0' },
+      argv: ['claude-code'],
+      cwd: dir,
+      orcaVersion: '0.0.0',
+      ...(opts.parentRun === undefined ? {} : { parentRun: opts.parentRun }),
+      ...(opts.forkPoint === undefined ? {} : { forkPoint: opts.forkPoint }),
+    });
+    await writer.close(0);
+    // `created_at` has second-ish resolution in the sort; make the order unambiguous.
+    await new Promise((r) => setTimeout(r, 5));
+    return writer.runId;
+  }
+
+  it('skips a replay trace and resolves the recording it describes', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'orca-last-'));
+    try {
+      const recording = await writeRun(dir);
+      const replay = await writeRun(dir, { parentRun: recording });
+      expect((await listRuns(dir))[0]!.runId, 'the replay is newest').toBe(replay);
+
+      expect((await resolveRunSelector(dir, 'last')).runId).toBe(recording);
+      // Naming it explicitly still works — it is a real run, just not the default one.
+      expect((await resolveRunSelector(dir, replay)).runId).toBe(replay);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('still resolves a fork, which is a run you act on', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'orca-last-'));
+    try {
+      const recording = await writeRun(dir);
+      const fork = await writeRun(dir, { parentRun: recording, forkPoint: 4 });
+      expect((await resolveRunSelector(dir, 'last')).runId).toBe(fork);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to a replay trace rather than failing when it is all there is', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'orca-last-'));
+    try {
+      const only = await writeRun(dir, { parentRun: 'run_000000000000' });
+      expect((await resolveRunSelector(dir, 'last')).runId).toBe(only);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('path helpers', () => {
   it('puts everything under .orca', () => {

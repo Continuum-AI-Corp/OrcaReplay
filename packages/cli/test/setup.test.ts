@@ -259,6 +259,29 @@ describe('setup makes compare work without flags', () => {
     expect(JSON.stringify(plan.headers)).toContain('sk-gateway-key');
   });
 
+  it('withholds the gateway key when even one dialect is redirected', async () => {
+    // The case the previous test missed, and the one that actually happens. Redirecting a single
+    // dialect leaves the other still pointing at the gateway, so a `.some()` check passed and the
+    // key was returned — and `upstreamHeaders` are applied to *every* live call, not per dialect,
+    // so the gateway's credential went to api.anthropic.com. Verified against the built CLI before
+    // this fix: upstream {anthropic: api.anthropic.com, openai: gw.example}, headers carrying the
+    // key.
+    //
+    // Because the headers are global to the proxy, the only safe rule is unanimity: attach the key
+    // when every origin we might reach is the gateway, and otherwise not at all.
+    const env = { ...process.env, XDG_CONFIG_HOME: home };
+    await writeConfig({ gateway: { url: 'https://gw.example', api_key: 'sk-gateway-key' } }, env);
+
+    const plan = await upstreamPlan(
+      parseArgs(['record', '--upstream-anthropic', 'https://api.anthropic.com']),
+      env,
+    );
+
+    expect(plan.upstream?.anthropic).toBe('https://api.anthropic.com');
+    expect(plan.upstream?.openai).toBe('https://gw.example');
+    expect(plan.headers, 'a redirected dialect must disarm the key entirely').toBeUndefined();
+  });
+
   it('withholds the gateway key when a flag sends traffic somewhere else', async () => {
     // Redirecting one dialect to a vendor must not hand that vendor a credential the gateway
     // issued. This is the failure that would be silent and expensive.
