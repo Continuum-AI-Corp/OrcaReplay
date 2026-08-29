@@ -12,8 +12,8 @@ is how a format quietly becomes two formats.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, Final, NoReturn
 
 __all__ = [
@@ -206,8 +206,11 @@ class BlobRef:
 
     @property
     def hex(self) -> str:
-        """The bare 64-character digest, which is also its path under `blobs/`."""
-        return self.digest.split(":", 1)[1]
+        """The bare 64-character digest, which is also its name under `blobs/`.
+
+        Tolerates a digest built by hand without the `sha256:` prefix; `from_json` insists on it.
+        """
+        return self.digest.split(":", 1)[1] if ":" in self.digest else self.digest
 
     @property
     def shard(self) -> str:
@@ -360,19 +363,42 @@ class Manifest:
             for key, value in env.items():
                 _string(value, f"{path}/env_allowlisted/{key}")
 
-        for name, keys in (
-            ("git", frozenset({"head", "branch", "dirty"})),
-            ("platform", frozenset({"os", "arch", "node"})),
-            ("counts", frozenset({"events", "blobs"})),
-            ("redaction", frozenset({"policy_version", "rules_fired"})),
-        ):
-            value = obj.get(name)
-            if value is not None:
-                _closed(_mapping(value, f"{path}/{name}"), keys, f"{path}/{name}")
-        if obj.get("platform") is not None:
-            _require(obj["platform"], ("os", "arch", "node"), f"{path}/platform")
-        if obj.get("redaction") is not None:
-            _require(obj["redaction"], ("policy_version",), f"{path}/redaction")
+        git = obj.get("git")
+        if git is not None:
+            git = _mapping(git, f"{path}/git")
+            _closed(git, frozenset({"head", "branch", "dirty"}), f"{path}/git")
+            for name in ("head", "branch"):
+                if name in git:
+                    _string(git[name], f"{path}/git/{name}")
+            if "dirty" in git and not isinstance(git["dirty"], bool):
+                _fail(f"{path}/git/dirty", "must be a boolean")
+
+        platform = obj.get("platform")
+        if platform is not None:
+            platform = _mapping(platform, f"{path}/platform")
+            _require(platform, ("os", "arch", "node"), f"{path}/platform")
+            _closed(platform, frozenset({"os", "arch", "node"}), f"{path}/platform")
+            for name in ("os", "arch", "node"):
+                _string(platform[name], f"{path}/platform/{name}")
+
+        counts = obj.get("counts")
+        if counts is not None:
+            counts = _mapping(counts, f"{path}/counts")
+            _closed(counts, frozenset({"events", "blobs"}), f"{path}/counts")
+            for name in ("events", "blobs"):
+                if name in counts:
+                    _integer(counts[name], f"{path}/counts/{name}")
+
+        redaction = obj.get("redaction")
+        if redaction is not None:
+            redaction = _mapping(redaction, f"{path}/redaction")
+            _require(redaction, ("policy_version",), f"{path}/redaction")
+            _closed(redaction, frozenset({"policy_version", "rules_fired"}), f"{path}/redaction")
+            _integer(redaction["policy_version"], f"{path}/redaction/policy_version")
+            fired = redaction.get("rules_fired")
+            if fired is not None:
+                for rule, count in _mapping(fired, f"{path}/redaction/rules_fired").items():
+                    _integer(count, f"{path}/redaction/rules_fired/{rule}")
 
         parent = obj.get("parent_run")
         return cls(
@@ -387,10 +413,10 @@ class Manifest:
             if obj.get("ended_at") is None
             else _timestamp(obj["ended_at"], f"{path}/ended_at"),
             env_allowlisted={} if env is None else dict(env),
-            git=None if obj.get("git") is None else dict(obj["git"]),
-            platform=None if obj.get("platform") is None else dict(obj["platform"]),
-            counts=None if obj.get("counts") is None else dict(obj["counts"]),
-            redaction=None if obj.get("redaction") is None else dict(obj["redaction"]),
+            git=None if git is None else dict(git),
+            platform=None if platform is None else dict(platform),
+            counts=None if counts is None else dict(counts),
+            redaction=None if redaction is None else dict(redaction),
             parent_run=None
             if parent is None
             else _string(parent, f"{path}/parent_run", pattern=RUN_ID_PATTERN),

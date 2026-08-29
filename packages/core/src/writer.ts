@@ -32,6 +32,15 @@ export interface TraceWriterInit {
   cwd: string;
   orcaVersion: string;
   envAllowlist?: string[];
+  /**
+   * Fork provenance (spec §1). Set on a run produced by forking another. The manifest is what
+   * every out-of-process reader sees first — `orca gc` deciding whether a run may be deleted, a
+   * third-party tool, the Python SDK — so recording this only as an event leaves those readers
+   * looking at an orphan.
+   */
+  parentRun?: string;
+  forkPoint?: number;
+  forkModel?: string;
 }
 
 /** The parts of an event a caller supplies; the writer stamps the rest. */
@@ -104,6 +113,11 @@ export class TraceWriter {
       cwd: init.cwd,
       env_allowlisted: redactor.redactEnv(process.env),
       platform: { os: platform(), arch: arch(), node: process.version },
+      // Spread conditionally: the schema forbids unknown keys and a plain recording must carry no
+      // provenance at all, rather than three nulls that readers would have to special-case.
+      ...(init.parentRun === undefined ? {} : { parent_run: init.parentRun }),
+      ...(init.forkPoint === undefined ? {} : { fork_point: init.forkPoint }),
+      ...(init.forkModel === undefined ? {} : { fork_model: init.forkModel }),
     };
     assertManifest(base);
     await writeFile(join(runDir, 'manifest.json'), `${JSON.stringify(base, null, 2)}\n`, {

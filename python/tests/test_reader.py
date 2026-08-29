@@ -128,6 +128,24 @@ class TestTruncatedFinalLine:
         reader = TraceReader.open(tmp_path)
         assert [e.type for e in reader.events()] == ["run.start"]
 
+    def test_a_complete_final_line_without_a_newline_is_not_a_casualty(self, tmp_path: Path) -> None:
+        """Tolerating truncation must not mean distrusting the last line."""
+        write_trace(tmp_path, [event(0), event(1)])
+        path = tmp_path / "events.jsonl"
+        path.write_text(path.read_text(encoding="utf-8").rstrip("\n"), encoding="utf-8")
+        reader = TraceReader.open(tmp_path)
+        assert [e.seq for e in reader.events()] == [0, 1]
+        assert reader.problems() == []
+
+    def test_an_unknown_type_on_the_final_line_is_reported_as_unknown_not_truncated(
+        self, tmp_path: Path
+    ) -> None:
+        write_trace(tmp_path, [event(0), event(1, "gpu.allocate")])
+        reader = TraceReader.open(tmp_path)
+        assert [e.seq for e in reader.events()] == [0]
+        assert any("gpu.allocate" in p for p in reader.problems())
+        assert not any("truncated" in p for p in reader.problems())
+
     def test_a_malformed_line_that_is_not_last_is_reported_as_malformed(self, tmp_path: Path) -> None:
         """Only the final line gets the benefit of the doubt; an earlier one is corruption."""
         write_trace(tmp_path, [event(0), event(1), event(2)])

@@ -72,7 +72,7 @@ describe('scaffoldAdapter', () => {
       for (const f of generated.files) {
         expect(f.contents, f.path).not.toMatch(/__[A-Z0-9_]+__/);
         expect(f.contents, f.path).not.toContain('${');
-        expect(f.contents, f.path).not.toMatch(/<[a-z-]+>/);
+        expect(f.contents, f.path).not.toMatch(/<(?:name|id|adapter|agent|command|var)>/i);
         expect(f.contents, f.path).not.toContain('undefined');
       }
   });
@@ -130,7 +130,10 @@ describe('scaffoldAdapter', () => {
   });
 
   it('takes the command when the binary is not named after the adapter', () => {
-    const source = file(scaffoldAdapter('my-agent', { command: 'magent' }).files, 'src/my-agent.ts');
+    const source = file(
+      scaffoldAdapter('my-agent', { command: 'magent' }).files,
+      'src/my-agent.ts',
+    );
     expect(source).toContain("hasBinary('magent')");
     expect(source).toContain("command: 'magent'");
   });

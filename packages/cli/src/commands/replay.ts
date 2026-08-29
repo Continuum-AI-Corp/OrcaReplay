@@ -253,6 +253,11 @@ async function replayFork(
     argv: ctx.manifest.argv,
     cwd: worktree,
     orcaVersion: ORCA_VERSION,
+    // Also in the manifest, not only the fork event: the manifest is what an out-of-process
+    // reader sees first, and `orca gc` uses it to decide a parent run may not be deleted.
+    parentRun: ctx.manifest.run_id,
+    forkPoint: checkpoint.seq,
+    ...(ctx.model === undefined ? {} : { forkModel: ctx.model }),
   });
 
   const deriver = new ExchangeEventDeriver();

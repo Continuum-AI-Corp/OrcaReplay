@@ -88,6 +88,10 @@ class TestBlobRef:
         with pytest.raises(TraceFormatError):
             BlobRef.from_json(bad)
 
+    def test_hex_tolerates_a_hand_built_reference_without_the_prefix(self) -> None:
+        assert BlobRef(digest="ab" * 32, bytes=1).hex == "ab" * 32
+        assert BlobRef(digest="ab" * 32, bytes=1).shard == "ab"
+
     def test_recognises_a_reference_by_its_blob_key(self) -> None:
         assert BlobRef.looks_like({"$blob": "anything"})
         assert not BlobRef.looks_like({"text": "hello"})
