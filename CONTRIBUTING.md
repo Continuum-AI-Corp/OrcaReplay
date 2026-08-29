@@ -56,6 +56,21 @@ The highest-value contributions, in order:
 - **Secrets never reach disk or a TTY.** Redaction lives in the write path. If you add a new sink,
   it goes through the redactor.
 
+## Every pull request gets reviewed by a model
+
+`.github/workflows/orca-code-review.yml` runs OrcaCode Review on each pull request and posts what
+it finds as inline comments. **Every severity blocks the merge** — P0, P1 and P2 alike — so an
+advisory nit turns the check red just as a correctness bug does. That is deliberate: the cheapest
+time to fix a nit is before anyone else reads the diff.
+
+The review is a reader, not a gate you argue with. If a finding is wrong, say so in the thread and
+a maintainer will merge past it — but say why, because a finding nobody answers is indistinguishable
+from one nobody read.
+
+A maintainer can re-run the review on demand by commenting `/orcacode-review`. Settings live in the
+workflow file rather than in a dashboard, so changing what the reviewer does is itself a reviewable
+diff.
+
 ## Sign your commits
 
 We use the [Developer Certificate of Origin](https://developercertificate.org/). Add a `Signed-off-by`
