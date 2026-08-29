@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run fmt:check
+      - run: npx tsc --build
+      - run: npx vitest run --reporter=verbose
+
+  conformance:
+    name: trace format conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm }
+      - run: npm ci
+      - run: npx tsc --build
+      # Every example trace shipped in the repo must validate against the normative schema.
+      # This is what makes the format a format rather than whatever the writer happens to emit.
+      - run: node scripts/conformance.mjs
+
+  plugin-api-neutrality:
+    name: plugin API neutrality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm }
+      - run: npm ci
+      # A vendor plugin must reach OrcaReplay only through the published interface.
+      # If this ever fails, a plugin has grown a privileged path into the core.
+      - run: node scripts/check-neutrality.mjs
