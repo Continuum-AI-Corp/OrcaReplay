@@ -34,7 +34,15 @@ def main(run_dir: Path) -> int:
     checkpoints = derive_checkpoints(events)
 
     print(f"{manifest.run_id}  adapter={manifest.adapter_id}  exit={manifest.exit_code}")
-    print(f"integrity: {'OK' if ok else f'MISMATCH expected {expected} got {actual}'}")
+    # Unsealed is not mismatched. A run whose recorder was killed has no digest at all, and
+    # printing "MISMATCH expected  got <hash>" accuses a file that nothing touched.
+    if ok:
+        integrity = "OK"
+    elif not expected:
+        integrity = f"UNSEALED (never finished; events.jsonl is {actual})"
+    else:
+        integrity = f"MISMATCH expected {expected} got {actual}"
+    print(f"integrity: {integrity}")
     print(
         f"{len(events)} events, {len(turns_of(events))} turns, "
         f"{len(checkpoints)} checkpoints, {len(reader.problems())} problems"

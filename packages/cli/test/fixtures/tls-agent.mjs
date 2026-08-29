@@ -9,10 +9,8 @@
  * Everything it reports goes to files named in the environment, so the test can assert on what the
  * *child* saw rather than on what the parent believes it set.
  */
-import { once } from 'node:events';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { request as httpRequest } from 'node:http';
-import { connect as tlsConnect } from 'node:tls';
+import { callConfiguredTargets } from './proxy-call.mjs';
 
 if (process.env.ORCA_TEST_ENV_OUT) {
   writeFileSync(process.env.ORCA_TEST_ENV_OUT, JSON.stringify(process.env, null, 2));
@@ -30,66 +28,7 @@ for (const path of [process.env.NODE_EXTRA_CA_CERTS, process.env.ORCA_TEST_ORIGI
   if (path && existsSync(path)) trust.push(readFileSync(path, 'utf8'));
 }
 
-async function callThroughProxy(target) {
-  const proxy = new URL(process.env.HTTPS_PROXY ?? 'http://127.0.0.1:1');
-  const authority = `${target.host}:${target.port}`;
-  const tunnel = httpRequest({
-    host: proxy.hostname,
-    port: Number(proxy.port),
-    method: 'CONNECT',
-    path: authority,
-    headers: { host: authority },
-  });
-  tunnel.end();
-  const [res, socket, head] = await once(tunnel, 'connect');
-  if (res.statusCode !== 200) {
-    socket.destroy();
-    throw new Error(`CONNECT ${authority} → ${res.statusCode}`);
-  }
-  if (head.length > 0) socket.unshift(head);
-
-  const secure = tlsConnect({ socket, ca: trust, host: target.host, port: target.port });
-  await once(secure, 'secureConnect');
-  const issuer = String(secure.getPeerCertificate().issuer.CN ?? '');
-
-  return await new Promise((resolve, reject) => {
-    const req = httpRequest(
-      {
-        createConnection: () => secure,
-        host: target.host,
-        port: target.port,
-        method: target.method ?? 'GET',
-        path: target.path ?? '/',
-        headers: { host: authority, 'content-type': 'application/json' },
-      },
-      (response) => {
-        let body = '';
-        response.setEncoding('utf8');
-        response.on('data', (chunk) => (body += chunk));
-        response.on('end', () => {
-          secure.destroy();
-          resolve({ status: response.statusCode, body, issuer });
-        });
-      },
-    );
-    req.on('error', (err) => {
-      secure.destroy();
-      reject(err);
-    });
-    if (target.body !== undefined) req.write(target.body);
-    req.end();
-  });
-}
-
-const targets = process.env.ORCA_TEST_TARGETS ? JSON.parse(process.env.ORCA_TEST_TARGETS) : [];
-const results = [];
-for (const target of targets) {
-  try {
-    results.push({ target, ...(await callThroughProxy(target)) });
-  } catch (err) {
-    results.push({ target, error: String(err) });
-  }
-}
+const results = await callConfiguredTargets(trust);
 if (process.env.ORCA_TEST_RESULT_OUT) {
   writeFileSync(process.env.ORCA_TEST_RESULT_OUT, JSON.stringify(results, null, 2));
 }

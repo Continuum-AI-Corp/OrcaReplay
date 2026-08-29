@@ -97,4 +97,18 @@ for (let turn = 0; turn < turns; turn += 1) {
   });
 }
 
+// One HTTPS side-call, only when a test asks for it. This is what a harness that talks to its own
+// backend does, and it is the only way a *fork* — which launches this same agent from the parent's
+// argv — can be checked for interception at all.
+if (process.env.ORCA_TEST_TARGETS) {
+  const { callConfiguredTargets } = await import('./proxy-call.mjs');
+  const results = await callConfiguredTargets();
+  if (process.env.ORCA_TEST_RESULT_OUT) {
+    writeFileSync(process.env.ORCA_TEST_RESULT_OUT, JSON.stringify(results, null, 2));
+  }
+}
+if (process.env.ORCA_TEST_ENV_OUT) {
+  writeFileSync(process.env.ORCA_TEST_ENV_OUT, JSON.stringify(process.env, null, 2));
+}
+
 console.log(`fake-agent: completed ${messages.length} messages`);

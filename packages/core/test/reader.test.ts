@@ -240,6 +240,7 @@ describe('verifyIntegrity', () => {
     const r = await TraceReader.open(w.runDir);
     const v = await r.verifyIntegrity();
     expect(v.ok).toBe(true);
+    expect(v.state).toBe('verified');
     expect(v.actual).toBe(v.expected);
   });
 
@@ -250,15 +251,19 @@ describe('verifyIntegrity', () => {
     await appendFile(join(w.runDir, 'events.jsonl'), `${line({ seq: 99 })}\n`);
     const v = await TraceReader.open(w.runDir).then((r) => r.verifyIntegrity());
     expect(v.ok).toBe(false);
+    expect(v.state).toBe('mismatch');
     expect(v.expected).toBe(m.integrity?.events_sha256);
     expect(v.actual).not.toBe(v.expected);
   });
 
-  it('cannot verify a run that was never sealed', async () => {
+  it('calls a never-sealed run unsealed, not tampered', async () => {
+    // `ok: false` on its own cannot tell a killed recorder from an edited file, and callers that
+    // report to a person read it as the second. A crashed run is the one you most want to open.
     const w = await TraceWriter.create(runs, INIT);
     await w.append({ type: 'note', actor: 'orca' });
     const v = await TraceReader.open(w.runDir).then((r) => r.verifyIntegrity());
     expect(v.ok).toBe(false);
+    expect(v.state).toBe('unsealed');
     expect(v.expected).toBeUndefined();
     expect(v.actual).toMatch(/^[0-9a-f]{64}$/);
     await w.close();

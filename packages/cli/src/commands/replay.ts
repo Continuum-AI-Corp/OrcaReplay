@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -19,6 +19,7 @@ import { ExchangeEventDeriver } from '../exchange-events.js';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
 import { SerialQueue } from '../serial.js';
+import { setupTlsCapture, trustRunCa } from '../tls-capture.js';
 import { upstreamPlan } from '../upstream.js';
 import { ORCA_VERSION } from '../version.js';
 
@@ -126,11 +127,19 @@ export async function replayCommand(
   const events = await reader.events();
 
   const integrity = await reader.verifyIntegrity();
-  if (!integrity.ok) {
+  // Two different facts, and saying the wrong one costs trust in the right one. A recorder that was
+  // killed leaves a run with no digest at all, and telling that person their trace "changed since
+  // the run ended" is an accusation about a file nothing touched.
+  if (integrity.state === 'mismatch') {
     out.warn('trace.integrity', {
       expected: integrity.expected,
       actual: integrity.actual,
       note: 'events.jsonl changed since the run ended',
+    });
+  } else if (integrity.state === 'unsealed') {
+    out.warn('trace.unsealed', {
+      actual: integrity.actual,
+      note: 'the recorder never sealed this run, so there is nothing to verify it against',
     });
   }
 
@@ -469,6 +478,12 @@ async function replayFork(
 
   const plan = await upstreamPlan(args);
 
+  // A fork runs a real agent live, so it has exactly the same blind spot `orca record` does: a
+  // harness that talks to its own backend over TLS reads no base-URL variable and is invisible
+  // without interception. The flag was parsed here and silently discarded, which is the worse
+  // half — the operator believes they captured that traffic.
+  const tls = await setupTlsCapture({ args, out, writer, writes, turn: () => turn });
+
   const proxy = await createProxy({
     mode: 'hybrid',
     forkAt,
@@ -476,6 +491,7 @@ async function replayFork(
     exchanges: ctx.exchanges,
     upstream: plan.upstream,
     upstreamHeaders: plan.headers,
+    ...tls.proxyOptions,
     onExchange: (exchange) => {
       writes.push(async () => {
         turn += 1;
@@ -532,18 +548,39 @@ async function replayFork(
     env: process.env,
   });
 
-  const exitCode = await runChild(
-    launch.command,
-    launch.args,
-    { ...process.env, ...launch.env },
-    worktree,
-  );
+  if (proxy.tls) {
+    await trustRunCa(writer, proxy.tls, proxy.url, launch.env, out);
+  }
+
+  let exitCode: number;
+  try {
+    exitCode = await runChild(
+      launch.command,
+      launch.args,
+      { ...process.env, ...launch.env },
+      worktree,
+    );
+  } catch (err) {
+    // The same two failures `orca record` had. A listening proxy keeps Node's event loop alive, so
+    // a throw here printed the error and then hung; and a fork that mints a certificate authority
+    // must not leave the private key on disk when it dies. The trace is sealed either way, because
+    // a fork that failed to launch is still a fork someone will want to read.
+    await proxy.close().catch(() => undefined);
+    await writes.drain().catch(() => undefined);
+    await tls.ca?.dispose().catch(() => undefined);
+    await writer
+      .append({ type: 'run.end', actor: 'orca', turn, attrs: { error: String(err) } })
+      .catch(() => undefined);
+    await writer.close().catch(() => undefined);
+    throw err;
+  }
   await writes.drain();
 
   const stats = proxy.stats();
   await writer.append({ type: 'run.end', actor: 'orca', turn, attrs: { exit_code: exitCode } });
   const manifest = await writer.close(exitCode);
   await proxy.close();
+  await tls.ca?.dispose();
 
   out.phase('fork.done', {
     run: writer.runId,
@@ -646,6 +683,16 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
     dir: ctx.cwd,
     release: async () => {
       await safety.restore(before.tree, ctx.cwd);
+      // Only after the restore succeeded. This store holds the only copy of your working tree as
+      // it was before the replay overwrote it, so removing it on the failure path would delete the
+      // thing the failure means you still need — better a directory to clean up by hand than the
+      // one that had your uncommitted work in it.
+      //
+      // Left behind on every run until now: a whole workspace per `orca replay`, in a directory
+      // `orca gc` deliberately will not touch because it only reclaims scratch worktrees belonging
+      // to forks. Owning its lifetime here is the fix; teaching gc to delete unknown temp
+      // directories is how gc ends up removing someone's work.
+      await rm(scratch, { recursive: true, force: true });
     },
   };
 }

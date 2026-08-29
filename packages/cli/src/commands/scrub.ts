@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
-import { readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { createHash, randomBytes } from 'node:crypto';
+import { readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { join, relative } from 'node:path';
 import { Redactor, resolveRunSelector } from '@orcareplay/core';
 import { runGit, runGitRaw } from '@orcareplay/fs-capture';
 import { validateEvent, validateManifest } from '@orcareplay/schema';
@@ -22,6 +22,14 @@ export interface ScrubResult {
   fsStoreMatches: number;
   /** True when `--drop-fs` deleted the shadow store rather than leaving it behind. */
   fsStoreDropped: boolean;
+  /** True when `--dry-run` reported the plan and wrote nothing. */
+  dryRun: boolean;
+}
+
+/** A file the scrub will replace, held back until every check on every file has passed. */
+interface PendingWrite {
+  path: string;
+  contents: string;
 }
 
 /** What one pass of the detectors did to a piece of text. */
@@ -39,6 +47,10 @@ interface Scrubbed {
  * scrubbed trace that fails its own integrity check would be unusable, which would make people
  * skip scrubbing.
  *
+ * Nothing is written until every file has been scrubbed and checked, and each one then lands by
+ * rename (see {@link commit}). `--dry-run` stops before that, and is the only way to find out what
+ * the standard detectors will take out alongside your literal without having already lost it.
+ *
  * Everything it cannot remove it says out loud. A scrubber that under-reports is merely
  * disappointing; one that over-reports hands you a false all-clear, which is worse than no
  * scrubber at all.
@@ -52,6 +64,10 @@ export async function scrubCommand(
 
   const literals = collectLiterals(args);
   const redactor = new Redactor();
+  // `orca gc` has had this since it shipped and scrub needed it more: gc removes runs you can
+  // re-record, scrub removes material you cannot get back, and it fires the standard detectors as
+  // well as your literal — so what it takes out is not fully knowable before it runs.
+  const dryRun = args.bool('dry-run');
 
   let removals = 0;
   let filesChanged = 0;
@@ -119,10 +135,12 @@ export async function scrubCommand(
     out.plain('  next: widen the match, or delete the run outright');
   }
 
+  const pending: PendingWrite[] = [];
+
   const nextEvents = `${scrubbedLines.join('\n')}\n`;
   const eventsRewritten = nextEvents !== original;
   if (eventsRewritten) {
-    await writeFile(eventsPath, nextEvents, { mode: FILE_MODE });
+    pending.push({ path: eventsPath, contents: nextEvents });
     filesChanged += 1;
   }
 
@@ -136,13 +154,13 @@ export async function scrubCommand(
     if (text === undefined) continue;
     const scrubbed = scrubText(text);
     if (scrubbed.value !== text) {
-      await writeFile(path, scrubbed.value, { mode: FILE_MODE });
+      pending.push({ path, contents: scrubbed.value });
       removals += scrubbed.removals;
       filesChanged += 1;
     }
   }
 
-  const fs = await handleShadowStore(runDir, args.bool('drop-fs'), (text) => {
+  const fs = await handleShadowStore(runDir, args.bool('drop-fs'), dryRun, (text) => {
     return scrubText(text).value !== text;
   });
 
@@ -150,20 +168,22 @@ export async function scrubCommand(
     // Refresh the digest so `verifyIntegrity` still passes over the scrubbed file. Only when the
     // file was actually rewritten: recomputing it unconditionally would quietly repair a digest
     // that never matched, which is exactly the tampering the digest exists to expose.
+    //
+    // Hashed from the bytes about to be written rather than re-read from disk, because under
+    // `--dry-run` nothing is written — and a digest that depends on the write having happened is
+    // a digest that silently means two different things.
     const integrity = manifest.integrity;
     if (isRecord(integrity)) {
       manifest.integrity = {
         ...integrity,
-        events_sha256: createHash('sha256')
-          .update(await readFile(eventsPath))
-          .digest('hex'),
+        events_sha256: createHash('sha256').update(nextEvents, 'utf8').digest('hex'),
       };
     }
   }
   const manifestAfter = `${JSON.stringify(manifest, null, 2)}\n`;
   if (manifestAfter !== manifestBefore) {
     assertManifestSurvived(manifest, runDir);
-    await writeFile(manifestPath, manifestAfter, { mode: FILE_MODE });
+    pending.push({ path: manifestPath, contents: manifestAfter });
     filesChanged += 1;
   }
 
@@ -176,10 +196,17 @@ export async function scrubCommand(
       // By rule and count, never by value — the whole point is that the value is gone.
       { rule: 'scrub', identifier: `manual:${literals.length} literal(s)`, count: removals },
     ];
-    await writeFile(redactionsPath, `${JSON.stringify(doc, null, 2)}\n`, { mode: FILE_MODE });
+    pending.push({ path: redactionsPath, contents: `${JSON.stringify(doc, null, 2)}\n` });
   }
 
-  out.phase('scrubbed', { run: runDir, removed: removals, files: filesChanged });
+  if (dryRun) {
+    out.phase('scrub.dry_run', { run: runDir, would_remove: removals, would_change: filesChanged });
+    for (const write of pending) out.plain(`  would rewrite ${relative(runDir, write.path)}`);
+    if (fs.matches > 0) out.plain(`  ${fs.matches} shadow-store object(s) would still match`);
+  } else {
+    await commit(pending);
+    out.phase('scrubbed', { run: runDir, removed: removals, files: filesChanged });
+  }
   if (removals === 0 && reverted === 0 && fs.matches === 0 && fs.unreadable === undefined) {
     out.plain('  nothing matched — the trace is unchanged');
   }
@@ -192,7 +219,35 @@ export async function scrubCommand(
     reverted,
     fsStoreMatches: fs.matches,
     fsStoreDropped: fs.dropped,
+    dryRun,
   };
+}
+
+/**
+ * Put every rewritten file in place, each one atomically.
+ *
+ * The old code wrote `events.jsonl` with a plain `writeFile`, which truncates first. A scrub
+ * interrupted in that window — ^C, a full disk, an OOM kill — left the run with a truncated events
+ * file and a manifest whose digest described the whole one. That is not a failed scrub, it is
+ * destroyed evidence, and the material being scrubbed is by definition the material someone cannot
+ * afford to lose along with it.
+ *
+ * Nothing is written until every check on every file has passed, and each file lands by rename, so
+ * no reader ever sees a half-written one. A crash part-way through the loop leaves a run whose
+ * files are individually intact and some of which are still unscrubbed — which re-running the same
+ * command fixes, because the detectors are idempotent over already-scrubbed text.
+ */
+async function commit(pending: PendingWrite[]): Promise<void> {
+  for (const write of pending) {
+    const tmp = `${write.path}.${randomBytes(6).toString('hex')}.tmp`;
+    try {
+      await writeFile(tmp, write.contents, { mode: FILE_MODE });
+      await rename(tmp, write.path);
+    } catch (err) {
+      await unlink(tmp).catch(() => undefined);
+      throw err;
+    }
+  }
 }
 
 /**
@@ -307,6 +362,7 @@ interface ShadowStoreStatus {
 async function handleShadowStore(
   runDir: string,
   drop: boolean,
+  dryRun: boolean,
   hasMatch: (text: string) => boolean,
 ): Promise<ShadowStoreStatus> {
   const gitDir = join(runDir, 'fs');
@@ -314,6 +370,10 @@ async function handleShadowStore(
     return { matches: 0, dropped: false };
   }
   if (drop) {
+    // `--dry-run --drop-fs` still scans, so the plan says how much would be lost. Deleting the
+    // snapshots is the single most destructive thing this command does; a dry run that did it
+    // anyway would be worse than having no dry run at all.
+    if (dryRun) return { ...(await scanShadowStore(gitDir, hasMatch)), dropped: false };
     await rm(gitDir, { recursive: true, force: true });
     return { matches: 0, dropped: true };
   }

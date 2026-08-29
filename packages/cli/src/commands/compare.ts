@@ -99,6 +99,11 @@ export async function compareCommand(
         '--model',
         model,
         ...(args.bool('loose') ? ['--loose'] : []),
+        // Every fork this makes runs a live agent, so interception has to reach them: accepting
+        // the flag here and dropping it before the fork is exactly the silent-no-op the flag was
+        // fixed for one layer up.
+        ...(args.bool('tls-intercept') ? ['--tls-intercept'] : []),
+        ...(args.list('tls-hosts').flatMap((h) => ['--tls-hosts', h]) as string[]),
         ...upstreamFlags(args),
       ]);
       const result = await replayCommand(forkArgs, out, cwd);

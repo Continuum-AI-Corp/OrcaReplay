@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -232,6 +232,24 @@ describe('end to end: record → replay → fork', () => {
       await replayCommand(parseArgs(['replay', 'last']), out, workspace);
       const line = lines.find((l) => l.includes('replay.restored')) ?? '';
       expect(line, `no restore line in:\n${lines.join('\n')}`).toMatch(/[0-9a-f]{40}/);
+    } finally {
+      delete process.env.FAKE_AGENT_READ;
+    }
+  });
+
+  it('does not leave a copy of the working tree in the temp directory', async () => {
+    // The safety snapshot is a shadow git store holding the whole workspace, and it was never
+    // removed — one per `orca replay`, growing with the size of your checkout, in a directory
+    // `orca gc` deliberately will not sweep because it only reclaims fork worktrees. Replay owns
+    // it, so replay has to clean it up.
+    process.env.FAKE_AGENT_READ = 'auth.ts';
+    try {
+      const before = await readdir(tmpdir());
+      await record();
+      await replayCommand(parseArgs(['replay', 'last']), out, workspace);
+      const after = await readdir(tmpdir());
+      const leaked = after.filter((e) => e.startsWith('orca-safety-') && !before.includes(e));
+      expect(leaked, 'the pre-replay snapshot store must not outlive the replay').toEqual([]);
     } finally {
       delete process.env.FAKE_AGENT_READ;
     }

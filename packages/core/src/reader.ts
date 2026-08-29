@@ -14,7 +14,15 @@ export interface ReadProblem {
 }
 
 export interface IntegrityResult {
+  /** True only for a sealed run whose events file still hashes to the digest it was sealed with. */
   ok: boolean;
+  /**
+   * Why `ok` is what it is. `unsealed` is not `mismatch`, and collapsing the two is how a run whose
+   * recorder was killed gets reported as tampered: nothing changed under it, there was simply never
+   * a digest to check it against. Callers that only care whether the bytes are trustworthy read
+   * `ok`; callers that tell a person what happened have to tell those two apart.
+   */
+  state: 'verified' | 'unsealed' | 'mismatch';
   /** Absent when the run was never sealed, so there is nothing to check against. */
   expected?: string;
   actual?: string;
@@ -134,9 +142,10 @@ export class TraceReader {
   async verifyIntegrity(): Promise<IntegrityResult> {
     const expected = this.#manifest.integrity?.events_sha256;
     const actual = await sha256File(this.#eventsPath);
-    return expected === undefined
-      ? { ok: false, actual }
-      : { ok: expected === actual, expected, actual };
+    if (expected === undefined) return { ok: false, state: 'unsealed', actual };
+    return expected === actual
+      ? { ok: true, state: 'verified', expected, actual }
+      : { ok: false, state: 'mismatch', expected, actual };
   }
 
   #parse(held: { line: number; text: string }, isLast: boolean): TraceEvent | undefined {

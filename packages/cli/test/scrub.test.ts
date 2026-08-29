@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -54,6 +54,78 @@ describe('scrub', () => {
     const raw = await readFile(join(runDir, 'events.jsonl'), 'utf8');
     expect(raw).not.toContain('prod-db-7.internal.example.com');
     expect(raw).toContain('redacted');
+  });
+
+  describe('--dry-run', () => {
+    it('reports what would go and changes nothing', async () => {
+      // The one command in the tool whose effect cannot be undone, and the only one that had no
+      // way to look first. It also fires the standard detectors alongside your literal, so what it
+      // takes out is genuinely not knowable in advance — which is what makes the preview load-bearing
+      // rather than a nicety.
+      const runDir = await makeRun(['the deploy host is prod-db-7.internal.example.com']);
+      const before = await readFile(join(runDir, 'events.jsonl'), 'utf8');
+      const manifestBefore = await readFile(join(runDir, 'manifest.json'), 'utf8');
+
+      const result = await scrubCommand(
+        parseArgs(['scrub', 'last', '--match', 'prod-db-7.internal.example.com', '--dry-run']),
+        out,
+        cwd,
+      );
+
+      expect(result.dryRun).toBe(true);
+      expect(result.removals, 'it still counts what it found').toBeGreaterThan(0);
+      expect(result.filesChanged).toBeGreaterThan(0);
+      expect(await readFile(join(runDir, 'events.jsonl'), 'utf8')).toBe(before);
+      expect(await readFile(join(runDir, 'manifest.json'), 'utf8')).toBe(manifestBefore);
+      expect(lines.join('\n')).toContain('would rewrite events.jsonl');
+    });
+
+    it('does not delete the filesystem snapshots that --drop-fs would', async () => {
+      const runDir = await makeRun(['nothing sensitive here']);
+      await mkdir(join(runDir, 'fs'), { recursive: true });
+      await writeFile(join(runDir, 'fs', 'HEAD'), 'ref: refs/heads/main\n');
+
+      await scrubCommand(parseArgs(['scrub', 'last', '--drop-fs', '--dry-run']), out, cwd);
+
+      expect(
+        await stat(join(runDir, 'fs')).then(
+          () => true,
+          () => false,
+        ),
+        'a dry run must not perform the most destructive thing the command does',
+      ).toBe(true);
+    });
+
+    it('then really removes it when the flag comes off', async () => {
+      const runDir = await makeRun(['the deploy host is prod-db-7.internal.example.com']);
+      await scrubCommand(
+        parseArgs(['scrub', 'last', '--match', 'prod-db-7.internal.example.com', '--dry-run']),
+        out,
+        cwd,
+      );
+      await scrubCommand(
+        parseArgs(['scrub', 'last', '--match', 'prod-db-7.internal.example.com']),
+        out,
+        cwd,
+      );
+      expect(await readFile(join(runDir, 'events.jsonl'), 'utf8')).not.toContain(
+        'prod-db-7.internal.example.com',
+      );
+    });
+  });
+
+  it('leaves no .tmp file behind when it rewrites a trace', async () => {
+    // events.jsonl used to be written with a plain writeFile, which truncates before it writes: a
+    // ^C in that window left a truncated events file and a manifest digest describing the whole
+    // one. Every rewrite now lands by rename, and the staging file must not survive the commit.
+    const runDir = await makeRun(['the deploy host is prod-db-7.internal.example.com']);
+    await scrubCommand(
+      parseArgs(['scrub', 'last', '--match', 'prod-db-7.internal.example.com']),
+      out,
+      cwd,
+    );
+    const entries = await readdir(runDir);
+    expect(entries.filter((e) => e.endsWith('.tmp'))).toEqual([]);
   });
 
   it('leaves the rest of the payload intact', async () => {
