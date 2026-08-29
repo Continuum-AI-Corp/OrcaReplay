@@ -1,0 +1,11 @@
+{
+  "name": "@orcareplay/mcp-shim",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": "./dist/index.js" },
+  "bin": { "orca-mcp-shim": "./dist/cli.js" },
+  "files": ["dist"]
+}
