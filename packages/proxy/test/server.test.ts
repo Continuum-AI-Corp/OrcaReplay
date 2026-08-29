@@ -187,6 +187,103 @@ describe('proxy — record mode', () => {
   });
 });
 
+describe('proxy — forking onto another provider', () => {
+  /**
+   * The README's headline compare example is `--models claude-opus-5,glm-5.3-flash,qwen3-coder`,
+   * and it could not have worked. `withModel` swapped the model *string* and nothing else, while
+   * the upstream origin came from the dialect of the *recorded* request — so `--model gpt-5.2` on
+   * an Anthropic-recorded run sent an Anthropic-shaped body to api.anthropic.com asking for a
+   * model that does not exist there. Cross-provider comparison, the feature the tool is pitched
+   * on, was single-provider comparison with a misleading flag.
+   */
+  const recordedAnthropic: RecordedExchange = {
+    seq: 0,
+    dialect: 'anthropic',
+    path: '/v1/messages',
+    rawRequest: JSON.stringify(ANTHROPIC_BODY),
+    rawResponse: JSON.stringify(ANTHROPIC_REPLY),
+    status: 200,
+    streamed: false,
+    canonicalRequest: {
+      model: 'claude-opus-5',
+      max_tokens: 1024,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'fix the auth test' }] }],
+    },
+  };
+
+  const OPENAI_REPLY = {
+    id: 'chatcmpl-9',
+    object: 'chat.completion',
+    model: 'gpt-5.2',
+    choices: [
+      { index: 0, message: { role: 'assistant', content: 'patched it' }, finish_reason: 'stop' },
+    ],
+    usage: { prompt_tokens: 11, completion_tokens: 3 },
+  };
+
+  it('sends an OpenAI-shaped request to the OpenAI origin', async () => {
+    const up = stubUpstream(OPENAI_REPLY);
+    const proxy = await createProxy({
+      mode: 'hybrid',
+      forkAt: 0,
+      forkModel: 'gpt-5.2',
+      exchanges: [recordedAnthropic],
+      fetchImpl: up.fetchImpl,
+    });
+    closers.push(proxy.close);
+
+    await post(`${proxy.url}/v1/messages`, ANTHROPIC_BODY);
+
+    expect(up.calls).toHaveLength(1);
+    expect(up.calls[0]!.url).toContain('api.openai.com');
+    expect(up.calls[0]!.url).toContain('/chat/completions');
+    const sent = JSON.parse(String(up.calls[0]!.init.body)) as Record<string, unknown>;
+    expect(sent.model).toBe('gpt-5.2');
+    // OpenAI's shape, not Anthropic's: a flat messages array and no top-level `system`.
+    expect(Array.isArray(sent.messages)).toBe(true);
+    expect(sent.max_completion_tokens ?? sent.max_tokens).toBeDefined();
+  });
+
+  it('returns the reply in the dialect the agent speaks', async () => {
+    // The agent asked Anthropic and must be answered in Anthropic, whatever served it. Handing an
+    // agent a `chat.completion` body it cannot parse is indistinguishable from the model failing.
+    const up = stubUpstream(OPENAI_REPLY);
+    const proxy = await createProxy({
+      mode: 'hybrid',
+      forkAt: 0,
+      forkModel: 'gpt-5.2',
+      exchanges: [recordedAnthropic],
+      fetchImpl: up.fetchImpl,
+    });
+    closers.push(proxy.close);
+
+    const res = await post(`${proxy.url}/v1/messages`, ANTHROPIC_BODY);
+    const body = res.json as Record<string, unknown>;
+
+    expect(body.type).toBe('message');
+    expect(body.role).toBe('assistant');
+    expect(JSON.stringify(body.content)).toContain('patched it');
+    expect(body.object).toBeUndefined();
+  });
+
+  it('still goes to the recorded provider when the model belongs to it', async () => {
+    const up = stubUpstream(ANTHROPIC_REPLY);
+    const proxy = await createProxy({
+      mode: 'hybrid',
+      forkAt: 0,
+      forkModel: 'claude-haiku-4-5',
+      exchanges: [recordedAnthropic],
+      fetchImpl: up.fetchImpl,
+    });
+    closers.push(proxy.close);
+
+    await post(`${proxy.url}/v1/messages`, ANTHROPIC_BODY);
+
+    expect(up.calls[0]!.url).toContain('api.anthropic.com');
+    expect(JSON.parse(String(up.calls[0]!.init.body)).model).toBe('claude-haiku-4-5');
+  });
+});
+
 describe('proxy — streaming', () => {
   /**
    * A model response arrives as SSE over seconds. The proxy used to `await upstreamRes.text()`

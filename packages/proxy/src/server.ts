@@ -4,6 +4,12 @@ import type { CanonicalRequest, CanonicalResponse, Usage } from '@orcareplay/plu
 import {
   anthropicToCanonicalRequest,
   anthropicToCanonicalResponse,
+  canonicalToAnthropicRequest,
+  canonicalToAnthropicResponse,
+  canonicalToAnthropicSse,
+  canonicalToOpenaiRequest,
+  canonicalToOpenaiResponse,
+  canonicalToOpenaiSse,
   openaiToCanonicalRequest,
   openaiToCanonicalResponse,
   parseAnthropicSse,
@@ -108,11 +114,17 @@ export function defaultDialects(): Dialect[] {
       toCanonicalRequest: anthropicToCanonicalRequest,
       toCanonicalResponse: anthropicToCanonicalResponse,
       parseSse: parseAnthropicSse,
+      fromCanonicalRequest: canonicalToAnthropicRequest,
+      fromCanonicalResponse: canonicalToAnthropicResponse,
+      toSse: canonicalToAnthropicSse,
     }),
     openaiDialect({
       toCanonicalRequest: openaiToCanonicalRequest,
       toCanonicalResponse: openaiToCanonicalResponse,
       parseSse: parseOpenaiSse,
+      fromCanonicalRequest: canonicalToOpenaiRequest,
+      fromCanonicalResponse: canonicalToOpenaiResponse,
+      toSse: canonicalToOpenaiSse,
     }),
   ];
 }
@@ -169,12 +181,35 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
   ): Promise<void> {
     stats.liveCalls += 1;
 
+    // Which dialect actually serves the model we are about to ask for. Without this the origin
+    // came from the *recorded* request, so forking an Anthropic run onto gpt-5.2 posted an
+    // Anthropic body to api.anthropic.com naming a model that does not exist there — the
+    // cross-provider comparison the tool is pitched on could not have worked.
+    const target =
+      options.forkModel === undefined
+        ? dialect
+        : (dialects.find((d) => d.ownsModel(options.forkModel!)) ?? dialect);
+    const crossProvider = target.id !== dialect.id;
+
     let parsed: unknown = JSON.parse(rawBody);
-    if (options.forkModel) parsed = dialect.withModel(parsed, options.forkModel);
+    if (crossProvider) {
+      // Through canonical, which is the only representation both dialects agree on.
+      const canonical = dialect.toCanonicalRequest(parsed);
+      parsed = target.fromCanonicalRequest({ ...canonical, model: options.forkModel! });
+    } else if (options.forkModel) {
+      parsed = dialect.withModel(parsed, options.forkModel);
+    }
     const outboundBody = JSON.stringify(parsed);
 
-    const origin = options.upstream?.[dialect.id] ?? dialect.defaultUpstream;
-    const upstreamRes = await doFetch(`${origin}${path}`, {
+    // Prefer an override for the provider we are actually calling; fall back to the override for
+    // the recorded provider before the vendor default. That fallback is the gateway case, and it
+    // is the common one: someone who passed --upstream-anthropic pointed *this run* at a specific
+    // origin, and a gateway serves both dialects from it. Going to api.openai.com instead because
+    // the fork changed model would ignore an instruction the user gave explicitly.
+    const origin =
+      options.upstream?.[target.id] ?? options.upstream?.[dialect.id] ?? target.defaultUpstream;
+    const upstreamPath = crossProvider ? target.requestPath : path;
+    const upstreamRes = await doFetch(`${origin}${upstreamPath}`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -184,8 +219,35 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       body: outboundBody,
     });
 
-    const contentType = upstreamRes.headers.get('content-type') ?? 'application/json';
-    const streamed = contentType.includes('event-stream');
+    const upstreamType = upstreamRes.headers.get('content-type') ?? 'application/json';
+    const upstreamStreamed = upstreamType.includes('event-stream');
+
+    // The agent asked one provider and must be answered in that provider's shape, whatever served
+    // the request. Handing an agent a `chat.completion` body it cannot parse is indistinguishable
+    // from the model having failed.
+    //
+    // A cross-provider reply cannot be teed: translating it means having all of it, so this path
+    // buffers where the same-provider path streams. That is a real cost and it only applies to a
+    // fork that deliberately changed provider — the recording path, which is what an interactive
+    // session runs through, still streams.
+    if (crossProvider) {
+      const raw = await upstreamRes.text();
+      const canonical = upstreamStreamed
+        ? target.parseStream(raw)
+        : target.toCanonicalResponse(JSON.parse(raw));
+      // Match the shape the agent asked for, not the shape the other provider happened to send.
+      const wantsStream = requestedStream(rawBody);
+      const body = dialect.fromCanonicalResponse(canonical, wantsStream);
+      res.writeHead(upstreamRes.status, {
+        'content-type': wantsStream ? 'text/event-stream' : 'application/json',
+      });
+      res.end(body);
+      recordExchange(body, upstreamRes.status, wantsStream);
+      return;
+    }
+
+    const contentType = upstreamType;
+    const streamed = upstreamStreamed;
 
     res.writeHead(upstreamRes.status, { 'content-type': contentType });
 
@@ -196,22 +258,41 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     // way past, so the recording is still the complete body.
     const text = await pipeThrough(upstreamRes, res);
 
-    // Recorded whatever the status. A run that died on rate limits used to produce a trace with no
-    // evidence of it — and replay would then be short exactly the exchanges that explain the
-    // failure you are trying to reproduce.
-    const exchange = buildExchange({
-      dialect,
-      path,
-      rawRequest: outboundBody,
-      rawResponse: text,
-      status: upstreamRes.status,
-      streamed,
-      headers: recordableHeaders,
-      seq: captured.length,
-      durationMs: Date.now() - startedAt,
-    });
-    captured.push(exchange);
-    options.onExchange?.(exchange);
+    recordExchange(text, upstreamRes.status, streamed);
+
+    /**
+     * Recorded whatever the status. A run that died on rate limits used to produce a trace with no
+     * evidence of it — and replay would then be short exactly the exchanges that explain the
+     * failure you are trying to reproduce.
+     *
+     * The recorded body is what the *agent* received, so a cross-provider fork replays as a run of
+     * the dialect the agent speaks. Recording the other provider's bytes would produce a trace
+     * that no adapter could replay.
+     */
+    function recordExchange(rawResponse: string, status: number, isStreamed: boolean): void {
+      const exchange = buildExchange({
+        dialect,
+        path,
+        rawRequest: outboundBody,
+        rawResponse,
+        status,
+        streamed: isStreamed,
+        headers: recordableHeaders,
+        seq: captured.length,
+        durationMs: Date.now() - startedAt,
+      });
+      captured.push(exchange);
+      options.onExchange?.(exchange);
+    }
+  }
+
+  /** Did the agent ask for a stream? Both dialects spell it the same way. */
+  function requestedStream(rawBody: string): boolean {
+    try {
+      return (JSON.parse(rawBody) as { stream?: unknown }).stream === true;
+    } catch {
+      return false;
+    }
   }
 
   /**
