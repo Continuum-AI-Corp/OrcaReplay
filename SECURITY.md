@@ -55,19 +55,56 @@ rather than papering over:
 
 `orca export` prints what it is about to write before it writes it.
 
-## TLS interception: not implemented
+## TLS interception
 
-Capture is base-URL injection, and only base-URL injection. **There is no CA mode.** Nothing in the
-tree generates a certificate, terminates TLS or touches a trust store, so there is no per-run CA to
-find in a run directory and nothing to audit. If you came here after reading that one exists — in
-an older copy of this file, an issue, or a doc that has since been corrected — it does not.
+Capture is normally base-URL injection: point an environment variable at a local origin server and
+the agent's traffic arrives in plaintext. A harness that reads no such variable is invisible to
+that mechanism — a Codex CLI signed in with a ChatGPT subscription is the concrete case, because it
+talks to its own backend over TLS it established itself.
 
-It is worth stating what would gate one, because the gap it would close is real: a harness that
-ignores base-URL variables is not captured at all, and a Codex CLI signed in with a ChatGPT
-subscription is the concrete example. Anything built here would have to generate its key per run,
-keep it in the run directory at mode `0600`, never write to a system trust store, and be opt-in per
-run rather than a global install. If such a mode ever ships and misses any of those, that is worth
-reporting through the process above.
+`orca record --tls-intercept` closes that gap. It is the most invasive thing this tool does, so
+here is exactly what it does and does not do.
+
+**Off by default, and per run.** There is no global switch and no persistent install. Off is the
+absence of a `CONNECT` listener rather than a branch inside one, so a proxy that was not asked to
+intercept cannot be talked into it. The run says out loud that interception is on, which hosts it
+will decrypt, and where the CA lives, before the agent starts.
+
+**The CA is ephemeral and local.** Generated per run into `<run>/tls/` — key `0600`, directory
+`0700` — and deleted when the run ends, including when the run fails, is interrupted, or the agent
+binary does not exist. It expires 24 hours after minting regardless. It is **never** installed into
+a system or browser trust store, and orca will not offer to.
+
+**The key never reaches a trace.** Not `events.jsonl`, not a blob, not the manifest. `RunCa` does
+not expose it — it is a private field, and the file is the only place it exists. A test copies the
+real key material out while a run is live and then greps the entire run directory for it.
+
+**The child trusts it, and nothing else does.** `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`,
+`REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `AWS_CA_BUNDLE` and `DENO_CERT` are set on that process
+alone. Note that `SSL_CERT_FILE` *replaces* a trust store rather than adding to it, so the bundle
+those variables point at is the run CA **plus** the public roots — otherwise every host orca
+deliberately does not intercept would stop working.
+
+**Only the allowlist is decrypted.** The default is model API hosts and nothing else.
+`auth.openai.com` and other sign-in origins are deliberately excluded: that flow carries the
+credential itself, and decrypting it would capture the thing we are trying not to record.
+Everything else is tunnelled opaquely — orca records the host, port, byte counts and duration, and
+nothing of the contents. `--tls-hosts` overrides the list. A bare `*` is refused, because it is a
+request to decrypt everything.
+
+**Origin verification is never disabled.** The re-encrypt leg to the real origin verifies its
+certificate, and an origin that cannot be verified is refused rather than downgraded.
+`ORCA_TLS_UPSTREAM_CA` *adds* roots, for a machine already behind a TLS-inspecting middlebox.
+Nothing removes the check.
+
+**Auth is handled exactly as on the base-URL path.** Headers are forwarded upstream so the agent
+can authenticate, and dropped before the writer. `set-cookie` is dropped from recorded response
+headers.
+
+Two things it will not do, both failing loudly rather than silently: HTTP/2 (ALPN is pinned to
+`http/1.1`, and a client offering only h2 fails the handshake with a named warning) and WebSocket
+upgrades inside an intercepted session (refused with a 501 that names the reason — take the host
+off the allowlist and the whole connection tunnels untouched).
 
 The general advice stands regardless of whether we ever build it: if a tool asks you to install its
 CA system-wide, refusing is reasonable — including if some future version of this one asks.

@@ -101,6 +101,21 @@ try {
     attrs: { model: 'gpt-5.2', status: 200, input_tokens: 1, output_tokens: 1 },
     payload: JSON.stringify({ id: 'x', content: [] }),
   });
+  // A tunnelled and a decrypted connection, which `--tls-intercept` now emits for real. Without a
+  // pair here the coverage line below still reported `net.*` as unexercised while the recorder was
+  // writing them, which is the opposite of the honesty this report exists to provide.
+  await writer.append({
+    type: 'net.request',
+    actor: 'agent',
+    turn: 1,
+    attrs: { host: 'api.example.com', port: 443, method: 'POST', path: '/v1/x' },
+  });
+  await writer.append({
+    type: 'net.response',
+    actor: 'gateway',
+    turn: 1,
+    attrs: { host: 'api.example.com', status: 200, duration_ms: 12 },
+  });
   await writer.append({ type: 'run.end', actor: 'orca', turn: 1, attrs: { exit_code: 0 } });
   await writer.close(0);
   await checkTrace(writer.runDir, 'this writer, freshly recorded');

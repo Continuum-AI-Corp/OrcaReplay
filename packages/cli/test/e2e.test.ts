@@ -309,6 +309,36 @@ describe('end to end: record → replay → fork', () => {
     expect(manifest.git?.dirty).toBe(false);
   });
 
+  it('closes the proxy and seals the trace when the agent will not start', async () => {
+    // Two bugs, one cause. `recordCommand` had no `try/finally`, so a throw skipped both
+    // `proxy.close()` and `writer.close()`.
+    //
+    // The proxy is the visible one: a listening server keeps Node's event loop alive, so
+    // `orca record generic-openai -- /nonexistent` printed its error and then **hung** — verified
+    // against the built CLI, killed at 12s. Mistyping an agent name is the first thing a new user
+    // does.
+    //
+    // The trace is the quieter one: everything the agent did is on disk, but with no `ended_at`,
+    // no `counts` and no `integrity`, so `verifyIntegrity` reports the run as tampered rather than
+    // as unfinished. The same shape loses a complete recording to one failed write.
+    const args = parseArgs([
+      'record',
+      'generic-openai',
+      '--upstream-anthropic',
+      model.url,
+      '--',
+      join(workspace, 'no-such-binary'),
+    ]);
+
+    await expect(recordCommand(args, out, workspace)).rejects.toThrow();
+
+    const runs = await listRuns(workspace);
+    expect(runs, 'the run directory should still exist').toHaveLength(1);
+    const manifest = (await TraceReader.open(runs[0]!.dir)).manifest();
+    expect(manifest.ended_at, 'a failed run must still be sealed').toBeDefined();
+    expect(manifest.integrity?.events_sha256).toBeDefined();
+  });
+
   it('derives checkpoints you can fork from', async () => {
     const result = await record();
     const events = await (await TraceReader.open(result.runDir)).events();

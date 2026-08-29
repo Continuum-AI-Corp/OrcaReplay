@@ -434,16 +434,34 @@ async function runRecording(
     shell: shell ? 'on' : 'off',
   });
 
-  const exitCode = await runChild(
-    launch.command,
-    launch.args,
-    {
-      ...process.env,
-      ...launch.env,
-      ...(launch.cwd ? {} : {}),
-    },
-    launch.cwd ?? cwd,
-  );
+  let exitCode: number;
+  try {
+    exitCode = await runChild(
+      launch.command,
+      launch.args,
+      { ...process.env, ...launch.env },
+      launch.cwd ?? cwd,
+    );
+  } catch (err) {
+    // Two failures share this path, and both were silent in their own way.
+    //
+    // A listening proxy keeps Node's event loop alive, so a throw here printed the error and then
+    // hung — `orca record generic-openai -- /nonexistent` never exited, and mistyping an agent
+    // name is the first thing a new user does. And an unsealed trace has no `ended_at`, `counts`
+    // or `integrity`, so everything the agent did is on disk while `verifyIntegrity` reports the
+    // run as *tampered* rather than as unfinished.
+    //
+    // Sealing here rather than discarding: a run that died is often the run you most want to
+    // read, and the exit code is unknown rather than zero, so it is left absent.
+    await proxy.close().catch(() => undefined);
+    await writes.drain().catch(() => undefined);
+    if (ca) await ca.dispose().catch(() => undefined);
+    await writer
+      .append({ type: 'run.end', actor: 'orca', turn, attrs: { error: String(err) } })
+      .catch(() => undefined);
+    await writer.close().catch(() => undefined);
+    throw err;
+  }
 
   await writes.drain();
 
