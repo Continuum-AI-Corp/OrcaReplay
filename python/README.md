@@ -58,7 +58,7 @@ Run the full example, which answers real questions from a trace:
 $ python3 python/examples/analyze.py
 run_9f2c14a03b71  adapter=claude-code  exit=1
 integrity: OK
-27 events, 6 turns, 11 checkpoints, 0 problems
+26 events, 6 turns, 10 checkpoints, 0 problems
 
 tokens by model
   claude-opus-5      in   40350  out    934  calls   5

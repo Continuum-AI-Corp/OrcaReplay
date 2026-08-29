@@ -115,6 +115,56 @@ describe('proxy — record mode', () => {
     expect(up.calls).toHaveLength(0);
   });
 
+  describe('route.decision', () => {
+    it('is silent when no model was substituted', async () => {
+      // The callback is only observable here, and an over-eager emit is the failure the CLI tests
+      // cannot see: they only wire `onRoute` on the fork path, so a proxy that fired on every
+      // request would put a "nothing was chosen" event in nothing they look at — and in every
+      // ordinary recording, which is where it would actually be wrong.
+      const up = stubUpstream(ANTHROPIC_REPLY);
+      const routes: unknown[] = [];
+      const proxy = await createProxy({
+        mode: 'record',
+        fetchImpl: up.fetchImpl,
+        onRoute: (d) => void routes.push(d),
+      });
+      closers.push(proxy.close);
+
+      await post(`${proxy.url}/v1/messages`, ANTHROPIC_BODY);
+      expect(routes).toEqual([]);
+    });
+
+    it('reports the target, the recorded dialect and the origin when one was', async () => {
+      const up = stubUpstream(ANTHROPIC_REPLY);
+      const routes: {
+        model: string;
+        target: string;
+        recorded: string;
+        crossProvider: boolean;
+        origin: string;
+      }[] = [];
+      const proxy = await createProxy({
+        mode: 'record',
+        forkModel: 'gpt-5.2',
+        fetchImpl: up.fetchImpl,
+        upstream: { openai: 'https://gw.example' },
+        onRoute: (d) => void routes.push(d),
+      });
+      closers.push(proxy.close);
+
+      await post(`${proxy.url}/v1/messages`, ANTHROPIC_BODY);
+
+      expect(routes).toHaveLength(1);
+      expect(routes[0]).toMatchObject({
+        model: 'gpt-5.2',
+        target: 'openai',
+        recorded: 'anthropic',
+        crossProvider: true,
+        origin: 'https://gw.example',
+      });
+    });
+  });
+
   it('never records the caller auth header', async () => {
     const up = stubUpstream(ANTHROPIC_REPLY);
     const seen: RecordedExchange[] = [];

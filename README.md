@@ -1,14 +1,33 @@
 # OrcaReplay
 
-**Time travel for AI agents.** Record an agent run, reproduce exactly what happened, and fork
-execution from any step with a different model, prompt or config.
+### Your agent broke something at 2am. Replay it at 9am — exactly, offline, as many times as you like.
+
+Record any coding agent. Reproduce the run byte-for-byte with the network off. Fork it from any step
+onto a different model and see who gets it right.
+
+[![License](https://img.shields.io/badge/code-Apache--2.0-blue)](LICENSE)
+[![Spec](https://img.shields.io/badge/trace%20spec-CC%20BY%204.0-blue)](spec/orca-trace-v0.md)
+[![Node](https://img.shields.io/badge/node-20%2B-brightgreen)](#install)
+[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20opencode%20%C2%B7%20any-black)](#install)
+[![Good first issues](https://img.shields.io/badge/good%20first%20issues-12-orange)](docs/good-first-issues.md)
 
 ![Recording a Claude Code run, replaying it offline, then forking it onto two models](docs/demo-cli.gif)
 
 <sup>Real output from one session — a Claude Code run recorded, replayed with the network off, then
 forked at checkpoint 4 onto two models and graded by `npx tsc --noEmit`. Nothing here is mocked up.</sup>
 
-Your agent broke something. Replay exactly why.
+## Try it in three commands
+
+```console
+orca record claude              # your agent, unmodified, doing whatever it does
+orca replay last                # the same run again — no network, no tokens, no charge
+orca replay last --from 4 --model claude-haiku-4-5 --ui
+```
+
+The third line is the one people stay for: same files, same conversation prefix, different model
+from step 4 onward. The model is the only variable, which is what makes the answer mean anything.
+
+Not on npm yet — [install from source](#install), it takes about a minute.
 
 ## Why this exists
 
@@ -18,6 +37,15 @@ observability tools: they tell you a run cost $4.12 and used 61k tokens, which i
 you have. The question you have is *why did it delete my migration file.*
 
 OrcaReplay answers that by giving you the run back.
+
+|  | Observability tools | OrcaReplay |
+|---|---|---|
+| Tells you what a run cost | ✅ | ✅ |
+| Tells you which tool call deleted the file | sometimes | ✅ |
+| Runs the agent again and gets the same answer | ❌ | ✅ offline, byte-for-byte |
+| Lets you change the model and re-run from step 4 | ❌ | ✅ |
+| Needs you to modify your agent | usually an SDK wrapper | ❌ two env vars |
+| Works after you close the terminal | ❌ | ✅ it is a file |
 
 ## How it works, in one paragraph
 
@@ -235,6 +263,23 @@ interface first, with a second implementation showing it is not shaped around on
 - [`docs/plugins.md`](docs/plugins.md) — writing an adapter or a provider
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — five-minute dev loop
 - [Good first issues](docs/good-first-issues.md) — twelve of them, with the file to start in
+
+## Help wanted
+
+The format is v0 and the walking skeleton works, which is the interesting point in a project's life:
+the decisions are still cheap to change and there is a lot of obvious work with the file to start in
+already written down.
+
+- **[Twelve good first issues](docs/good-first-issues.md)**, each naming the file and the test.
+- **Write an adapter.** One file, one fixture. If your harness reads a base-URL variable it is
+  about twenty lines — [docs/plugins.md](docs/plugins.md).
+- **Reimplement the reader.** The spec is CC BY 4.0 on purpose. There is already a Python reader;
+  Go and Rust are open.
+- **Break the replay.** The matching ladder is the heart of this and the fastest way to improve it
+  is a real recording it gets wrong. Open an issue with `orca export last -o bug.html` attached — it
+  is one self-contained file, and `orca scrub` is there for anything you need out of it first.
+
+If it saved you an afternoon, a ⭐ helps other people find it.
 
 ## License
 

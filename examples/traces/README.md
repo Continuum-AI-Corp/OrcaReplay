@@ -11,22 +11,28 @@ Real-shaped traces, checked into the repo on purpose. They do four jobs at once:
 4. **Evaluation.** Anyone can inspect the project without installing it.
 
 **These are hand-written**, and that is the point of job 1 and job 3 — a fixture our own writer
-produced could not demonstrate that someone else's implementation is possible. It does mean they
-are ahead of the recorder in places: `run_9f2c14a03b71` contains `error` and `checkpoint` events,
-and a populated `manifest.git`, and v0 emits none of the first two (checkpoints are *derived* at
-read time per spec §3, never recorded). Treat the examples as what the format allows, not as a
-transcript of what `orca record` produces today. The conformance run prints which declared event
-types no shipped trace exercises, so the gap stays visible instead of drifting.
+produced could not demonstrate that someone else's implementation is possible. Treat them as what
+the format allows, not as a transcript of what `orca record` produces today.
+
+That licence has one limit, and this fixture used to break it: it carried a recorded `checkpoint`
+event. Spec §3 says a checkpoint is *derived* at read time and never recorded, so shipping one
+taught every implementer reading the example to emit the one event the format says not to. It is
+gone. `error` and a populated `manifest.git` stay — the recorder produces both now.
+
+The conformance run prints which declared event types no shipped trace exercises, so any drift
+between the format and the recorder stays visible rather than becoming folklore.
 
 ## `run_9f2c14a03b71`
 
 A coding agent chasing a failing auth test. It reads `src/auth.ts`, greps for `JWT`, makes a
 correct-looking edit at turn 3, runs the tests, and fails — then repeats the same edit for two more
-turns without changing the tree, which the `note` event at seq 26 flags as a loop.
+turns without changing the tree, which the `note` event at seq 24 flags as a loop.
 
-The interesting part is seq 18: the `checkpoint`. Everything before it is identical no matter which
-model you hand the rest of the run to, which is exactly what makes
-`orca replay --from 18 --model <other>` a controlled experiment rather than an anecdote.
+The interesting part is seq 13: the `fs.snapshot` after that first edit. Everything up to it is
+identical no matter which model you hand the rest of the run to, which is what makes
+`orca replay --from 13 --model <other>` a controlled experiment rather than an anecdote — and a
+checkpoint is exactly that snapshot plus a complete conversation prefix, worked out by the reader
+rather than written down by the recorder.
 
 Poke at it with nothing but `jq`:
 

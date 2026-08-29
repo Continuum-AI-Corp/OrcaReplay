@@ -69,6 +69,8 @@ export interface ProxyOptions {
   dialects?: Dialect[];
   onExchange?: (e: RecordedExchange) => void;
   onDivergence?: (d: Divergence & { seq: number }) => void;
+  /** Called once per live call that carried a model substitution. See {@link RouteDecision}. */
+  onRoute?: (decision: RouteDecision) => void;
   /**
    * Called when strict replay refuses a request. Separate from `onDivergence` because it is not a
    * divergence: nothing was served, and the run is over. A count alone leaves the operator staring
@@ -104,6 +106,24 @@ export interface ProxyStats {
 }
 
 /** What a run needs to tell the operator, and to tell the child process, about interception. */
+/**
+ * One routing decision: which model, which wire format serves it, and where it was sent.
+ *
+ * `recorded` is the dialect the agent's own request used, which is what makes a cross-provider fork
+ * legible — without it, "target: openai" leaves a reader unable to tell a substitution from a run
+ * that was OpenAI all along.
+ */
+export interface RouteDecision {
+  model: string;
+  /** Dialect that will serve it. */
+  target: string;
+  /** Dialect the agent's request arrived in. */
+  recorded: string;
+  origin: string;
+  crossProvider: boolean;
+  reason: string;
+}
+
 export interface TlsInterceptInfo {
   /** The hosts that will be decrypted, as written. */
   hosts: string;
@@ -282,6 +302,26 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     const origin =
       options.upstream?.[target.id] ?? options.upstream?.[dialect.id] ?? target.defaultUpstream;
     const upstreamPath = crossProvider ? target.requestPath : path;
+
+    // Spec §2: "a gateway chose a model". Orca *is* the gateway on this path — it substitutes the
+    // model, picks the wire format that serves it, and picks the origin — and it was making all
+    // three of those choices silently. Which is the one thing a comparison must not do: reading
+    // `claude-opus-5 vs gpt-5.2` in a verdict table tells you nothing about where either went, and
+    // a fork that quietly fell back to the recorded provider's origin looked identical to one that
+    // did not. Emitted only when a decision was actually taken, so an ordinary recording — where
+    // orca forwards what it was given — stays free of an event saying "nothing was chosen".
+    if (options.forkModel !== undefined) {
+      options.onRoute?.({
+        model: options.forkModel,
+        target: target.id,
+        recorded: dialect.id,
+        origin,
+        crossProvider,
+        reason: crossProvider
+          ? `${options.forkModel} is served by ${target.id}, not the recorded ${dialect.id}`
+          : `${options.forkModel} is served by the recorded dialect ${dialect.id}`,
+      });
+    }
     const upstreamRes = await doFetch(`${origin}${upstreamPath}`, {
       method: 'POST',
       headers: {

@@ -36,15 +36,15 @@ from orca_trace import (
 )
 
 #: Every seq that satisfies spec §3 for this trace, per deriveCheckpoints() in TypeScript.
-GOLDEN_CHECKPOINT_SEQS = [1, 13, 14, 15, 16, 17, 18, 21, 24, 25, 26]
+GOLDEN_CHECKPOINT_SEQS = [1, 13, 14, 15, 16, 17, 20, 23, 24, 25]
 
 #: (turn, startSeq, endSeq) per turnsOf() in TypeScript.
-GOLDEN_TURN_SPANS = [(0, 0, 1), (1, 2, 4), (2, 5, 8), (3, 9, 18), (4, 19, 21), (5, 22, 26)]
+GOLDEN_TURN_SPANS = [(0, 0, 1), (1, 2, 4), (2, 5, 8), (3, 9, 17), (4, 18, 20), (5, 21, 25)]
 
 #: causalChain(events, 17) in TypeScript — the failing test, traced back to its first request.
 GOLDEN_CHAIN_TO_17 = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15, 16, 17]
 
-GOLDEN_EVENT_COUNT = 27
+GOLDEN_EVENT_COUNT = 26
 
 
 @pytest.fixture
@@ -165,20 +165,23 @@ class TestCheckpointsAgreeWithTypeScript:
                 seq <= checkpoint.seq and turn == checkpoint.turn for seq, turn in snapshots
             ), f"checkpoint {checkpoint.seq} has no governing snapshot"
 
-    def test_the_derived_checkpoints_include_the_recorded_checkpoint_event(
-        self, reader: TraceReader
-    ) -> None:
-        """This trace also carries a live `checkpoint` event; derivation must agree with it."""
-        recorded = [e.seq for e in reader.events() if e.type == "checkpoint"]
-        derived = {c.seq for c in derive_checkpoints(reader.events())}
-        assert recorded and set(recorded) <= derived
+    def test_a_checkpoint_is_never_recorded_only_derived(self, reader: TraceReader) -> None:
+        """Spec §3, from the other side.
+
+        This used to assert the opposite — that the fixture carried a live `checkpoint` event and
+        derivation agreed with it — which made a passing suite out of a fixture that taught every
+        implementer to emit the one event the format says not to.
+        """
+        assert [e.seq for e in reader.events() if e.type == "checkpoint"] == []
+        assert derive_checkpoints(reader.events()), "derivation still finds them without one"
 
     def test_snapping_a_non_checkpoint_target_moves_back_and_says_so(
         self, reader: TraceReader
     ) -> None:
         checkpoints = derive_checkpoints(reader.events())
-        checkpoint, snapped = snap_to_checkpoint(checkpoints, 20)
-        assert (checkpoint.seq, snapped) == (18, True)
+        # 19 is inside turn 4 with no checkpoint of its own, so it must move back to 17 and say so.
+        checkpoint, snapped = snap_to_checkpoint(checkpoints, 19)
+        assert (checkpoint.seq, snapped) == (17, True)
         assert snap_to_checkpoint(checkpoints, 13) == (checkpoints[1], False)
 
     def test_turn_spans_match(self, reader: TraceReader) -> None:

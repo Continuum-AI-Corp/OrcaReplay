@@ -125,6 +125,11 @@ configured upstream, translating only where a fork changed the model — routing
 no gain. To point orca at a different model API today, use `orca setup`, or `--upstream-anthropic` /
 `--upstream-openai` per run.
 
+The repo used to ship live `Provider` clients and a registry to resolve them. They were deleted:
+about 400 lines of production code and 570 of tests that nothing invoked, kept alive only by a
+docstring claiming the live path went through them. The *interface* stays, because a format and an
+interface are cheap to publish and a wrong implementation is not.
+
 So implement this to be *ready* for a future live path, or to reuse the shape in your own tooling —
 not because registering one changes what `orca replay --model` does. It does not, yet.
 

@@ -92,7 +92,15 @@ def main(run_dir: Path) -> int:
     elif not checkpoints:
         print("  (no checkpoints: the run recorded no fs.snapshot, so nothing is forkable)")
     else:
-        for target in (failure.seq, failure.seq + 3):
+        # One target that is a checkpoint and one that is not, so both behaviours show. The second
+        # is *found* rather than guessed at with an offset: which seqs are checkpoints depends on
+        # the trace, and an arithmetic guess quietly stops demonstrating anything the day it lands
+        # on one.
+        exact = {c.seq for c in checkpoints}
+        between = next((e.seq for e in events if e.seq > failure.seq and e.seq not in exact), None)
+        for target in (failure.seq, between):
+            if target is None:
+                continue
             checkpoint, snapped = snap_to_checkpoint(checkpoints, target)
             moved = f"snapped back from {target}" if snapped else "exact"
             print(f"  seq {target:<3} -> checkpoint {checkpoint.seq} ({moved}), tree {checkpoint.fs_tree}")

@@ -556,6 +556,17 @@ async function replayFork(
         if (forkFs) await appendSnapshot(forkFs, writer, out, turn);
       });
     },
+    onRoute: (decision) => {
+      writes.push(async () => {
+        await writer.append({
+          type: 'route.decision',
+          // On a fork the gateway is orca: it substituted the model and picked what serves it.
+          actor: 'gateway',
+          turn,
+          attrs: { ...decision },
+        });
+      });
+    },
     onDivergence: (d) => {
       writes.push(async () => {
         await writer.append({

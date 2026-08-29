@@ -147,6 +147,21 @@ try {
     turn: 1,
     attrs: { level: 'minor', rung: 2, detail: 'trailing message differs', source_seq: 2 },
   });
+  // A routing decision, which a fork emits for real now: orca substituted the model, picked the
+  // dialect that serves it and picked the origin.
+  await writer.append({
+    type: 'route.decision',
+    actor: 'gateway',
+    turn: 1,
+    attrs: {
+      model: 'gpt-5.2',
+      target: 'openai',
+      recorded: 'anthropic',
+      origin: 'https://api.openai.com',
+      crossProvider: true,
+      reason: 'gpt-5.2 is served by openai, not the recorded anthropic',
+    },
+  });
   await writer.append({ type: 'run.end', actor: 'orca', turn: 1, attrs: { exit_code: 0 } });
   await writer.close(0);
   await checkTrace(writer.runDir, 'this writer, freshly recorded');
@@ -154,16 +169,25 @@ try {
   await rm(scratch, { recursive: true, force: true });
 }
 
-// Not a failure: the format deliberately declares more than v0 emits, and a reader is better
-// served by knowing which is which than by the schema and the recorder quietly disagreeing.
-//
 // Only types this repository actually emits are added above. Writing a synthetic event for a type
 // nothing produces would empty this list while making it a lie — the line is worth having precisely
 // because it is what noticed that MCP capture emitted nothing.
-const unexercised = EVENT_TYPES.filter((t) => !seen.has(t));
-if (unexercised.length > 0) {
-  console.log(`\ndeclared but not exercised by any trace here: ${unexercised.join(', ')}`);
+//
+// `checkpoint` is the one type that is *supposed* to stay unexercised: spec §3 derives a checkpoint
+// at read time and forbids recording one. Reporting it beside genuine gaps invites someone to close
+// it by emitting the event the spec says not to — which is exactly what the shipped example used to
+// do — so it is named as intentional instead.
+const DERIVED_ONLY = new Set(['checkpoint']);
+const unexercised = EVENT_TYPES.filter((t) => !seen.has(t) && !DERIVED_ONLY.has(t));
+const derived = EVENT_TYPES.filter((t) => !seen.has(t) && DERIVED_ONLY.has(t));
+if (derived.length > 0) {
+  console.log(`\nderived at read time, never recorded (spec §3): ${derived.join(', ')}`);
 }
+console.log(
+  unexercised.length > 0
+    ? `declared but not exercised by any trace here: ${unexercised.join(', ')}`
+    : 'every declared event type is exercised by a trace here',
+);
 
 console.log(`\n${checked} events checked, ${failures} failure(s)`);
 process.exit(failures === 0 ? 0 : 1);
