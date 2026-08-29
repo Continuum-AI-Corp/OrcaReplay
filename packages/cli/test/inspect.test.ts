@@ -113,6 +113,24 @@ describe('orca list — fork provenance', () => {
       const parentRow = text.split('\n').find((l) => l.startsWith(parent.runId)) ?? '';
       expect(childRow).toContain(`${parent.runId}@4`);
       expect(parentRow).not.toContain('@');
+
+      // A replay trace has a parent but no checkpoint, and `run_x@?` reads as missing data.
+      const replay = await TraceWriter.create(join(dir, '.orca', 'runs'), {
+        adapter: { id: 'claude-code', version: '0.0.0' },
+        argv: ['claude-code'],
+        cwd: dir,
+        orcaVersion: '0.0.0',
+        parentRun: parent.runId,
+      });
+      await replay.close(0);
+      lines.length = 0;
+      await listCommand(parseArgs(['list']), out, dir);
+      const replayRow =
+        stripAnsi(lines.join('\n'))
+          .split('\n')
+          .find((l) => l.startsWith(replay.runId)) ?? '';
+      expect(replayRow).toContain(parent.runId);
+      expect(replayRow).not.toContain('@');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -156,6 +174,42 @@ describe('orca show — fork provenance', () => {
       expect(text).toContain(parent.runId);
       expect(text).toContain('4');
       expect(text).toContain('claude-haiku-4-5-20251001');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('describes a replay trace as a replay, not a fork with no checkpoint', async () => {
+    // `parent_run` used to imply a fork, and now it does not: an exact replay writes its own run
+    // with a parent and deliberately no `fork_point`. The line rendered "at checkpoint undefined",
+    // which reads as a bug in the trace rather than as the two different things it is describing.
+    const dir = await mkdtemp(join(tmpdir(), 'orca-show-replay-'));
+    try {
+      const parent = await TraceWriter.create(join(dir, '.orca', 'runs'), {
+        adapter: { id: 'claude-code', version: '0.0.0' },
+        argv: ['claude-code'],
+        cwd: dir,
+        orcaVersion: '0.0.0',
+      });
+      await parent.close(0);
+
+      const replay = await TraceWriter.create(join(dir, '.orca', 'runs'), {
+        adapter: { id: 'claude-code', version: '0.0.0' },
+        argv: ['claude-code'],
+        cwd: dir,
+        orcaVersion: '0.0.0',
+        parentRun: parent.runId,
+      });
+      await replay.close(0);
+
+      const lines: string[] = [];
+      const out = new Output({ write: (l) => void lines.push(l), isTTY: false });
+      await showCommand(parseArgs(['show', replay.runId]), out, dir);
+
+      const text = lines.join('\n');
+      expect(text).toContain(parent.runId);
+      expect(text).toContain('replay');
+      expect(text).not.toContain('undefined');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

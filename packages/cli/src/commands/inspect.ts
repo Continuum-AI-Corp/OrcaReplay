@@ -32,7 +32,13 @@ export async function listCommand(
     runs.map((r) => [
       r.runId,
       r.createdAt,
-      r.parentRun === undefined ? '' : `${r.parentRun}@${r.forkPoint ?? '?'}`,
+      // `@<seq>` only where there is a fork point. A replay trace has a parent and no checkpoint,
+      // and `run_x@?` reads as missing data rather than as the different thing it is.
+      r.parentRun === undefined
+        ? ''
+        : r.forkPoint === undefined
+          ? r.parentRun
+          : `${r.parentRun}@${r.forkPoint}`,
       r.dir,
     ]),
   );
@@ -58,8 +64,18 @@ export async function showCommand(
   // this line the only way to learn where it came from is to cat the manifest — for the feature
   // the tool is named after.
   if (manifest.parent_run !== undefined) {
-    const model = manifest.fork_model === undefined ? '' : ` on ${manifest.fork_model}`;
-    out.plain(`  forked from ${manifest.parent_run} at checkpoint ${manifest.fork_point}${model}`);
+    // `parent_run` no longer implies a fork. An exact replay writes its own run with a parent and
+    // deliberately no `fork_point`, so keying the wording on that field is what tells the two
+    // apart — and stops the line reading "at checkpoint undefined", which looks like a corrupt
+    // trace rather than the different thing it actually is.
+    if (manifest.fork_point === undefined) {
+      out.plain(`  replay of ${manifest.parent_run}`);
+    } else {
+      const model = manifest.fork_model === undefined ? '' : ` on ${manifest.fork_model}`;
+      out.plain(
+        `  forked from ${manifest.parent_run} at checkpoint ${manifest.fork_point}${model}`,
+      );
+    }
   }
   out.plain('');
 
