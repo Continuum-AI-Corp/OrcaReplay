@@ -123,6 +123,56 @@ describe('orca setup', () => {
     });
   });
 
+  describe('the next-step line', () => {
+    it('suggests models the gateway actually serves', async () => {
+      // Model ids are gateway-specific — OrcaRouter namespaces them by provider, a direct provider
+      // does not — so a hardcoded pair is a copyable line that fails against the gateway orca just
+      // configured. It used to print `claude-opus-5,gpt-5.2` regardless.
+      await setupCommand(
+        parseArgs(['setup', '--gateway', 'https://gw.example', '--key', 'k']),
+        out,
+        {
+          env,
+          probe: async () => ['anthropic/claude-opus-5', 'openai/gpt-5.2', 'google/gemini-2.5-pro'],
+          ask: async (q) => (q.startsWith('Models') ? '' : ''),
+        },
+      );
+      // The ask above accepts the offered default, so a model list is stored and the line is short.
+      expect(text()).toContain('orca compare last --verify');
+    });
+
+    it('names real ids when no default list was chosen', async () => {
+      await setupCommand(
+        parseArgs(['setup', '--gateway', 'https://gw.example', '--key', 'k']),
+        out,
+        { env, probe: async () => ['anthropic/claude-opus-5', 'openai/gpt-5.2'] },
+      );
+      const printed = text();
+      expect(printed).toContain('--models anthropic/claude-opus-5,openai/gpt-5.2');
+      expect(printed, 'never a model id nobody confirmed exists').not.toContain(
+        '--models claude-opus-5,gpt-5.2',
+      );
+    });
+
+    it('points at orca models when the gateway could not be reached', async () => {
+      await setupCommand(
+        parseArgs(['setup', '--gateway', 'https://gw.example', '--key', 'k']),
+        out,
+        {
+          env,
+          probe: async () => {
+            throw new Error('ECONNREFUSED');
+          },
+        },
+      );
+      const printed = text();
+      expect(printed).toContain('orca models');
+      expect(printed, 'inventing ids for an unreachable gateway is worse than none').not.toMatch(
+        /--models \S/,
+      );
+    });
+  });
+
   it('writes a gateway and key given on the command line', async () => {
     await setupCommand(
       parseArgs(['setup', '--gateway', 'https://gw.example', '--key', 'sk-secret-value']),

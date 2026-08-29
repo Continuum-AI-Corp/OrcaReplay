@@ -63,7 +63,9 @@ export async function compareCommand(
   if (models.length === 0) {
     throw new Error(
       'compare needs models to compare\n' +
-        '  orca compare last --models claude-opus-5,glm-5.3-flash\n' +
+        // Not two example ids: they are gateway-specific — OrcaRouter namespaces by provider,
+        // a direct provider does not — so a copyable pair here fails against half of them.
+        '  orca models to see what your gateway serves, then: orca compare last --models a,b\n' +
         '  or run orca setup once — it stores a gateway (OrcaRouter by default) and a model list',
     );
   }

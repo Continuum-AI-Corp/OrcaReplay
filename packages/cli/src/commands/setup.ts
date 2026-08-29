@@ -97,8 +97,9 @@ export async function setupCommand(
   // all, and where it came from. The value is a description, never the credential.
   out.info('config.saved', { path, mode: '0600', gateway: url, auth: describeKey(gateway) });
 
+  let available: string[] = [];
   try {
-    const available = await probe(url, gatewayHeaders(config, env));
+    available = await probe(url, gatewayHeaders(config, env));
     if (available.length === 0) {
       out.warn('gateway.no_models', { note: 'reachable, but it listed no models' });
     } else {
@@ -130,12 +131,20 @@ export async function setupCommand(
   }
 
   out.plain('');
-  out.plain(
-    config.models && config.models.length > 0
-      ? '  orca compare last --verify "npm test"'
-      : '  orca compare last --models claude-opus-5,gpt-5.2 --verify "npm test"',
-  );
+  // Built from what the gateway actually serves, never from two model names picked here. Model ids
+  // are gateway-specific — OrcaRouter namespaces them by provider, a direct provider does not — so a
+  // hardcoded pair is a copyable line that fails against the gateway orca just configured.
+  out.plain(nextStep(config, available));
   return config;
+}
+
+/** The line worth copying next, using real model ids wherever we have them. */
+function nextStep(config: OrcaConfig, available: string[]): string {
+  if (config.models && config.models.length > 0) return '  orca compare last --verify "npm test"';
+  if (available.length > 0) {
+    return `  orca compare last --models ${available.slice(0, 2).join(',')} --verify "npm test"`;
+  }
+  return '  orca models                    # what this gateway serves, then compare two of them';
 }
 
 /** Offer the gateway's own list, so the answer is a choice rather than a spelling test. */

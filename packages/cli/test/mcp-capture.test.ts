@@ -9,6 +9,7 @@ import { TraceReader, deriveCheckpoints, resolveRunSelector } from '@orcareplay/
 import { validateEvent } from '@orcareplay/schema';
 import { parseArgs } from '../src/args.js';
 import { Output } from '../src/out.js';
+import { mcpSourceFrom, usedMcp } from '../src/mcp.js';
 import { recordCommand } from '../src/commands/record.js';
 import { replayCommand } from '../src/commands/replay.js';
 import { startFakeModel } from './fixtures/fake-model.mjs';
@@ -216,5 +217,41 @@ describe('mcp capture', () => {
     expect(request!.turn, 'not the last turn, which is what the drain used to assign').not.toBe(
       Math.max(...turns),
     );
+  });
+});
+
+describe('mcpSourceFrom', () => {
+  const note = (source: string) => ({
+    type: 'note',
+    attrs: { rule: 'mcp_instrumented', source },
+  });
+
+  it('prefers the flag over what the recording used', () => {
+    expect(mcpSourceFrom('/given/on/the/command/line.json', [note('/recorded.json')])).toBe(
+      '/given/on/the/command/line.json',
+    );
+  });
+
+  it('falls back to the recording, so a replay needs no flag', () => {
+    expect(mcpSourceFrom(undefined, [note('/recorded.json')])).toBe('/recorded.json');
+  });
+
+  it('is undefined for a run that never had MCP', () => {
+    expect(mcpSourceFrom(undefined, [{ type: 'model.request' }])).toBeUndefined();
+  });
+
+  it('ignores a note of a different rule, and an empty source', () => {
+    expect(
+      mcpSourceFrom(undefined, [
+        { type: 'note', attrs: { rule: 'tls_intercept', source: '/wrong.json' } },
+        { type: 'note', attrs: { rule: 'mcp_instrumented', source: '' } },
+      ]),
+    ).toBeUndefined();
+  });
+
+  it('knows whether a run captured MCP at all', () => {
+    expect(usedMcp([{ type: 'mcp.request' }])).toBe(true);
+    expect(usedMcp([{ type: 'mcp.response' }])).toBe(true);
+    expect(usedMcp([{ type: 'model.request' }, { type: 'note' }])).toBe(false);
   });
 });
