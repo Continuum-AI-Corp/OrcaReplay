@@ -47,7 +47,7 @@ Early. `v0` is the walking skeleton of the three commands above.
 |---|---|
 | Trace format v0 + JSON Schema | working |
 | Anthropic / OpenAI-compatible model capture | working |
-| Exact replay with divergence reporting | working |
+| Exact replay with divergence reporting | working — restores the recorded filesystem over your working tree, then puts it back; `--worktree` for a scratch copy, `--in-place` to restore nothing |
 | Fork replay from a checkpoint | working |
 | Compare across models | working |
 | Filesystem snapshots and diffs | working |

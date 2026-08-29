@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   TraceReader,
   deriveCheckpoints,
@@ -131,7 +131,7 @@ export async function replayCommand(
 
   const result = isFork
     ? await replayFork(args, out, { manifest, events, exchanges, runDir, cwd, from, model })
-    : await replayExact(args, out, { manifest, events, exchanges, runDir });
+    : await replayExact(args, out, { manifest, events, exchanges, runDir, cwd });
 
   if (args.bool('ui')) {
     // Show the run you just produced: after a fork that is the child, not the parent, because
@@ -159,15 +159,26 @@ interface Ctx {
   events: TraceEvent[];
   exchanges: RecordedExchange[];
   runDir: string;
+  cwd: string;
 }
 
 /**
  * Exact replay. Every response comes from the trace and egress is blocked — if the agent reaches
  * for the network here, that is a bug we want to fail on, not paper over.
+ *
+ * It also restores the filesystem the run started from, and that is not a nicety. A harness reads
+ * files into the conversation, so the bytes on disk end up inside the recorded request; the run
+ * then edits those same files. Replaying in the directory you recorded in re-reads what the
+ * recording itself changed, the trailing message differs, and the replay halts at rung 4 —
+ * correctly, but uselessly, because nothing about the recording was wrong. Restoring first is
+ * what makes "exact" mean anything, and it has the second virtue of leaving your checkout alone
+ * rather than letting the agent edit it a second time.
  */
 async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<ReplayResult> {
   const divergences: { level: string; detail: string; seq: number }[] = [];
   const unmatched: { seq: number; reason: string }[] = [];
+  const workspace = await replayWorkspace(args, out, ctx);
+
   const proxy = await createProxy({
     mode: 'replay',
     exchanges: ctx.exchanges,
@@ -177,13 +188,23 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
     // Printed as it happens rather than tallied at the end. A halted replay stops the agent, so
     // the count in `replay.done` arrives after the operator has already seen the run die — and a
     // bare `unmatched=1` with no reason is indistinguishable from a bug in orca itself.
+    //
+    // The two directories are on the line because a distance in the hundreds of thousands is true
+    // and unactionable. Harnesses put absolute paths in their tool calls, so a replay running
+    // anywhere but the recording's own directory gets a permission refusal where the recording has
+    // file contents — by far the most common cause of a halt, and invisible from the number alone.
     onUnmatched: (u) => {
       unmatched.push(u);
       out.warn('replay.unmatched', {
         seq: u.seq,
         index: u.index,
         reason: u.reason,
-        next: 'orca replay <run> --loose',
+        recorded_in: ctx.manifest.cwd,
+        replayed_in: workspace.dir,
+        next:
+          workspace.dir === ctx.manifest.cwd
+            ? 'orca replay <run> --loose'
+            : `cd ${ctx.manifest.cwd} && orca replay <run> --in-place   # or --loose to continue live`,
       });
     },
   });
@@ -193,22 +214,33 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
     exchanges: ctx.exchanges.length,
     egress: 'blocked',
     proxy: proxy.url,
+    cwd: workspace.dir,
   });
 
   const adapter = defaultAdapters().get(ctx.manifest.adapter.id);
   const launch = await adapter.prepare({
     runId: ctx.manifest.run_id,
-    cwd: process.cwd(),
+    cwd: workspace.dir,
     proxyUrl: proxy.url,
     runDir: ctx.runDir,
     userArgs: ctx.manifest.argv.slice(1),
     env: process.env,
   });
 
-  const exitCode = await runChild(launch.command, launch.args, {
-    ...process.env,
-    ...launch.env,
-  });
+  let exitCode: number;
+  try {
+    exitCode = await runChild(
+      launch.command,
+      launch.args,
+      { ...process.env, ...launch.env },
+      workspace.dir,
+    );
+  } finally {
+    // In a finally because the whole justification for restoring over the working tree is that it
+    // is put back — a throw between here and there would leave someone's checkout holding a
+    // recorded run's files.
+    await workspace.release();
+  }
 
   const stats = proxy.stats();
   await proxy.close();
@@ -391,6 +423,89 @@ async function replayFork(
     divergences: stats.divergences,
     liveCalls: stats.liveCalls,
     exitCode,
+  };
+}
+
+/** Where an exact replay runs, and how to put the directory back afterwards. */
+interface Workspace {
+  dir: string;
+  release: () => Promise<void>;
+}
+
+const noRelease = async (): Promise<void> => {};
+
+/**
+ * Prepare the filesystem an exact replay needs.
+ *
+ * Two facts decide this, and they pull against each other. A harness reads files into the
+ * conversation, so the bytes on disk are inside the recorded request and replaying against a
+ * directory the recording itself edited produces a different request. And a harness writes
+ * *absolute* paths into its tool calls, so replaying a copy of that directory somewhere else makes
+ * the agent read outside its working directory — where it gets a permission refusal in place of
+ * the file, which diverges just as badly. Measured on a real Claude Code run: a scratch copy
+ * halted at the first tool result; the same trace restored at its own path replayed all six
+ * exchanges with nothing unmatched.
+ *
+ * So the default restores the recorded state *over the working tree*, at the path the run was
+ * recorded in. That is only defensible because it is reversible: the current tree is snapshotted
+ * into a scratch store first and put back in a `finally`, so a replay is observationally a no-op
+ * on your checkout, and the snapshot id is printed before anything is touched in case the process
+ * is killed in between.
+ *
+ * Three ways out. `--worktree` replays in a scratch copy and never touches your files, at the cost
+ * of the divergence above. `--in-place` uses the tree exactly as it stands, restoring nothing.
+ * And a replay invoked from somewhere other than the directory the run was recorded in never
+ * restores, because writing a recorded tree over an unrelated directory is not a thing to do by
+ * default.
+ */
+async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Workspace> {
+  if (args.bool('in-place')) return { dir: ctx.cwd, release: noRelease };
+
+  const initial = deriveCheckpoints(ctx.events).find((c) => c.fsTree !== undefined);
+  if (!initial?.fsTree) {
+    out.warn('replay.in-place', {
+      why: 'this run has no filesystem snapshot to restore',
+      note: 'recorded with --no-fs; a file the run read may since have changed',
+    });
+    return { dir: ctx.cwd, release: noRelease };
+  }
+
+  const recorded = await FsCapture.start({ runDir: ctx.runDir, cwd: ctx.cwd });
+
+  if (args.bool('worktree')) {
+    const worktree = await mkdtemp(join(tmpdir(), `orca-replay-${ctx.manifest.run_id}-`));
+    await recorded.restore(initial.fsTree, worktree);
+    return { dir: worktree, release: noRelease };
+  }
+
+  if (resolve(ctx.cwd) !== resolve(ctx.manifest.cwd)) {
+    out.warn('replay.elsewhere', {
+      recorded_in: ctx.manifest.cwd,
+      running_in: ctx.cwd,
+      note: 'not restoring over a directory the run was not recorded in; use --worktree for a copy',
+    });
+    return { dir: ctx.cwd, release: noRelease };
+  }
+
+  // A store of its own, under the OS temp dir: the safety snapshot is scratch, and writing it into
+  // the trace's shadow store would leave an object in a recorded run that nothing references.
+  const scratch = await mkdtemp(join(tmpdir(), 'orca-safety-'));
+  const safety = await FsCapture.start({ runDir: scratch, cwd: ctx.cwd });
+  const before = await safety.snapshotTurn(0);
+
+  out.info('replay.restored', {
+    to: initial.fsTree,
+    your_tree: before.tree,
+    note: 'your files are restored when the replay ends',
+  });
+
+  await recorded.restore(initial.fsTree, ctx.cwd);
+
+  return {
+    dir: ctx.cwd,
+    release: async () => {
+      await safety.restore(before.tree, ctx.cwd);
+    },
   };
 }
 

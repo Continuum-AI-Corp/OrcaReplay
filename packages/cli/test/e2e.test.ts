@@ -61,7 +61,7 @@ describe('end to end: record → replay → fork', () => {
       FAKE_AGENT,
     ]);
     process.env.FAKE_AGENT_TURNS = String(turns);
-    process.env.FAKE_AGENT_CWD = workspace;
+    delete process.env.FAKE_AGENT_CWD;
     return recordCommand(args, out, workspace);
   }
 
@@ -162,6 +162,130 @@ describe('end to end: record → replay → fork', () => {
       expect(halt).toContain('does not match the recording');
     } finally {
       delete process.env.FAKE_AGENT_PROMPT;
+    }
+  });
+
+  it('replays a run that changed the files it depends on', async () => {
+    // The one that made exact replay useless on a real agent. The recording reads auth.ts into the
+    // conversation and then edits it, so by the time you replay, the working tree no longer holds
+    // what the recorded request contains. Replaying in place re-reads the mutated file, the
+    // trailing message differs, and the run halts at rung 4 — correctly, but uselessly: nothing
+    // about the recording changed, only the directory it ran in.
+    //
+    // Replay therefore restores the filesystem the run started from, the same way a fork does.
+    process.env.FAKE_AGENT_READ = 'auth.ts';
+    try {
+      await record();
+      const mutated = await readFile(join(workspace, 'auth.ts'), 'utf8');
+      expect(
+        mutated,
+        'the recording must have changed the file for this test to mean anything',
+      ).not.toBe('export const fixed = false;\n');
+
+      const result = await replayCommand(parseArgs(['replay', 'last']), out, workspace);
+
+      expect(result.matchedExact).toBeGreaterThan(0);
+      expect(result.exitCode).toBe(0);
+      expect(lines.join('\n')).not.toContain('replay.unmatched');
+    } finally {
+      delete process.env.FAKE_AGENT_READ;
+    }
+  });
+
+  it('leaves the working tree exactly as it found it', async () => {
+    // Replay restores the recorded state over the working tree, because a harness bakes absolute
+    // paths into its tool calls and a copy somewhere else gets a permission refusal where the
+    // recording has file contents. That is only acceptable because it is reversible: the current
+    // state is snapshotted first and put back afterwards, so a replay is observationally a no-op
+    // on your checkout.
+    process.env.FAKE_AGENT_READ = 'auth.ts';
+    try {
+      await record();
+      const before = await readFile(join(workspace, 'auth.ts'), 'utf8');
+      await replayCommand(parseArgs(['replay', 'last']), out, workspace);
+      expect(await readFile(join(workspace, 'auth.ts'), 'utf8')).toBe(before);
+    } finally {
+      delete process.env.FAKE_AGENT_READ;
+    }
+  });
+
+  it('replays in the directory the run was recorded in, not a copy of it', async () => {
+    // The property the whole restore exists for. Harnesses record absolute paths, so the replay
+    // has to happen at the same path or the agent is reading somewhere it was never given.
+    process.env.FAKE_AGENT_READ = 'auth.ts';
+    try {
+      await record();
+      await replayCommand(parseArgs(['replay', 'last']), out, workspace);
+      const replaying = lines.find((l) => l.includes('info replaying')) ?? '';
+      expect(replaying).toContain(`cwd=${workspace}`);
+    } finally {
+      delete process.env.FAKE_AGENT_READ;
+    }
+  });
+
+  it('names the snapshot it can restore from if a replay dies halfway', async () => {
+    // The safety net has to be visible before it is needed. If the process is killed between the
+    // restore and the put-back, this id is the only way back to the tree you had.
+    process.env.FAKE_AGENT_READ = 'auth.ts';
+    try {
+      await record();
+      await replayCommand(parseArgs(['replay', 'last']), out, workspace);
+      const line = lines.find((l) => l.includes('replay.restored')) ?? '';
+      expect(line, `no restore line in:\n${lines.join('\n')}`).toMatch(/[0-9a-f]{40}/);
+    } finally {
+      delete process.env.FAKE_AGENT_READ;
+    }
+  });
+
+  it('does not touch the working tree when asked to replay in a scratch copy', async () => {
+    process.env.FAKE_AGENT_READ = 'auth.ts';
+    try {
+      await record();
+      await replayCommand(parseArgs(['replay', 'last', '--worktree']), out, workspace);
+      const replaying = lines.find((l) => l.includes('info replaying')) ?? '';
+      expect(replaying).not.toContain(`cwd=${workspace}`);
+      expect(lines.join('\n')).not.toContain('replay.restored');
+    } finally {
+      delete process.env.FAKE_AGENT_READ;
+    }
+  });
+
+  it('says where the recording ran and where the replay ran when it halts', async () => {
+    // A halt reason like "distance 205343" is true and useless. The most common cause by far is
+    // that the recorded conversation contains absolute paths from the directory the run was made
+    // in and the replay is somewhere else, so the harness refuses the read and the tool result
+    // comes back as a permission error instead of the file. Both directories on the line is what
+    // turns the number into something an operator can act on — including confirming they match.
+    await record();
+    // Set *after* recording: the replay has to ask something the recording cannot answer.
+    process.env.FAKE_AGENT_PROMPT = 'ask something else entirely';
+    try {
+      await replayCommand(parseArgs(['replay', 'last']), out, workspace);
+
+      const halt = lines.find((l) => l.includes('replay.unmatched')) ?? '';
+      expect(halt).toContain(`recorded_in=${workspace}`);
+      expect(halt).toContain(`replayed_in=${workspace}`);
+      expect(halt).toContain('--loose');
+    } finally {
+      delete process.env.FAKE_AGENT_PROMPT;
+    }
+  });
+
+  it('points at the recording directory when the replay is somewhere else', async () => {
+    await record();
+    const elsewhere = await mkdtemp(join(tmpdir(), 'orca-elsewhere-'));
+    process.env.FAKE_AGENT_PROMPT = 'ask something else entirely';
+    try {
+      // Copy the trace, not the files: this is someone replaying a colleague's run.
+      await run('cp', ['-r', join(workspace, '.orca'), elsewhere]);
+      await replayCommand(parseArgs(['replay', 'last']), out, elsewhere);
+
+      const warned = lines.find((l) => l.includes('replay.elsewhere')) ?? '';
+      expect(warned, `no elsewhere warning in:\n${lines.join('\n')}`).toContain(workspace);
+      expect(warned).toContain('--worktree');
+    } finally {
+      delete process.env.FAKE_AGENT_PROMPT;
+      await rm(elsewhere, { recursive: true, force: true });
     }
   });
 

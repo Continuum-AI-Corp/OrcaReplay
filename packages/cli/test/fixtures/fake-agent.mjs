@@ -7,7 +7,7 @@
  * resends the whole conversation every turn (which is what lets the proxy see tool results), and
  * edits a file on disk. If OrcaReplay can record and replay this, the mechanism is sound.
  */
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const base = process.env.ANTHROPIC_BASE_URL;
@@ -17,6 +17,9 @@ if (!base) {
 }
 
 const turns = Number(process.env.FAKE_AGENT_TURNS ?? '3');
+// Its own working directory, like a real agent. Overridable only because a couple of tests pin
+// it; anything that pins it stops exercising the directory the harness was actually launched in,
+// which is the whole point of restoring a worktree before a replay or a fork.
 const cwd = process.env.FAKE_AGENT_CWD ?? process.cwd();
 const prompt = process.env.FAKE_AGENT_PROMPT ?? 'fix the auth test';
 // Real harnesses open with a system prompt and a tool catalogue that put the very first request
@@ -38,7 +41,15 @@ const tools = [
   },
 ];
 
-const messages = [{ role: 'user', content: [{ type: 'text', text: prompt }] }];
+// Reading a file into the conversation is what makes a run depend on the filesystem it started
+// from: the bytes end up inside the request, so replaying against a directory the recording itself
+// mutated produces a different request. Real harnesses do this on almost every turn.
+const readPath = process.env.FAKE_AGENT_READ;
+const opening = readPath
+  ? `${prompt}\n\n<file path="${readPath}">\n${readFileSync(join(cwd, readPath), 'utf8')}</file>`
+  : prompt;
+
+const messages = [{ role: 'user', content: [{ type: 'text', text: opening }] }];
 
 for (let turn = 0; turn < turns; turn += 1) {
   const res = await fetch(`${base}/v1/messages`, {
