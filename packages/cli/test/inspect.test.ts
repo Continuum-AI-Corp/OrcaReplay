@@ -13,6 +13,69 @@ import {
   showCommand,
 } from '../src/commands/inspect.js';
 
+describe('orca show — the DETAIL column', () => {
+  /**
+   * `show` rendered each row's `meta` and dropped its `detail`, so the column showed token counts
+   * for a model response and nothing at all for everything else. The casualties were the facts the
+   * capture layers exist to record: a shell command's exit code — named in the shell shim's own
+   * docstring as the thing the model never sees — appeared as an empty cell next to its duration,
+   * and a tool call and its result rendered as two identical rows.
+   */
+  async function showEvents(events: { type: string; attrs: Record<string, unknown> }[]) {
+    const dir = await mkdtemp(join(tmpdir(), 'orca-show-detail-'));
+    const writer = await TraceWriter.create(join(dir, '.orca', 'runs'), {
+      adapter: { id: 'claude-code', version: '0.0.0' },
+      argv: ['claude-code'],
+      cwd: dir,
+      orcaVersion: '0.0.0',
+    });
+    for (const e of events) {
+      await writer.append({ type: e.type as never, actor: 'agent', turn: 1, attrs: e.attrs });
+    }
+    await writer.close(0);
+    const lines: string[] = [];
+    const out = new Output({ write: (l) => void lines.push(l), isTTY: false });
+    await showCommand(parseArgs(['show', writer.runId]), out, dir);
+    await rm(dir, { recursive: true, force: true });
+    return stripAnsi(lines.join('\n'));
+  }
+
+  it('shows the exit code of a shell command, not only its duration', async () => {
+    const text = await showEvents([
+      { type: 'shell.exec', attrs: { command: 'npm test', cwd: '/w' } },
+      { type: 'shell.result', attrs: { command: 'npm test', exit_code: 1, duration_ms: 4200 } },
+    ]);
+    expect(text).toContain('exit 1');
+    expect(text).toContain('4.2s');
+  });
+
+  it('tells a tool call apart from its result', async () => {
+    const text = await showEvents([
+      { type: 'tool.call', attrs: { name: 'Bash', summary: 'run the tests' } },
+      { type: 'tool.result', attrs: { name: 'Bash', error: 'exit 1' } },
+    ]);
+    expect(text).toContain('run the tests');
+    expect(text).toContain('exit 1');
+  });
+
+  it('keeps the token counts it already showed', async () => {
+    const text = await showEvents([
+      {
+        type: 'model.response',
+        attrs: {
+          model: 'claude-opus-5',
+          stop_reason: 'end_turn',
+          input_tokens: 1200,
+          output_tokens: 40,
+        },
+      },
+    ]);
+    expect(text).toContain('end_turn');
+    expect(text).toContain('1,200 in');
+    expect(text).toContain('40 out');
+  });
+});
+
 describe('orca list — fork provenance', () => {
   /**
    * `orca compare --models a,b,c` leaves four runs in the directory: the parent and one fork per

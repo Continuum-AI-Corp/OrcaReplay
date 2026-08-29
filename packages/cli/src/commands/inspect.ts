@@ -63,7 +63,16 @@ export async function showCommand(
   }
   out.plain('');
 
-  const rows = buildTimeline(events).map((r) => [String(r.seq), r.kind, r.label, r.meta ?? '']);
+  // Both halves of the row. Rendering only `meta` showed token counts for a model response and an
+  // empty cell for everything else — which quietly dropped a shell command's exit code, a tool
+  // result's success or failure, and the stop reason, leaving a call and its result looking like
+  // the same row printed twice.
+  const rows = buildTimeline(events).map((r) => [
+    String(r.seq),
+    r.kind,
+    r.label,
+    [r.detail, r.meta].filter((part) => part !== undefined && part !== '').join(' · '),
+  ]);
   out.table(['SEQ', 'KIND', 'WHAT', 'DETAIL'], rows);
 
   const loops = detectLoops(events);
