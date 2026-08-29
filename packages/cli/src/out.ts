@@ -48,6 +48,8 @@ export interface OutputOptions {
   env?: Record<string, string | undefined>;
   verbose?: boolean;
   ci?: boolean;
+  /** Explicit override from `--no-color`. Wins over TTY detection and NO_COLOR alike. */
+  color?: boolean;
 }
 
 export interface Failure {
@@ -73,8 +75,10 @@ export class Output {
     this.#tty = opts.isTTY ?? false;
     this.#ci = opts.ci ?? false;
     this.#verbose = opts.verbose ?? false;
-    // NO_COLOR is honoured whatever its value; see no-color.org.
-    this.#color = this.#tty && !this.#ci && env.NO_COLOR === undefined;
+    // NO_COLOR is honoured whatever its value; see no-color.org. An explicit `color: false` from
+    // `--no-color` overrides everything — it is the flag people reach for when a log has come out
+    // unreadable, so it has to win rather than be one input among several.
+    this.#color = opts.color ?? (this.#tty && !this.#ci && env.NO_COLOR === undefined);
   }
 
   get isVerbose(): boolean {

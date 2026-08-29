@@ -184,28 +184,70 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       body: outboundBody,
     });
 
-    const text = await upstreamRes.text();
     const contentType = upstreamRes.headers.get('content-type') ?? 'application/json';
     const streamed = contentType.includes('event-stream');
 
     res.writeHead(upstreamRes.status, { 'content-type': contentType });
-    res.end(text);
 
-    if (upstreamRes.ok) {
-      const exchange = buildExchange({
-        dialect,
-        path,
-        rawRequest: outboundBody,
-        rawResponse: text,
-        status: upstreamRes.status,
-        streamed,
-        headers: recordableHeaders,
-        seq: captured.length,
-        durationMs: Date.now() - startedAt,
-      });
-      captured.push(exchange);
-      options.onExchange?.(exchange);
+    // Tee rather than buffer. A model response arrives over seconds, and reading it to completion
+    // before writing a byte makes every turn of an interactive session appear to hang for its full
+    // duration — the agent's own progressive rendering stops working because there is nothing
+    // progressive left to render. Chunks go straight through; the copy we keep is assembled on the
+    // way past, so the recording is still the complete body.
+    const text = await pipeThrough(upstreamRes, res);
+
+    // Recorded whatever the status. A run that died on rate limits used to produce a trace with no
+    // evidence of it — and replay would then be short exactly the exchanges that explain the
+    // failure you are trying to reproduce.
+    const exchange = buildExchange({
+      dialect,
+      path,
+      rawRequest: outboundBody,
+      rawResponse: text,
+      status: upstreamRes.status,
+      streamed,
+      headers: recordableHeaders,
+      seq: captured.length,
+      durationMs: Date.now() - startedAt,
+    });
+    captured.push(exchange);
+    options.onExchange?.(exchange);
+  }
+
+  /**
+   * Forward an upstream body to the client as it arrives, returning the complete text.
+   *
+   * `Response.body` is absent in a couple of legitimate cases — a 204, and any stubbed Response
+   * built without one — so fall back to buffering rather than failing: the point is never to lose
+   * the recording.
+   */
+  async function pipeThrough(upstream: Response, res: ServerResponse): Promise<string> {
+    const body = upstream.body;
+    if (!body) {
+      const text = await upstream.text();
+      res.end(text);
+      return text;
     }
+
+    const decoder = new TextDecoder();
+    const reader = body.getReader();
+    let text = '';
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        text += decoder.decode(value, { stream: true });
+        // Backpressure: if the socket says it is full, wait for it rather than buffering in memory
+        // on the agent's behalf.
+        if (!res.write(value)) {
+          await new Promise<void>((resolve) => res.once('drain', resolve));
+        }
+      }
+      text += decoder.decode();
+    } finally {
+      res.end();
+    }
+    return text;
   }
 
   function buildExchange(input: {

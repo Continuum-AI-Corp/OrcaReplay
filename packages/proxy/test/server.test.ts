@@ -159,11 +159,136 @@ describe('proxy — record mode', () => {
     expect((await post(`${proxy.url}/v1/messages`, ANTHROPIC_BODY)).status).toBe(429);
   });
 
+  it('records a failed exchange rather than dropping it', async () => {
+    // Recording used to be guarded by `if (upstreamRes.ok)`. A run that died on rate limits then
+    // produced a trace with no evidence of why — and replay came up short exactly the exchanges
+    // that explain the failure you opened the trace to understand.
+    const up = stubUpstream({ error: { message: 'rate limited' } }, 429);
+    const seen: RecordedExchange[] = [];
+    const proxy = await createProxy({
+      mode: 'record',
+      fetchImpl: up.fetchImpl,
+      onExchange: (e) => void seen.push(e),
+    });
+    closers.push(proxy.close);
+
+    await post(`${proxy.url}/v1/messages`, ANTHROPIC_BODY);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.status).toBe(429);
+    expect(seen[0]!.rawResponse).toContain('rate limited');
+  });
+
   it('binds loopback only — a trace is sensitive', async () => {
     const up = stubUpstream(ANTHROPIC_REPLY);
     const proxy = await createProxy({ mode: 'record', fetchImpl: up.fetchImpl });
     closers.push(proxy.close);
     expect(proxy.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+  });
+});
+
+describe('proxy — streaming', () => {
+  /**
+   * A model response arrives as SSE over seconds. The proxy used to `await upstreamRes.text()`
+   * before writing a single byte, so the agent got the whole response at once, after the model had
+   * finished — every turn of an interactive session appeared to hang for its full duration, and
+   * `docs/architecture.md` claimed the opposite ("tees a canonical copy while streaming through").
+   *
+   * The test is built so buffering cannot pass it by luck: the upstream withholds its second chunk
+   * until the *client* has actually received the first. A proxy that buffers deadlocks, which the
+   * race below turns into a legible failure instead of a timeout.
+   */
+  function gatedUpstream() {
+    let releaseSecond: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      releaseSecond = r;
+    });
+    const fetchImpl = (async () =>
+      new Response(
+        new ReadableStream({
+          async start(controller) {
+            const enc = new TextEncoder();
+            controller.enqueue(
+              enc.encode('event: message_start\ndata: {"type":"message_start"}\n\n'),
+            );
+            await gate;
+            controller.enqueue(
+              enc.encode('event: message_stop\ndata: {"type":"message_stop"}\n\n'),
+            );
+            controller.close();
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      )) as unknown as typeof fetch;
+    return { fetchImpl, releaseSecond };
+  }
+
+  it('forwards the first chunk before the upstream has finished', async () => {
+    const up = gatedUpstream();
+    const proxy = await createProxy({ mode: 'record', fetchImpl: up.fetchImpl });
+    closers.push(proxy.close);
+
+    const res = await fetch(`${proxy.url}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(ANTHROPIC_BODY),
+    });
+    const reader = res.body!.getReader();
+
+    const first = await Promise.race([
+      reader.read().then((r) => new TextDecoder().decode(r.value)),
+      new Promise<string>((_, reject) =>
+        setTimeout(() => reject(new Error('proxy buffered: no chunk reached the client')), 2000),
+      ),
+    ]);
+    expect(first).toContain('message_start');
+
+    // Only now does the upstream produce the rest, proving the first chunk was genuinely early.
+    up.releaseSecond();
+    let rest = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      rest += new TextDecoder().decode(value);
+    }
+    expect(rest).toContain('message_stop');
+  });
+
+  it('records the whole streamed body, not just the part it forwarded first', async () => {
+    const up = gatedUpstream();
+    const seen: RecordedExchange[] = [];
+    const proxy = await createProxy({
+      mode: 'record',
+      fetchImpl: up.fetchImpl,
+      onExchange: (e) => void seen.push(e),
+    });
+    closers.push(proxy.close);
+
+    const res = await fetch(`${proxy.url}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(ANTHROPIC_BODY),
+    });
+    const reader = res.body!.getReader();
+    // Same guard as above: without it a buffering proxy hangs the suite instead of failing it.
+    await Promise.race([
+      reader.read(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('proxy buffered: no chunk reached the client')), 2000),
+      ),
+    ]);
+    up.releaseSecond();
+    for (;;) {
+      const { done } = await reader.read();
+      if (done) break;
+    }
+    // The exchange is finished only once the stream ends, so give the tee a turn to settle.
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.streamed).toBe(true);
+    expect(seen[0]!.rawResponse).toContain('message_start');
+    expect(seen[0]!.rawResponse).toContain('message_stop');
   });
 });
 

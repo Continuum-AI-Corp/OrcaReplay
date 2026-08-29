@@ -7,6 +7,33 @@ const ESC = String.fromCharCode(27);
  * §14 of the design: the CLI is ~90% of the product surface. Most of these assertions exist
  * because the output ends up in a CI log, a pipe, or a pasted GitHub issue — not a terminal.
  */
+describe('--no-color', () => {
+  /**
+   * `--no-color` is listed in `orca --help`, and nothing read it: `parseArgs` set the flag and
+   * `Output` computed colour from `isTTY`/`ci`/`NO_COLOR` alone, so on a terminal the flag was
+   * inert and `orca show --no-color` still emitted ANSI. A documented flag that does nothing is
+   * worse than an undocumented one — it is the flag people pipe through when a log ends up
+   * unreadable.
+   */
+  it('suppresses ANSI on a TTY when the flag is set', () => {
+    const lines: string[] = [];
+    const out = new Output({
+      write: (s) => void lines.push(s),
+      isTTY: true,
+      color: false,
+    });
+    out.warn('divergence', { seq: 3 });
+    expect(lines.join('')).not.toMatch(/\u001b\[/);
+  });
+
+  it('still colours a TTY when the flag is absent', () => {
+    const lines: string[] = [];
+    const out = new Output({ write: (s) => void lines.push(s), isTTY: true });
+    out.warn('divergence', { seq: 3 });
+    expect(lines.join('')).toMatch(/\u001b\[/);
+  });
+});
+
 describe('Output', () => {
   const sink = () => {
     const lines: string[] = [];

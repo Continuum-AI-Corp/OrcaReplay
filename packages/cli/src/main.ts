@@ -24,6 +24,7 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
         --model <id>             continue on a different model
   orca compare [run] --models a,b,c
                                  fork the same checkpoint onto several models
+        --from N                 checkpoint to fork every model from
         --verify <cmd>           run this in each fork; its exit code is the verdict
         --share [file.svg]       write the verdict table as a shareable card
   orca show [run]                the timeline, in the terminal
@@ -47,6 +48,13 @@ Flags
   --ci           machine-readable output, no progress
   --verbose      more detail
   --no-color     also honours NO_COLOR
+  --port <n>     port for --ui and orca ui (default: any free port)
+
+Sending traffic somewhere other than the vendor — a gateway, a proxy, a local model — is what
+these two are for. They apply to record, replay, fork and compare alike:
+
+  --upstream-anthropic <url>   origin for /v1/messages       (env ORCA_UPSTREAM_ANTHROPIC)
+  --upstream-openai <url>      origin for /chat/completions  (env ORCA_UPSTREAM_OPENAI)
 
 Everything after -- goes to the agent:
   orca record claude -- -p "fix the failing test"
@@ -62,6 +70,10 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
     env: process.env,
     verbose: args.bool('verbose'),
     ci: args.bool('ci') || process.env.CI === 'true',
+    // `--no-color` parses to `color: false`. The `true` fallback is what separates that from an
+    // unset flag — `bool('color')` alone returns false for both, which would disable colour for
+    // everyone.
+    ...(args.bool('color', true) ? {} : { color: false }),
   });
 
   if (args.bool('version') || args.command === 'version') {
