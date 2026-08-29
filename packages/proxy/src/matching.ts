@@ -230,8 +230,29 @@ function weight(v: unknown): number {
   return JSON.stringify(v ?? null).length;
 }
 
-/** Prefix and suffix — the old whole-body heuristic, now scoped to one leaf, where it holds. */
+/**
+ * Distance within one string leaf.
+ *
+ * Line-aligned when both sides have the same number of lines, because that is the shape drift takes
+ * inside a command's output: `node --test` prints four `duration_ms` floats scattered over fifty
+ * lines, and taking the common prefix and suffix of the whole string counted the 1,289 characters
+ * lying between the first and the last of them. Per line, it counts the four. Same failure as the
+ * whole-body metric had, one level down; the structural walk above cannot see inside a string.
+ */
 function textDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  const la = a.split('\n');
+  const lb = b.split('\n');
+  if (la.length === lb.length && la.length > 1) {
+    let total = 0;
+    for (let i = 0; i < la.length; i += 1) total += spanDistance(la[i]!, lb[i]!);
+    return total;
+  }
+  return spanDistance(a, b);
+}
+
+/** Prefix and suffix — the old whole-body heuristic, now scoped to one line, where it holds. */
+function spanDistance(a: string, b: string): number {
   let prefix = 0;
   const max = Math.min(a.length, b.length);
   while (prefix < max && a[prefix] === b[prefix]) prefix += 1;
@@ -249,6 +270,26 @@ function trailingMessage(form: Record<string, unknown>): unknown {
 
 function messageCount(form: Record<string, unknown>): number {
   return ((form.messages ?? []) as unknown[]).length;
+}
+
+/**
+ * The request with the body of every tool result blanked, leaving what the model was told and what
+ * it said.
+ *
+ * If two requests agree on this and differ elsewhere, the only thing that changed is what the world
+ * returned — and on replay it will, because orca does not intercept tool execution. That is the
+ * price of not patching the harness: the agent really re-runs `npm test`, which really reprints its
+ * own durations. `is_error` is kept, so a check that went from failing to passing is still a
+ * difference; only the text of the output is set aside.
+ */
+function withoutToolOutput(form: Record<string, unknown>): Record<string, unknown> {
+  const messages = ((form.messages ?? []) as Record<string, unknown>[]).map((m) => ({
+    ...m,
+    content: ((m.content ?? []) as Record<string, unknown>[]).map((c) =>
+      c?.type === 'tool_result' ? { ...c, content: '' } : c,
+    ),
+  }));
+  return { ...form, messages };
 }
 
 /**
@@ -414,6 +455,31 @@ export class RequestMatcher {
             `request ${index} has ${askDrift === 0 ? 'an identical' : 'an equivalent'} trailing ` +
             `message but a different prefix ` +
             `(${messageCount(recorded)} recorded vs ${messageCount(live)} replayed)`,
+        },
+      };
+    }
+
+    // Rung 3 — every difference in this request is inside tool output. Halting here would make
+    // exact replay impossible for most real agents, since re-running a command reprints its own
+    // timings, and the drift accumulates: by the fifth turn the earlier results are in the prefix
+    // too. Serving the recorded answer is the useful thing to do, and a `major` divergence is the
+    // honest way to say so. Deliberately narrow — a changed *question*, or a check that went from
+    // failing to passing, moves this comparison and still falls through to rung 4.
+    // A message count that differs is already covered: `leafDistance` charges the full weight of
+    // any message only one side has, so it cannot come back zero.
+    if (leafDistance(withoutToolOutput(live), withoutToolOutput(recorded)) === 0) {
+      this.#cursor += 1;
+      return {
+        matched: true,
+        rung: 3,
+        index,
+        divergence: {
+          level: 'major',
+          rung: 3,
+          distance,
+          detail:
+            `request ${index} replayed against a different world: ` +
+            `only tool output differs (${distance} chars)`,
         },
       };
     }

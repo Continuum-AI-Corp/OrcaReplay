@@ -4,8 +4,9 @@ import type { RedactionRecord } from '@orcareplay/schema';
 /** Bump when a rule is added or changed, so old traces stay interpretable. */
 // Bumped when a rule's *name* or pattern changes, because both reach the trace: the placeholder is
 // `<secret:<kind>:<hash>>`, and a reader comparing two traces needs to know the policy differed
-// rather than the content. v2 renamed `openai_key` to `sk_api_key`.
-export const REDACTION_POLICY_VERSION = 2;
+// rather than the content. v2 renamed `openai_key` to `sk_api_key`; v3 stopped the entropy sweep
+// eating protocol identifiers (`id`, `tool_use_id`, `tool_call_id`).
+export const REDACTION_POLICY_VERSION = 3;
 
 /** Environment capture is allowlist-only (spec §5). Everything else is denied. */
 export const DEFAULT_ENV_ALLOWLIST = [
@@ -100,9 +101,52 @@ function looksRandom(token: string): boolean {
   return /[0-9]/.test(token) && /[A-Za-z]/.test(token);
 }
 
+/**
+ * Protocol identifiers, which are not secrets and must survive a recording verbatim.
+ *
+ * A `tool_use` id is generated per call, means nothing outside its own conversation, and the API
+ * requires it to match `^[a-zA-Z0-9_-]+$`. It is also ~25 characters of mixed-case base62, so the
+ * entropy sweep took it every time — and a fork replays recorded assistant turns, the agent echoes
+ * those ids back, and the placeholder then arrives at the live API, which rejects the request:
+ *
+ *   messages.1.content.2.tool_use.id: String should match pattern '^[a-zA-Z0-9_-]+$'
+ *
+ * So `orca compare`, the feature the tool is pitched on, could not work against any real recording.
+ * Found by forking one, which no fixture could have shown.
+ *
+ * This shields these values from the *entropy heuristic* only. The pattern rules run first and are
+ * untouched, so a real credential parked under a key called `id` is still redacted by shape — what
+ * is relaxed is the guess, not the detection. The value must already look like a protocol id
+ * (`^[A-Za-z0-9_-]*$`, the shape the API demands); anything else under that key is left to the
+ * ordinary sweep.
+ *
+ * The quotes are matched as `\\*"` because a response body is stored as a *string* inside the
+ * event's JSON, so by the time the scanner sees it the text reads `\\"id\\":\\"toolu_…\\"`. A
+ * pattern that only accepted bare quotes matched nothing where it mattered and passed its own test,
+ * which is how the first version of this shipped and still broke every fork.
+ */
+const PROTOCOL_ID_VALUE = /(\\*")(?:id|tool_use_id|tool_call_id)\1\s*:\s*\1[A-Za-z0-9_-]*\1/g;
+
+/**
+ * The same problem with a different alphabet. An Anthropic `thinking` block carries a `signature`
+ * over its own contents, and the API rejects a turn whose signature does not verify — so a fork,
+ * which replays recorded assistant turns for the agent to echo back, died on
+ * `messages.1.content.0: Invalid \`signature\` in \`thinking\` block`. It is base64, not an
+ * identifier, hence a second shape.
+ *
+ * It is not a credential either: it authenticates thinking text the trace already holds in full, so
+ * keeping it costs no secrecy that was not already spent.
+ */
+const PROTOCOL_SIGNATURE_VALUE = /(\\*")signature\1\s*:\s*\1[A-Za-z0-9+/=_-]*\1/g;
+
+/** Regions the entropy sweep must not touch: what it already replaced, and what is not a secret. */
 function spansOf(value: string): [number, number][] {
   const spans: [number, number][] = [];
   for (const m of value.matchAll(PLACEHOLDER)) spans.push([m.index, m.index + m[0].length]);
+  for (const m of value.matchAll(PROTOCOL_ID_VALUE)) spans.push([m.index, m.index + m[0].length]);
+  for (const m of value.matchAll(PROTOCOL_SIGNATURE_VALUE)) {
+    spans.push([m.index, m.index + m[0].length]);
+  }
   return spans;
 }
 

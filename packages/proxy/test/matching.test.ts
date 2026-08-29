@@ -264,11 +264,11 @@ describe('RequestMatcher — a live request meeting a redacted recording', () =>
     expect(r.divergence?.detail).toContain('1 redacted value');
   });
 
-  it('cannot match it without a redactor, because the two are not in the same representation', () => {
+  it('without a redactor it can only approximate, because the two are not in the same representation', () => {
     const recorded = asked(redactedWith('recording', `key ${secret}`));
     const r = new RequestMatcher([recorded]).match(asked(`key ${secret}`));
-    expect(r.matched).toBe(false);
-    expect(r.rung).toBe(4);
+    expect(r.rung).toBe(3);
+    expect(r.divergence?.level).toBe('major');
   });
 
   it('rung 1 stays exact: a request with nothing redacted in it reports no divergence', () => {
@@ -310,12 +310,79 @@ describe('RequestMatcher — how far the ask itself may drift', () => {
     expect(r.rung).toBe(4);
   });
 
-  it('caps the tolerance absolutely, so a huge result cannot buy a huge licence to differ', () => {
+  /** A person's message, not a tool result — so the tool-output rung below cannot rescue it. */
+  function said(text: string) {
+    return req({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'fix the auth test' }] },
+        { role: 'user', content: [{ type: 'text', text }] },
+      ],
+    });
+  }
+
+  it('caps the tolerance absolutely, so a huge message cannot buy a huge licence to differ', () => {
     const body = 'z'.repeat(200_000);
-    const m = new RequestMatcher([result(`${body}${'a'.repeat(1_000)}`)]);
-    const r = m.match(result(`${body}${'b'.repeat(1_000)}`));
+    const m = new RequestMatcher([said(`${body}${'a'.repeat(1_000)}`)]);
+    const r = m.match(said(`${body}${'b'.repeat(1_000)}`));
 
     expect(r.matched).toBe(false);
     expect(r.rung).toBe(4);
+  });
+});
+
+describe('RequestMatcher — when the world answers differently', () => {
+  /**
+   * Orca does not intercept tool execution, so a replayed agent really re-runs its commands. This
+   * is the shape that takes in practice: `node --test` reprinting its own durations.
+   */
+  const output = (ms: string) =>
+    ['TAP version 13', '# Subtest: splits evenly', 'ok 1', `  duration_ms: ${ms}`, '1..1'].join(
+      '\n',
+    );
+
+  function ran(text: string) {
+    return req({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'fix the auth test' }] },
+        {
+          role: 'assistant',
+          content: [{ type: 'tool_use', name: 'Bash', input: { cmd: 'test' } }],
+        },
+        { role: 'user', content: [{ type: 'tool_result', content: text }] },
+      ],
+    });
+  }
+
+  it('serves the recording when only the tool result moved, and calls it a major divergence', () => {
+    const m = new RequestMatcher([ran(output('1.865564'))]);
+    const r = m.match(ran(output('1.948684')));
+
+    expect(r.matched).toBe(true);
+    expect(r.rung).toBe(3);
+    expect(r.divergence?.level).toBe('major');
+    expect(r.divergence?.detail).toContain('only tool output differs');
+  });
+
+  it('does not extend that to a request whose earlier turns also moved', () => {
+    const m = new RequestMatcher([ran(output('1.865564'))]);
+    const changed = ran(output('1.948684'));
+    changed.messages[0] = {
+      role: 'user',
+      content: [{ type: 'text', text: 'delete the auth test' }],
+    };
+
+    expect(m.match(changed).matched).toBe(false);
+  });
+
+  it('counts drift per line, not from the first change to the last', () => {
+    const many = (t: string) =>
+      Array.from({ length: 60 }, (_, i) => `  duration_ms: ${i}.${t} of a long enough line`).join(
+        '\n',
+      );
+    const a = `${many('a')}\nend`;
+    const b = `${many('b')}\nend`;
+    // 60 lines each differing by one character, in a body of well over a thousand.
+    expect(structuralDistance(req({ system: a }), req({ system: b }))).toBeLessThan(200);
+    expect(a.length).toBeGreaterThan(2_000);
   });
 });

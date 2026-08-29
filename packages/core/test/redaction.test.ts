@@ -339,3 +339,88 @@ describe('records and rulesFired', () => {
     expect(hits[0]?.identifier).toContain('event:7:payload');
   });
 });
+
+describe('protocol identifiers', () => {
+  /**
+   * The bug this exists for: a fork replays recorded assistant turns, the agent echoes their
+   * `tool_use` ids back, and the live API rejects the request because a placeholder is not a legal
+   * id. `orca compare` could not work against any real Anthropic recording.
+   */
+  it('leaves a tool_use id verbatim, so a fork can echo it back to the API', () => {
+    const body = JSON.stringify({
+      content: [{ type: 'tool_use', id: 'toolu_01A9CkVfSMkVsjE7HB2nQrPz', name: 'Bash' }],
+    });
+    const { value } = fresh().redactString(body);
+    expect(value).toContain('toolu_01A9CkVfSMkVsjE7HB2nQrPz');
+    expect(JSON.parse(value).content[0].id).toMatch(/^[a-zA-Z0-9_-]+$/);
+  });
+
+  it('leaves the ids that refer back to one alone as well', () => {
+    const body = JSON.stringify({
+      tool_use_id: 'toolu_01A9CkVfSMkVsjE7HB2nQrPz',
+      tool_call_id: 'call_9BdRt4Kw2ZpQ7mXvL3nHsYcE',
+    });
+    const { value } = fresh().redactString(body);
+    expect(value).toBe(body);
+  });
+
+  it('still redacts a credential parked under one of those keys, by shape', () => {
+    const body = JSON.stringify({ id: 'sk-live-9f2c14a03b71d4e8a7c5b6d2' });
+    const { value } = fresh().redactString(body);
+    expect(value).not.toContain('sk-live-9f2c14a03b71d4e8a7c5b6d2');
+    expect(value).toContain('<secret:sk_api_key:');
+  });
+
+  it('still redacts a random token that is not an identifier value', () => {
+    const body = JSON.stringify({ note: 'toolu_01A9CkVfSMkVsjE7HB2nQrPz' });
+    const { value } = fresh().redactString(body);
+    expect(value).toContain('<secret:high_entropy:');
+  });
+});
+
+describe('protocol identifiers, as they are actually stored', () => {
+  /**
+   * The response body is a string inside the event's JSON, so the scanner sees escaped quotes. A
+   * pattern that only accepted bare ones protected nothing real — and replay hands these bytes
+   * straight back to the agent, so a placeholder here becomes a 400 from the API on the next turn.
+   */
+  it('protects an id inside a body that has been serialized into JSON', () => {
+    const sse =
+      'data: {"type":"content_block_start","index":2,' +
+      '"content_block":{"type":"tool_use","id":"toolu_01A9CkVfSMkVsjE7HB2nQrPz","name":"Bash"}}';
+    const stored = JSON.stringify(sse);
+    const { value } = fresh().redactString(stored);
+    expect(value).toContain('toolu_01A9CkVfSMkVsjE7HB2nQrPz');
+    expect(JSON.parse(value)).toBe(sse);
+  });
+
+  it('protects one nested two levels deep, as a payload inside an event line', () => {
+    const inner = JSON.stringify({ tool_use_id: 'toolu_01A9CkVfSMkVsjE7HB2nQrPz' });
+    const outer = JSON.stringify({ payload: inner });
+    expect(fresh().redactString(outer).value).toBe(outer);
+  });
+
+  it('does not protect a value under those keys that is not identifier-shaped', () => {
+    const body = JSON.stringify({ id: 'https://x.example/toolu_01A9CkVfSMkVsjE7HB2nQrPz' });
+    expect(fresh().redactString(body).value).toContain('<secret:high_entropy:');
+  });
+});
+
+describe('thinking signatures', () => {
+  const sig = 'ErUBCkYIBRgCKkDx9vQ2mK4/nR8sT1uVwXyZ0aBcDeFgHiJkLmNoPqRsTuVwXyZ012+34567==';
+
+  it('keeps the signature that authenticates a thinking block', () => {
+    const body = JSON.stringify({ type: 'thinking', thinking: 'let me check', signature: sig });
+    expect(fresh().redactString(body).value).toContain(sig);
+  });
+
+  it('keeps it through the escaping a stored response body adds', () => {
+    const stored = JSON.stringify(JSON.stringify({ signature: sig }));
+    expect(fresh().redactString(stored).value).toBe(stored);
+  });
+
+  it('does not turn `signature` into a hiding place for a credential', () => {
+    const body = JSON.stringify({ signature: 'sk-live-9f2c14a03b71d4e8a7c5b6d2' });
+    expect(fresh().redactString(body).value).toContain('<secret:sk_api_key:');
+  });
+});
