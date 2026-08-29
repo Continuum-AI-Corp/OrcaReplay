@@ -85,6 +85,26 @@ describe('gc', () => {
       expect(existsSync(worktree)).toBe(true);
     });
 
+    it('never deletes the cwd of a run that carries a parent but is not a fork', async () => {
+      // `parent_run` used to mean "fork", so the two halves of the guard — is it a fork, does the
+      // path look like one of ours — were the same question asked twice. An exact replay now
+      // writes a run with `parent_run` set and the *user's own directory* as its cwd, so the fork
+      // half has to be a real question again: only a run that actually forked has a `fork_point`,
+      // and only such a run has a directory orca made and may reclaim.
+      const project = await mkdtemp(join(tmpdir(), 'orca-someones-project-'));
+      await writeFile(join(project, 'important.ts'), 'do not delete me\n');
+
+      const run = await makeRun(['replay trace']);
+      await patchManifest(run, { parent_run: 'run_000000000000', cwd: project });
+      await ageRun(run, 30 * DAY);
+
+      const result = await gcCommand(parseArgs(['gc', '--older-than', '7d']), out, cwd);
+
+      expect(existsSync(run), 'the trace itself should be gone').toBe(false);
+      expect(existsSync(project), 'a replay ran in the user’s project; it is not ours').toBe(true);
+      expect(result.worktreesRemoved).toBe(0);
+    });
+
     it('never deletes a directory that is not a scratch worktree', async () => {
       // The guard that matters. A fork's cwd is a temp directory orca made; a plain recording's cwd
       // is the user's actual project, and deleting that would be catastrophic.

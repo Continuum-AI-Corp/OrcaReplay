@@ -13,6 +13,7 @@ import { compareCommand } from './commands/compare.js';
 import { scrubCommand } from './commands/scrub.js';
 import { gcCommand } from './commands/gc.js';
 import { doctorCommand } from './commands/doctor.js';
+import { modelsCommand, setupCommand } from './commands/setup.js';
 import { ORCA_VERSION } from './version.js';
 
 const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI agents
@@ -37,6 +38,11 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
   orca gc --older-than 7d        reclaim space, forks' scratch worktrees included
                                  --keep N, --dry-run
   orca doctor                    check this machine can record at all
+  orca setup                     point orca at a gateway once, to compare many models
+        --gateway <url>          origin that serves the model APIs
+        --key <k> | --key-env V  store the key, or read it from an environment variable
+        --models a,b,c           default model list, so compare needs no flags
+  orca models                    what the configured gateway serves, and what it costs
 
   [run] is a run id, or "last" (the default).
 
@@ -44,6 +50,7 @@ Flags
   --loose        on replay, continue live past an unmatched request
   --in-place     replay against this directory as it stands, restoring nothing
   --worktree     replay in a scratch copy; never touches your files
+  --no-trace     do not record the exact replay itself as a run of its own
   --no-fs        skip filesystem capture
   --no-shell     skip shell capture (PATH shim in front of sh/bash)
   --mcp-config <path>  instrument MCP servers from this config
@@ -120,6 +127,12 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
       case 'doctor':
         // A failed check is the whole point of running this in CI, so it has to be visible in $?.
         return (await doctorCommand(args, out, cwd)).ok ? 0 : 1;
+      case 'setup':
+        await setupCommand(args, out);
+        return 0;
+      case 'models':
+        await modelsCommand(args, out);
+        return 0;
       default:
         out.failure({
           event: 'unknown_command',

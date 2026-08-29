@@ -116,6 +116,15 @@ describe('fork provenance in the manifest', () => {
     expect(result.valid, result.errors.join(', ')).toBe(true);
   });
 
+  it('reports the run it wrote under the name both replay modes share', async () => {
+    // An exact replay writes a trace of its own findings and reports it as `traceRunId`. A fork
+    // writes a run too, so the field has to mean the same thing here — otherwise a caller asking
+    // "what did this invocation produce" gets an answer only half the time. `forkRunId` stays as
+    // the narrower claim: there is a *fork*, with a worktree and exchanges of its own.
+    const { fork } = await recordThenFork();
+    expect(fork.traceRunId).toBe(fork.forkRunId);
+  });
+
   it('still records the fork event, so both sources agree', async () => {
     const { parent, fork, from } = await recordThenFork();
     const forkDir = (await resolveRunSelector(workspace, fork.forkRunId!)).dir;

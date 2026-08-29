@@ -244,6 +244,7 @@ async function inspectRun(runId: string, dir: string, createdAt: string): Promis
   try {
     const manifest = JSON.parse(await readFile(join(dir, 'manifest.json'), 'utf8')) as {
       parent_run?: unknown;
+      fork_point?: unknown;
       ended_at?: unknown;
       cwd?: unknown;
     };
@@ -251,8 +252,14 @@ async function inspectRun(runId: string, dir: string, createdAt: string): Promis
     // Only a fork's cwd is ever ours to delete. A plain recording runs in the user's project, and
     // `gc` removing that would be the worst bug this tool could have — so the fork check is the
     // load-bearing half of the guard, and the path check is the belt.
+    //
+    // The fork check is `fork_point`, not `parent_run`. It used to be the latter, back when the
+    // only run with a parent was a fork; an exact replay now writes a trace of its own findings
+    // that also names a parent, and it ran in the user's *own* directory. A project that happens
+    // to live at $TMPDIR/orca-something would have satisfied the belt on its own, and the run
+    // holding the evidence of what happened there is the one gc would have used to delete it.
     if (
-      facts.parentRun !== undefined &&
+      typeof manifest.fork_point === 'number' &&
       typeof manifest.cwd === 'string' &&
       isScratchWorktree(manifest.cwd)
     ) {

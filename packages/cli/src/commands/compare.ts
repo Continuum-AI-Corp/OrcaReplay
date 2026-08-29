@@ -6,6 +6,7 @@ import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { renderCompareCard } from '../share-card.js';
 import { replayCommand } from './replay.js';
+import { readConfig } from '../config.js';
 
 /** Run the verdict command inside the fork's worktree. Shell so `npm test -- auth` just works. */
 async function runVerify(command: string, cwd: string): Promise<number> {
@@ -55,10 +56,15 @@ export async function compareCommand(
   out: Output,
   cwd = process.cwd(),
 ): Promise<CompareRow[]> {
-  const models = args.list('models');
+  // Fall back to what `orca setup` recorded, so the common case needs no flags at all. An explicit
+  // --models still wins: the config is a default, not a policy.
+  const models =
+    args.list('models').length > 0 ? args.list('models') : ((await readConfig()).models ?? []);
   if (models.length === 0) {
     throw new Error(
-      'compare needs models to compare\n  orca compare last --models claude-opus-5,glm-5.3-flash',
+      'compare needs models to compare\n' +
+        '  orca compare last --models claude-opus-5,glm-5.3-flash\n' +
+        '  or set a default list once: orca setup',
     );
   }
 

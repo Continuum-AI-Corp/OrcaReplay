@@ -13,7 +13,7 @@ import { SerialQueue } from '../serial.js';
 import { snapshotWithRetry } from '../snapshot.js';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
-import { upstreamOverrides } from '../upstream.js';
+import { upstreamPlan } from '../upstream.js';
 import { ORCA_VERSION } from '../version.js';
 
 export interface RecordResult {
@@ -106,9 +106,12 @@ export async function recordCommand(
   // calls collide on index.lock. It also keeps seq in the order exchanges actually happened.
   const writes = new SerialQueue();
 
+  const plan = await upstreamPlan(args);
+
   const proxy = await createProxy({
     mode: 'record',
-    upstream: upstreamOverrides(args),
+    upstream: plan.upstream,
+    upstreamHeaders: plan.headers,
     onExchange: (exchange: RecordedExchange) => {
       writes.push(() => persist(exchange));
     },

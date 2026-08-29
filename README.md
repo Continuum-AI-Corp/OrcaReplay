@@ -61,6 +61,49 @@ orca compare last --from 4 \
   --share verdict.svg          # the card above, ready to paste into an issue
 ```
 
+### Pointing it at several models
+
+Comparing models means reaching several providers, and doing that by hand means knowing that
+`--upstream-anthropic` and `--upstream-openai` exist, that one gateway can serve both wire formats,
+and where the key goes. All of that is real and none of it is discoverable, so there is a command
+that asks instead:
+
+```console
+$ orca setup
+Gateway URL (serves the model APIs): https://router.example
+API key (stored 0600; leave blank for none):
+  info config.saved path=~/.config/orca/config.json mode=0600 gateway=https://router.example auth=stored
+
+  6 models available:
+    claude-haiku-4-5
+    claude-opus-5
+    glm-5.3-flash
+    ...
+
+$ orca models
+MODEL             $/MTOK IN  $/MTOK OUT
+claude-haiku-4-5  1          5
+claude-opus-5     15         75
+glm-5.3-flash     0.05       0.15
+some-local-model  —          —
+```
+
+`orca setup` asks the gateway what it actually serves rather than just writing the file, so a wrong
+URL or a dead key is an answer now instead of a 401 in the middle of a comparison. After that,
+`orca compare --models a,b,c` needs no flags. `orca models` prices what it recognises and shows a
+dash for what it does not, because inventing a number for an unknown model is how a comparison
+table ends up quoting a cost that was never real.
+
+Anything that speaks the OpenAI-compatible `/v1/models` and chat endpoints works — OrcaRouter,
+another gateway, or something you run yourself. Non-interactive:
+`orca setup --gateway <url> --key <k>`, or `--key-env <VAR>` to read the key from the environment
+rather than keep a credential on disk.
+
+The key never reaches a trace. It is attached to the outbound request only, while what gets
+recorded is built from the *incoming* request with auth stripped — so it is invisible to the
+recording by construction, not by a rule someone has to remember. It is withheld entirely if a flag
+sends that traffic somewhere other than the gateway that issued it.
+
 ## Status
 
 Early. `v0` is the walking skeleton of the three commands above.
@@ -71,7 +114,7 @@ Early. `v0` is the walking skeleton of the three commands above.
 | Anthropic / OpenAI-compatible model capture | working |
 | Exact replay with divergence reporting | working — restores the recorded filesystem over your working tree, then puts it back; `--worktree` for a scratch copy, `--in-place` to restore nothing |
 | Fork replay from a checkpoint | working |
-| Compare across models | working |
+| Compare across models | working — `orca setup` stores a gateway, key and default model list, so `orca compare` needs no flags |
 | Filesystem snapshots and diffs | working |
 | Single-file HTML export | working |
 | MCP call recording | working — opt in with `--mcp-config <path>` |

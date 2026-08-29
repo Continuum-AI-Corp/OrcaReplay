@@ -19,16 +19,26 @@ import { ExchangeEventDeriver } from '../exchange-events.js';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
 import { SerialQueue } from '../serial.js';
-import { upstreamOverrides } from '../upstream.js';
+import { upstreamPlan } from '../upstream.js';
 import { ORCA_VERSION } from '../version.js';
 
 export interface ReplayResult {
+  /** The run that was *read*: the recording being replayed or forked. */
   runId: string;
   mode: 'exact' | 'fork';
   matchedExact: number;
   divergences: number;
   liveCalls: number;
   exitCode: number;
+  /**
+   * The run this invocation *wrote*, whichever mode it ran in — a fork's continuation, or an exact
+   * replay's record of its own findings. Absent only when `--no-trace` turned the latter off.
+   *
+   * `forkRunId` is kept as the fork-only name because callers use it to mean "there is a fork
+   * here": `--ui` opens it in preference to the parent, and `compare` reads token usage out of it.
+   * Neither is true of an exact replay's trace, which holds no exchanges at all.
+   */
+  traceRunId?: string;
   forkRunId?: string;
   /** Scratch worktree a fork ran in, so a verify command can be run against its result. */
   worktree?: string;
@@ -178,13 +188,35 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
   const divergences: { level: string; detail: string; seq: number }[] = [];
   const unmatched: { seq: number; reason: string }[] = [];
   const workspace = await replayWorkspace(args, out, ctx);
+  const trace = await openReplayTrace(args, ctx, workspace.dir);
+  // Serial for the same reason the recorder's is: the callbacks fire from the proxy's request
+  // handler, and two overlapping appends would interleave lines in events.jsonl.
+  const writes = new SerialQueue();
+
+  const plan = await upstreamPlan(args);
 
   const proxy = await createProxy({
     mode: 'replay',
     exchanges: ctx.exchanges,
     loose: args.bool('loose'),
-    upstream: upstreamOverrides(args),
-    onDivergence: (d) => void divergences.push(d),
+    upstream: plan.upstream,
+    upstreamHeaders: plan.headers,
+    onDivergence: (d) => {
+      divergences.push(d);
+      if (!trace) return;
+      writes.push(async () => {
+        await trace.append({
+          type: 'divergence',
+          actor: 'orca',
+          // Turn 0 for everything in this trace, and deliberately not a running count. An exact
+          // match produces no callback, so a counter here would number the third divergence as
+          // turn 1 and claim a position in the conversation that it does not have. `source_seq`
+          // is the honest coordinate: it points straight at the parent's own event.
+          turn: 0,
+          attrs: { level: d.level, rung: d.rung, detail: d.detail, source_seq: d.seq },
+        });
+      });
+    },
     // Printed as it happens rather than tallied at the end. A halted replay stops the agent, so
     // the count in `replay.done` arrives after the operator has already seen the run die — and a
     // bare `unmatched=1` with no reason is indistinguishable from a bug in orca itself.
@@ -206,6 +238,44 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
             ? 'orca replay <run> --loose'
             : `cd ${ctx.manifest.cwd} && orca replay <run> --in-place   # or --loose to continue live`,
       });
+      if (!trace) return;
+      // `error`, not `divergence`: nothing was served and the run is over, so calling it an
+      // inexact match would put a rung on a ladder the request never climbed. It is also the one
+      // finding here that exists nowhere else — a matched exchange is already in the parent, but
+      // "the agent asked for something this recording cannot answer" is new, and until now it
+      // lived only in the operator's scrollback.
+      writes.push(async () => {
+        await trace.append({
+          type: 'error',
+          actor: 'orca',
+          turn: 0,
+          attrs: {
+            rule: 'replay_unmatched',
+            rung: 4,
+            reason: u.reason,
+            index: u.index,
+            source_seq: u.seq,
+            recorded_in: ctx.manifest.cwd,
+            replayed_in: workspace.dir,
+          },
+        });
+      });
+    },
+  });
+
+  await trace?.append({
+    type: 'run.start',
+    actor: 'orca',
+    turn: 0,
+    attrs: {
+      adapter: ctx.manifest.adapter.id,
+      cwd: workspace.dir,
+      proxy: proxy.url,
+      mode: 'replay',
+      // Also on the manifest, which is what an out-of-process reader sees first. Here as well
+      // because a trace read on its own should say what it is a replay of.
+      parent_run: ctx.manifest.run_id,
+      exchanges: ctx.exchanges.length,
     },
   });
 
@@ -242,11 +312,33 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
     await workspace.release();
   }
 
+  await writes.drain();
   const stats = proxy.stats();
   await proxy.close();
 
   for (const d of divergences) {
     out.warn('divergence', { seq: d.seq, level: d.level, detail: d.detail });
+  }
+
+  // A halted replay is a failed replay even if the harness chose to exit 0 on the error. The exit
+  // code is what a script reads, so it has to reflect what happened rather than what the agent
+  // decided to do about it — and the trace records the same verdict for the same reason.
+  const verdict = exitCode === 0 && unmatched.length > 0 ? 1 : exitCode;
+
+  if (trace) {
+    await trace.append({
+      type: 'run.end',
+      actor: 'orca',
+      turn: 0,
+      attrs: {
+        exit_code: verdict,
+        agent_exit_code: exitCode,
+        matched: stats.matchedExact,
+        divergences: stats.divergences,
+        unmatched: stats.unmatched,
+      },
+    });
+    await trace.close(verdict);
   }
 
   out.phase('replay.done', {
@@ -255,19 +347,64 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
     divergences: stats.divergences,
     unmatched: stats.unmatched,
     exit: exitCode,
+    // Omitted entirely under --no-trace: `Output` drops undefined fields, so the line stays the
+    // shape it has always been for anyone who opted out.
+    trace: trace?.runId,
   });
 
   return {
     runId: ctx.manifest.run_id,
     mode: 'exact',
+    ...(trace === undefined ? {} : { traceRunId: trace.runId }),
     matchedExact: stats.matchedExact,
     divergences: stats.divergences,
     liveCalls: stats.liveCalls,
-    // A halted replay is a failed replay even if the harness chose to exit 0 on the error. The
-    // exit code is what a script reads, so it has to reflect what happened rather than what the
-    // agent decided to do about it.
-    exitCode: exitCode === 0 && unmatched.length > 0 ? 1 : exitCode,
+    exitCode: verdict,
   };
+}
+
+/**
+ * The run an exact replay writes about itself, or nothing under `--no-trace`.
+ *
+ * Spec §4 says every inexact match is an event in the trace, and until now the exact path had no
+ * trace to put one in: divergences were printed and discarded with the scrollback. They cannot go
+ * into the run being replayed — it is append-only and its manifest carries a digest over
+ * events.jsonl, so a single line appended would invalidate every verification anyone had done of
+ * it — so the replay becomes a run of its own, pointing back at its subject through `parent_run`.
+ * That one field is what `orca list`, `orca show` and `orca gc` already read, which is why it is
+ * on the manifest and not only in an event: gc uses it to refuse to delete a run something else
+ * still points at.
+ *
+ * There is no `fork_point`. An exact replay does not branch anywhere, and a fabricated checkpoint
+ * would be a number `orca list` prints as though someone had chosen it.
+ *
+ * What it deliberately does NOT record is the exchanges it served. Every one of them was read out
+ * of the parent's own events.jsonl and handed back byte for byte, so copying them here would
+ * duplicate the trace's single largest cost — the conversation bodies, blobs and all — to store a
+ * second copy that is identical by construction, and would make `orca gc` report a store twice the
+ * size for one recording's worth of content. An unmatched request is the opposite case: it is
+ * something the agent asked that the recording never contained, so it exists nowhere else and is
+ * written as an `error` event above. The rule is that this trace holds what replaying *discovered*,
+ * and points at the parent for what replaying merely repeated.
+ */
+async function openReplayTrace(
+  args: ParsedArgs,
+  ctx: Ctx,
+  cwd: string,
+): Promise<TraceWriter | undefined> {
+  if (!args.bool('trace', true)) return undefined;
+  const dir = runsDir(ctx.cwd);
+  await mkdir(dir, { recursive: true });
+  return TraceWriter.create(dir, {
+    adapter: ctx.manifest.adapter,
+    argv: ctx.manifest.argv,
+    // Where the replay actually ran, which is not always where the recording did: `--worktree`
+    // puts it in a scratch copy, and `orca gc` reads exactly this to decide whether the directory
+    // is one of ours to reclaim.
+    cwd,
+    orcaVersion: ORCA_VERSION,
+    parentRun: ctx.manifest.run_id,
+  });
 }
 
 /**
@@ -330,12 +467,15 @@ async function replayFork(
   let turn = 0;
   const writes = new SerialQueue();
 
+  const plan = await upstreamPlan(args);
+
   const proxy = await createProxy({
     mode: 'hybrid',
     forkAt,
     forkModel: ctx.model,
     exchanges: ctx.exchanges,
-    upstream: upstreamOverrides(args),
+    upstream: plan.upstream,
+    upstreamHeaders: plan.headers,
     onExchange: (exchange) => {
       writes.push(async () => {
         turn += 1;
@@ -416,6 +556,7 @@ async function replayFork(
 
   return {
     runId: ctx.manifest.run_id,
+    traceRunId: writer.runId,
     forkRunId: writer.runId,
     worktree,
     mode: 'fork',

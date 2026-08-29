@@ -16,6 +16,21 @@ const run = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
 const FAKE_AGENT = join(here, 'fixtures', 'fake-agent.mjs');
 
+describe('compare without --models', () => {
+  it('tells you both ways to supply models when none are available', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'orca-cmp-cfg-'));
+    const lines: string[] = [];
+    const out = new Output({ write: (l) => void lines.push(l), isTTY: false });
+    try {
+      await expect(compareCommand(parseArgs(['compare', 'last']), out, home)).rejects.toThrow(
+        /orca setup/,
+      );
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('compare', () => {
   let workspace: string;
   let model: Awaited<ReturnType<typeof startFakeModel>>;
