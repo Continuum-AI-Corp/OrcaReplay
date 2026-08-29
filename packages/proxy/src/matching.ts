@@ -132,7 +132,8 @@ function mapStrings<T>(value: T, f: (s: string) => string): T {
   if (Array.isArray(value)) return value.map((v) => mapStrings(v, f)) as unknown as T;
   if (value !== null && typeof value === 'object') {
     const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = mapStrings(v, f);
+    for (const [k, v] of Object.entries(value as Record<string, unknown>))
+      out[k] = mapStrings(v, f);
     return out as unknown as T;
   }
   return value;

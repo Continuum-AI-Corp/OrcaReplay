@@ -233,10 +233,7 @@ describe('structuralDistance — bounded to the leaves that differ', () => {
     const long = 'y'.repeat(5_000);
     const a = req();
     const b = req({
-      messages: [
-        ...req().messages,
-        { role: 'assistant', content: [{ type: 'text', text: long }] },
-      ],
+      messages: [...req().messages, { role: 'assistant', content: [{ type: 'text', text: long }] }],
     });
     expect(structuralDistance(a, b)).toBeGreaterThan(5_000);
   });

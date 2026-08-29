@@ -1,5 +1,7 @@
 # OrcaReplay
 
+<sub>**English** · [简体中文](docs/i18n/README.zh-CN.md) · [日本語](docs/i18n/README.ja.md) · [한국어](docs/i18n/README.ko.md) · [Deutsch](docs/i18n/README.de.md) · [Français](docs/i18n/README.fr.md) · [Español](docs/i18n/README.es.md) · [العربية](docs/i18n/README.ar.md)</sub>
+
 ### Your agent broke something at 2am. Replay it at 9am — exactly, offline, as many times as you like.
 
 Record any coding agent. Reproduce the run byte-for-byte with the network off. Fork it from any step
@@ -158,7 +160,7 @@ Now reproduce it as often as you like, for nothing:
 
 ```console
 $ orca replay last
-info replay.done matched=2 total=2 divergences=0 unmatched=0 exit=0
+info replay.done reused=2/2 exact=2 divergences=0 unmatched=0 exit=0
 ```
 
 No network, no tokens, no variance. Then ask the question you actually have — *would a different
