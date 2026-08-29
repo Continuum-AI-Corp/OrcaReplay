@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -45,6 +46,61 @@ describe('gc', () => {
     await writer.close(0);
     return writer.runDir;
   }
+
+  describe('gc — fork worktrees', () => {
+    /**
+     * A fork materialises the recorded workspace into a scratch directory under the OS temp dir and
+     * runs the agent there, and nothing ever removed it. `orca compare --models a,b,c,d` therefore
+     * left four full copies of the workspace behind on every invocation, permanently, and `orca gc`
+     * — the command whose entire job is reclaiming space — could not see them.
+     *
+     * The worktree is not deleted when the fork ends, because it holds what the model actually did:
+     * deleting it immediately would destroy the thing you forked in order to look at. It is reclaimed
+     * with its run.
+     */
+    it('removes the worktree belonging to a run it deletes', async () => {
+      const worktree = await mkdtemp(join(tmpdir(), 'orca-4-'));
+      await writeFile(join(worktree, 'auth.ts'), 'export const fixed = true;\n');
+
+      const parent = await makeRun(['parent']);
+      const child = await makeRun(['child']);
+      await patchManifest(child, { parent_run: 'run_000000000000', fork_point: 4, cwd: worktree });
+      await ageRun(child, 30 * DAY);
+      await ageRun(parent, 1000);
+
+      await gcCommand(parseArgs(['gc', '--older-than', '7d']), out, cwd);
+
+      expect(existsSync(child), 'the forked run should be gone').toBe(false);
+      expect(existsSync(worktree), 'its worktree should be gone with it').toBe(false);
+    });
+
+    it('leaves a worktree alone on a dry run', async () => {
+      const worktree = await mkdtemp(join(tmpdir(), 'orca-4-'));
+      const child = await makeRun(['child']);
+      await patchManifest(child, { parent_run: 'run_000000000000', fork_point: 4, cwd: worktree });
+      await ageRun(child, 30 * DAY);
+
+      await gcCommand(parseArgs(['gc', '--older-than', '7d', '--dry-run']), out, cwd);
+
+      expect(existsSync(worktree)).toBe(true);
+    });
+
+    it('never deletes a directory that is not a scratch worktree', async () => {
+      // The guard that matters. A fork's cwd is a temp directory orca made; a plain recording's cwd
+      // is the user's actual project, and deleting that would be catastrophic.
+      const project = await mkdtemp(join(tmpdir(), 'someones-project-'));
+      await writeFile(join(project, 'important.ts'), 'do not delete me\n');
+
+      const run = await makeRun(['first']);
+      await patchManifest(run, { cwd: project });
+      await ageRun(run, 30 * DAY);
+
+      await gcCommand(parseArgs(['gc', '--older-than', '7d']), out, cwd);
+
+      expect(existsSync(run), 'the run itself should be gone').toBe(false);
+      expect(existsSync(project), "a recording cwd is not orca's to delete").toBe(true);
+    });
+  });
 
   /** Runs recorded milliseconds apart sort unstably; every test states the age it means. */
   async function ageRun(runDir: string, ageMs: number): Promise<void> {
@@ -197,7 +253,12 @@ describe('gc', () => {
 
     it('says so plainly when there are no runs at all', async () => {
       const result = await gcCommand(parseArgs(['gc']), out, cwd);
-      expect(result).toEqual({ runsRemoved: 0, blobsRemoved: 0, bytesReclaimed: 0 });
+      expect(result).toEqual({
+        runsRemoved: 0,
+        worktreesRemoved: 0,
+        blobsRemoved: 0,
+        bytesReclaimed: 0,
+      });
       expect(text()).toMatch(/no runs/i);
     });
   });

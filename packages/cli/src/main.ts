@@ -34,7 +34,8 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
         --drop-fs                delete the filesystem snapshots, which cannot be scrubbed
   orca ui [run]                  serve the viewer locally
   orca list                      runs recorded here
-  orca gc --older-than 7d        reclaim space; --keep N, --dry-run
+  orca gc --older-than 7d        reclaim space, forks' scratch worktrees included
+                                 --keep N, --dry-run
   orca doctor                    check this machine can record at all
 
   [run] is a run id, or "last" (the default).
