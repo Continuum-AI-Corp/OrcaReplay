@@ -13,6 +13,8 @@ onto a different model and see who gets it right.
 for Claude, GPT, Gemini, Grok, DeepSeek, Qwen and the rest. It is what `orca setup` points at by
 default, and what makes `orca compare` a single command instead of four provider accounts.
 
+[All models](https://www.orcarouter.ai/models) · [OrcaCode Review](https://www.orcarouter.ai/code-review) · [X](https://x.com/OrcaRouter) · [Hugging Face](https://huggingface.co/orcarouter)
+
 <br clear="left">
 
 [![License](https://img.shields.io/badge/code-Apache--2.0-blue)](LICENSE)
@@ -304,21 +306,25 @@ Early. `v0` is the walking skeleton of the three commands above.
 
 ## Install
 
-Not published to npm yet — `v0` is unreleased, so install from source:
+Not on npm yet — the packages are built and verified for it, but nothing has been published, so
+today it is from source:
 
 ```console
 git clone https://github.com/Continuum-AI-Corp/OrcaReplay && cd OrcaReplay
 npm ci && npm run build
 npm install -g ./packages/cli     # puts `orca` (and `orcareplay`) on PATH
-orca doctor                       # checks Node, git, and which agents it can find
+orca doctor                       # checks node, git, and which agents it can find
 ```
 
 `npm install -g .` from the repository root installs nothing: the root is a workspace with no
-binary of its own, and the `orca` command lives in `packages/cli`.
+binary of its own, and `orca` lives in `packages/cli`.
 
-Once `v0` ships, `npx orcareplay --help` will be the one-liner and this section will say so.
+The moment `v0` is published, `npx orcareplay doctor` is the whole install and this section will say
+so instead. The release is a tagged, gated workflow — see [`RELEASING.md`](RELEASING.md).
 
-Node 20+. No account, no signup, no API key changes.
+**Node 20+ to run it** (the CLI's own `engines` says `>=20.0.0`). Contributing needs `^20.19.0 ||
+>=22.12.0`, because the test toolchain does; the root `package.json` declares that separately so
+`npm ci` tells you up front. No account, no signup, no API key changes.
 
 ## Where your runs are kept
 
@@ -429,3 +435,14 @@ If it saved you an afternoon, a ⭐ helps other people find it.
 ## License
 
 Apache-2.0 for the code. The trace specification is CC BY 4.0, so anyone may reimplement it.
+
+---
+
+<sub>
+Built by the OrcaRouter team ·
+<a href="https://www.orcarouter.ai">orcarouter.ai</a> ·
+<a href="https://www.orcarouter.ai/models">all models</a> ·
+<a href="https://www.orcarouter.ai/code-review">OrcaCode Review</a> ·
+<a href="https://x.com/OrcaRouter">X</a> ·
+<a href="https://huggingface.co/orcarouter">Hugging Face</a>
+</sub>

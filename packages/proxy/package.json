@@ -12,9 +12,9 @@
     "dist"
   ],
   "dependencies": {
-    "@orcareplay/plugin-api": "*",
-    "@orcareplay/schema": "*",
-    "@orcareplay/core": "*",
-    "@orcareplay/providers": "*"
+    "@orcareplay/plugin-api": "0.1.0",
+    "@orcareplay/schema": "0.1.0",
+    "@orcareplay/core": "0.1.0",
+    "@orcareplay/providers": "0.1.0"
   }
 }

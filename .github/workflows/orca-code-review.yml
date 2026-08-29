@@ -33,7 +33,12 @@ jobs:
     # `pull_request_target` workflow with the OrcaRouter secret, so only
     # maintainers may trigger it — otherwise any participant could burn paid
     # quota and spam reviews without pushing new commits.
+    # `secrets` is readable in a job-level `if`, and without the key the action can only fail.
+    # A check that is red on every PR because a repository was never given a credential teaches
+    # people to ignore red checks, which is the opposite of what a review gate is for. A fork's PR
+    # gets no secrets either, so this also stops it failing there by design.
     if: |
+      secrets.ORCAROUTER_API_KEY != '' && (
       github.event_name == 'pull_request_target' ||
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
@@ -41,7 +46,7 @@ jobs:
           startsWith(github.event.comment.body, '/orcacode review') ||
           startsWith(github.event.comment.body, '@orcacode-review') ||
           startsWith(github.event.comment.body, '@orcacode review')) &&
-        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)))
     steps:
       # Pinned to a commit, not to `@v1`. This job runs on `pull_request_target` with a secret
       # in scope, so whoever can move that tag can run code here with it — and `v1` is a floating
