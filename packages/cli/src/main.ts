@@ -31,6 +31,7 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
   orca checkpoints [run]         where you can fork from
   orca export [run] -o file.html a single self-contained file you can attach
   orca scrub [run] --match X     remove something from a recorded trace
+        --drop-fs                delete the filesystem snapshots, which cannot be scrubbed
   orca ui [run]                  serve the viewer locally
   orca list                      runs recorded here
   orca gc --older-than 7d        reclaim space; --keep N, --dry-run

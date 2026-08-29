@@ -73,6 +73,7 @@ describe('pattern rules', () => {
     ['github_token', 'gho_abcdefghijklmnopqrstuvwxyz0123456789', 'github oauth'],
     ['github_token', 'ghs_abcdefghijklmnopqrstuvwxyz0123456789', 'github server'],
     ['github_token', 'ghu_abcdefghijklmnopqrstuvwxyz0123456789', 'github user'],
+    ['github_token', 'ghr_abcdefghijklmnopqrstuvwxyz0123456789', 'github refresh'],
     ['aws_access_key_id', 'AKIAIOSFODNN7EXAMPLE', 'aws'],
     ['slack_token', 'xoxb-123456789012-abcdefghijkl', 'slack bot'],
     ['slack_token', 'xoxp-123456789012-abcdefghijkl', 'slack user'],
@@ -124,6 +125,18 @@ describe('pattern rules', () => {
     expect(hits.length).toBeGreaterThan(0);
     const parsed = JSON.parse(value) as { model: string };
     expect(parsed.model).toBe('claude-opus-5');
+  });
+
+  /**
+   * A refresh token is the one GitHub credential that survives a rotated access token, so the
+   * pattern rule has to carry it rather than leaning on the entropy sweep: a low-entropy token
+   * body clears neither the entropy floor nor the letters-and-digits test.
+   */
+  it('catches a github refresh token the entropy sweep would never see', () => {
+    const secret = `ghr_${'1'.repeat(30)}`;
+    const { value, hits } = fresh().redactString(`token ${secret} end`);
+    expect(value).not.toContain(secret);
+    expect(hits.map((h) => h.rule)).toContain('github_token');
   });
 
   it('catches a high-entropy token with no recognisable prefix', () => {

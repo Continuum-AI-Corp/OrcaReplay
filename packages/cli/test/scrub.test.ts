@@ -1,9 +1,9 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { TraceWriter } from '@orcareplay/core';
-import { validateEvent } from '@orcareplay/schema';
+import { validateEvent, validateManifest } from '@orcareplay/schema';
 import { parseArgs } from '../src/args.js';
 import { Output } from '../src/out.js';
 import { scrubCommand } from '../src/commands/scrub.js';
@@ -196,6 +196,368 @@ describe('scrub — binary safety', () => {
     const after = Buffer.from(await store.get(ref)).toString('utf8');
     expect(after).not.toContain('NEEDLE');
     expect(after).toContain('prose with');
+    await rm(cwd, { recursive: true, force: true });
+  });
+});
+
+/**
+ * The failure mode that matters for a scrubber is not "removed too little" — it is "reported a
+ * clean trace it never searched". Each of these pins one way `orca scrub` used to do exactly that.
+ */
+describe('scrub — false all-clears', () => {
+  let cwd: string;
+  let out: Output;
+  let lines: string[];
+
+  beforeEach(async () => {
+    cwd = await mkdtemp(join(tmpdir(), 'orca-scrub-clear-'));
+    lines = [];
+    out = new Output({ write: (s) => void lines.push(s), isTTY: false });
+  });
+
+  afterEach(async () => {
+    await rm(cwd, { recursive: true, force: true });
+  });
+
+  async function makeRun(payloads: unknown[]): Promise<string> {
+    const writer = await TraceWriter.create(join(cwd, '.orca', 'runs'), {
+      adapter: { id: 'test' },
+      argv: ['test'],
+      cwd,
+      orcaVersion: '0.1.0',
+    });
+    await writer.append({ type: 'run.start', actor: 'orca', turn: 0 });
+    for (const payload of payloads) {
+      await writer.append({ type: 'note', actor: 'orca', turn: 1, payload: payload as never });
+    }
+    await writer.append({ type: 'run.end', actor: 'orca', turn: 1 });
+    await writer.close(0);
+    return writer.runDir;
+  }
+
+  it('refuses --match with no value instead of scrubbing nothing', async () => {
+    const runDir = await makeRun(['the host is prod-db-7.internal.example.com']);
+    await expect(scrubCommand(parseArgs(['scrub', 'last', '--match']), out, cwd)).rejects.toThrow(
+      /--match/,
+    );
+    expect(await readFile(join(runDir, 'events.jsonl'), 'utf8')).toContain('prod-db-7');
+    expect(lines.join(''), 'it must not claim the trace is clean').not.toMatch(/nothing matched/);
+  });
+
+  it('refuses an empty --match= the same way', async () => {
+    await makeRun(['anything']);
+    await expect(scrubCommand(parseArgs(['scrub', 'last', '--match=']), out, cwd)).rejects.toThrow(
+      /--match/,
+    );
+  });
+
+  it('refuses --matches with no value too', async () => {
+    await makeRun(['anything']);
+    await expect(scrubCommand(parseArgs(['scrub', 'last', '--matches']), out, cwd)).rejects.toThrow(
+      /--matches/,
+    );
+  });
+
+  it('does not count a removal it reverted', async () => {
+    // `note` sits inside `"type":"note"`, so the scrubbed line still parses but no longer
+    // validates. The original goes back — and the count must go back with it.
+    await makeRun(['keep this text']);
+    const result = await scrubCommand(parseArgs(['scrub', 'last', '--match', 'note']), out, cwd);
+    expect(result.removals).toBe(0);
+    expect(lines.join('')).toMatch(/removed=0/);
+  });
+
+  it('warns loudly, naming the event, when it puts a line back', async () => {
+    const runDir = await makeRun(['keep this text']);
+    const result = await scrubCommand(parseArgs(['scrub', 'last', '--match', 'note']), out, cwd);
+
+    expect(result.reverted).toBe(1);
+    const printed = lines.join('');
+    expect(printed).toMatch(/warn scrub_reverted/);
+    // The note event is seq 1: run.start, note, run.end.
+    expect(printed).toMatch(/seq=1/);
+    // And it says plainly that the match survived, because it did.
+    expect(await readFile(join(runDir, 'events.jsonl'), 'utf8')).toContain('"type":"note"');
+    expect(printed.toLowerCase()).toMatch(/still/);
+  });
+
+  it('warns when the scrub would leave the line unparseable, rather than reverting in silence', async () => {
+    // `"payload"` is a key, so removing it leaves a bare token where a string had to be.
+    const runDir = await makeRun(['keep this text']);
+    const before = await readFile(join(runDir, 'events.jsonl'), 'utf8');
+    const result = await scrubCommand(
+      parseArgs(['scrub', 'last', '--match', '"payload"']),
+      out,
+      cwd,
+    );
+
+    expect(result.reverted).toBe(1);
+    expect(result.removals).toBe(0);
+    expect(lines.join('')).toMatch(/warn scrub_reverted/);
+    expect(await readFile(join(runDir, 'events.jsonl'), 'utf8')).toBe(before);
+  });
+});
+
+/**
+ * `manifest.json` is where the operator is named: `cwd` and `argv` carry the checkout path, and
+ * `env_allowlisted` carries HOME, PATH and USER verbatim. `orca scrub last --match my-hostname`
+ * is the README's own example, so the manifest has to go through the same detectors as the rest.
+ */
+describe('scrub — the manifest', () => {
+  const ENV_KEY = 'ORCA_SCRUB_TEST_HOST';
+  let cwd: string;
+  let out: Output;
+  let lines: string[];
+
+  beforeEach(async () => {
+    cwd = await mkdtemp(join(tmpdir(), 'orca-scrub-manifest-'));
+    lines = [];
+    out = new Output({ write: (s) => void lines.push(s), isTTY: false });
+  });
+
+  afterEach(async () => {
+    delete process.env[ENV_KEY];
+    await rm(cwd, { recursive: true, force: true });
+  });
+
+  async function makeRun(host = 'prod-db-7.internal.example.com'): Promise<string> {
+    process.env[ENV_KEY] = `/home/${host}/checkout`;
+    const writer = await TraceWriter.create(join(cwd, '.orca', 'runs'), {
+      adapter: { id: 'test' },
+      argv: ['claude', '--project', `/srv/${host}`],
+      cwd: `/srv/${host}`,
+      orcaVersion: '0.1.0',
+      envAllowlist: [ENV_KEY],
+    });
+    await writer.append({ type: 'run.start', actor: 'orca', turn: 0 });
+    await writer.append({ type: 'run.end', actor: 'orca', turn: 0 });
+    await writer.close(0);
+    return writer.runDir;
+  }
+
+  it('removes the literal from cwd, argv and the allowlisted environment', async () => {
+    const runDir = await makeRun();
+    const before = await readFile(join(runDir, 'manifest.json'), 'utf8');
+    expect(before, 'fixture must put the host in all three places').toContain(
+      'prod-db-7.internal.example.com',
+    );
+
+    await scrubCommand(
+      parseArgs(['scrub', 'last', '--match', 'prod-db-7.internal.example.com']),
+      out,
+      cwd,
+    );
+
+    const after = JSON.parse(await readFile(join(runDir, 'manifest.json'), 'utf8')) as {
+      cwd: string;
+      argv: string[];
+      env_allowlisted: Record<string, string>;
+    };
+    expect(JSON.stringify(after)).not.toContain('prod-db-7.internal.example.com');
+    expect(after.cwd).toContain('redacted');
+    expect(after.argv.join(' ')).toContain('redacted');
+    expect(after.env_allowlisted[ENV_KEY]).toContain('redacted');
+  });
+
+  it('re-runs the standard detectors over the manifest as well', async () => {
+    const runDir = await makeRun();
+    // A key that leaked into the recorded command line, which the write path never saw.
+    const raw = JSON.parse(await readFile(join(runDir, 'manifest.json'), 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    raw.argv = ['claude', '--token', 'ghr_abcdefghijklmnopqrstuvwxyz0123456789'];
+    await writeFile(join(runDir, 'manifest.json'), `${JSON.stringify(raw, null, 2)}\n`, 'utf8');
+
+    await scrubCommand(parseArgs(['scrub', 'last']), out, cwd);
+
+    const after = await readFile(join(runDir, 'manifest.json'), 'utf8');
+    expect(after).not.toContain('ghr_abcdefghijklmnopqrstuvwxyz0123456789');
+  });
+
+  it('leaves a manifest that still validates and still verifies', async () => {
+    const runDir = await makeRun();
+    await scrubCommand(
+      parseArgs(['scrub', 'last', '--match', 'prod-db-7.internal.example.com']),
+      out,
+      cwd,
+    );
+
+    const parsed: unknown = JSON.parse(await readFile(join(runDir, 'manifest.json'), 'utf8'));
+    const result = validateManifest(parsed);
+    expect(result.valid, result.errors.join(', ')).toBe(true);
+
+    const { TraceReader } = await import('@orcareplay/core');
+    await expect((await TraceReader.open(runDir)).verifyIntegrity()).resolves.toMatchObject({
+      ok: true,
+    });
+  });
+
+  it('counts what it removed from the manifest', async () => {
+    await makeRun();
+    const result = await scrubCommand(
+      parseArgs(['scrub', 'last', '--match', 'prod-db-7.internal.example.com']),
+      out,
+      cwd,
+    );
+    // cwd, one argv element, and the environment value.
+    expect(result.removals).toBeGreaterThanOrEqual(3);
+  });
+
+  it('refuses, changing nothing, when the scrub would take the manifest apart', async () => {
+    const runDir = await makeRun();
+    const manifestBefore = await readFile(join(runDir, 'manifest.json'), 'utf8');
+
+    // A bare quote is not a value in the manifest, it is the JSON itself.
+    await expect(
+      scrubCommand(parseArgs(['scrub', 'last', '--match', '"']), out, cwd),
+    ).rejects.toThrow(/manifest/);
+
+    expect(await readFile(join(runDir, 'manifest.json'), 'utf8')).toBe(manifestBefore);
+  });
+
+  it('refuses, changing nothing, when the scrub would invalidate the manifest', async () => {
+    const runDir = await makeRun();
+    const manifestBefore = await readFile(join(runDir, 'manifest.json'), 'utf8');
+    const eventsBefore = await readFile(join(runDir, 'events.jsonl'), 'utf8');
+
+    // `run_` is the run id's required prefix, so removing it breaks a field the schema pins.
+    await expect(
+      scrubCommand(parseArgs(['scrub', 'last', '--match', 'run_']), out, cwd),
+    ).rejects.toThrow(/manifest/);
+
+    expect(await readFile(join(runDir, 'manifest.json'), 'utf8')).toBe(manifestBefore);
+    expect(await readFile(join(runDir, 'events.jsonl'), 'utf8')).toBe(eventsBefore);
+  });
+});
+
+/**
+ * `fs/` is a bare git object store holding the whole workspace at every turn — usually the largest
+ * thing in a run. Its objects are addressed by the hash of what they contain, so a secret in a
+ * source file cannot be edited out of it the way a blob can. What must not happen is the scrubber
+ * reporting a clean trace while every snapshot still holds the file.
+ */
+describe('scrub — the shadow filesystem store', () => {
+  const NEEDLE = 'prod-db-7.internal.example.com';
+  let cwd: string;
+  let out: Output;
+  let lines: string[];
+
+  beforeEach(async () => {
+    cwd = await mkdtemp(join(tmpdir(), 'orca-scrub-fs-'));
+    lines = [];
+    out = new Output({ write: (s) => void lines.push(s), isTTY: false });
+  });
+
+  afterEach(async () => {
+    await rm(cwd, { recursive: true, force: true });
+  });
+
+  /** A run whose shadow store holds one workspace file containing `contents`. */
+  async function makeRunWithSnapshot(contents: string): Promise<{ runDir: string; tree: string }> {
+    await writeFile(join(cwd, 'config.ts'), contents, 'utf8');
+    const writer = await TraceWriter.create(join(cwd, '.orca', 'runs'), {
+      adapter: { id: 'test' },
+      argv: ['test'],
+      cwd,
+      orcaVersion: '0.1.0',
+    });
+    await writer.append({ type: 'run.start', actor: 'orca', turn: 0 });
+    const { FsCapture } = await import('@orcareplay/fs-capture');
+    const capture = await FsCapture.start({ runDir: writer.runDir, cwd });
+    const snapshot = await capture.snapshotTurn(0);
+    await writer.append({
+      type: 'fs.snapshot',
+      actor: 'orca',
+      turn: 0,
+      attrs: { tree: snapshot.tree },
+    });
+    await writer.append({ type: 'run.end', actor: 'orca', turn: 0 });
+    await writer.close(0);
+    return { runDir: writer.runDir, tree: snapshot.tree };
+  }
+
+  it('reports that the shadow store still holds the match instead of claiming a clean trace', async () => {
+    const { runDir } = await makeRunWithSnapshot(`export const host = '${NEEDLE}';\n`);
+    const result = await scrubCommand(parseArgs(['scrub', 'last', '--match', NEEDLE]), out, cwd);
+
+    expect(result.fsStoreMatches).toBeGreaterThan(0);
+    const printed = lines.join('');
+    expect(printed).toMatch(/warn fs_store_not_scrubbed/);
+    expect(printed).toMatch(/--drop-fs/);
+    expect(
+      printed,
+      'it must not call a trace clean while the store still holds the match',
+    ).not.toMatch(/nothing matched/);
+    expect(runDir).toBeTruthy();
+  });
+
+  /** The report has to be true: restoring the snapshot really does bring the match back. */
+  it('is telling the truth — the snapshot still restores the match', async () => {
+    const { runDir, tree } = await makeRunWithSnapshot(`export const host = '${NEEDLE}';\n`);
+    await scrubCommand(parseArgs(['scrub', 'last', '--match', NEEDLE]), out, cwd);
+
+    const dest = await mkdtemp(join(tmpdir(), 'orca-scrub-fs-restore-'));
+    const { ShadowIndex } = await import('@orcareplay/fs-capture');
+    const shadow = await ShadowIndex.create({ gitDir: join(runDir, 'fs'), workTree: cwd });
+    await shadow.materialize(tree, dest);
+    expect(await readFile(join(dest, 'config.ts'), 'utf8')).toContain(NEEDLE);
+    await rm(dest, { recursive: true, force: true });
+  });
+
+  it('drops the store outright with --drop-fs, and says what that costs', async () => {
+    const { runDir } = await makeRunWithSnapshot(`export const host = '${NEEDLE}';\n`);
+    const result = await scrubCommand(
+      parseArgs(['scrub', 'last', '--match', NEEDLE, '--drop-fs']),
+      out,
+      cwd,
+    );
+
+    expect(result.fsStoreDropped).toBe(true);
+    expect(result.fsStoreMatches).toBe(0);
+    await expect(stat(join(runDir, 'fs'))).rejects.toThrow();
+    expect(lines.join('')).toMatch(/fs_store_dropped/);
+  });
+
+  it('says nothing about the store when it holds no match', async () => {
+    await makeRunWithSnapshot('export const host = "localhost";\n');
+    const result = await scrubCommand(parseArgs(['scrub', 'last', '--match', NEEDLE]), out, cwd);
+
+    expect(result.fsStoreMatches).toBe(0);
+    expect(lines.join('')).not.toMatch(/fs_store_not_scrubbed/);
+  });
+
+  it('finds a match in a captured filename, not only in file contents', async () => {
+    await writeFile(join(cwd, `${NEEDLE}.conf`), 'listen = 8080\n', 'utf8');
+    await makeRunWithSnapshot('export const host = "localhost";\n');
+    const result = await scrubCommand(parseArgs(['scrub', 'last', '--match', NEEDLE]), out, cwd);
+    expect(result.fsStoreMatches).toBeGreaterThan(0);
+  });
+});
+
+/** A store that is present but unreadable is the one case where "0 matches" proves nothing. */
+describe('scrub — an unreadable shadow store', () => {
+  it('says it could not check, rather than reporting a clean trace', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'orca-scrub-fs-bad-'));
+    const lines: string[] = [];
+    const out = new Output({ write: (s) => void lines.push(s), isTTY: false });
+    const writer = await TraceWriter.create(join(cwd, '.orca', 'runs'), {
+      adapter: { id: 'test' },
+      argv: ['test'],
+      cwd,
+      orcaVersion: '0.1.0',
+    });
+    await writer.append({ type: 'run.start', actor: 'orca', turn: 0 });
+    await writer.close(0);
+    // Present, but not an object database git can open.
+    await mkdir(join(writer.runDir, 'fs'), { recursive: true });
+
+    const result = await scrubCommand(parseArgs(['scrub', 'last', '--match', 'ABSENT']), out, cwd);
+
+    expect(result.fsStoreMatches).toBe(0);
+    const printed = lines.join('');
+    expect(printed).toMatch(/warn fs_store_unverified/);
+    expect(printed, 'an unchecked store is not a clean one').not.toMatch(/nothing matched/);
     await rm(cwd, { recursive: true, force: true });
   });
 });

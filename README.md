@@ -112,8 +112,15 @@ orca export last -o bug.html          # prints exactly what it is about to write
 orca scrub last --match my-hostname   # remove something after the fact
 ```
 
-`orca scrub` rewrites `events.jsonl` and every text blob, re-runs the standard detectors, refreshes
-the integrity digest, and leaves binary blobs byte-identical.
+`orca scrub` rewrites `events.jsonl`, the manifest and every text blob, re-runs the standard
+detectors, refreshes the integrity digest, and leaves binary blobs byte-identical.
+
+It cannot rewrite the filesystem snapshots. Git objects are addressed by the hash of their own
+contents, so editing one changes its id, which forces every tree naming it to be rewritten and
+every event naming those trees after that — a history rewrite whose failure mode is a run that no
+longer restores. So scrub *searches* the snapshot store and tells you when your string is still in
+there, rather than reporting a clean trace it could not clean. `--drop-fs` deletes the store
+outright, at the cost of being able to fork the run.
 
 ## What is open, and what is not
 
