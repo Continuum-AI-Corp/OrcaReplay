@@ -42,6 +42,20 @@ jobs:
       # This is what makes the format a format rather than whatever the writer happens to emit.
       - run: node scripts/conformance.mjs
 
+  python-sdk:
+    name: python sdk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      # The SDK itself has no runtime dependencies and is meant to keep it that way, but the test
+      # runner is not the SDK: setup-python provides a clean interpreter with no pytest on it.
+      # Installing the package rather than running pytest against the source tree also checks that
+      # `pip install orca-trace` actually works, which is how anyone will really get it.
+      - run: pip install ./python[dev]
+      - run: python -m pytest python/ -q
+
   plugin-api-neutrality:
     name: plugin API neutrality
     runs-on: ubuntu-latest

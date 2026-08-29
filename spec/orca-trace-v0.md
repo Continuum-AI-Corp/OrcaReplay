@@ -104,6 +104,17 @@ MUST match using this ladder and MUST record which rung matched:
 | 3 | Identical trailing message, different prefix (typical after compaction) | `divergence` level `major` |
 | 4 | No match | halt and report; `--loose` continues live instead |
 
+Redaction (§5) makes rung 1 unreachable for any request that contained a secret: the placeholder's
+digest is salted per run, so the same value becomes a different placeholder on replay. Implementations
+MUST therefore put both sides in the same representation before comparing — redacting the incoming
+request with the same policy — and MUST compare the *kind* of secret rather than its digest, which
+is the most a trace can know about a value it deliberately destroyed. A request that is equal only
+after that fold is a rung 2 `minor` divergence, never rung 1.
+
+Distance MUST be measured per field rather than over the serialized body as a whole. A whole-body
+longest-common-prefix-and-suffix measure counts everything between two distant edits as changed, so
+two drifting identifiers in a large prompt score as a total rewrite and no request can reach rung 2.
+
 **Replay MUST NOT silently approximate.** Every inexact match is an event in the trace.
 
 ## 5. Redaction
@@ -115,6 +126,13 @@ Redaction happens in the write path, before bytes reach disk. Implementations MU
   substituting a stable placeholder `<secret:kind:hash8>` derived from a per-run salt, so that
   replay still matches structurally and repeat occurrences remain equal;
 - record removals in `redactions.json` by rule and identifier, never by value.
+
+High-entropy detection MUST additionally require a **mixed alphabet** — the token must contain
+both a digit and a letter. Shannon entropy alone has false positives on ordinary source code
+(`getUserAuthenticationTokenFromRequestHeaders` scores 4.08 bits/char), and since agent traces are
+mostly source code, an unguarded rule corrupts exactly the payloads the trace exists to preserve.
+Recall is essentially unaffected: random base64url of 20+ characters contains a digit with
+probability ≈0.98.
 
 Redaction is best-effort mitigation, not a guarantee. A trace is sensitive material.
 

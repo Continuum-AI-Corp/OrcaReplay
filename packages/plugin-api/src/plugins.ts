@@ -27,6 +27,15 @@ export interface Launch {
 /** How to launch and instrument one agent harness. */
 export interface Adapter {
   id: string;
+  /**
+   * Other names this adapter answers to on the command line.
+   *
+   * The id is a stable internal handle written into every manifest; an alias is what a human
+   * types, which is almost always the name of the binary they run. `claude-code` and `claude` are
+   * the canonical example — keeping them separate means the manifest stays unambiguous while
+   * `orca record claude` does what anyone would expect it to.
+   */
+  aliases?: readonly string[];
   /** Semver range of harness versions this adapter is tested against. */
   harnessVersions?: string;
   detect(cwd: string): Promise<boolean>;

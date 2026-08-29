@@ -1,5 +1,40 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "outDir": "dist", "rootDir": "src" },
-  "include": ["src/**/*.ts"]
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    {
+      "path": "../schema"
+    },
+    {
+      "path": "../plugin-api"
+    },
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../proxy"
+    },
+    {
+      "path": "../providers"
+    },
+    {
+      "path": "../adapters"
+    },
+    {
+      "path": "../fs-capture"
+    },
+    {
+      "path": "../viewer"
+    },
+    {
+      "path": "../mcp-shim"
+    },
+    {
+      "path": "../shell-shim"
+    }
+  ]
 }

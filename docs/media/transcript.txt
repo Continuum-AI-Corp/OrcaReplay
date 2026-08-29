@@ -1,0 +1,29 @@
+$ orca record claude -- --permission-mode acceptEdits -p 'Reject tokens shorter than 8 chars in auth.ts'
+info recording run=run_c00c6c89f4b6 adapter=claude-code proxy=http://127.0.0.1:44043 fs=on shell=on
+Warning: no stdin data received in 3s, proceeding without it. If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, or wait longer.
+Updated `isValid` in auth.ts to require tokens of at least 8 characters.
+info recorded run=run_c00c6c89f4b6 events=42 blobs=8 exit=0 dir=/tmp/herodemo/.orca/runs/run_c00c6c89f4b6
+
+  orca replay run_c00c6c89f4b6            # reproduce it exactly
+  orca replay run_c00c6c89f4b6 --ui       # open the timeline
+$ orca replay last
+info replay.restored to=5c1e02c6cba203f78847e811342709570fce42e6 your_tree=fbb98ae506c62341962da4bba014f57b3bc7918b note="your files are restored when the replay ends"
+info replaying run=run_c00c6c89f4b6 exchanges=6 egress=blocked proxy=http://127.0.0.1:46879 cwd=/tmp/herodemo
+Updated `isValid` in auth.ts to require tokens of at least 8 characters.
+warn divergence seq=5 level=major detail="request 1 has an identical trailing message but a different prefix (2 recorded vs 2 replayed)"
+warn divergence seq=10 level=major detail="request 2 has an identical trailing message but a different prefix (4 recorded vs 4 replayed)"
+warn divergence seq=15 level=major detail="request 3 has an identical trailing message but a different prefix (6 recorded vs 6 replayed)"
+warn divergence seq=21 level=major detail="request 4 has an identical trailing message but a different prefix (8 recorded vs 8 replayed)"
+info replay.done matched=2 total=6 divergences=4 unmatched=0 exit=0
+$ orca compare last --from 4 --models claude-sonnet-5,claude-haiku-4-5-20251001 --verify 'npx tsc --noEmit auth.ts'
+info compare run=run_c00c6c89f4b6 from=4 models=claude-sonnet-5,claude-haiku-4-5-20251001
+info forked from=run_c00c6c89f4b6 at=4 run=run_387f7c40dc0b model=claude-sonnet-5 worktree=/tmp/orca-4-PKhKMM
+Updated `isValid` in auth.ts to require tokens of at least 8 characters.
+info fork.done run=run_387f7c40dc0b replayed=1 live=5 divergences=0 events=18 exit=0
+info forked from=run_c00c6c89f4b6 at=4 run=run_8c7fcc8a255b model=claude-haiku-4-5-20251001 worktree=/tmp/orca-4-NiHZZO
+Done. Updated the `isValid` function to require tokens to be at least 8 characters long. Tokens shorter than 8 characters will now be rejected.
+info fork.done run=run_8c7fcc8a255b replayed=1 live=8 divergences=0 events=24 exit=0
+
+MODEL                      VERDICT  TOKENS   COST       WALL   RUN
+claude-sonnet-5            pass     124/429  $0.006807  12.2s  run_387f7c40dc0b
+claude-haiku-4-5-20251001  pass     184/650  $0.003434  14.3s  run_8c7fcc8a255b

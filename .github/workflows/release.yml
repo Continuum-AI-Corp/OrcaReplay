@@ -1,0 +1,70 @@
+# Publish every workspace to npm, in dependency order, from a tag.
+#
+# Nothing here runs on a push to a branch: it fires on a `v*` tag, or by hand. Publishing is
+# irreversible — npm allows an unpublish only briefly and never a re-publish of the same version —
+# so the whole test suite gates it, and a dry run is available that proves the tarballs are right
+# without sending anything.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Pack and verify without publishing'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write # npm provenance: proves the tarball came from this workflow, from this commit
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+      - run: npm run fmt:check
+      - run: npx tsc --build
+      # The same gate a contributor runs. A release is the worst possible time to skip it.
+      - run: npx vitest run
+      - run: node scripts/conformance.mjs
+      - run: node scripts/check-neutrality.mjs
+
+      # The tag must match what the packages actually say, or `npm publish` puts a version on the
+      # registry that no git tag points at.
+      - name: Tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./packages/cli/package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag $GITHUB_REF_NAME does not match packages/cli version $pkg" >&2
+            exit 1
+          fi
+
+      - name: Publish in dependency order
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DRY_RUN: ${{ github.event.inputs.dry-run }}
+        run: |
+          set -euo pipefail
+          # Computed, never hardcoded: internal deps are pinned to an exact version, so publishing
+          # the CLI before the core it names would fail on a version the registry does not have.
+          node scripts/publish-order.mjs | while read -r dir; do
+            if [ "${DRY_RUN:-false}" = "true" ]; then
+              echo "── dry run: $dir"
+              ( cd "$dir" && npm publish --dry-run --provenance --access public )
+            else
+              echo "── publishing: $dir"
+              ( cd "$dir" && npm publish --provenance --access public )
+            fi
+          done
