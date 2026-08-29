@@ -9,7 +9,17 @@ npm install
 npm run check     # format check + typecheck + tests
 ```
 
-`npm run check` is exactly what CI runs. If it is green locally it will be green there.
+`npm run check` is the fast loop — format check, typecheck, tests — and it is the first CI job, but
+it is not all of CI. Three more jobs run commands `check` does not:
+
+```console
+node scripts/conformance.mjs      # every example trace validates against the normative schema
+node scripts/check-neutrality.mjs # no vendor plugin reaches past @orcareplay/plugin-api
+pip install ./python[dev] && python -m pytest python/ -q   # the Python SDK
+```
+
+Run those four and CI has nothing left to tell you, with one caveat it cannot: the `check` job runs
+on node 20 as well as 22, so a 22-only API passes locally and fails there.
 
 Working on one package:
 
@@ -60,6 +70,10 @@ The highest-value contributions, in order:
 
 We use the [Developer Certificate of Origin](https://developercertificate.org/). Add a `Signed-off-by`
 line with `git commit -s`. There is no CLA and no copyright assignment.
+
+**This one is honour-system.** No CI job checks for the trailer and no bot will ask you for it, so a
+PR without one is not blocked — we would rather tell you that than have you discover it from a
+green tick. If we ever start enforcing it, it will be a check you can see, not a surprise on merge.
 
 ## Code of conduct
 
