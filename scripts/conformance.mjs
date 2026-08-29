@@ -2,19 +2,29 @@
 /**
  * Trace format conformance runner.
  *
- * Validates every trace under examples/traces/ against the normative JSON Schema. Any
- * implementation in any language can run the equivalent check; that is what makes v0 a format
- * other people can target rather than whatever our writer happens to emit today.
+ * Validates every trace under examples/traces/ against the normative JSON Schema, and validates a
+ * trace produced by our own writer alongside them. Both halves are load-bearing and they prove
+ * different things: a hand-written example validating shows the schema is targetable by an
+ * implementation that is not ours, and the writer's output validating shows *ours* still conforms.
+ *
+ * Checking only the examples — which is what this did — let the shipped fixture drift into
+ * containing events the writer cannot produce while the job reported a clean bill of health for
+ * "the format". So the run also reports which declared event types no shipped trace exercises,
+ * because a type nothing emits and nothing tests is a claim, not a feature.
  */
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { validateEvent, validateManifest } from '../packages/schema/dist/index.js';
+import { EVENT_TYPES, validateEvent, validateManifest } from '../packages/schema/dist/index.js';
+import { TraceWriter } from '../packages/core/dist/index.js';
 
 const root = new URL('..', import.meta.url).pathname;
 const examplesDir = join(root, 'examples', 'traces');
 
 let checked = 0;
 let failures = 0;
+/** Every event type any validated trace actually contained. */
+const seen = new Set();
 
 function fail(where, errors) {
   failures += 1;
@@ -22,7 +32,7 @@ function fail(where, errors) {
   for (const e of errors) console.error(`     ${e}`);
 }
 
-async function checkTrace(dir) {
+async function checkTrace(dir, label) {
   const manifest = JSON.parse(await readFile(join(dir, 'manifest.json'), 'utf8'));
   const mr = validateManifest(manifest);
   if (!mr.valid) fail(`${dir}/manifest.json`, mr.errors);
@@ -46,9 +56,10 @@ async function checkTrace(dir) {
       fail(`${dir}/events.jsonl:${i + 1}`, [`seq ${event.seq}, expected dense ${expectedSeq}`]);
     }
     expectedSeq = event.seq + 1;
+    seen.add(event.type);
     checked += 1;
   }
-  console.log(`  ${dir.replace(root, '')}: ${lines.length} events`);
+  console.log(`  ${label ?? dir.replace(root, '')}: ${lines.length} events`);
 }
 
 let entries = [];
@@ -63,6 +74,45 @@ for (const name of entries) {
   const dir = join(examplesDir, name);
   if (!(await stat(dir)).isDirectory()) continue;
   await checkTrace(dir);
+}
+
+// A trace this repository's writer produced, checked by the same rules as the examples. Without
+// it the job could stay green while the writer emitted something the schema forbids.
+const scratch = await mkdtemp(join(tmpdir(), 'orca-conformance-'));
+try {
+  const writer = await TraceWriter.create(scratch, {
+    adapter: { id: 'generic-openai', version: '0.0.0' },
+    argv: ['generic-openai'],
+    cwd: scratch,
+    orcaVersion: '0.0.0',
+  });
+  await writer.append({ type: 'run.start', actor: 'orca', turn: 0, attrs: { adapter: 'x' } });
+  await writer.append({
+    type: 'model.request',
+    actor: 'agent',
+    turn: 1,
+    attrs: { model: 'gpt-5.2', dialect: 'openai' },
+    payload: JSON.stringify({ model: 'gpt-5.2', messages: [] }),
+  });
+  await writer.append({
+    type: 'model.response',
+    actor: 'model',
+    turn: 1,
+    attrs: { model: 'gpt-5.2', status: 200, input_tokens: 1, output_tokens: 1 },
+    payload: JSON.stringify({ id: 'x', content: [] }),
+  });
+  await writer.append({ type: 'run.end', actor: 'orca', turn: 1, attrs: { exit_code: 0 } });
+  await writer.close(0);
+  await checkTrace(writer.runDir, 'this writer, freshly recorded');
+} finally {
+  await rm(scratch, { recursive: true, force: true });
+}
+
+// Not a failure: the format deliberately declares more than v0 emits, and a reader is better
+// served by knowing which is which than by the schema and the recorder quietly disagreeing.
+const unexercised = EVENT_TYPES.filter((t) => !seen.has(t));
+if (unexercised.length > 0) {
+  console.log(`\ndeclared but not exercised by any trace here: ${unexercised.join(', ')}`);
 }
 
 console.log(`\n${checked} events checked, ${failures} failure(s)`);

@@ -6,7 +6,17 @@ Real-shaped traces, checked into the repo on purpose. They do four jobs at once:
 2. **Contributor fixtures.** Everything here works against these on day one, no recording needed.
 3. **Conformance input.** `scripts/conformance.mjs` validates each against the normative schema in
    CI — that is what makes v0 a format others can target rather than whatever our writer emits.
+   The same job also validates a trace the writer produces on the spot, so "the format" and "our
+   implementation of it" are checked separately rather than one standing in for the other.
 4. **Evaluation.** Anyone can inspect the project without installing it.
+
+**These are hand-written**, and that is the point of job 1 and job 3 — a fixture our own writer
+produced could not demonstrate that someone else's implementation is possible. It does mean they
+are ahead of the recorder in places: `run_9f2c14a03b71` contains `error` and `checkpoint` events,
+and a populated `manifest.git`, and v0 emits none of the first two (checkpoints are *derived* at
+read time per spec §3, never recorded). Treat the examples as what the format allows, not as a
+transcript of what `orca record` produces today. The conformance run prints which declared event
+types no shipped trace exercises, so the gap stays visible instead of drifting.
 
 ## `run_9f2c14a03b71`
 
