@@ -132,6 +132,13 @@ export async function resolveUpstream(
   const anthropic = args.str('upstream-anthropic') ?? env.ORCA_UPSTREAM_ANTHROPIC ?? gateway;
   const openai = args.str('upstream-openai') ?? env.ORCA_UPSTREAM_OPENAI ?? gateway;
   if (anthropic) out.anthropic = anthropic;
-  if (openai) out.openai = openai;
+  if (openai) {
+    out.openai = openai;
+    // The proxy resolves an origin by dialect id, and chat completions and the Responses API are
+    // two dialects sharing one provider — so a map holding only `openai` sends every Codex and
+    // Agents-SDK call straight past a gateway the user configured, on their own key, silently.
+    // `--upstream-openai` names a provider, not a wire format.
+    out['openai-responses'] = openai;
+  }
   return Object.keys(out).length > 0 ? out : undefined;
 }

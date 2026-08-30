@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { delimiter, resolve } from 'node:path';
 import { TraceWriter, ensureRunsDir } from '@orcareplay/core';
 import { FsCapture } from '@orcareplay/fs-capture';
-import { createProxy, RunCa, type RecordedExchange } from '@orcareplay/proxy';
+import { createProxy, RunCa, type NetExchange, type RecordedExchange } from '@orcareplay/proxy';
 import { defaultAdapters } from '@orcareplay/adapters';
 import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver } from '../exchange-events.js';
@@ -13,7 +13,7 @@ import { SerialQueue } from '../serial.js';
 import { appendSnapshot } from '../fs-events.js';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
-import { setupTlsCapture, trustRunCa } from '../tls-capture.js';
+import { persistNetExchange, setupTlsCapture, trustRunCa } from '../tls-capture.js';
 import { upstreamPlan } from '../upstream.js';
 import { ORCA_VERSION } from '../version.js';
 
@@ -159,12 +159,22 @@ async function runRecording(
   if (tls.ca) minted.push(tls.ca);
   const ca = tls.ca;
 
+  /** Model exchanges the proxy actually captured — the number the warning below turns on. */
+  let modelExchanges = 0;
+
   const proxy = await createProxy({
     mode: 'record',
     upstream: plan.upstream,
     upstreamHeaders: plan.headers,
     onExchange: (exchange: RecordedExchange) => {
+      modelExchanges += 1;
       writes.push(() => persist(exchange));
+    },
+    // A POST on a path no dialect claims is forwarded rather than refused, and lands in the trace
+    // as the same `net.*` pair unrecognised TLS traffic does. Orca holds the bytes but not the
+    // meaning, so it is evidence, not a replayable turn.
+    onNetExchange: (exchange: NetExchange) => {
+      writes.push(() => persistNetExchange(writer, turn, exchange));
     },
     ...tls.proxyOptions,
   });
@@ -341,6 +351,31 @@ async function runRecording(
     exit: exitCode,
     dir: writer.runDir,
   });
+
+  /**
+   * The quietest way orca can fail, and the most damaging.
+   *
+   * Capture works by pointing a base-URL variable at the proxy, so a harness that reads none of
+   * them is never redirected — and there is nothing to notice. The agent answers, the exit code is
+   * zero, and the trace is empty. `@ai-sdk/openai` is the live example: it takes its base URL only
+   * as a constructor argument, so an agent built on the Vercel AI SDK produces exactly this.
+   *
+   * `contract.ts` already names this shape as what the adapter checks exist to prevent. They guard
+   * the adapters; this guards the run, which is where a user actually meets it.
+   */
+  if (modelExchanges === 0) {
+    out.warn('capture.empty', {
+      exchanges: 0,
+      cause: 'the agent never called the proxy — it may not read a base-URL variable',
+      set:
+        Object.keys(launch.env)
+          .filter((name) => /(?:_BASE_URL|_API_BASE)$/.test(name))
+          .sort()
+          .join(',') || 'none',
+      next: 'orca doctor',
+    });
+  }
+
   out.plain('');
   out.plain(`  orca replay ${writer.runId}            # reproduce it exactly`);
   out.plain(`  orca replay ${writer.runId} --ui       # open the timeline`);

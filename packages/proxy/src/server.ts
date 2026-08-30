@@ -95,6 +95,24 @@ export interface ProxyOptions {
   /** Extra headers to attach to live upstream calls (an API key the agent never saw). */
   upstreamHeaders?: Record<string, string>;
   /**
+   * Where to send a POST whose path no dialect claims.
+   *
+   * Orca pointed the harness's base URL at itself, so every call the harness makes arrives here —
+   * including the ones orca has no translator for. Refusing those does not mean "not captured", it
+   * means the agent gets an error for a call that would have worked, from a tool whose whole job is
+   * not to change the run it is watching. Left unset, an origin is inferred; see `passthroughOrigin`.
+   */
+  passthroughUpstream?: string;
+  /**
+   * An exchange orca forwarded but could not interpret.
+   *
+   * Deliberately the same type the TLS interceptor reports unrecognised traffic with, so both
+   * arrive in the trace as `net.request` / `net.response` and a reader does not have to learn a
+   * second shape for the same fact. TLS traffic keeps reporting through `tls.onNetExchange`; this
+   * is the plain-HTTP channel, so a caller wiring both never sees one exchange twice.
+   */
+  onNetExchange?: (e: NetExchange) => void;
+  /**
    * Terminate TLS for a named set of hosts, for a harness that ignores base-URL variables.
    *
    * Absent by default, and absence is the whole safety story: with no `tls` block the server
@@ -117,6 +135,8 @@ export interface ProxyStats {
   intercepted: number;
   /** Connections passed through as opaque bytes because their host was not on the list. */
   tunnelled: number;
+  /** Requests forwarded on a path no dialect claims — captured, but not replayable. */
+  passedThrough: number;
 }
 
 /** What a run needs to tell the operator, and to tell the child process, about interception. */
@@ -232,6 +252,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     unmatched: 0,
     intercepted: 0,
     tunnelled: 0,
+    passedThrough: 0,
   };
 
   // In hybrid mode only the exchanges below the fork point are replayable; everything at or above
@@ -437,6 +458,99 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     }
   }
 
+  /**
+   * Where a request orca could not read should have gone.
+   *
+   * Explicit first, then the gateway: someone who pointed this run at one origin pointed *all* of
+   * it there, and splitting a run across two origins because orca could not read one call is not a
+   * choice they made. Only then the guess — and the guess is narrow, because it is not choosing a
+   * destination so much as restoring one. Orca took this request away from a provider by rewriting
+   * a base URL; the client's own headers say which provider that was, and its own credential is
+   * already on the request addressed to them.
+   */
+  function passthroughOrigin(headers: Record<string, string>): string {
+    if (options.passthroughUpstream !== undefined) return options.passthroughUpstream;
+    const configured = [...new Set(Object.values(options.upstream ?? {}))];
+    if (configured.length === 1) return configured[0]!;
+    const names = new Set(Object.keys(headers).map((h) => h.toLowerCase()));
+    const anthropic = names.has('anthropic-version') || names.has('anthropic-beta');
+    return anthropic ? 'https://api.anthropic.com' : 'https://api.openai.com';
+  }
+
+  /**
+   * Forward a POST no dialect claims, and record that it happened.
+   *
+   * It is recorded as `NetExchange` rather than `RecordedExchange` on purpose: orca holds the bytes
+   * but not the meaning, so it cannot match this request on replay or rewrite its model on a fork.
+   * Filing it with the model exchanges would inflate `reused=n/m` with turns replay will never
+   * serve, and an operator would be reading a fidelity number that is not one.
+   */
+  async function passThrough(
+    path: string,
+    rawBody: string,
+    headers: Record<string, string>,
+    recordableHeaders: Record<string, string>,
+    res: ServerResponse,
+    startedAt: number,
+  ): Promise<void> {
+    if (options.mode !== 'record') {
+      // Replay has the network blocked and no recording to serve from — orca never understood this
+      // call well enough to match it. Say so: a bare 502 mid-replay reads as orca being broken,
+      // when the honest fact is narrower and more useful than that.
+      stats.unmatched += 1;
+      const reason =
+        `${path} was captured as opaque network traffic, not as a model exchange, so it ` +
+        'cannot be replayed. Recorded with --tls-intercept, or on a path no dialect claims.';
+      options.onUnmatched?.({ seq: -1, index: -1, reason });
+      json(res, 502, { error: { message: `orca replay cannot reproduce ${path}: ${reason}` } });
+      return;
+    }
+
+    stats.passedThrough += 1;
+    const origin = passthroughOrigin(headers);
+    const upstreamRes = await doFetch(`${origin}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body: rawBody,
+    });
+
+    const responseHeaders: Record<string, string> = {};
+    upstreamRes.headers.forEach((value, key) => {
+      responseHeaders[key.toLowerCase()] = value;
+    });
+    res.writeHead(upstreamRes.status, {
+      'content-type': responseHeaders['content-type'] ?? 'application/json',
+    });
+    const body = await pipeThrough(upstreamRes, res);
+
+    let host = origin;
+    let port = 443;
+    try {
+      const url = new URL(origin);
+      host = url.hostname;
+      port = url.port !== '' ? Number(url.port) : url.protocol === 'http:' ? 80 : 443;
+    } catch {
+      // An origin that does not parse is still worth recording under the string we were given.
+    }
+    options.onNetExchange?.({
+      host,
+      port,
+      method: 'POST',
+      path,
+      // `recordableHeaders`, never `headers`: the auth material was forwarded a moment ago and
+      // must not now be written down. §7 says never write it, which is not the same as never relay it.
+      requestHeaders: recordableHeaders,
+      requestBody: rawBody,
+      requestTruncated: false,
+      status: upstreamRes.status,
+      responseHeaders,
+      responseBody: body,
+      responseTruncated: false,
+      responseBytes: Buffer.byteLength(body),
+      durationMs: Date.now() - startedAt,
+    });
+  }
+
   /** Did the agent ask for a stream? Both dialects spell it the same way. */
   function requestedStream(rawBody: string): boolean {
     try {
@@ -530,7 +644,9 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     }
 
     const dialect = selectDialect(dialects, path);
-    if (!dialect || req.method !== 'POST') {
+    // A GET is never a model call, and blind-forwarding every method would make orca an open relay
+    // for whatever else on the machine found this port. Passthrough is for the POST it redirected.
+    if (!dialect && req.method !== 'POST') {
       json(res, 404, {
         error: { message: `orca proxy does not handle ${req.method ?? 'GET'} ${path}` },
       });
@@ -546,6 +662,11 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       if (typeof v !== 'string') continue;
       headers[k] = v;
       if (!SECRET_REQUEST_HEADERS.has(key)) recordableHeaders[k] = v;
+    }
+
+    if (!dialect) {
+      await passThrough(path, rawBody, headers, recordableHeaders, res, startedAt);
+      return;
     }
 
     if (options.mode === 'record') {
