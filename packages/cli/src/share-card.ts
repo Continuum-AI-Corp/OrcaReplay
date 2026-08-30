@@ -84,6 +84,25 @@ ${text(WIDTH - 28, height - 16, CREDIT_REPO, { size: 10, mono: true, fill: '#6B7
 </svg>`;
 }
 
+/**
+ * The path to write a card to, or a refusal.
+ *
+ * Everything here renders SVG and nothing rasterises, so a name ending `.png` used to get SVG
+ * bytes and a success line — and PNG is precisely what someone asks for, since it is the format
+ * that posts where SVG does not. Failing loudly costs one retry; succeeding falsely costs a file
+ * that no viewer opens and no error explaining why.
+ */
+export function svgTarget(name: string, flag: string): string {
+  if (/\.svg$/i.test(name)) return name;
+  const ext = /\.([A-Za-z0-9]+)$/.exec(name)?.[1];
+  throw new Error(
+    ext === undefined
+      ? `${flag} needs a filename ending in .svg — got ${JSON.stringify(name)}`
+      : `${flag} writes SVG, so it cannot write ${JSON.stringify(name)}. ` +
+          `Name it .svg instead; orca does not rasterise to .${ext} yet.`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // the chain card
 // ---------------------------------------------------------------------------

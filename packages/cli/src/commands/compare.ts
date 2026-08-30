@@ -4,7 +4,7 @@ import { parseArgs, type ParsedArgs } from '../args.js';
 import type { Output } from '../out.js';
 import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { renderCompareCard } from '../share-card.js';
+import { renderCompareCard, svgTarget } from '../share-card.js';
 import { replayCommand } from './replay.js';
 import { readConfig } from '../config.js';
 
@@ -168,7 +168,7 @@ export async function compareCommand(
   );
 
   if (args.has('share')) {
-    const target = resolve(cwd, args.str('share') ?? 'compare.svg');
+    const target = resolve(cwd, svgTarget(args.str('share') ?? 'compare.svg', '--share'));
     const svg = renderCompareCard(rows, {
       runId,
       forkPoint: from,

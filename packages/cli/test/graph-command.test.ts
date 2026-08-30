@@ -208,3 +208,47 @@ describe('orca export --card', () => {
     await rm(dir, { recursive: true, force: true });
   });
 });
+
+/**
+ * Asking for `--card chain.png` used to write SVG bytes into a file named .png and report
+ * success. PNG is the one format that posts to X, so that is exactly the request someone makes,
+ * and what they got back was a file no image viewer opens.
+ */
+describe('card and share filenames', () => {
+  async function exportTo(name: string, dir: string) {
+    const lines: string[] = [];
+    const out = new Output({ write: (l) => void lines.push(l), isTTY: false });
+    const { exportCommand } = await import('../src/commands/inspect.js');
+    await exportCommand(parseArgs(['export', 'last', '--card', name]), out, dir);
+    return stripAnsi(lines.join('\n'));
+  }
+
+  it('refuses a raster filename rather than writing SVG bytes into it', async () => {
+    const { dir } = await seed();
+    await expect(exportTo('chain.png', dir)).rejects.toThrow(/png/i);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('says what it can write, so the refusal is actionable', async () => {
+    const { dir } = await seed();
+    await expect(exportTo('chain.gif', dir)).rejects.toThrow(/\.svg/);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('still accepts an .svg name, in any case', async () => {
+    const { dir } = await seed();
+    await exportTo('Chain.SVG', dir);
+    expect((await readFile(join(dir, 'Chain.SVG'), 'utf8')).startsWith('<svg')).toBe(true);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('defaults to an .svg name when the flag carries no value', async () => {
+    const { dir } = await seed();
+    const lines: string[] = [];
+    const out = new Output({ write: (l) => void lines.push(l), isTTY: false });
+    const { exportCommand } = await import('../src/commands/inspect.js');
+    await exportCommand(parseArgs(['export', 'last', '--card']), out, dir);
+    expect((await readFile(join(dir, 'chain.svg'), 'utf8')).startsWith('<svg')).toBe(true);
+    await rm(dir, { recursive: true, force: true });
+  });
+});

@@ -21,7 +21,7 @@ import { priceFor } from '@orcareplay/providers';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
 import { formatCost } from './compare.js';
-import { renderChainCard } from '../share-card.js';
+import { renderChainCard, svgTarget } from '../share-card.js';
 
 /** `orca list` — what runs are here, newest first. */
 export async function listCommand(
@@ -211,7 +211,7 @@ export async function exportCommand(
   // rather than the whole trace as a page. It leaks far less too — a card carries the events on
   // one chain and none of the payloads — so it does not print the disclosure the page needs.
   if (args.has('card')) {
-    const cardPath = resolve(cwd, args.str('card') ?? 'chain.svg');
+    const cardPath = resolve(cwd, svgTarget(args.str('card') ?? 'chain.svg', '--card'));
     const events = await reader.events();
     const to = args.num('to') ?? pickChainTarget(events);
     if (to === undefined) {
