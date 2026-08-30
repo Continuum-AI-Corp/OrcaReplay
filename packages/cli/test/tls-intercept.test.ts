@@ -227,7 +227,7 @@ describe('orca record --tls-intercept', () => {
 
   it('captures an allowlisted host and tunnels everything else', async () => {
     process.env.ORCA_TEST_TARGETS = JSON.stringify([
-      { host: '127.0.0.1', port: model.port, path: '/v1/responses', method: 'POST', body: '{}' },
+      { host: '127.0.0.1', port: model.port, path: '/v1/embeddings', method: 'POST', body: '{}' },
       { host: '127.0.0.1', port: bank.port, path: '/accounts' },
     ]);
 
@@ -257,7 +257,7 @@ describe('orca record --tls-intercept', () => {
 
     const intercepted = net.filter((e) => e.attrs?.intercepted === true);
     expect(intercepted.map((e) => e.type)).toEqual(['net.request', 'net.response']);
-    expect(intercepted[0]!.attrs?.path).toBe('/v1/responses');
+    expect(intercepted[0]!.attrs?.path).toBe('/v1/embeddings');
     expect(JSON.stringify(intercepted[1]?.payload)).toContain('MODEL-BODY-MARKER');
 
     const tunnelled = net.filter((e) => e.attrs?.intercepted === false);
@@ -282,7 +282,7 @@ describe('orca record --tls-intercept', () => {
 
   it('never writes the CA private key into the trace', async () => {
     process.env.ORCA_TEST_TARGETS = JSON.stringify([
-      { host: '127.0.0.1', port: model.port, path: '/v1/responses', method: 'POST', body: '{}' },
+      { host: '127.0.0.1', port: model.port, path: '/v1/embeddings', method: 'POST', body: '{}' },
     ]);
     const result = await record(['--tls-intercept', '--tls-hosts', `127.0.0.1:${model.port}`]);
 

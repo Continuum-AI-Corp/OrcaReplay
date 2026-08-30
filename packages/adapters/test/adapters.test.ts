@@ -340,8 +340,18 @@ describe('genericOpenAiAdapter', () => {
 });
 
 describe('AdapterRegistry', () => {
-  it('registers all four adapters by default', () => {
-    expect(defaultAdapters().ids()).toEqual(['claude-code', 'codex', 'opencode', 'generic-openai']);
+  it('registers every adapter by default, with the escape hatches last', () => {
+    // Order is the detection order, and `node` and `generic-openai` both decline to detect — so
+    // they sit at the end where they cannot shadow an adapter that can recognise its own harness.
+    expect(defaultAdapters().ids()).toEqual([
+      'claude-code',
+      'codex',
+      'opencode',
+      'grok',
+      'openclaw',
+      'node',
+      'generic-openai',
+    ]);
   });
 
   it('returns a registered adapter by id', () => {

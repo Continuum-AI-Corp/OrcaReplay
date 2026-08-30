@@ -256,6 +256,10 @@ describe('TLS interception', () => {
     expect(netExchanges).toHaveLength(0);
   });
 
+  // `/v1/embeddings` throughout the opaque-capture tests, and the choice is load-bearing: these
+  // assert what happens to traffic *no dialect recognises*, so the path has to be one orca has no
+  // translator for. They were written against `/v1/responses`, which stopped being such a path the
+  // day the Responses dialect landed — and then failed, correctly, by recording a model exchange.
   it('decrypts an allowlisted host and captures both halves of the exchange', async () => {
     const handle = await startProxy([`127.0.0.1:${model.port}`]);
 
@@ -265,7 +269,7 @@ describe('TLS interception', () => {
       port: model.port,
       trust: [runCa.certPem],
       method: 'POST',
-      path: '/v1/responses',
+      path: '/v1/embeddings',
       body: JSON.stringify({ prompt: 'hello' }),
       headers: { 'content-type': 'application/json' },
     });
@@ -281,10 +285,10 @@ describe('TLS interception', () => {
     expect(captured.host).toBe('127.0.0.1');
     expect(captured.port).toBe(model.port);
     expect(captured.method).toBe('POST');
-    expect(captured.path).toBe('/v1/responses');
+    expect(captured.path).toBe('/v1/embeddings');
     expect(captured.requestBody).toBe(JSON.stringify({ prompt: 'hello' }));
     expect(captured.status).toBe(200);
-    expect(JSON.parse(captured.responseBody).path).toBe('/v1/responses');
+    expect(JSON.parse(captured.responseBody).path).toBe('/v1/embeddings');
     expect(tunnels).toHaveLength(0);
   });
 
@@ -365,7 +369,7 @@ describe('TLS interception', () => {
       port: model.port,
       trust: [runCa.certPem],
       method: 'POST',
-      path: '/v1/responses',
+      path: '/v1/embeddings',
       body: '{}',
       headers: { authorization: 'Bearer sk-live-abcdefghijklmnop', 'x-api-key': 'secret-key' },
     });
@@ -394,7 +398,7 @@ describe('TLS interception', () => {
       port: model.port,
       trust: [runCa.certPem],
       method: 'POST',
-      path: '/v1/responses',
+      path: '/v1/embeddings',
       body: '{"model":"gpt-5.2"}',
     });
 

@@ -1,0 +1,18 @@
+{
+  "adapter": "grok",
+  "harness_versions": null,
+  "verified_at": "2026-08-30",
+  "command": "grok",
+  "env_vars": [
+    "BUN_OPTIONS",
+    "GROK_BASE_URL",
+    "NODE_OPTIONS",
+    "ORCA_INSTRUMENT_HOSTS",
+    "ORCA_PROXY_URL"
+  ],
+  "base_urls": {
+    "GROK_BASE_URL": "/v1"
+  },
+  "optional_env_vars": ["GROK_API_KEY"],
+  "note": "grok-cli documents GROK_BASE_URL (default https://api.x.ai/v1), so the /v1 is part of the value. The fetch hook goes in as well because grok-cli runs on Bun with sub-agents on by default, and api.x.ai is not one of the hook default hosts — hence ORCA_INSTRUMENT_HOSTS. BUN_OPTIONS carries --preload because Bun ignores --require inside NODE_OPTIONS. Its Telegram remote control is the same process reading the same variable. harness_versions is null: the adapter is written from the published README, not pinned to a release."
+}

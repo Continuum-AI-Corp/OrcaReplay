@@ -230,9 +230,21 @@ function redirectsModelTraffic(primary: Attempt, base: RecordContext): CheckOutc
   const env = primary.launch.env;
   if (!isStringRecord(env)) return notVerified('prepare-shape');
 
-  const known = MODEL_BASE_URL_VARS.filter((name) => readEnv(env, name) !== undefined);
-  if (known.length === 0) {
-    return `prepare() set none of ${MODEL_BASE_URL_VARS.join(', ')}, so nothing points the harness at the proxy and the run records no model traffic at all`;
+  // Any base-URL-shaped variable counts, not only the three orca happens to know: a harness with
+  // its own spelling — grok-cli reads `GROK_BASE_URL` — is redirected just as effectively. So is
+  // an adapter that installs the fetch hook instead, for a harness that reads no variable at all.
+  // Narrowing this to three names would have failed both of those for setting the wrong thing,
+  // when what they set is the only thing that works.
+  //
+  // This never detected adapter *rot* on its own — an adapter still setting a variable the harness
+  // renamed sets a base-URL variable too. The harness fixtures are what catch that, by recording
+  // the exact names. What this catches is an adapter that redirects nothing whatsoever.
+  const redirected = Object.entries(env).filter(
+    ([name, value]) => BASE_URL_LIKE.test(name) && value !== '',
+  );
+  const hooked = readEnv(env, 'ORCA_PROXY_URL') !== undefined;
+  if (redirected.length === 0 && !hooked) {
+    return `prepare() set no base-url variable (none of ${MODEL_BASE_URL_VARS.join(', ')}, nor anything else ending _BASE_URL or _API_BASE) and installed no fetch hook, so nothing points the harness at the proxy and the run records no model traffic at all`;
   }
   const host = hostOf(base.proxyUrl) ?? base.proxyUrl;
   const wrong = Object.entries(env)

@@ -12,6 +12,7 @@
     "dist"
   ],
   "dependencies": {
+    "@orcareplay/node-instrument": "0.1.0",
     "@orcareplay/plugin-api": "0.1.0"
   }
 }

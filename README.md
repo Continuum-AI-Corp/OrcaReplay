@@ -22,7 +22,7 @@ default, and what makes `orca compare` a single command instead of four provider
 [![License](https://img.shields.io/badge/code-Apache--2.0-blue)](LICENSE)
 [![Spec](https://img.shields.io/badge/trace%20spec-CC%20BY%204.0-blue)](spec/orca-trace-v0.md)
 [![Node](https://img.shields.io/badge/node-20%2B-brightgreen)](#install)
-[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20opencode%20%C2%B7%20any-black)](#install)
+[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Agents%20SDK%20%C2%B7%20AI%20SDK%20%C2%B7%20any-black)](#which-agents)
 [![Good first issues](https://img.shields.io/badge/good%20first%20issues-12-orange)](docs/good-first-issues.md)
 
 ![Recording a Claude Code run, replaying it offline, then forking it onto two models](docs/demo-cli.gif)
@@ -60,6 +60,15 @@ OrcaReplay answers that by giving you the run back.
 | Lets you change the model and re-run from step 4 | ❌ | ✅ |
 | Needs you to modify your agent | usually an SDK wrapper | ❌ two env vars |
 | Works after you close the terminal | ❌ | ✅ it is a file |
+| Sees past the model API — shell exit codes, file writes | ❌ | ✅ every turn |
+| Records an agent with no API endpoint to redirect | ❌ | ✅ opt-in `--tls-intercept` |
+
+The last two rows are the ones an SDK wrapper structurally cannot reach. Capture happens *below*
+the agent — at the process and socket boundary — so it does not matter whether the agent is
+yours, whether you can edit it, or whether it even holds an API key: a Codex CLI signed in with
+a ChatGPT subscription talks to its own backend over TLS and has no base URL to point anywhere,
+and orca can still record it. See
+[when the harness will not be redirected](#when-the-harness-will-not-be-redirected).
 
 ## How it works
 
@@ -71,27 +80,29 @@ not patch your agent** — it stands up a local proxy, sets two environment vari
 the way.
 
 Three more layers catch what the protocol cannot see: an exit code, a real duration, which stream a
-byte came out of, a file written without telling anyone.
+byte came out of, a file written without telling anyone. A fifth exists for the agents that read no
+base-URL variable at all — see [which agents](#which-agents).
 
 ```mermaid
 %%{init: {'theme':'neutral'}}%%
 flowchart LR
     A["<b>your agent</b><br/><i>unmodified</i>"]
 
-    subgraph orca["orca · four capture layers"]
+    subgraph orca["orca · five capture layers"]
         direction TB
         P["<b>proxy</b><br/>base-URL env var"]
         SH["<b>PATH shim</b><br/>exit code · timing · streams"]
         MC["<b>JSON-RPC tee</b><br/>MCP config rewrite"]
         FS["<b>shadow git index</b><br/>workspace per turn"]
+        FH["<b>fetch hook</b><br/>for a hardcoded origin"]
     end
 
-    A --> P & SH & MC & FS
+    A --> P & SH & MC & FS & FH
     P -->|"forwarded, auth intact"| U["<b>the model API</b><br/><i>or OrcaRouter · any gateway</i>"]
     orca ==> T[("<b>one trace</b><br/>.orca/runs/run_a1b2c3")]
 ```
 
-All four land in the same timeline, ordered by when they actually happened rather than when orca
+They all land in the same timeline, ordered by when they actually happened rather than when orca
 got around to reading them.
 
 ### Exact, fork and compare are one thing
@@ -266,12 +277,74 @@ recorded is built from the *incoming* request with auth stripped — so it is in
 recording by construction, not by a rule someone has to remember. It is withheld entirely if a flag
 sends that traffic somewhere other than the gateway that issued it.
 
+## Which agents
+
+Two things decide whether a harness can be recorded: whether it can be pointed at the proxy, and
+whether orca understands the wire format it speaks once it arrives.
+
+| Agent | How it is captured | State |
+|---|---|---|
+| **Claude Code** | `ANTHROPIC_BASE_URL` | works — validated against a real bug fix, [in detail](docs/validation.md) |
+| **Codex CLI** (API key) | `OPENAI_BASE_URL` → Responses API | works |
+| **Codex CLI** (ChatGPT login) | `--tls-intercept` → Responses API | works, [with a decision to make](#when-the-harness-will-not-be-redirected) |
+| **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | works |
+| **Vercel AI SDK** | fetch hook — `orca record node -- node app.mjs` | works |
+| **grok-cli** (and its Telegram bot) | `orca record grok` — `GROK_BASE_URL`, plus the hook for its sub-agents | works |
+| **OpenClaw** | `orca record openclaw` — the hook for the gateway, inherited variables for the agents it spawns | works |
+| **opencode** | `orca record opencode` | adapter shipped, both origins redirected |
+| **LangGraph / LangChain** | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | should work — it goes through the official clients, but nothing here tests it yet |
+| **Hermes** (Nous Research) | `ORCA_BASE_URL_VARS=… orca record generic-openai -- hermes …` | should work — it overrides per provider; [name the variable](#a-base-url-variable-orca-has-never-heard-of) |
+| **anything else** | `orca record generic-openai -- <cmd>` | works if it reads a base-URL variable; `orca record node -- <cmd>` if it does not |
+
+Only Claude Code has been driven end to end against the real harness, and
+[it broke four things doing it](docs/validation.md). The rest are held to the adapter contract and
+to fixtures that record the exact variables each one sets, so a harness that renames the variable
+it reads turns a check red instead of producing an empty trace.
+
+### A gateway that launches the coding agent
+
+OpenClaw does not do the coding: it runs Claude Code, Codex or opencode as child processes and
+drives them from a chat app, so one run carries two kinds of model traffic. The gateway's own calls
+are caught by the fetch hook. The coding agent's calls are caught by the ordinary variables — not
+because OpenClaw reads them, but because **a child process inherits its parent's environment**, so
+the Claude Code it spawns sees `ANTHROPIC_BASE_URL` exactly as it would if you had run it yourself.
+
+```console
+orca record openclaw
+```
+
+That inheritance is a property of the operating system rather than of orca, which is the kind of
+thing that stays obviously true right up until some layer in between sanitises the environment. So
+it has a test: a gateway fixture that makes no model call of its own, spawns an agent that does, and
+is recorded and replayed offline through the grandchild's traffic.
+
+### A base-URL variable orca has never heard of
+
+Enumerating them is hopeless. Hermes overrides per provider, and its own `.env.example` carries
+`NOVITA_BASE_URL`, `GLM_BASE_URL`, `KIMI_BASE_URL`, `MINIMAX_BASE_URL`, `HF_BASE_URL`,
+`NEBIUS_BASE_URL` and a dozen more. A list baked into orca would be stale the week after it was
+written, so name the variable instead:
+
+```console
+ORCA_BASE_URL_VARS='OPENROUTER_BASE_URL' orca record generic-openai -- hermes
+ORCA_BASE_URL_VARS='GLM_BASE_URL,KIMI_BASE_URL' orca record generic-openai -- my-agent
+ORCA_BASE_URL_VARS='SOMETHING_BASE_URL=/' orca record node -- node agent.mjs
+```
+
+Each name is pointed at the proxy with `/v1` appended, which is what an OpenAI-compatible override
+wants; `=<path>` overrides that, and `=/` gives the bare origin.
+
+If you record an agent this way and it works, an adapter is about twenty lines —
+[docs/plugins.md](docs/plugins.md). If it does not, the trace is the most useful thing you can send:
+`orca export last -o run.html`.
+
 ## When the harness will not be redirected
 
-Base-URL injection captures every harness that reads a base-URL variable, which is most of them. A
-Codex CLI signed in with a ChatGPT subscription reads none: it talks to its own backend over TLS,
-and orca sees nothing. `--tls-intercept` is the answer to that, and it is deliberately a separate
-decision you have to make, because it mints a certificate authority.
+Base-URL injection captures every harness that reads a base-URL variable, and the fetch hook covers
+the Node ones that do not. A Codex CLI signed in with a ChatGPT subscription is neither: it talks to
+its own backend over TLS, so there is no origin to rewrite and no `fetch` of ours to reach.
+`--tls-intercept` is the answer to that, and it is deliberately a separate decision you have to
+make, because it mints a certificate authority.
 
 ```console
 orca record codex --tls-intercept
@@ -284,17 +357,70 @@ offer to install it anywhere. Hosts outside the allowlist are tunnelled unread a
 address and a byte count, with no path and no body, because orca never held the plaintext. Asking
 to intercept everything is refused rather than honoured.
 
+What comes back through it is not a log line. An intercepted request is parsed by the same wire
+dialects as any other, so it lands in the trace as an ordinary exchange — replayable offline and
+forkable to a different model, on a run that never had an API key of yours in it.
+
 It works on `orca replay --model`, `orca fork` and `orca compare` too, which launch a live agent for
 the same reason.
 
+## For an agent, a script, or CI
+
+A trace is a file, which is the one thing an observability dashboard cannot be — so the most useful
+question about a failed run is one an *agent* can ask: *replay my last run and tell me what
+diverged.* Every command answers as data, and orca serves itself over MCP.
+
+```console
+$ orca replay last --json
+{"runId":"run_a278eea7b535","mode":"exact","traceRunId":"run_687e3f84b208","matchedExact":2,"divergences":0,"unmatched":0,"liveCalls":0,"exitCode":0}
+
+$ orca show last --json | jq '.events[] | select(.kind == "TOOL")'
+$ orca checkpoints last --json | jq '.[-1].seq'
+```
+
+One JSON document on stdout, diagnostics on stderr — including the recorded agent's own output, so
+the document stays parseable while a run is talking. Failures answer in JSON too, with a non-zero
+exit. `--json` covers `list`, `show`, `events`, `checkpoints`, `record`, `replay`, `compare` and
+`doctor`.
+
+**As tools.** `orca mcp` serves the trace store to an agent over stdio:
+
+```json
+{ "mcpServers": { "orca": { "command": "orca", "args": ["mcp"] } } }
+```
+
+`orca_list_runs`, `orca_show_run`, `orca_checkpoints`, `orca_replay` and `orca_compare`. Replay is
+free and offline; `orca_compare` says in its own description that it spends real tokens, because a
+model choosing a tool reads that string and nothing else.
+
+**From code**, if you would rather not shell out:
+
+```ts
+import { Orca } from 'orcareplay';
+
+const orca = new Orca({ cwd: process.cwd() });
+const { unmatched, divergences } = await orca.replay('last');
+const timeline = await orca.show('last');
+```
+
+It never writes to your stdout and never calls `process.exit` — both asserted, because a library
+that does either cannot be built on.
+
 ## Status
 
-Early. `v0` is the walking skeleton of the three commands above.
+Early. `v0` is the walking skeleton of the three commands above. Everything below is exercised by
+1,243 tests, the trace-format conformance check and a plugin-API neutrality check, on Node 20 and 22.
 
 | Capability | State |
 |---|---|
 | Trace format v0 + JSON Schema | working |
 | Anthropic / OpenAI-compatible model capture | working |
+| OpenAI Responses API capture | working — the format the OpenAI Agents SDK and the Codex CLI default to. Records, replays offline and forks; a fork stays on the wire format the agent speaks |
+| Agents that read no base-URL variable | working — `orca record node -- <cmd>` writes a preload into the run directory and redirects `globalThis.fetch` for an allowlist of provider hosts. Node and Bun both, since Bun ignores `--require` in `NODE_OPTIONS`. This is how a Vercel AI SDK agent is captured |
+| A call orca cannot read | working — forwarded rather than refused, and recorded as `net.request` / `net.response`: evidence, not a replayable turn. A recording that captured nothing warns instead of exiting clean |
+| Machine-readable output (`--json`) | working — one JSON document on stdout, diagnostics on stderr, failures as JSON |
+| MCP server (`orca mcp`) | working — five tools over stdio, so an agent can read and replay its own runs |
+| Programmatic API (`Orca`) | working — the commands render what it returns, so the terminal is a view of one source of truth |
 | Exact replay with divergence reporting | working — restores the recorded filesystem over your working tree, then puts it back; `--worktree` for a scratch copy, `--in-place` to restore nothing. Writes a run of its own recording what the replay *discovered* — divergences, unmatched requests — and points at the parent for what it merely repeated; `--no-trace` to skip |
 | Fork replay from a checkpoint | working — a fork records its own filesystem snapshots, so it is a run you can fork again |
 | Compare across models | working — `orca setup` stores a gateway (OrcaRouter by default, any URL you name otherwise), key and model list, so `orca compare` needs no flags |
@@ -304,33 +430,8 @@ Early. `v0` is the walking skeleton of the three commands above.
 | Post-hoc scrubbing (`orca scrub`) | working |
 | Shell capture (`PATH` shim) | working — exit codes, duration and the stdout/stderr split. `--no-shell` to skip |
 | Non-model network capture | working — opt in with `--tls-intercept`; mints a per-run CA the launched agent alone trusts, decrypts an allowlist of hosts, tunnels the rest unread, and deletes the key when the run ends |
-| Validated against a real agent | Claude Code, recording a real fix to a real bug: recorded, replayed offline end to end, forked from a checkpoint and exported. Four bugs found doing it, all fixed — see below |
-| Subscription-auth harnesses | Claude Code works. A Codex CLI signed in with a ChatGPT subscription talks to its own backend and reads no base-URL variable, so it needs `--tls-intercept` |
-
-### What a real agent found
-
-Everything above was built against fixtures. The first Claude Code run recorded through it broke
-four things, each of a kind no fixture can produce:
-
-- **A sixteen-character drift scored 217,568.** Distance was the common prefix and suffix of the
-  whole request body, and Claude Code carries a session id in its system prompt *and* another in a
-  tool description — so all 200 KB between them counted as changed and nothing could reach rung 2.
-  Distance is now summed per field, and per line within a field.
-- **Redaction made an exact match unreachable.** Placeholder digests are salted per run by design,
-  so a recorded request could never equal itself again. The matcher now redacts the incoming
-  request the same way and compares the *kind* of secret rather than its digest — and reports that
-  fold, because it is an approximation.
-- **Redaction also broke every fork.** `tool_use` ids and thinking-block signatures are
-  high-entropy strings, so the sweep replaced them; a fork replays those turns, the agent echoes
-  them back, and the API answers `400`. Protocol values that have to round-trip are now exempt from
-  the guess — never from the credential rules.
-- **Replaying re-runs the tools.** Orca does not intercept tool execution, so the agent really runs
-  `npm test` again and it really reprints its own durations. A request whose only difference is
-  inside tool output is now served from the recording as a `major` divergence instead of halting.
-
-That run replays offline end to end — `reused=7/7 exact=2 divergences=5 unmatched=0 exit=0`, with
-every approximation named — and a fork of it reaches the same tree the recording did. If you have a
-recording it still gets wrong, that is the single most useful thing you can send.
+| Validated against a real agent | Claude Code, recording a real fix to a real bug: recorded, replayed offline end to end, forked from a checkpoint and exported. It broke four things no fixture could have produced, all since fixed — [what a real agent found](docs/validation.md) |
+| Subscription-auth harnesses | Claude Code works. A Codex CLI signed in with a ChatGPT subscription talks to its own backend, so there is no origin to rewrite: it needs `--tls-intercept`. With an API key it needs nothing special |
 
 ## Install
 
@@ -443,6 +544,8 @@ interface first, with a second implementation showing it is not shaped around on
 
 - [`spec/orca-trace-v0.md`](spec/orca-trace-v0.md) — the normative trace format
 - [`docs/architecture.md`](docs/architecture.md) — how capture, replay and fork actually work
+- [`docs/validation.md`](docs/validation.md) — what broke the first time this met a real agent
+- [`docs/launch-path.md`](docs/launch-path.md) — what is built, what is not, and what is next
 - [`docs/plugins.md`](docs/plugins.md) — writing an adapter or a provider
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — five-minute dev loop
 - [Good first issues](docs/good-first-issues.md) — twelve of them, with the file to start in
@@ -455,7 +558,11 @@ already written down.
 
 - **[Twelve good first issues](docs/good-first-issues.md)**, each naming the file and the test.
 - **Write an adapter.** One file, one fixture. If your harness reads a base-URL variable it is
-  about twenty lines — [docs/plugins.md](docs/plugins.md).
+  about twenty lines — [docs/plugins.md](docs/plugins.md). If it does not, `node` may already cover
+  it; a recording that comes back empty from a harness not listed [above](#which-agents) is worth
+  an issue either way.
+- **Prove LangGraph.** It should work through the official clients and nothing here tests it. An
+  end-to-end test against a stub upstream would turn a "should" into a row that CI can turn red.
 - **Reimplement the reader.** The spec is CC BY 4.0 on purpose. There is already a Python reader;
   Go and Rust are open.
 - **Break the replay.** The matching ladder is the heart of this and the fastest way to improve it
