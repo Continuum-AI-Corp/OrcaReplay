@@ -376,7 +376,7 @@ $ orca checkpoints last --json | jq '.[-1].seq'
 
 وثيقة JSON واحدة على stdout والتشخيص على stderr — ومعه مخرجات الوكيل المُسجَّل نفسه، فتبقى الوثيقة
 قابلة للتحليل بينما التشغيل يتكلم. والإخفاقات تجيب بـJSON أيضًا مع رمز خروج غير صفري. ويغطي `--json`
-الأوامر `list` و`show` و`events` و`checkpoints` و`record` و`replay` و`compare` و`doctor`.
+الأوامر `list` و`show` و`events` و`checkpoints` و`graph` و`record` و`replay` و`compare` و`doctor`.
 
 **أدواتٍ.** يقدّم `orca mcp` مخزن التسجيلات إلى وكيل عبر stdio:
 

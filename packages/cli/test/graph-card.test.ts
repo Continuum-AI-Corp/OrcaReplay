@@ -167,3 +167,83 @@ describe('renderGraphCard labels', () => {
     expect(y).toBeGreaterThan(270);
   });
 });
+
+/**
+ * Found in review. Shell and MCP frames are drained after the agent exits and written with their
+ * original turn numbers, so a turn's events are not contiguous in seq. Laying nodes out by seq
+ * alone therefore interleaved two turns and drew their bands on top of each other, with both
+ * labels inside the overlap.
+ */
+describe('renderGraphCard turn bands', () => {
+  const interleaved: TraceEvent[] = [
+    ev(2, 'model.request', { turn: 1 }),
+    ev(3, 'model.response', { turn: 1, attrs: { stop_reason: 'tool_use' } }),
+    ev(4, 'tool.call', {
+      turn: 1,
+      causes: [3],
+      attrs: { name: 'bash', input: { command: 'npm test' } },
+    }),
+    ev(5, 'model.request', { turn: 2 }),
+    ev(6, 'model.response', { turn: 2, attrs: { stop_reason: 'end_turn' } }),
+    // Drained after the agent exited, so it lands late in seq but belongs to turn 1.
+    ev(7, 'shell.exec', { turn: 1, attrs: { argv: ['sh', '-c', 'npm test'] } }),
+    ev(8, 'shell.result', { turn: 1, causes: [7], attrs: { exit_code: 1 } }),
+  ];
+
+  function bands(svg: string): Array<{ x: number; w: number }> {
+    return [...svg.matchAll(/<rect x="(-?[\d.]+)" y="84" width="([\d.]+)"/g)].map((m) => ({
+      x: Number(m[1]),
+      w: Number(m[2]),
+    }));
+  }
+
+  it('draws turn bands that do not overlap each other', () => {
+    const g = runGraph(interleaved);
+    const svg = renderGraphCard(scopeForCard(g, new Set()), { runId: 'r', highlight: new Set() });
+    const [a, b] = bands(svg).sort((p, q) => p.x - q.x);
+    expect(a).toBeDefined();
+    expect(b).toBeDefined();
+    expect(a!.x + a!.w).toBeLessThanOrEqual(b!.x);
+  });
+
+  it('keeps a turn together, so a late-drained frame sits with its own turn', () => {
+    const g = runGraph(interleaved);
+    const svg = renderGraphCard(scopeForCard(g, new Set()), { runId: 'r', highlight: new Set() });
+    // seq 7 belongs to turn 1, so it must be drawn left of turn 2's seq 5.
+    const x = (seq: number) =>
+      Number(
+        new RegExp(
+          `<circle[^>]*cx="([\\d.]+)" cy="\\d+" r="\\d+"[^>]*/><text x="\\1"[^>]*>${seq}</text>`,
+        ).exec(svg)?.[1],
+      );
+    expect(x(7)).toBeLessThan(x(5));
+  });
+});
+
+/**
+ * Found in review. `pickChainTarget` can name an `error` or a `divergence`, and neither had a lane,
+ * so the graph card dropped the very event it was drawn about.
+ */
+describe('renderGraphCard covers every event a card can be about', () => {
+  it('draws an error, rather than silently omitting the subject', () => {
+    const g = runGraph([
+      ev(1, 'model.response', { attrs: { stop_reason: 'tool_use' } }),
+      ev(2, 'error', { causes: [1], attrs: { message: 'boom' } }),
+    ]);
+    const svg = renderGraphCard(scopeForCard(g, new Set([2])), {
+      runId: 'r',
+      highlight: new Set([2]),
+    });
+    expect(svg).toMatch(/<circle[^>]*class="n on"/);
+    expect(svg).not.toContain('not shown');
+  });
+
+  it('draws a divergence too, which is what a replay trace is about', () => {
+    const g = runGraph([ev(1, 'model.request'), ev(2, 'divergence', { causes: [1] })]);
+    const svg = renderGraphCard(scopeForCard(g, new Set([2])), {
+      runId: 'r',
+      highlight: new Set([2]),
+    });
+    expect(svg).not.toContain('not shown');
+  });
+});

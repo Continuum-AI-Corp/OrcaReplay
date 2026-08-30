@@ -364,7 +364,7 @@ $ orca checkpoints last --json | jq '.[-1].seq'
 
 stdout 上只有一份 JSON 文档，诊断信息全走 stderr——包括被录制 agent 自己的输出，所以哪怕运行过程中
 一直在打印，那份文档也始终是可解析的。失败同样以 JSON 返回，并带非零退出码。`--json` 覆盖 `list`、
-`show`、`events`、`checkpoints`、`record`、`replay`、`compare` 和 `doctor`。
+`show`、`events`、`checkpoints`、`graph`、`record`、`replay`、`compare` 和 `doctor`。
 
 **作为工具。** `orca mcp` 通过 stdio 把 trace 仓库交给 agent：
 

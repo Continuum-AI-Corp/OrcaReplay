@@ -412,7 +412,7 @@ $ orca checkpoints last --json | jq '.[-1].seq'
 
 Ein JSON-Dokument auf stdout, Diagnose auf stderr — auch die Ausgabe des aufgezeichneten Agenten,
 damit das Dokument lesbar bleibt, während ein Lauf redet. Fehler antworten ebenfalls als JSON, mit
-einem Exit-Code ungleich null. `--json` deckt `list`, `show`, `events`, `checkpoints`, `record`,
+einem Exit-Code ungleich null. `--json` deckt `list`, `show`, `events`, `checkpoints`, `graph`, `record`,
 `replay`, `compare` und `doctor` ab.
 
 **Als Werkzeuge.** `orca mcp` reicht den Aufzeichnungsspeicher über stdio an einen Agenten:

@@ -378,7 +378,7 @@ $ orca checkpoints last --json | jq '.[-1].seq'
 
 stdout에는 JSON 문서 하나, 진단은 stderr — 기록 중인 에이전트 자신의 출력까지 stderr로 보내므로,
 실행이 떠드는 동안에도 그 문서는 계속 파싱된다. 실패도 JSON으로 답하고 종료 코드는 0이 아니다.
-`--json`은 `list`, `show`, `events`, `checkpoints`, `record`, `replay`, `compare`, `doctor`를 덮는다.
+`--json`은 `list`, `show`, `events`, `checkpoints`, `graph`, `record`, `replay`, `compare`, `doctor`를 덮는다.
 
 **도구로서.** `orca mcp`는 stdio로 트레이스 저장소를 에이전트에게 내준다.
 

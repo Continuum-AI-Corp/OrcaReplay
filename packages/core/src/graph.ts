@@ -243,6 +243,33 @@ function soleMatchingCall(
 }
 
 /**
+ * The longest string a graph node carries. A graph is about structure, not payloads.
+ *
+ * `orca_graph` answers an agent, and the answer lands in its context — so a `tool.call` whose
+ * `input` holds a whole file body would spend that context on something the graph never uses. The
+ * shape survives so a label can still read `input.path`; the bulk does not. `orca events` is one
+ * command away when the full value is what you want.
+ */
+const ATTR_MAX = 200;
+
+function clampValue(value: unknown, depth = 0): unknown {
+  if (typeof value === 'string') {
+    return value.length <= ATTR_MAX ? value : `${value.slice(0, ATTR_MAX)}…`;
+  }
+  if (depth >= 4 || value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.slice(0, 20).map((v) => clampValue(v, depth + 1));
+  const out: Record<string, unknown> = {};
+  for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = clampValue(v, depth + 1);
+  }
+  return out;
+}
+
+function clampAttrs(attrs: Record<string, unknown>): Record<string, unknown> {
+  return clampValue(attrs) as Record<string, unknown>;
+}
+
+/**
  * A run as nodes and edges, with every edge saying whether the trace vouches for it.
  *
  * Two kinds, and they are not interchangeable. A `recorded` edge came out of `causes`, which the
@@ -262,7 +289,7 @@ export function runGraph(events: TraceEvent[]): RunGraph {
     seq: e.seq,
     turn: e.turn,
     type: e.type,
-    ...(e.attrs === undefined ? {} : { attrs: e.attrs }),
+    ...(e.attrs === undefined ? {} : { attrs: clampAttrs(e.attrs) }),
   }));
 
   const byType = new Map(ordered.map((e) => [e.seq, e.type]));

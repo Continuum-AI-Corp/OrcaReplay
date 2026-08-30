@@ -133,3 +133,30 @@ describe('renderChainCard rail', () => {
     expect(svg).not.toContain('stroke-dasharray');
   });
 });
+
+/**
+ * Found in review. The rail drew a segment between every seq-adjacent pair and left it solid when
+ * no edge joined them — and solid is this card's own legend for "recorded". A chain whose nodes
+ * are not a single path therefore asserted causality that the trace does not contain.
+ */
+describe('renderChainCard rail draws only real hops', () => {
+  const diamond: TraceEvent[] = [
+    ev(1, 'model.response', { attrs: { stop_reason: 'tool_use' } }),
+    ev(2, 'tool.call', { causes: [1], attrs: { name: 'a', input: {} } }),
+    ev(3, 'tool.call', { causes: [1], attrs: { name: 'b', input: {} } }),
+    ev(4, 'model.request', { causes: [2, 3] }),
+  ];
+
+  it('leaves no line between two nodes that no edge connects', () => {
+    const svg = renderChainCard(chainTo(runGraph(diamond), 4), { runId: 'r' });
+    // Nodes sort to 1,2,3,4 but there is no edge 2→3, so at most three segments may be drawn.
+    const rails = svg.match(/<line[^>]*x1="92"[^>]*>/g) ?? [];
+    expect(rails.length).toBeLessThanOrEqual(2);
+  });
+
+  it('still joins the hops that do exist', () => {
+    const straight = [ev(1, 'shell.exec'), ev(2, 'shell.result', { causes: [1] })];
+    const svg = renderChainCard(chainTo(runGraph(straight), 2), { runId: 'r' });
+    expect(svg.match(/<line[^>]*x1="92"[^>]*>/g) ?? []).toHaveLength(1);
+  });
+});

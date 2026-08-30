@@ -383,7 +383,7 @@ $ orca checkpoints last --json | jq '.[-1].seq'
 
 stdout には JSON ドキュメントがひとつだけ、診断は stderr——記録中のエージェント自身の出力も stderr に
 回すので、実行が喋っている間もドキュメントは壊れません。失敗も JSON で返り、終了コードは非ゼロです。
-`--json` は `list`、`show`、`events`、`checkpoints`、`record`、`replay`、`compare`、`doctor` に対応します。
+`--json` は `list`、`show`、`events`、`checkpoints`、`graph`、`record`、`replay`、`compare`、`doctor` に対応します。
 
 **ツールとして。** `orca mcp` は stdio 経由で trace ストアをエージェントに渡します。
 

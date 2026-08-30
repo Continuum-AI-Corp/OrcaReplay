@@ -152,9 +152,13 @@ ${text(28, 92, CREDIT_MADE_BY, { size: 10, mono: true, fill: '#6B7578' })}
       const next = nodes[i + 1];
       if (!next) return '';
       const y = CHAIN_HEAD + i * CHAIN_ROW;
-      const guessed = kindOf.get(`${node.seq}→${next.seq}`) === 'inferred';
+      const kind = kindOf.get(`${node.seq}→${next.seq}`);
+      // No edge between these two, so no line. Solid is this card's word for "recorded", and a
+      // chain whose nodes are not one path — a diamond, say — would otherwise draw a hop the
+      // trace does not contain and state it in the strongest form the card has.
+      if (kind === undefined) return '';
       return `<line x1="${RAIL_X}" y1="${y + 6}" x2="${RAIL_X}" y2="${y + CHAIN_ROW - 6}" stroke="#5A6669" stroke-width="1.5"${
-        guessed ? ' stroke-dasharray="4 3"' : ''
+        kind === 'inferred' ? ' stroke-dasharray="4 3"' : ''
       }/>`;
     })
     .join('');
@@ -322,6 +326,9 @@ function laneOf(type: string): 'model' | 'tool' | 'effect' | undefined {
   if (type.startsWith('shell.') || type.startsWith('fs.change') || type.startsWith('net.')) {
     return 'effect';
   }
+  // `pickChainTarget` can name either of these, so leaving them laneless dropped the very event
+  // the card was drawn about. They are outcomes, which is what the effect row holds.
+  if (type === 'error' || type === 'divergence') return 'effect';
   return undefined;
 }
 
@@ -375,7 +382,11 @@ export function scopeForCard(graph: RunGraph, highlight: Set<number>, max = 18):
 export function renderGraphCard(graph: RunGraph | ScopedGraph, meta: GraphCardMeta): string {
   const scoped: ScopedGraph =
     'narrowed' in graph ? graph : scopeForCard(graph, meta.highlight, Number.MAX_SAFE_INTEGER);
-  const nodes = [...scoped.nodes].sort((a, b) => a.seq - b.seq);
+  // By turn first, then seq. Shell and MCP frames are drained after the agent exits and keep their
+  // original turn, so they are not contiguous in seq — laying out by seq alone interleaved two
+  // turns and drew their bands on top of each other. Turn is monotonic in time, so this is also
+  // the truer left-to-right order for an out-of-band frame.
+  const nodes = [...scoped.nodes].sort((a, b) => a.turn - b.turn || a.seq - b.seq);
 
   if (nodes.length === 0) {
     return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${WIDTH} 120" width="${WIDTH}" height="120" role="img" aria-label="OrcaReplay causal graph">

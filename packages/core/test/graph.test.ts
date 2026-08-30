@@ -480,3 +480,41 @@ describe('pickChainTarget', () => {
     ).toBeUndefined();
   });
 });
+
+/**
+ * Found in review. A graph is about structure, and `orca_graph` answers an agent whose context the
+ * answer lands in — so copying `attrs` whole put every `tool.call`'s complete `input`, file bodies
+ * and all, into the reply. `orca show` clamps every field for the same reason; the full value is a
+ * `orca events` away.
+ */
+describe('runGraph node attrs', () => {
+  const body = 'x'.repeat(5000);
+
+  it('clamps a long value rather than carrying a whole file into an answer', () => {
+    const g = runGraph([
+      ev(1, 'tool.call', { attrs: { name: 'edit', input: { path: 'a.ts', content: body } } }),
+    ]);
+    expect(JSON.stringify(g.nodes).length).toBeLessThan(1000);
+  });
+
+  it('says a value was clamped instead of quietly truncating it', () => {
+    const g = runGraph([ev(1, 'tool.call', { attrs: { input: { content: body } } })]);
+    expect(JSON.stringify(g.nodes[0]?.attrs)).toContain('…');
+  });
+
+  it('leaves the short values a reader actually labels nodes with alone', () => {
+    const g = runGraph([
+      ev(1, 'shell.result', { attrs: { exit_code: 1, duration_ms: 43 } }),
+      ev(2, 'fs.change', { attrs: { path: 'src/auth.ts', status: 'modified' } }),
+    ]);
+    expect(g.nodes[0]?.attrs).toEqual({ exit_code: 1, duration_ms: 43 });
+    expect(g.nodes[1]?.attrs).toEqual({ path: 'src/auth.ts', status: 'modified' });
+  });
+
+  it('keeps the shape of a nested value, since a label may read a key inside it', () => {
+    const g = runGraph([ev(1, 'tool.call', { attrs: { input: { path: 'a.ts', content: body } } })]);
+    const input = (g.nodes[0]?.attrs?.['input'] ?? {}) as Record<string, unknown>;
+    expect(input['path']).toBe('a.ts');
+    expect(String(input['content']).length).toBeLessThan(300);
+  });
+});
