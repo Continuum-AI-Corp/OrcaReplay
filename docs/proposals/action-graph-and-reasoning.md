@@ -80,7 +80,8 @@ travels down it. Nothing is lost by waiting.
 It is the closest to done of the three. Reasoning is parsed into `{ type: 'thinking', text }` by
 all three translators and then never becomes an event — `derive()` collects tool uses out of the
 canonical response and nothing else. The extraction is roughly fifteen lines next to
-`collectToolUses()`: `thinking_chars` and `thinking_blocks` in `attrs`, the text to a blob, which the 4 KB spill rule already handles.
+`collectToolUses()`: `thinking_chars` and `thinking_blocks` in `attrs`, the text to a blob, which
+the 4 KB spill rule already handles.
 
 The raw provider bytes are recorded regardless, so **every trace already on disk contains this**. It
 is a read-path feature, not a capture-path one.
