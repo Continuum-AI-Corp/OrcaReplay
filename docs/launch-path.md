@@ -1,6 +1,7 @@
 # Launch path: v0 to a demo people can run
 
-> **Status.** W3.1, W3.2, W3.3 and W3.4 are shipped — see the commits on this branch. The Responses
+> **Status.** W3.1, W3.2, W3.3 and W3.4 are shipped, and so is a fifth block that was missing
+> from this plan entirely — the agent-native surface in section 5 — see the commits on this branch. The Responses
 > API is recorded, replayed offline and forkable; a call orca cannot read is forwarded rather
 > than refused; and a run that captured nothing says so. The table below is updated to match.
 > Everything else is still as written.
@@ -129,6 +130,38 @@ prose does not clear a security review.
 | **W4.3** | `orca verify` — scan a trace and report what a detector can still find. Gate `orca export` on a clean scan or an explicit `--force`. The README asks users to send traces; make that ask safe to accept. | Exporting a trace containing a planted key refuses without `--force`. |
 | **W4.4** | Assert the offline guarantee at the socket level in CI with DNS blackholed, and cite the test by name in the README. | The README's offline claim links to a test. |
 | **W4.5** | Extend `SECURITY.md` with a trace threat model: what a trace contains, what redaction catches and provably does not, the snapshot limitation, and a decision guide for "can I attach this to a public issue?" | A security reviewer can answer their questions without opening the source. |
+
+## 5. Agent-native surface
+
+Not in the original four blockers, and it should have been. OrcaReplay was a human CLI with an
+agent-readable file format: `TraceReader` and the Python reader make a trace easy to *read* from
+code, but nothing let anything drive orca. `orca show` computed a timeline and formatted it away,
+`orca list` returned `void`, and there was no `--json` anywhere — so a script, a CI job, or an
+agent debugging its own failure had to scrape `info replay.done reused=2/2 exact=2 divergences=0`
+out of stdout. The MCP shim in this repo is a *tee* that records an agent's own MCP traffic; it
+never let an agent ask orca a question.
+
+That is backwards for this product in particular. "Replay my last run and tell me what diverged"
+is the most useful thing an agent could ask a replay debugger, and it is a question no
+observability tool can answer — because a trace is a file, so an agent can fork it.
+
+| | Work | Done when |
+|---|---|---|
+| **W5.1** ✅ | **Shipped.** An `Orca` class returning the work as data — list, show, events, checkpoints, record, replay, compare, export. The commands render what it returns, so the terminal is a view of one source of truth. Asserted: nothing writes to an embedding process's stdout, nothing calls `process.exit`. | `new Orca({cwd}).replay('last')` returns the numbers. |
+| **W5.2** ✅ | **Shipped.** `--json`: one document on stdout, diagnostics on stderr, failures as JSON too. | `orca show last --json \| jq .events` works with nothing in front of it. |
+| **W5.3** ✅ | **Shipped.** `orca mcp` — a stdio MCP server exposing `orca_list_runs`, `orca_show_run`, `orca_checkpoints`, `orca_replay`, `orca_compare`. Built on the framer the MCP shim already has, so no runtime dependency. `orca_compare` says in its own description that it spends real tokens. | An agent's MCP config can point at `{"command": "orca", "args": ["mcp"]}`. |
+
+Two bugs the tests found here, both of which would have reached users:
+
+- **`ReplayResult` never carried `unmatched`.** It has been in the `replay.done` line since the
+  beginning and returned to no one, so every non-terminal caller had to scrape it back out — while
+  `exitCode` folds it into a single bit. It is the number that says whether a replay reproduced
+  the run.
+- **Under `--json`, the recorded agent's own stdout landed in the middle of the document.**
+  `stdio: 'inherit'` means the file descriptor, not the `process.stdout.write` an in-process test
+  can replace, so seven assertions passed while `orca record --json | jq` would have choked. Both
+  `record` and `replay` now route the agent's stdout to stderr under `--json`, keeping stdin and
+  stderr inherited so a harness that prompts still can.
 
 ## Sequencing
 
