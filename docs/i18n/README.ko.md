@@ -270,7 +270,10 @@ URL이나 죽은 키는 비교 도중의 401이 아니라 지금 여기서의 �
 | **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | 동작 |
 | **Vercel AI SDK** | fetch 훅 — `orca record node -- node app.mjs` | 동작 |
 | **LangGraph / LangChain** | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | 될 것이다 — 공식 클라이언트를 거치지만 아직 테스트가 없다 |
+| **grok-cli**(텔레그램 봇 포함) | `orca record grok` — `GROK_BASE_URL`, 그리고 서브에이전트용 fetch 훅 | 동작 |
+| **OpenClaw** | `orca record openclaw` — 게이트웨이는 훅으로, 그것이 띄우는 에이전트는 상속된 변수로 | 동작 |
 | **opencode** | `orca record opencode` | 어댑터 있음. 두 오리진 모두 돌린다 |
+| **Hermes**(Nous Research) | `ORCA_BASE_URL_VARS=… orca record generic-openai -- hermes …` | 될 것이다 — 프로바이더마다 덮어쓴다. 아래 참고 |
 | **그 밖의 모든 것** | `orca record generic-openai -- <cmd>` | base-URL 변수를 읽으면 동작. 읽지 않으면 `orca record node -- <cmd>` |
 
 실제 하네스로 끝까지 돌려본 것은 Claude Code뿐이다. 나머지는 어댑터 계약과 픽스처가 지킨다. 픽스처는
@@ -308,18 +311,23 @@ Bun은 `NODE_OPTIONS`를 받아들이지만 그 안의 `--require`는 무시한�
 warn capture.empty exchanges=0 cause="the agent never called the proxy — it may not read a base-URL variable" set=ANTHROPIC_BASE_URL,OPENAI_API_BASE,OPENAI_BASE_URL next="orca doctor"
 ```
 
-**아직 아무도 기록해보지 않은 에이전트.** 자주 나오는 것들이고, 답은 모두 같다. orca가 계측하는 것은
-**프로세스**이지 제품이 아니며, 설정한 환경은 그 프로세스가 낳는 모든 것에 상속된다. 그러니 질문은
-당신의 에이전트가 아래 세 모양 중 어느 것이냐는 것뿐이다.
+**orca가 모르는 base-URL 변수.** 전부 나열하는 건 가망이 없다. Hermes 하나의 `.env.example`에만
+`NOVITA_BASE_URL`, `GLM_BASE_URL`, `KIMI_BASE_URL`, `MINIMAX_BASE_URL`, `HF_BASE_URL`,
+`NEBIUS_BASE_URL` 등 십수 개가 있다. orca에 박아 넣은 목록은 다음 주면 낡는다. 그러니 변수 이름을
+직접 알려주면 된다.
 
-| | 모양 | 시도 |
-|---|---|---|
-| **grok-cli** | Bun, xAI의 OpenAI 호환 엔드포인트 | `ORCA_INSTRUMENT_HOSTS='api.x.ai' orca record node -- grok` |
-| **Hermes**(Nous Research) | 상주 데몬. 모델 엔드포인트는 자체 설정에 있다 | `orca record`가 찍어주는 프록시 URL로 향하게 하거나, CLI 호출 쪽을 기록한다 |
-| **OpenClaw** | Claude Code·Codex·opencode를 자식 프로세스로 띄우는 게이트웨이 | `orca record generic-openai -- openclaw …` — 자식이 방향 전환을 물려받는다 |
+```console
+ORCA_BASE_URL_VARS='OPENROUTER_BASE_URL' orca record generic-openai -- hermes
+ORCA_BASE_URL_VARS='GLM_BASE_URL,KIMI_BASE_URL' orca record generic-openai -- my-agent
+```
 
-셋 다 여기엔 테스트도 어댑터도 없다. 기록에 성공했다면 가장 쓸모 있는 것은 그 트레이스다 —
-`orca export last -o run.html`.
+각 이름은 `/v1`이 붙어 프록시를 가리킨다. OpenAI 호환 덮어쓰기가 원하는 형태다. `=<path>`로 바꿀 수
+있고 `=/`면 오리진만 남는다.
+
+**코딩 에이전트를 띄우는 게이트웨이.** OpenClaw는 직접 코딩하지 않는다. Claude Code, Codex,
+opencode를 자식 프로세스로 띄운다. 게이트웨이 자신의 호출은 fetch 훅이, 띄워진 에이전트의 호출은
+평범한 환경 변수가 잡는다 — OpenClaw가 그것을 읽어서가 아니라 **자식 프로세스가 부모의 환경을
+상속**하기 때문이다. 이건 orca가 아니라 운영체제의 성질이라, 테스트가 지키고 있다.
 
 ## 하네스가 방향을 바꾸지 않을 때
 

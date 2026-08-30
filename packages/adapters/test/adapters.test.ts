@@ -347,6 +347,8 @@ describe('AdapterRegistry', () => {
       'claude-code',
       'codex',
       'opencode',
+      'grok',
+      'openclaw',
       'node',
       'generic-openai',
     ]);

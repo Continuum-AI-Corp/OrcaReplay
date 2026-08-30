@@ -292,7 +292,10 @@ orca comprend le format qu'il parle une fois arrivé.
 | **OpenAI Agents SDK** | `OPENAI_BASE_URL` → API Responses | fonctionne |
 | **Vercel AI SDK** | hook fetch — `orca record node -- node app.mjs` | fonctionne |
 | **LangGraph / LangChain** | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | devrait fonctionner — il passe par les clients officiels, mais rien ici ne le teste encore |
+| **grok-cli** (et son bot Telegram) | `orca record grok` — `GROK_BASE_URL`, plus le hook pour ses sous-agents | fonctionne |
+| **OpenClaw** | `orca record openclaw` — le hook pour la passerelle, les variables héritées pour les agents qu'elle lance | fonctionne |
 | **opencode** | `orca record opencode` | adaptateur présent, les deux origines sont redirigées |
+| **Hermes** (Nous Research) | `ORCA_BASE_URL_VARS=… orca record generic-openai -- hermes …` | devrait fonctionner — il surcharge par fournisseur, voir ci-dessous |
 | **tout le reste** | `orca record generic-openai -- <cmd>` | fonctionne s'il lit une variable de base-URL ; sinon `orca record node -- <cmd>` |
 
 Seul Claude Code a été mené de bout en bout contre le vrai harnais. Le reste tient au contrat
@@ -335,19 +338,24 @@ rien n'est enregistré.
 warn capture.empty exchanges=0 cause="the agent never called the proxy — it may not read a base-URL variable" set=ANTHROPIC_BASE_URL,OPENAI_API_BASE,OPENAI_BASE_URL next="orca doctor"
 ```
 
-**Des agents que personne n'a encore enregistrés.** On nous les demande, et la réponse est la même
-pour tous : orca instrumente un **processus**, pas un produit, et l'environnement qu'il pose est
-hérité par tout ce que ce processus lance. La question se réduit donc à laquelle des trois formes
-ci-dessous a votre agent.
+**Une variable de base-URL dont orca n'a jamais entendu parler.** Les énumérer est sans espoir :
+le seul `.env.example` de Hermes porte `NOVITA_BASE_URL`, `GLM_BASE_URL`, `KIMI_BASE_URL`,
+`MINIMAX_BASE_URL`, `HF_BASE_URL`, `NEBIUS_BASE_URL` et une douzaine d'autres. Une liste figée dans
+orca serait périmée la semaine suivante — alors nommez la variable :
 
-| | Forme | À essayer |
-|---|---|---|
-| **grok-cli** | Bun, l'endpoint compatible OpenAI de xAI | `ORCA_INSTRUMENT_HOSTS='api.x.ai' orca record node -- grok` |
-| **Hermes** (Nous Research) | un démon permanent, endpoint du modèle dans sa propre configuration | pointez-le sur l'URL de proxy qu'affiche `orca record`, ou enregistrez l'appel CLI |
-| **OpenClaw** | une passerelle qui lance Claude Code, Codex ou opencode en sous-processus | `orca record generic-openai -- openclaw …` — l'enfant hérite de la redirection |
+```console
+ORCA_BASE_URL_VARS='OPENROUTER_BASE_URL' orca record generic-openai -- hermes
+ORCA_BASE_URL_VARS='GLM_BASE_URL,KIMI_BASE_URL' orca record generic-openai -- my-agent
+```
 
-Aucun des trois n'est testé ici et aucun n'a d'adaptateur. Si vous en enregistrez un, la chose la
-plus utile à envoyer est l'enregistrement : `orca export last -o run.html`.
+Chaque nom pointe vers le proxy avec `/v1` ajouté, ce qu'attend une surcharge compatible OpenAI ;
+`=<chemin>` remplace ce suffixe, et `=/` donne l'origine nue.
+
+**Une passerelle qui lance l'agent de code.** OpenClaw ne code pas : elle lance Claude Code, Codex
+ou opencode en sous-processus. Ses propres appels sont pris par le hook fetch ; ceux de l'agent de
+code le sont par les variables ordinaires — non parce qu'OpenClaw les lit, mais parce qu'**un
+processus enfant hérite de l'environnement de son parent**. C'est une propriété du système
+d'exploitation, pas d'orca, et c'est pourquoi un test la surveille.
 
 ## Quand le harnais refuse d'être redirigé
 

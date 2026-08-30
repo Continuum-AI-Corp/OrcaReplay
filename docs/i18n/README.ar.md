@@ -271,7 +271,10 @@ some-local-model           —          —
 | **OpenAI Agents SDK** | `OPENAI_BASE_URL` ← واجهة Responses | تعمل |
 | **Vercel AI SDK** | خطّاف fetch — `orca record node -- node app.mjs` | تعمل |
 | **LangGraph / LangChain** | `OPENAI_BASE_URL` و`ANTHROPIC_BASE_URL` | يُفترض أن تعمل — تمرّ عبر العملاء الرسميين، لكن لا شيء هنا يختبرها بعد |
+| **grok-cli** (وبوت تيليغرام الخاص به) | `orca record grok` — `GROK_BASE_URL`، ومعه الخطّاف لوكلائه الفرعيين | تعمل |
+| **OpenClaw** | `orca record openclaw` — الخطّاف للبوابة، والمتغيّرات الموروثة للوكلاء الذين تُطلقهم | تعمل |
 | **opencode** | `orca record opencode` | المحوّل موجود، والأصلان معًا يُعاد توجيههما |
+| **Hermes** (Nous Research) | `ORCA_BASE_URL_VARS=… orca record generic-openai -- hermes …` | يُفترض أن تعمل — يتجاوز الإعداد لكل مزوّد، انظر أدناه |
 | **أي شيء آخر** | `orca record generic-openai -- <cmd>` | تعمل إن كان يقرأ متغيّر base-URL؛ وإلا فـ`orca record node -- <cmd>` |
 
 Claude Code وحده هو ما شُغِّل من طرف إلى طرف على المِهاد الحقيقي. أما البقية فيصونها عقد المحوّلات
@@ -308,18 +311,22 @@ ORCA_INSTRUMENT_HOSTS='contoso.openai.azure.com' orca record node -- node agent.
 warn capture.empty exchanges=0 cause="the agent never called the proxy — it may not read a base-URL variable" set=ANTHROPIC_BASE_URL,OPENAI_API_BASE,OPENAI_BASE_URL next="orca doctor"
 ```
 
-**وكلاء لم يسجّلهم أحد بعد.** يُسأل عنهم كثيرًا، والجواب واحد لهم جميعًا: orca يرصد **عملية** لا
-منتجًا، والبيئة التي يضبطها ترثها كل عملية تتفرّع عنها. فالسؤال إذن ليس إلا: أي الأشكال الثلاثة أدناه
-يشبه وكيلك.
+**متغيّر base-URL لم يسمع به orca قط.** حصرها ميؤوس منه: ملف `.env.example` في Hermes وحده يحمل
+`NOVITA_BASE_URL` و`GLM_BASE_URL` و`KIMI_BASE_URL` و`MINIMAX_BASE_URL` و`HF_BASE_URL`
+و`NEBIUS_BASE_URL` وعشرة غيرها. وأي قائمة مثبّتة داخل orca ستصير قديمة بعد أسبوع، فسمِّ المتغيّر بنفسك:
 
-| | الشكل | جرّب |
-|---|---|---|
-| **grok-cli** | Bun، ونقطة xAI المتوافقة مع OpenAI | `ORCA_INSTRUMENT_HOSTS='api.x.ai' orca record node -- grok` |
-| **Hermes** (Nous Research) | خفيّ دائم التشغيل، ونقطة النموذج في إعداداته الخاصة | وجّهه إلى عنوان الوسيط الذي يطبعه `orca record`، أو سجّل استدعاء سطر الأوامر |
-| **OpenClaw** | بوابة تُطلق Claude Code أو Codex أو opencode كعمليات فرعية | `orca record generic-openai -- openclaw …` — والعملية الابنة ترث إعادة التوجيه |
+```console
+ORCA_BASE_URL_VARS='OPENROUTER_BASE_URL' orca record generic-openai -- hermes
+ORCA_BASE_URL_VARS='GLM_BASE_URL,KIMI_BASE_URL' orca record generic-openai -- my-agent
+```
 
-لا واحد من الثلاثة مختبَر هنا ولا لواحد منها محوّل. فإن سجّلت أحدها، فأنفع ما ترسله هو التسجيل نفسه:
-`orca export last -o run.html`.
+كل اسم يُوجَّه إلى الوسيط مع إضافة `/v1`، وهو ما يريده أي تجاوز متوافق مع OpenAI؛ و`=<path>` يغيّر ذلك،
+و`=/` يعطي الأصل مجرّدًا.
+
+**بوابة تُطلق وكيل البرمجة.** لا تبرمج OpenClaw بنفسها: إنها تُطلق Claude Code أو Codex أو opencode
+كعمليات فرعية. نداءات البوابة نفسها يلتقطها خطّاف fetch؛ أما نداءات وكيل البرمجة فتلتقطها المتغيّرات
+المعتادة — لا لأن OpenClaw تقرؤها، بل لأن **العملية الابنة ترث بيئة أمّها**. وهذه خاصية نظام التشغيل لا
+خاصية orca، ولذلك يحرسها اختبار.
 
 ## حين يرفض المِهاد أن يُعاد توجيهه
 

@@ -261,7 +261,10 @@ some-local-model           —          —
 | **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | 可用 |
 | **Vercel AI SDK** | fetch 钩子——`orca record node -- node app.mjs` | 可用 |
 | **LangGraph / LangChain** | `OPENAI_BASE_URL`、`ANTHROPIC_BASE_URL` | 应该可用——它走的是官方客户端，但这里还没有测试覆盖 |
+| **grok-cli**（含它的 Telegram bot） | `orca record grok`——`GROK_BASE_URL`，外加给子 agent 的 fetch 钩子 | 可用 |
+| **OpenClaw** | `orca record openclaw`——网关自己用钩子，它拉起的 agent 靠继承来的变量 | 可用 |
 | **opencode** | `orca record opencode` | 已有适配器，两个 origin 都改道 |
+| **Hermes**（Nous Research） | `ORCA_BASE_URL_VARS=… orca record generic-openai -- hermes …` | 应该可用——它按 provider 分别覆盖，见下面 |
 | **其它任何东西** | `orca record generic-openai -- <cmd>` | 只要它读 base-URL 变量就行；不读的话用 `orca record node -- <cmd>` |
 
 只有 Claude Code 是对着真实 harness 端到端跑通过的。其余的靠适配器契约和 fixture 保证：fixture
@@ -298,18 +301,22 @@ Bun 的 agent 也一样能覆盖到。这一条是拿真的 `bun` 验过的，�
 warn capture.empty exchanges=0 cause="the agent never called the proxy — it may not read a base-URL variable" set=ANTHROPIC_BASE_URL,OPENAI_API_BASE,OPENAI_BASE_URL next="orca doctor"
 ```
 
-**还没有人录过的 agent。** 这几个经常有人问，答案对它们都一样：orca instrument 的是一个**进程**，
-不是某个产品，而它设下的环境会被这个进程派生出的一切继承。所以问题只剩一个——你的 agent 属于下面
-三种形态里的哪一种。
+**orca 没听说过的 base-URL 变量。** 把它们列全是没指望的：Hermes 一个项目的 `.env.example` 里就有
+`NOVITA_BASE_URL`、`GLM_BASE_URL`、`KIMI_BASE_URL`、`MINIMAX_BASE_URL`、`HF_BASE_URL`、
+`NEBIUS_BASE_URL` 还有十几个。写死在 orca 里的清单，写完第二周就过时了。所以直接把变量名告诉它:
 
-| | 形态 | 试试 |
-|---|---|---|
-| **grok-cli** | Bun，xAI 的 OpenAI 兼容端点 | `ORCA_INSTRUMENT_HOSTS='api.x.ai' orca record node -- grok` |
-| **Hermes**（Nous Research） | 常驻守护进程，模型端点写在它自己的配置里 | 把它指向 `orca record` 打印出来的代理地址，或者录那次 CLI 调用 |
-| **OpenClaw** | 一个网关，会把 Claude Code、Codex 或 opencode 作为子进程拉起来 | `orca record generic-openai -- openclaw …`——子进程会继承改道 |
+```console
+ORCA_BASE_URL_VARS='OPENROUTER_BASE_URL' orca record generic-openai -- hermes
+ORCA_BASE_URL_VARS='GLM_BASE_URL,KIMI_BASE_URL' orca record generic-openai -- my-agent
+```
 
-这三个这里都没有测试、也都没有适配器。如果你录成功了，最有用的东西就是那份 trace：
-`orca export last -o run.html`。
+每个名字都会指向代理并补上 `/v1`——这是 OpenAI 兼容覆盖想要的形式；`=<path>` 可以改掉它，`=/`
+则给出裸 origin。
+
+**一个会拉起编程 agent 的网关。** OpenClaw 自己不写代码，它把 Claude Code、Codex 或 opencode 作为
+子进程拉起来。网关自己的调用靠 fetch 钩子抓；被拉起的 agent 那部分靠普通的环境变量抓——不是因为
+OpenClaw 读它们，而是因为**子进程会继承父进程的环境**。这一条属于操作系统而不属于 orca，所以它有
+一个测试盯着。
 
 ## 当 harness 不肯被改道时
 

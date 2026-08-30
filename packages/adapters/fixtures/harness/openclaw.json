@@ -1,0 +1,21 @@
+{
+  "adapter": "openclaw",
+  "harness_versions": null,
+  "verified_at": "2026-08-30",
+  "command": "openclaw",
+  "env_vars": [
+    "ANTHROPIC_BASE_URL",
+    "BUN_OPTIONS",
+    "NODE_OPTIONS",
+    "OPENAI_API_BASE",
+    "OPENAI_BASE_URL",
+    "ORCA_PROXY_URL"
+  ],
+  "base_urls": {
+    "ANTHROPIC_BASE_URL": "",
+    "OPENAI_BASE_URL": "/v1",
+    "OPENAI_API_BASE": "/v1"
+  },
+  "optional_env_vars": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "ORCA_INSTRUMENT_HOSTS"],
+  "note": "OpenClaw is a gateway, not a coding agent: it launches Claude Code, Codex or opencode as child processes. The fetch hook catches the gateway own calls, which read no documented base-URL variable; ANTHROPIC_BASE_URL and OPENAI_BASE_URL are set for the agents it spawns, which inherit this environment and do read them. harness_versions is null: written from the published package and README, not pinned to a release."
+}

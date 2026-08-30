@@ -1,5 +1,5 @@
 import type { Adapter, Launch, RecordContext } from '@orcareplay/plugin-api';
-import { passKey, passThrough, proxyBase } from './env.js';
+import { applyNamedBaseUrls, passKey, passThrough, proxyBase } from './env.js';
 
 /**
  * The escape hatch for any agent nobody has written an adapter for: the user supplies the command,
@@ -30,6 +30,7 @@ export const genericOpenAiAdapter: Adapter = {
     // Only passed on if the user already had one: an invented Anthropic key could flip an unknown
     // agent's provider auto-selection and change which model it calls.
     passThrough(env, ctx.env, 'ANTHROPIC_API_KEY');
+    applyNamedBaseUrls(env, ctx.env, ctx.proxyUrl);
     return { command, args, env };
   },
 };

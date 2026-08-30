@@ -5,7 +5,7 @@ import {
   writeFetchHook,
 } from '@orcareplay/node-instrument';
 import type { Adapter, Launch, RecordContext } from '@orcareplay/plugin-api';
-import { passKey, passThrough, proxyBase, readEnv } from './env.js';
+import { applyNamedBaseUrls, passKey, passThrough, proxyBase, readEnv } from './env.js';
 
 /**
  * A JS agent that never reads a base-URL variable.
@@ -64,6 +64,7 @@ export const nodeAdapter: Adapter = {
     passThrough(env, ctx.env, 'ORCA_INSTRUMENT_HOSTS');
     passKey(env, ctx.env, 'OPENAI_API_KEY');
     passThrough(env, ctx.env, 'ANTHROPIC_API_KEY');
+    applyNamedBaseUrls(env, ctx.env, ctx.proxyUrl);
     return { command, args, env, tempFiles: [hookPath] };
   },
 };

@@ -273,7 +273,10 @@ OpenAI 互換の `/v1/models` とチャットエンドポイントを話すも�
 | **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | 動作 |
 | **Vercel AI SDK** | fetch フック——`orca record node -- node app.mjs` | 動作 |
 | **LangGraph / LangChain** | `OPENAI_BASE_URL`、`ANTHROPIC_BASE_URL` | 動くはず——公式クライアント経由だが、ここにはまだテストがない |
+| **grok-cli**（Telegram bot も） | `orca record grok`——`GROK_BASE_URL` に加えてサブエージェント用の fetch フック | 動作 |
+| **OpenClaw** | `orca record openclaw`——ゲートウェイ自身はフック、起動される側は継承した変数 | 動作 |
 | **opencode** | `orca record opencode` | アダプタあり。両方のオリジンを向け替える |
+| **Hermes**（Nous Research） | `ORCA_BASE_URL_VARS=… orca record generic-openai -- hermes …` | 動くはず——プロバイダごとに上書きする。下記参照 |
 | **それ以外** | `orca record generic-openai -- <cmd>` | base-URL 変数を読むなら動作。読まないなら `orca record node -- <cmd>` |
 
 実際のハーネスに対して端から端まで走らせたのは Claude Code だけです。ほかはアダプタ契約と
@@ -314,18 +317,23 @@ Bun は `NODE_OPTIONS` を受け取りますが、その中の `--require` は�
 warn capture.empty exchanges=0 cause="the agent never called the proxy — it may not read a base-URL variable" set=ANTHROPIC_BASE_URL,OPENAI_API_BASE,OPENAI_BASE_URL next="orca doctor"
 ```
 
-**まだ誰も記録していないエージェント。** よく聞かれるもので、答えはどれも同じです。orca が計測するのは
-**プロセス**であって製品ではなく、設定した環境はそのプロセスが起こすものすべてに引き継がれます。
-つまり問題は、あなたのエージェントが下の三つの形のどれかというだけです。
+**orca が知らない base-URL 変数。** 列挙は不可能です。Hermes 一つの `.env.example` にすら
+`NOVITA_BASE_URL`、`GLM_BASE_URL`、`KIMI_BASE_URL`、`MINIMAX_BASE_URL`、`HF_BASE_URL`、
+`NEBIUS_BASE_URL` ほか十数個があります。orca に焼き込んだ一覧は翌週には古びるので、代わりに変数名を
+渡してください。
 
-| | 形 | 試すこと |
-|---|---|---|
-| **grok-cli** | Bun、xAI の OpenAI 互換エンドポイント | `ORCA_INSTRUMENT_HOSTS='api.x.ai' orca record node -- grok` |
-| **Hermes**（Nous Research） | 常駐デーモン。モデルのエンドポイントは自前の設定に書く | `orca record` が表示するプロキシ URL を向けるか、CLI 呼び出しのほうを記録する |
-| **OpenClaw** | Claude Code や Codex、opencode を子プロセスとして起動するゲートウェイ | `orca record generic-openai -- openclaw …`——子プロセスが向け替えを引き継ぎます |
+```console
+ORCA_BASE_URL_VARS='OPENROUTER_BASE_URL' orca record generic-openai -- hermes
+ORCA_BASE_URL_VARS='GLM_BASE_URL,KIMI_BASE_URL' orca record generic-openai -- my-agent
+```
 
-三つとも、ここにテストはなくアダプタもありません。記録できたなら、いちばん役に立つのはその trace
-です——`orca export last -o run.html`。
+各名前はプロキシに `/v1` を付けて向けられます。OpenAI 互換の上書きが求める形です。`=<path>` で
+変更でき、`=/` なら素のオリジンになります。
+
+**コーディングエージェントを起動するゲートウェイ。** OpenClaw 自身はコードを書かず、Claude Code や
+Codex、opencode を子プロセスとして起動します。ゲートウェイ自身の通信は fetch フックが、起動された
+エージェントの通信は通常の環境変数が捕まえます——OpenClaw がそれを読むからではなく、**子プロセスが
+親の環境を継承する**からです。これは orca ではなく OS の性質なので、テストが見張っています。
 
 ## ハーネスが向きを変えてくれないとき
 

@@ -280,8 +280,11 @@ whether orca understands the wire format it speaks once it arrives.
 | **Codex CLI** (ChatGPT login) | `--tls-intercept` → Responses API | works, [with a decision to make](#when-the-harness-will-not-be-redirected) |
 | **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | works |
 | **Vercel AI SDK** | fetch hook — `orca record node -- node app.mjs` | works |
-| **LangGraph / LangChain** | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | should work — it goes through the official clients, but nothing here tests it yet |
+| **grok-cli** (and its Telegram bot) | `orca record grok` — `GROK_BASE_URL`, plus the hook for its sub-agents | works |
+| **OpenClaw** | `orca record openclaw` — the hook for the gateway, inherited variables for the agents it spawns | works |
 | **opencode** | `orca record opencode` | adapter shipped, both origins redirected |
+| **LangGraph / LangChain** | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | should work — it goes through the official clients, but nothing here tests it yet |
+| **Hermes** (Nous Research) | `ORCA_BASE_URL_VARS=… orca record generic-openai -- hermes …` | should work — it overrides per provider; [name the variable](#a-base-url-variable-orca-has-never-heard-of) |
 | **anything else** | `orca record generic-openai -- <cmd>` | works if it reads a base-URL variable; `orca record node -- <cmd>` if it does not |
 
 Only Claude Code has been driven end to end against the real harness, and
@@ -289,54 +292,42 @@ Only Claude Code has been driven end to end against the real harness, and
 to fixtures that record the exact variables each one sets, so a harness that renames the variable
 it reads turns a check red instead of producing an empty trace.
 
-**Agents nobody has recorded yet.** These come up, and the honest answer is the same for all of
-them: orca instruments a *process*, not a product, and the environment it sets is inherited by
-everything that process spawns. So the question is only ever which of the three shapes below your
-agent has.
+### A gateway that launches the coding agent
 
-| | Shape | Try |
-|---|---|---|
-| **grok-cli** | Bun, xAI's OpenAI-compatible endpoint | `ORCA_INSTRUMENT_HOSTS='api.x.ai' orca record node -- grok` |
-| **Hermes** (Nous Research) | a persistent daemon, model endpoint set in its own config | point it at the proxy URL `orca record` prints, or record the CLI invocation |
-| **OpenClaw** | a gateway that launches Claude Code, Codex or opencode as subprocesses | `orca record generic-openai -- openclaw …` — the child inherits the redirect |
-
-None of the three is tested here and none has an adapter. If you record one, the trace is the most
-useful thing you can send: `orca export last -o run.html`.
-
-Two of those needed more than an environment variable, and the difference is worth knowing about
-before you pick a command.
-
-**A harness that speaks the Responses API.** The OpenAI Agents SDK and the Codex CLI both default
-to `/v1/responses` rather than chat completions. Orca speaks it, so nothing special is required —
-but if you are on a build from before that landed, the symptom was not a missing trace, it was a
-`404` on the agent's first turn.
-
-**A harness that reads no base-URL variable.** `@ai-sdk/openai` takes its origin as a constructor
-argument and nothing else, so an agent built on the Vercel AI SDK runs perfectly under `orca
-record`, exits 0, and writes an empty trace. The `node` adapter is for exactly that: it writes a
-small preload into the run directory and points `NODE_OPTIONS` at it, redirecting
-`globalThis.fetch` for an allowlist of provider hosts and nothing else.
+OpenClaw does not do the coding: it runs Claude Code, Codex or opencode as child processes and
+drives them from a chat app, so one run carries two kinds of model traffic. The gateway's own calls
+are caught by the fetch hook. The coding agent's calls are caught by the ordinary variables — not
+because OpenClaw reads them, but because **a child process inherits its parent's environment**, so
+the Claude Code it spawns sees `ANTHROPIC_BASE_URL` exactly as it would if you had run it yourself.
 
 ```console
-orca record node -- node agent.mjs
-orca record node -- npm run agent
-ORCA_INSTRUMENT_HOSTS='contoso.openai.azure.com' orca record node -- node agent.mjs
+orca record openclaw
 ```
 
-It is a separate adapter rather than the default because `NODE_OPTIONS` reaches every Node process
-the agent spawns — worth paying when you know your agent needs it, not worth imposing on someone
-recording a Python harness.
+That inheritance is a property of the operating system rather than of orca, which is the kind of
+thing that stays obviously true right up until some layer in between sanitises the environment. So
+it has a test: a gateway fixture that makes no model call of its own, spawns an agent that does, and
+is recorded and replayed offline through the grandchild's traffic.
 
-Bun accepts `NODE_OPTIONS` but ignores `--require` inside it, so `BUN_OPTIONS=--preload` is set
-alongside it and a Bun-based agent is covered too. That is checked against a real `bun`, because
-the failure it prevents is the silent one: the hook not running, and the traffic going to the
-provider unrecorded.
+### A base-URL variable orca has never heard of
 
-**And when the trace comes back empty anyway**, `orca record` says so rather than exiting cleanly:
+Enumerating them is hopeless. Hermes overrides per provider, and its own `.env.example` carries
+`NOVITA_BASE_URL`, `GLM_BASE_URL`, `KIMI_BASE_URL`, `MINIMAX_BASE_URL`, `HF_BASE_URL`,
+`NEBIUS_BASE_URL` and a dozen more. A list baked into orca would be stale the week after it was
+written, so name the variable instead:
 
 ```console
-warn capture.empty exchanges=0 cause="the agent never called the proxy — it may not read a base-URL variable" set=ANTHROPIC_BASE_URL,OPENAI_API_BASE,OPENAI_BASE_URL next="orca doctor"
+ORCA_BASE_URL_VARS='OPENROUTER_BASE_URL' orca record generic-openai -- hermes
+ORCA_BASE_URL_VARS='GLM_BASE_URL,KIMI_BASE_URL' orca record generic-openai -- my-agent
+ORCA_BASE_URL_VARS='SOMETHING_BASE_URL=/' orca record node -- node agent.mjs
 ```
+
+Each name is pointed at the proxy with `/v1` appended, which is what an OpenAI-compatible override
+wants; `=<path>` overrides that, and `=/` gives the bare origin.
+
+If you record an agent this way and it works, an adapter is about twenty lines —
+[docs/plugins.md](docs/plugins.md). If it does not, the trace is the most useful thing you can send:
+`orca export last -o run.html`.
 
 ## When the harness will not be redirected
 
