@@ -5,12 +5,5 @@
     "rootDir": "src"
   },
   "include": ["src/**/*.ts"],
-  "references": [
-    {
-      "path": "../plugin-api"
-    },
-    {
-      "path": "../node-instrument"
-    }
-  ]
+  "references": []
 }

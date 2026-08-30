@@ -180,8 +180,28 @@ export interface ProxyHandle {
 
 /**
  * Hop-by-hop headers, dropped before forwarding because they describe *this* connection.
+ *
+ * The full RFC 7230 §6.1 set, plus `host` and `accept-encoding`, which describe this hop for the
+ * same reason. `transfer-encoding` is the one that was missing and the one that bites: an SDK
+ * that hands `fetch` a `Request` — or any stream body — sends `transfer-encoding: chunked` and no
+ * `content-length`, and orca then copied that header onto an outbound call whose body it had
+ * already buffered. undici refuses the contradiction, so the agent got
+ * `500 {"error":{"message":"TypeError: fetch failed"}}` on every such turn, with nothing in the
+ * message pointing at a header, at orca, or at the agent.
  */
-const HOP_BY_HOP_HEADERS = new Set(['host', 'connection', 'content-length', 'accept-encoding']);
+const HOP_BY_HOP_HEADERS = new Set([
+  'host',
+  'connection',
+  'content-length',
+  'accept-encoding',
+  'transfer-encoding',
+  'te',
+  'trailer',
+  'upgrade',
+  'keep-alive',
+  'proxy-connection',
+  'proxy-authenticate',
+]);
 
 /**
  * Auth material. Forwarded upstream — an agent that cannot authenticate is an agent that cannot
@@ -228,6 +248,16 @@ async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(chunk as Buffer);
   return Buffer.concat(chunks).toString('utf8');
+}
+
+/** Is this something a dialect could parse at all? Cheap guard, run before anything is forwarded. */
+function isReadable(rawBody: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(rawBody);
+    return typeof parsed === 'object' && parsed !== null;
+  } catch {
+    return false;
+  }
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -666,6 +696,21 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
 
     if (!dialect) {
       await passThrough(path, rawBody, headers, recordableHeaders, res, startedAt);
+      return;
+    }
+
+    // Parsed here rather than inside `goLive`, which read it unguarded — so a body orca could not
+    // read reached the server's catch-all and came back as `500 SyntaxError: …`. To whoever is
+    // running the agent that reads as orca falling over, and sends them to orca's issue tracker
+    // instead of to the line of their own harness that sent it. Replay already answered 400.
+    if (!isReadable(rawBody)) {
+      json(res, 400, {
+        error: {
+          message:
+            `orca proxy could not read the body of POST ${path}: expected JSON, got ` +
+            `${rawBody === '' ? 'an empty body' : `${rawBody.length} bytes that do not parse`}`,
+        },
+      });
       return;
     }
 

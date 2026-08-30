@@ -1,0 +1,21 @@
+{
+  "adapter": "node",
+  "harness_versions": null,
+  "verified_at": "2026-08-30",
+  "command": "my-agent",
+  "env_vars": [
+    "ANTHROPIC_BASE_URL",
+    "NODE_OPTIONS",
+    "OPENAI_API_BASE",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "ORCA_PROXY_URL"
+  ],
+  "base_urls": {
+    "OPENAI_BASE_URL": "/v1",
+    "OPENAI_API_BASE": "/v1",
+    "ANTHROPIC_BASE_URL": ""
+  },
+  "optional_env_vars": ["ANTHROPIC_API_KEY", "ORCA_INSTRUMENT_HOSTS"],
+  "note": "Not a harness but a runtime: the command is the first user arg, as with generic-openai. NODE_OPTIONS carries --require of the fetch hook written into ctx.runDir, which is the only reason this adapter exists — an agent on the Vercel AI SDK reads none of the base-url variables. They are set anyway because one agent may use an SDK default client for one provider and a hardcoded origin for another. harness_versions is null because the thing being pinned would be Node itself, and the hook uses nothing newer than the CLI's own floor."
+}

@@ -1,6 +1,8 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import type { Adapter, Launch, RecordContext } from '@orcareplay/plugin-api';
 import { defaultAdapters } from '../src/index.js';
 
@@ -40,12 +42,21 @@ interface HarnessFixture {
   note?: string;
 }
 
+/**
+ * A real directory, because `ctx.runDir` is where the contract tells an adapter to put scratch
+ * files — the MCP config rewrite and the fetch instrument both write one. With `/work` hardcoded
+ * here, the first adapter to do that created a directory at the filesystem root on whoever ran
+ * the tests, or failed outright on a machine where they could not.
+ */
+const SCRATCH = mkdtempSync(join(tmpdir(), 'orca-harness-fixture-'));
+afterAll(() => rmSync(SCRATCH, { recursive: true, force: true }));
+
 function ctx(over: Partial<RecordContext> = {}): RecordContext {
   return {
     runId: 'run_fixture',
-    cwd: '/work',
+    cwd: join(SCRATCH, 'work'),
     proxyUrl: PROXY,
-    runDir: '/work/.orca/runs/run_fixture',
+    runDir: join(SCRATCH, 'work', '.orca', 'runs', 'run_fixture'),
     userArgs: [...USER_ARGS],
     env: {},
     ...over,
