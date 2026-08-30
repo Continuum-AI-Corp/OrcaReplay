@@ -1,21 +1,45 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { access, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, extname, join } from 'node:path';
 
 /**
  * Detection runs before every recording, and a detector that throws would take the whole run with
  * it. Every helper here answers false instead of failing.
  */
 export async function hasBinary(name: string): Promise<boolean> {
-  const lookup = process.platform === 'win32' ? 'where' : 'which';
+  if (process.platform === 'win32') return hasWindowsBinary(name, process.env.PATH ?? '');
+
   return new Promise((resolve) => {
     // execFile, never a shell: `name` reaches the lookup as one argv element, so an agent id
     // carrying shell metacharacters cannot become a command.
-    execFile(lookup, [name], { timeout: 5_000, windowsHide: true }, (err, stdout) => {
+    execFile('which', [name], { timeout: 5_000 }, (err, stdout) => {
       resolve(!err && stdout.trim().length > 0);
     });
   });
+}
+
+async function hasWindowsBinary(name: string, pathVar: string): Promise<boolean> {
+  const extensions =
+    extname(name) !== ''
+      ? ['']
+      : (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean);
+  for (const entry of pathVar.split(delimiter)) {
+    if (entry === '') continue;
+    for (const extension of extensions) {
+      const candidate = join(entry, `${name}${extension.toLowerCase()}`);
+      try {
+        if ((await stat(candidate)).isFile()) {
+          await access(candidate);
+          return true;
+        }
+      } catch {
+        // Keep searching the rest of PATH. Detection must never take the CLI down.
+      }
+    }
+  }
+  return false;
 }
 
 /**

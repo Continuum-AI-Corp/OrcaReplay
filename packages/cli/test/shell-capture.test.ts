@@ -18,7 +18,7 @@ const run = promisify(execFile);
  * real duration, and a stdout/stderr split. The model only ever sees the harness's rendering of
  * the output, one turn late.
  */
-describe('shell capture', () => {
+describe.skipIf(process.platform === 'win32')('shell capture (POSIX)', () => {
   let workspace: string;
   let model: Awaited<ReturnType<typeof startFakeModel>>;
   let out: Output;

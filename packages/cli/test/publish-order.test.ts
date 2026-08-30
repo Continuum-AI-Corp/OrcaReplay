@@ -1,9 +1,10 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-const repoRoot = join(dirname(new URL(import.meta.url).pathname), '..', '..', '..');
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const script = join(repoRoot, 'scripts', 'publish-order.mjs');
 
 const order = (): string[] =>

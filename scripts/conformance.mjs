@@ -15,10 +15,11 @@
 import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { EVENT_TYPES, validateEvent, validateManifest } from '../packages/schema/dist/index.js';
 import { TraceWriter } from '../packages/core/dist/index.js';
 
-const root = new URL('..', import.meta.url).pathname;
+const root = fileURLToPath(new URL('..', import.meta.url));
 const examplesDir = join(root, 'examples', 'traces');
 
 let checked = 0;
