@@ -11,12 +11,24 @@ import {
   canonicalToOpenaiRequest,
   canonicalToOpenaiResponse,
   canonicalToOpenaiSse,
+  canonicalToResponsesRequest,
+  canonicalToResponsesResponse,
+  canonicalToResponsesSse,
   openaiToCanonicalRequest,
   openaiToCanonicalResponse,
   parseAnthropicSse,
   parseOpenaiSse,
+  parseResponsesSse,
+  responsesToCanonicalRequest,
+  responsesToCanonicalResponse,
 } from '@orcareplay/providers';
-import { anthropicDialect, openaiDialect, selectDialect, type Dialect } from './dialects.js';
+import {
+  anthropicDialect,
+  openaiDialect,
+  responsesDialect,
+  selectDialect,
+  type Dialect,
+} from './dialects.js';
 import { attachTlsIntercept, type NetExchange, type TlsInterceptOptions } from './intercept.js';
 import { RequestMatcher, type Divergence } from './matching.js';
 
@@ -180,6 +192,15 @@ export function defaultDialects(): Dialect[] {
       fromCanonicalResponse: canonicalToOpenaiResponse,
       toSse: canonicalToOpenaiSse,
     }),
+    // After the chat dialect deliberately: see the note on `responsesDialect`.
+    responsesDialect({
+      toCanonicalRequest: responsesToCanonicalRequest,
+      toCanonicalResponse: responsesToCanonicalResponse,
+      parseSse: parseResponsesSse,
+      fromCanonicalRequest: canonicalToResponsesRequest,
+      fromCanonicalResponse: canonicalToResponsesResponse,
+      toSse: canonicalToResponsesSse,
+    }),
   ];
 }
 
@@ -288,8 +309,12 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     // came from the *recorded* request, so forking an Anthropic run onto gpt-5.2 posted an
     // Anthropic body to api.anthropic.com naming a model that does not exist there — the
     // cross-provider comparison the tool is pitched on could not have worked.
+    // The recorded dialect wins whenever it can serve the model, and only then do we go looking.
+    // Two dialects now share a provider — chat completions and Responses both answer for anything
+    // that is not Claude — so a bare `find` would route every Responses fork to chat completions
+    // and translate a turn that never needed translating.
     const target =
-      options.forkModel === undefined
+      options.forkModel === undefined || dialect.ownsModel(options.forkModel)
         ? dialect
         : (dialects.find((d) => d.ownsModel(options.forkModel!)) ?? dialect);
     const crossProvider = target.id !== dialect.id;
