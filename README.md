@@ -520,10 +520,13 @@ Always open, under Apache-2.0: the trace format, the core, the CLI, the viewer, 
 the provider interface.
 
 OrcaReplay is built by the people who build [OrcaRouter](https://www.orcarouter.ai), and that shows
-up in exactly one place: `orca setup` suggests it when you do not name a gateway. That is a default
-you can see and overtype, on a question you chose to answer — not a route anything takes on its own.
-Every model path stays a plain URL you can point anywhere, and there is no code path that treats
-that origin differently from any other.
+up in two places, both of them things you asked for. `orca setup` suggests it when you do not name a
+gateway — a default you can see and overtype, on a question you chose to answer, not a route
+anything takes on its own. And an artefact you explicitly generate — an export, a `--share` card —
+signs itself "built by the @OrcaRouter team", the way a chart carries its source.
+
+Every model path stays a plain URL you can point anywhere, there is no code path that treats that
+origin differently from any other, and a credit line routes nothing anywhere.
 
 What the vendor does *not* get is privilege. A plugin — OrcaRouter's included — may use only the
 public `Provider` interface in `@orcareplay/plugin-api`, with no private API behind it. No vendor

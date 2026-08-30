@@ -1,3 +1,4 @@
+import { CREDIT_MADE_BY, CREDIT_REPO } from '@orcareplay/viewer';
 import type { CompareRow } from './commands/compare.js';
 
 /**
@@ -77,7 +78,8 @@ ${text(470, HEADER - 30, 'COST', { size: 9, mono: true, fill: '#6B7578' })}
 ${text(600, HEADER - 30, 'WALL', { size: 9, mono: true, fill: '#6B7578' })}
 ${body}${empty}
 <line x1="0" y1="${height - FOOTER + 14}" x2="${WIDTH}" y2="${height - FOOTER + 14}" stroke="#1F2426"/>
-${text(28, height - 16, 'Recorded with OrcaReplay · github.com/Continuum-AI-Corp/OrcaReplay', { size: 11, mono: true, fill: '#6B7578' })}
+${text(28, height - 16, CREDIT_MADE_BY, { size: 10, mono: true, fill: '#6B7578' })}
+${text(WIDTH - 28, height - 16, CREDIT_REPO, { size: 10, mono: true, fill: '#6B7578', anchor: 'end' })}
 </svg>`;
 }
 
@@ -86,15 +88,20 @@ interface TextOptions {
   weight?: number;
   fill?: string;
   mono?: boolean;
+  /** Anchor at `x` rather than starting from it, for text set against the right margin. */
+  anchor?: 'end';
 }
 
 function text(x: number, y: number, value: string, options: TextOptions): string {
   const family = options.mono
     ? 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
     : 'system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif';
-  return `<text x="${x}" y="${y}" font-family="${family}" font-size="${options.size}" font-weight="${
-    options.weight ?? 400
-  }" fill="${options.fill ?? '#E8ECEC'}">${escapeXml(value)}</text>`;
+  const anchor = options.anchor ? ` text-anchor="${options.anchor}"` : '';
+  return `<text x="${x}" y="${y}"${anchor} font-family="${family}" font-size="${
+    options.size
+  }" font-weight="${options.weight ?? 400}" fill="${
+    options.fill ?? '#E8ECEC'
+  }">${escapeXml(value)}</text>`;
 }
 
 /** Model names come out of a trace, which is someone else's machine. Treat them as untrusted. */

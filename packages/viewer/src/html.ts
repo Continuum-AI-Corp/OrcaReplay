@@ -12,6 +12,7 @@
  */
 
 import type { BlobRef, Manifest, TraceEvent } from '@orcareplay/schema';
+import { CREDIT_LINE } from './credit.js';
 import { CLIENT_SOURCE } from './client/main.js';
 import { VIEWER_CSS } from './css.js';
 import {
@@ -302,7 +303,7 @@ ${list}
 </section>
 <section class="pane-col" aria-label="Event detail">${panes}</section>
 </main>
-<footer>Recorded with OrcaReplay · github.com/Continuum-AI-Corp/OrcaReplay</footer>
+<footer>${CREDIT_LINE}</footer>
 <script>${script}</script>
 </body>
 </html>

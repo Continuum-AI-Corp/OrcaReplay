@@ -189,6 +189,28 @@ has to carry its own context. And the legend ships on the card, because a dashed
 that travels without its trace launders a guess into a fact — the same discipline that makes
 `renderCompareCard` print the verify command next to the costs.
 
+### Attribution
+
+Both cards and the exported page sign themselves, from one constant so they cannot drift:
+
+```
+Recorded with OrcaReplay · built by the @OrcaRouter team    github.com/Continuum-AI-Corp/OrcaReplay
+```
+
+Shipped ahead of the rest of this plan, since `renderCompareCard` and the viewer footer both
+existed already and both carried the same literal in two packages. It now lives in
+`packages/viewer/src/credit.ts` — `viewer` is the package that already owns what an exported
+artefact says about itself, and `cli` already depends on it, so no new edge in the package graph.
+
+The card sets the two halves against opposite margins at 10px rather than one line at 11px: together
+they are 95 characters, and at 11px the halves leave 37px between them — close enough that a
+monospace fallback advancing wider than the one this was measured in would overlap them.
+
+This makes the README's old "shows up in exactly one place" claim false, so that section now says
+two places and draws the line where it actually matters: a default you can overtype and a credit on
+an artefact you asked for are both opt-in, and neither is a code path or a route. Vendor neutrality
+is about where bytes go, not about a byline.
+
 **Picking the chain is the hard part**, and it *is* the feature. A defensible default: the chain
 ending at the run's most interesting event — a non-zero `shell.result`, an `error`, a `divergence`,
 else the last `fs.change` — with `--seq N` to name one outright. When nothing stands out, refuse

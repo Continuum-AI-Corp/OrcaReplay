@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { CREDIT_MADE_BY, CREDIT_REPO } from '@orcareplay/viewer';
 import { renderCompareCard } from '../src/share-card.js';
 import type { CompareRow } from '../src/commands/compare.js';
 
@@ -84,7 +85,17 @@ describe('renderCompareCard', () => {
   });
 
   it('carries the attribution line that makes sharing a conversion path', () => {
-    expect(renderCompareCard(rows, meta)).toContain('OrcaReplay');
+    const svg = renderCompareCard(rows, meta);
+    expect(svg).toContain(CREDIT_MADE_BY);
+    expect(svg).toContain(CREDIT_REPO);
+  });
+
+  // The card and the exported page are the two things a stranger sees first, and they used to
+  // carry the same literal in two packages. Asserting against the constant is what keeps a change
+  // to one from silently leaving the other behind.
+  it('credits the team from the same constant the exported page uses', () => {
+    expect(CREDIT_MADE_BY).toContain('@OrcaRouter');
+    expect(renderCompareCard(rows, meta)).toContain('text-anchor="end"');
   });
 
   it('survives an empty comparison without producing broken markup', () => {
