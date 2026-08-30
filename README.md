@@ -177,6 +177,7 @@ FROM              TO               KIND      WHY
 4 tool.call       6 fs.change      inferred  changed path appears in tool input, same or previous turn
 4 tool.call       7 tool.result    recorded  tool result answers its call
 7 tool.result     8 model.request  recorded  tool_result block in the request
+11 shell.exec     12 shell.result  recorded  shell result answers its exec
 
   1 inferred — derived from this trace, not recorded in it
 ```
@@ -189,8 +190,23 @@ is a good guess and not a fact. Inferred edges are never written back into the t
 checkpoints are derived and never recorded, so a field a third-party reader trusts never contains
 something orca made up.
 
-`orca export last --card bug.svg` draws that chain as a picture you can paste into an issue, and
-`--graph-card` draws the whole run with the chain lit against it.
+`--graph-card` draws the whole run that way — time left to right, kind of thing top to bottom, with
+the chain that produced the failure lit against everything else:
+
+![The same run as a causal graph: model, tool and effect lanes across three turns, with the chain to the failing check lit and the inferred hops dashed](docs/graph-card.png)
+
+The shape is the point. A run is one motif repeated — request, response, call, effect, result — so
+anything that breaks it is worth a look, and an event with **no edge leaving it** is an absence a
+list cannot show at all.
+
+`orca export last --card bug.svg` draws just that chain, which is the version that fits in an issue
+or a message:
+
+![One causal chain: a model response, the bash tool call it emitted, the shell command, and its exit 1](docs/chain-card.png)
+
+Nothing picked the subject by hand — `--to` was not passed. The card carries its own legend because
+a dashed line travelling without its trace would otherwise launder a guess into a fact, and it
+prints the command that reproduces it.
 
 SVG renders in a GitHub issue and almost nowhere else that matters — X will not take it as an
 upload, and Slack and Discord give it no preview — so name the file `.png` and you get one, or
@@ -450,7 +466,7 @@ that does either cannot be built on.
 ## Status
 
 Early. `v0` is the walking skeleton of the three commands above. Everything below is exercised by
-1,243 tests, the trace-format conformance check and a plugin-API neutrality check, on Node 20 and 22.
+1,393 tests, the trace-format conformance check and a plugin-API neutrality check, on Node 20 and 22.
 
 | Capability | State |
 |---|---|
