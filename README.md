@@ -284,7 +284,27 @@ whether orca understands the wire format it speaks once it arrives.
 | **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | works |
 | **Vercel AI SDK** | fetch hook — `orca record node -- node app.mjs` | works |
 | **LangGraph / LangChain** | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | should work — it goes through the official clients, but nothing here tests it yet |
-| **opencode**, anything else | `orca record generic-openai -- <cmd>` | works if it reads a base-URL variable; `node` if it does not |
+| **opencode** | `orca record opencode` | adapter shipped, both origins redirected |
+| **anything else** | `orca record generic-openai -- <cmd>` | works if it reads a base-URL variable; `orca record node -- <cmd>` if it does not |
+
+Only Claude Code has been driven end to end against the real harness — see
+[what a real agent found](#what-a-real-agent-found). The rest are held to the adapter contract and
+to fixtures that record the exact variables each one sets, so a harness that renames the variable
+it reads turns a check red instead of producing an empty trace.
+
+**Agents nobody has recorded yet.** These come up, and the honest answer is the same for all of
+them: orca instruments a *process*, not a product, and the environment it sets is inherited by
+everything that process spawns. So the question is only ever which of the three shapes below your
+agent has.
+
+| | Shape | Try |
+|---|---|---|
+| **grok-cli** | Bun, xAI's OpenAI-compatible endpoint | `ORCA_INSTRUMENT_HOSTS='api.x.ai' orca record node -- grok` |
+| **Hermes** (Nous Research) | a persistent daemon, model endpoint set in its own config | point it at the proxy URL `orca record` prints, or record the CLI invocation |
+| **OpenClaw** | a gateway that launches Claude Code, Codex or opencode as subprocesses | `orca record generic-openai -- openclaw …` — the child inherits the redirect |
+
+None of the three is tested here and none has an adapter. If you record one, the trace is the most
+useful thing you can send: `orca export last -o run.html`.
 
 Two of those needed more than an environment variable, and the difference is worth knowing about
 before you pick a command.
@@ -309,6 +329,11 @@ ORCA_INSTRUMENT_HOSTS='contoso.openai.azure.com' orca record node -- node agent.
 It is a separate adapter rather than the default because `NODE_OPTIONS` reaches every Node process
 the agent spawns — worth paying when you know your agent needs it, not worth imposing on someone
 recording a Python harness.
+
+Bun accepts `NODE_OPTIONS` but ignores `--require` inside it, so `BUN_OPTIONS=--preload` is set
+alongside it and a Bun-based agent is covered too. That is checked against a real `bun`, because
+the failure it prevents is the silent one: the hook not running, and the traffic going to the
+provider unrecorded.
 
 **And when the trace comes back empty anyway**, `orca record` says so rather than exiting cleanly:
 
@@ -390,7 +415,7 @@ Early. `v0` is the walking skeleton of the three commands above. Everything belo
 | Trace format v0 + JSON Schema | working |
 | Anthropic / OpenAI-compatible model capture | working |
 | OpenAI Responses API capture | working — the format the OpenAI Agents SDK and the Codex CLI default to. Records, replays offline and forks; a fork stays on the wire format the agent speaks |
-| Agents that read no base-URL variable | working — `orca record node -- <cmd>` writes a preload into the run directory and redirects `globalThis.fetch` for an allowlist of provider hosts. This is how a Vercel AI SDK agent is captured |
+| Agents that read no base-URL variable | working — `orca record node -- <cmd>` writes a preload into the run directory and redirects `globalThis.fetch` for an allowlist of provider hosts. Node and Bun both, since Bun ignores `--require` in `NODE_OPTIONS`. This is how a Vercel AI SDK agent is captured |
 | A call orca cannot read | working — forwarded rather than refused, and recorded as `net.request` / `net.response`: evidence, not a replayable turn. A recording that captured nothing warns instead of exiting clean |
 | Machine-readable output (`--json`) | working — one JSON document on stdout, diagnostics on stderr, failures as JSON |
 | MCP server (`orca mcp`) | working — five tools over stdio, so an agent can read and replay its own runs |

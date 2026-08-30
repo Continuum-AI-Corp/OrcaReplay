@@ -1,4 +1,9 @@
-import { HOOK_FILENAME, nodeOptionsWithHook, writeFetchHook } from '@orcareplay/node-instrument';
+import {
+  HOOK_FILENAME,
+  bunOptionsWithHook,
+  nodeOptionsWithHook,
+  writeFetchHook,
+} from '@orcareplay/node-instrument';
 import type { Adapter, Launch, RecordContext } from '@orcareplay/plugin-api';
 import { passKey, passThrough, proxyBase, readEnv } from './env.js';
 
@@ -44,6 +49,10 @@ export const nodeAdapter: Adapter = {
       // on disk in a run directory someone later opens.
       ORCA_PROXY_URL: ctx.proxyUrl,
       NODE_OPTIONS: nodeOptionsWithHook(hookPath, readEnv(ctx.env, 'NODE_OPTIONS')),
+      // Bun accepts NODE_OPTIONS but ignores `--require` in it, so a Bun-based agent — grok-cli is
+      // the one people hit — ran uninstrumented and its traffic went to the provider unrecorded.
+      // Setting both costs nothing: each runtime reads only its own.
+      BUN_OPTIONS: bunOptionsWithHook(hookPath, readEnv(ctx.env, 'BUN_OPTIONS')),
       // Belt and braces. One agent may use an SDK's default client for one provider and a
       // hardcoded origin for another, and orca has no way to tell which from the outside.
       OPENAI_BASE_URL: proxyBase(ctx.proxyUrl, 'v1'),

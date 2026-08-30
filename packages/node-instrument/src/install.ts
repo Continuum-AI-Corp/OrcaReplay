@@ -101,16 +101,33 @@ export async function writeFetchHook(dir: string): Promise<string> {
 }
 
 /**
- * `NODE_OPTIONS` with the hook added, preserving whatever the user already had there.
+ * Add a flag to an options variable, preserving whatever the user already had there.
  *
- * Quoted, because NODE_OPTIONS is split on whitespace and a macOS home directory routinely has a
- * space in it — an unquoted path there makes node reject the whole variable and the agent never
- * starts.
+ * Quoted, because these variables are split on whitespace and a macOS home directory routinely has
+ * a space in it — an unquoted path makes the runtime reject the whole variable, and the agent then
+ * never starts at all.
  */
-export function nodeOptionsWithHook(hookPath: string, existing: string | undefined): string {
+function withHook(flag: string, hookPath: string, existing: string | undefined): string {
   const quoted = hookPath.includes(' ') ? `"${hookPath}"` : hookPath;
   const current = existing ?? '';
   if (current.includes(quoted)) return current;
-  const flag = `--require ${quoted}`;
-  return current === '' ? flag : `${current} ${flag}`;
+  const added = `${flag} ${quoted}`;
+  return current === '' ? added : `${current} ${added}`;
+}
+
+/** `NODE_OPTIONS` with the hook added. */
+export function nodeOptionsWithHook(hookPath: string, existing: string | undefined): string {
+  return withHook('--require', hookPath, existing);
+}
+
+/**
+ * `BUN_OPTIONS` with the hook added.
+ *
+ * Bun accepts `NODE_OPTIONS` but ignores `--require` inside it, so a Bun-based agent ran
+ * uninstrumented and its traffic went straight to the provider — a silent miss, and the shape this
+ * package exists to prevent. `--preload` is Bun's own spelling and `BUN_OPTIONS` is how it reaches
+ * a command orca did not write. Both were checked against a real `bun` before this was written.
+ */
+export function bunOptionsWithHook(hookPath: string, existing: string | undefined): string {
+  return withHook('--preload', hookPath, existing);
 }

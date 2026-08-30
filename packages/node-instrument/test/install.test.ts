@@ -1,11 +1,16 @@
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { HOOK_FILENAME, nodeOptionsWithHook, writeFetchHook } from '../src/install.js';
+import {
+  HOOK_FILENAME,
+  bunOptionsWithHook,
+  nodeOptionsWithHook,
+  writeFetchHook,
+} from '../src/install.js';
 import { DEFAULT_INSTRUMENTED_HOSTS, hostMatches, rewriteUrl } from '../src/rewrite.js';
 
 const run = promisify(execFile);
@@ -63,6 +68,27 @@ describe('writeFetchHook', () => {
   it('is valid JavaScript that a bare node can load', async () => {
     const path = await writeFetchHook(dir);
     await expect(run(process.execPath, ['--check', path])).resolves.toBeDefined();
+  });
+});
+
+describe('bunOptionsWithHook', () => {
+  it('preloads the hook, because Bun ignores --require in NODE_OPTIONS', () => {
+    // Verified, not assumed: with NODE_OPTIONS=--require the hook never runs under Bun and the
+    // request goes to the real provider. Bun's own --preload does run it, and BUN_OPTIONS is how
+    // that reaches a command orca did not write. grok-cli is the agent this matters for today.
+    const composed = bunOptionsWithHook('/run/hook.cjs', undefined);
+    expect(composed).toContain('--preload');
+    expect(composed).toContain('/run/hook.cjs');
+  });
+
+  it('preserves options the user already set, and does not add the hook twice', () => {
+    const once = bunOptionsWithHook('/run/hook.cjs', '--smol');
+    expect(once).toContain('--smol');
+    expect(bunOptionsWithHook('/run/hook.cjs', once)).toBe(once);
+  });
+
+  it('quotes a path containing a space', () => {
+    expect(bunOptionsWithHook('/Users/a b/hook.cjs', undefined)).toContain('"/Users/a b/hook.cjs"');
   });
 });
 
@@ -281,5 +307,75 @@ describe('the body of a rewritten Request', () => {
     await runAgent(`await fetch(new Request('https://api.openai.com/v1/models'));`);
     expect(seen[0]!.method).toBe('GET');
     expect(seen[0]!.body).toBe('');
+  });
+});
+
+/**
+ * The same hook, under Bun.
+ *
+ * Skipped where `bun` is not installed — CI runners have Node only — but it is the test that
+ * caught the gap: with `NODE_OPTIONS=--require` the hook silently does not run under Bun, and the
+ * agent's traffic goes to the real provider unrecorded. An agent that quietly escapes capture is
+ * exactly what this package exists to prevent, so the escape hatch gets a real runtime.
+ */
+const hasBun = (() => {
+  try {
+    execFileSync('bun', ['--version'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+describe.skipIf(!hasBun)('the hook under Bun', () => {
+  let dir: string;
+  let seen: string[];
+  let server: ReturnType<typeof createServer>;
+  let url: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'orca-hook-bun-'));
+    seen = [];
+    server = createServer((req, res) => {
+      seen.push(req.url ?? '');
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"ok":true}');
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  });
+  afterEach(async () => {
+    await new Promise<void>((r) => void server.close(() => r()));
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const AGENT = `
+    const r = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"model":"x"}',
+    });
+    console.log(r.status);
+  `;
+
+  it('runs when BUN_OPTIONS carries --preload', async () => {
+    const hook = await writeFetchHook(dir);
+    const agent = join(dir, 'agent.mjs');
+    await writeFile(agent, AGENT);
+
+    await run('bun', [agent], {
+      env: {
+        ...process.env,
+        ORCA_PROXY_URL: url,
+        BUN_OPTIONS: bunOptionsWithHook(hook, undefined),
+      },
+    });
+
+    expect(seen).toEqual(['/v1/responses']);
+  });
+
+  it('is what the node adapter sets, so `orca record node` covers a Bun agent', async () => {
+    // NODE_OPTIONS alone is not enough here, which is the whole reason BUN_OPTIONS is set too.
+    const hook = await writeFetchHook(dir);
+    expect(nodeOptionsWithHook(hook, undefined)).toContain('--require');
+    expect(bunOptionsWithHook(hook, undefined)).toContain('--preload');
   });
 });
