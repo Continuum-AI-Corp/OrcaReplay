@@ -37,6 +37,7 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
         --to N                   just the chain that produced event N
   orca export [run] -o file.html a single self-contained file you can attach
         --card [file.svg]        one causal chain as a picture, ready to paste
+        --graph-card [file.svg]  the whole run as a graph, with the chain lit
         --to N                   which event the card is about (default: the failure)
   orca scrub [run] --match X     remove something from a recorded trace
         --dry-run                say what would go, and write nothing

@@ -21,7 +21,7 @@ import { priceFor } from '@orcareplay/providers';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
 import { formatCost } from './compare.js';
-import { renderChainCard, svgTarget } from '../share-card.js';
+import { renderChainCard, renderGraphCard, scopeForCard, svgTarget } from '../share-card.js';
 
 /** `orca list` — what runs are here, newest first. */
 export async function listCommand(
@@ -210,6 +210,23 @@ export async function exportCommand(
   // `--card` is a different artefact from `--out`, not a variation on it: one chain as a picture
   // rather than the whole trace as a page. It leaks far less too — a card carries the events on
   // one chain and none of the payloads — so it does not print the disclosure the page needs.
+  // The graph card shows the shape of a run; the chain card follows one path through it. Two
+  // different pictures, so two flags rather than a mode switch on one.
+  if (args.has('graph-card')) {
+    const cardPath = resolve(cwd, svgTarget(args.str('graph-card') ?? 'graph.svg', '--graph-card'));
+    const events = await reader.events();
+    const graph = runGraph(events);
+    const to = args.num('to') ?? pickChainTarget(events);
+    const highlight = new Set(to === undefined ? [] : chainTo(graph, to).nodes.map((n) => n.seq));
+    const svg = renderGraphCard(scopeForCard(graph, highlight), {
+      runId: manifest.run_id,
+      highlight,
+    });
+    await writeFile(cardPath, svg, 'utf8');
+    out.phase('carded', { path: cardPath, bytes: Buffer.byteLength(svg), kind: 'graph' });
+    return;
+  }
+
   if (args.has('card')) {
     const cardPath = resolve(cwd, svgTarget(args.str('card') ?? 'chain.svg', '--card'));
     const events = await reader.events();
