@@ -58,6 +58,13 @@ OrcaReplay 的回答方式，是把那次运行还给你。
 | 让你换个模型、从第 4 步重跑 | ❌ | ✅ |
 | 需要你改造 agent | 通常要套一层 SDK | ❌ 两个环境变量 |
 | 关掉终端之后还能用 | ❌ | ✅ 它就是个文件 |
+| 看得见模型 API 之外的事——shell 退出码、文件写入 | ❌ | ✅ 每一轮都有 |
+| 记录一个没有 API 端点可改道的 agent | ❌ | ✅ 需自行开启 `--tls-intercept` |
+
+最后两行是套一层 SDK 在结构上就够不着的。捕获发生在 agent **下面**——进程与套接字这一层——所以
+agent 是不是你写的、你能不能改它、它手里有没有 API key，都不重要：用 ChatGPT 订阅登录的 Codex CLI
+通过 TLS 和自家后端对话，没有任何 base URL 可以指向别处，orca 照样能录下它。见
+[当 harness 不肯被改道时](#当-harness-不肯被改道时)。
 
 ## 它是怎么工作的
 
@@ -334,6 +341,9 @@ orca record codex --tls-intercept --tls-hosts 'api.openai.com,*.chatgpt.com'
 信任库——并在运行结束时删除。orca 不会主动提出把它装到任何地方。白名单之外的主机会被原样隧道转发、
 不被读取，只记录一个地址和一个字节数，没有路径也没有 body，因为 orca 从未持有过明文。要求拦截一切
 会被拒绝，而不是被满足。
+
+从中回来的东西不是一行日志。被拦截的请求由同一套 wire dialect 解析，因此它作为一次普通的交换落进
+trace——可以离线重放，也可以分叉到另一个模型，而这次运行里从来没有出现过你的 API key。
 
 它在 `orca replay --model`、`orca fork` 和 `orca compare` 上同样有效——它们出于同样的原因会启动一个
 真实的 agent。

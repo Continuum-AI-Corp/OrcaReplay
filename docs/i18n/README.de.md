@@ -62,6 +62,16 @@ OrcaReplay beantwortet sie, indem es dir den Lauf zurückgibt.
 | Lässt dich das Modell wechseln und ab Schritt 4 neu laufen | ❌ | ✅ |
 | Verlangt Änderungen an deinem Agenten | meist ein SDK-Wrapper | ❌ zwei Umgebungsvariablen |
 | Funktioniert, nachdem du das Terminal geschlossen hast | ❌ | ✅ es ist eine Datei |
+| Sieht über die Modell-API hinaus — Shell-Exit-Codes, Dateischreibvorgänge | ❌ | ✅ in jeder Runde |
+| Zeichnet einen Agenten ohne umlenkbaren API-Endpunkt auf | ❌ | ✅ opt-in mit `--tls-intercept` |
+
+Die letzten beiden Zeilen sind die, an die ein SDK-Wrapper strukturell nicht herankommt. Die
+Aufzeichnung passiert *unterhalb* des Agenten — an der Prozess- und Socket-Grenze — und deshalb
+spielt es keine Rolle, ob der Agent von dir ist, ob du ihn ändern kannst oder ob er überhaupt einen
+API-Schlüssel hat: Eine Codex-CLI, die mit einem ChatGPT-Abo angemeldet ist, spricht über TLS mit
+ihrem eigenen Backend und hat keine Base-URL, die man irgendwohin zeigen lassen könnte — und orca
+kann sie trotzdem aufzeichnen. Siehe
+[wenn sich das Harness nicht umlenken lässt](#wenn-sich-das-harness-nicht-umlenken-lässt).
 
 ## Wie es funktioniert
 
@@ -376,6 +386,11 @@ des Laufs gelöscht. Orca bietet nicht an, sie irgendwo zu installieren. Hosts a
 Allowlist werden ungelesen getunnelt und als Adresse plus Byte-Zahl aufgezeichnet, ohne Pfad und
 ohne Body, weil orca den Klartext nie hatte. Die Bitte, alles abzufangen, wird abgelehnt statt
 erfüllt.
+
+Was dabei zurückkommt, ist keine Logzeile. Eine abgefangene Anfrage wird von denselben
+Wire-Dialekten geparst wie jede andere und landet als ganz normaler Austausch im Trace — offline
+abspielbar und auf ein anderes Modell forkbar, bei einem Lauf, in dem nie ein Schlüssel von dir
+steckte.
 
 Es funktioniert auch bei `orca replay --model`, `orca fork` und `orca compare`, die aus demselben
 Grund einen echten Agenten starten.

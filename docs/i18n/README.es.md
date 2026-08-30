@@ -63,6 +63,15 @@ OrcaReplay la responde devolviéndote la ejecución.
 | Te deja cambiar de modelo y repetir desde el paso 4 | ❌ | ✅ |
 | Exige modificar tu agente | normalmente un wrapper de SDK | ❌ dos variables de entorno |
 | Sirve después de cerrar el terminal | ❌ | ✅ es un archivo |
+| Ve más allá de la API del modelo — códigos de salida de shell, escrituras de archivos | ❌ | ✅ en cada turno |
+| Graba un agente sin endpoint de API que redirigir | ❌ | ✅ opt-in `--tls-intercept` |
+
+Las dos últimas filas son las que un wrapper de SDK no puede alcanzar por construcción. La captura
+ocurre *por debajo* del agente —en la frontera de procesos y sockets—, así que da igual si el agente
+es tuyo, si puedes editarlo o si siquiera tiene una clave de API: un Codex CLI conectado con una
+suscripción de ChatGPT habla con su propio backend por TLS y no tiene ninguna base URL que apuntar a
+otro sitio, y orca lo graba igualmente. Ver
+[cuando el harness no se deja redirigir](#cuando-el-harness-no-se-deja-redirigir).
 
 ## Cómo funciona
 
@@ -372,6 +381,11 @@ borra al terminar. Orca no se ofrecerá a instalarla en ningún sitio. Los hosts
 permitidos se tunelizan sin leerse y se graban como una dirección y un número de bytes, sin ruta y
 sin cuerpo, porque orca nunca tuvo el texto en claro. Pedir interceptarlo todo se rechaza en lugar
 de concederse.
+
+Lo que vuelve por ahí no es una línea de log. Una petición interceptada la analizan los mismos
+dialectos de protocolo que a cualquier otra, así que aterriza en la traza como un intercambio
+corriente: reproducible sin red y bifurcable a otro modelo, en una ejecución en la que nunca entró
+una clave de API tuya.
 
 Funciona también en `orca replay --model`, `orca fork` y `orca compare`, que lanzan un agente real
 por el mismo motivo.

@@ -64,6 +64,15 @@ OrcaReplay y répond en vous rendant l'exécution.
 | Permet de changer de modèle et de repartir de l'étape 4 | ❌ | ✅ |
 | Demande de modifier votre agent | en général un wrapper SDK | ❌ deux variables d'environnement |
 | Fonctionne après la fermeture du terminal | ❌ | ✅ c'est un fichier |
+| Voit au-delà de l'API du modèle — codes de sortie shell, écritures de fichiers | ❌ | ✅ à chaque tour |
+| Enregistre un agent sans point d'accès API à rediriger | ❌ | ✅ opt-in `--tls-intercept` |
+
+Les deux dernières lignes sont celles qu'un wrapper SDK ne peut structurellement pas atteindre. La
+capture a lieu *en dessous* de l'agent — à la frontière des processus et des sockets — si bien qu'il
+importe peu que l'agent soit le vôtre, que vous puissiez le modifier, ou même qu'il détienne une clé
+d'API : un Codex CLI connecté avec un abonnement ChatGPT parle à son propre backend en TLS et n'a
+aucune base URL à faire pointer ailleurs, et orca sait tout de même l'enregistrer. Voir
+[quand le harnais refuse d'être redirigé](#quand-le-harnais-refuse-dêtre-redirigé).
 
 ## Comment ça marche
 
@@ -376,6 +385,11 @@ elle est supprimée à la fin. Orca ne proposera de l'installer nulle part. Les 
 d'autorisation sont tunnelés sans être lus et enregistrés comme une adresse et un nombre d'octets,
 sans chemin ni corps, parce qu'orca n'a jamais détenu le clair. Demander à tout intercepter est
 refusé plutôt qu'exaucé.
+
+Ce qui en revient n'est pas une ligne de journal. Une requête interceptée est analysée par les mêmes
+dialectes de protocole que les autres : elle se range dans la trace comme un échange ordinaire —
+rejouable hors ligne et forkable vers un autre modèle, sur une exécution où aucune de vos clés
+d'API n'est jamais entrée.
 
 Cela vaut aussi pour `orca replay --model`, `orca fork` et `orca compare`, qui lancent un agent réel
 pour la même raison.

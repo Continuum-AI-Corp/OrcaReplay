@@ -60,6 +60,15 @@ OrcaReplay answers that by giving you the run back.
 | Lets you change the model and re-run from step 4 | ❌ | ✅ |
 | Needs you to modify your agent | usually an SDK wrapper | ❌ two env vars |
 | Works after you close the terminal | ❌ | ✅ it is a file |
+| Sees past the model API — shell exit codes, file writes | ❌ | ✅ every turn |
+| Records an agent with no API endpoint to redirect | ❌ | ✅ opt-in `--tls-intercept` |
+
+The last two rows are the ones an SDK wrapper structurally cannot reach. Capture happens *below*
+the agent — at the process and socket boundary — so it does not matter whether the agent is
+yours, whether you can edit it, or whether it even holds an API key: a Codex CLI signed in with
+a ChatGPT subscription talks to its own backend over TLS and has no base URL to point anywhere,
+and orca can still record it. See
+[when the harness will not be redirected](#when-the-harness-will-not-be-redirected).
 
 ## How it works
 
@@ -347,6 +356,10 @@ environment, never a system or browser trust store — and deleted when the run 
 offer to install it anywhere. Hosts outside the allowlist are tunnelled unread and recorded as an
 address and a byte count, with no path and no body, because orca never held the plaintext. Asking
 to intercept everything is refused rather than honoured.
+
+What comes back through it is not a log line. An intercepted request is parsed by the same wire
+dialects as any other, so it lands in the trace as an ordinary exchange — replayable offline and
+forkable to a different model, on a run that never had an API key of yours in it.
 
 It works on `orca replay --model`, `orca fork` and `orca compare` too, which launch a live agent for
 the same reason.
