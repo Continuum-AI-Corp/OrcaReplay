@@ -75,7 +75,7 @@ define dos variables de entorno y se aparta.
 
 Otras tres capas capturan lo que el protocolo no puede ver: un código de salida, una duración real,
 de qué flujo salió un byte, un archivo escrito sin avisar a nadie. Hay una quinta para los agentes que no leen ninguna variable de base-URL — véase
-«Qué agentes» más abajo.
+«Qué agentes»  — [lo que encontró un agente de verdad](../validation.md).
 
 ```mermaid
 %%{init: {'theme':'neutral'}}%%
@@ -282,7 +282,7 @@ el formato que habla una vez que el tráfico llega.
 
 | Agente | Cómo se captura | Estado |
 |---|---|---|
-| **Claude Code** | `ANTHROPIC_BASE_URL` | funciona — verificado contra un arreglo de bug real |
+| **Claude Code** | `ANTHROPIC_BASE_URL` | funciona — verificado contra un arreglo de bug real, [en detalle](../validation.md) |
 | **Codex CLI** (clave de API) | `OPENAI_BASE_URL` → API Responses | funciona |
 | **Codex CLI** (sesión de ChatGPT) | `--tls-intercept` → API Responses | funciona, con una decisión que tomas tú |
 | **OpenAI Agents SDK** | `OPENAI_BASE_URL` → API Responses | funciona |
@@ -436,37 +436,6 @@ Temprano. `v0` es el esqueleto que camina de los tres comandos de arriba.
 | Verificado contra un agente de verdad | Claude Code arreglando de verdad un bug de verdad: grabado, reproducido sin red de principio a fin, bifurcado desde un punto de control y exportado. Cuatro bugs encontrados por el camino, todos corregidos — ver abajo |
 | Harness con auth por suscripción | Claude Code funciona. Un Codex CLI con suscripción de ChatGPT habla con su propio backend y no lee ninguna variable de base-URL, así que necesita `--tls-intercept` |
 
-### Lo que encontró un agente de verdad
-
-Todo lo anterior se construyó contra fixtures. La primera ejecución de Claude Code grabada con esto
-rompió cuatro cosas, cada una de un tipo que ninguna fixture puede producir:
-
-- **Una deriva de dieciséis caracteres puntuó 217.568.** La distancia era el prefijo y el sufijo
-  comunes del cuerpo entero de la petición, y Claude Code lleva un id de sesión en su prompt de
-  sistema *y* otro en la descripción de una herramienta — así que los 200 KB de en medio contaban
-  como cambiados y ninguna petición llegaba al peldaño 2. Ahora la distancia se suma por campo, y
-  por línea dentro de un campo.
-- **La redacción hacía inalcanzable una coincidencia exacta.** Los digests de los marcadores llevan
-  sal por ejecución a propósito, así que una petición grabada no podía volver a ser igual a sí
-  misma. Ahora el emparejador redacta también la petición entrante del mismo modo y compara el
-  *tipo* de secreto en vez de su digest — e informa de ese pliegue, porque es una aproximación.
-- **La redacción rompía además todas las bifurcaciones.** Los ids `tool_use` y las firmas de los
-  bloques de razonamiento son cadenas de alta entropía, así que el barrido las sustituía; una
-  bifurcación reproduce esos turnos, el agente los devuelve, y la API responde `400`. Los valores de
-  protocolo que tienen que ir y volver intactos quedan exentos de la *conjetura* — nunca de las
-  reglas de credenciales.
-- **Reproducir vuelve a ejecutar las herramientas.** Orca no intercepta la ejecución de
-  herramientas, así que el agente lanza `npm test` otra vez de verdad, y eso reimprime de verdad sus
-  propios tiempos. Una petición cuya única diferencia está dentro de la salida de una herramienta
-  ahora se sirve desde la grabación como divergencia `major` en lugar de detener la reproducción.
-
-Esa ejecución se reproduce ahora sin red de principio a fin — `reused=7/7 exact=2 divergences=5
-unmatched=0 exit=0`, con cada aproximación nombrada — y una bifurcación llega al mismo árbol que la
-grabación. Si tienes una grabación en la que todavía se equivoca, eso es lo más útil que puedes
-enviar.
-
-<a id="install"></a>
-
 ## Instalación
 
 Todavía no está en npm — los paquetes están construidos y verificados para ello, pero no se ha
@@ -581,6 +550,7 @@ implementación que demuestre que no está moldeada alrededor de un proveedor.
 
 - [`spec/orca-trace-v0.md`](../../spec/orca-trace-v0.md) — el formato de traza normativo
 - [`docs/architecture.md`](../architecture.md) — cómo funcionan de verdad captura, reproducción y bifurcación
+- [`docs/validation.md`](../validation.md) — qué se rompió la primera vez que se enfrentó a un agente real
 - [`docs/launch-path.md`](../launch-path.md) — qué está hecho, qué no, y qué viene después
 - [`docs/plugins.md`](../plugins.md) — escribir un adaptador o un provider
 - [`CONTRIBUTING.md`](../../CONTRIBUTING.md) — el bucle de desarrollo de cinco minutos

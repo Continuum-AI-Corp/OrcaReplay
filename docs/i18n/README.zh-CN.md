@@ -67,7 +67,7 @@ OrcaReplay 的回答方式，是把那次运行还给你。
 agent** 的原因——它起一个本地代理、设两个环境变量，然后就让开。
 
 另外三层负责抓协议看不见的东西：退出码、真实耗时、某个字节来自哪条流、悄悄写下的一个文件。
-还有第五层，专门对付那些根本不读 base-URL 变量的 agent——见下面的“支持哪些 agent”。
+还有第五层，专门对付那些根本不读 base-URL 变量的 agent————[一个真实的 agent 发现了什么](../validation.md)的“支持哪些 agent”。
 
 ```mermaid
 %%{init: {'theme':'neutral'}}%%
@@ -255,7 +255,7 @@ some-local-model           —          —
 
 | Agent | 怎么抓 | 状态 |
 |---|---|---|
-| **Claude Code** | `ANTHROPIC_BASE_URL` | 可用——已对着真实的修 bug 过程验证过 |
+| **Claude Code** | `ANTHROPIC_BASE_URL` | 可用——已对着真实的修 bug 过程验证过，[细节在这里](../validation.md) |
 | **Codex CLI**（API key） | `OPENAI_BASE_URL` → Responses API | 可用 |
 | **Codex CLI**（ChatGPT 登录） | `--tls-intercept` → Responses API | 可用，但需要你自己做一个决定 |
 | **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | 可用 |
@@ -399,30 +399,6 @@ const timeline = await orca.show('last');
 | 已在真实 agent 上验证 | Claude Code，一次对真实 bug 的真实修复：录制、完整离线重放、从检查点分叉、并导出。做这件事时发现了四个 bug，都已修复——见下文 |
 | 订阅制鉴权的 harness | Claude Code 可用。用 ChatGPT 订阅登录的 Codex CLI 和自家后端对话，没有 origin 可改，所以需要 `--tls-intercept`。用 API key 的话不需要任何特别处理 |
 
-### 一个真实的 agent 发现了什么
-
-上面这些都是对着 fixture 造出来的。第一次真正录制 Claude Code 的运行，就一次打破了四件事，
-而每一件都是 fixture 造不出来的：
-
-- **十六个字符的漂移被算成了 217,568。** 距离取的是整个请求体的公共前缀和后缀，而 Claude Code
-  在系统提示里带着一个会话 id、在某个工具描述里又带着另一个——于是夹在中间的 200 KB 全被算作变化，
-  没有任何请求能够到达第 2 级。现在距离按字段求和，字段内部再按行求和。
-- **脱敏让「完全一致」在结构上不可能达到。** 占位符摘要按设计是每次运行加盐的，
-  所以一个录制下来的请求永远不可能再次等于它自己。匹配器现在用同样的策略对入站请求脱敏，
-  并比较秘密的*种类*而不是它的摘要——而且会把这次折叠报告出来，因为那确实是一次近似。
-- **脱敏还让每一次分叉都失败。** `tool_use` 的 id 和 thinking 块的签名都是高熵字符串，
-  会被扫描替换掉；分叉会重放这些轮次，agent 把它们原样回传，于是 API 返回 `400`。
-  必须原样往返的协议值现在被排除在这条*猜测*之外——但绝不排除在凭据规则之外。
-- **重放会真的再跑一遍工具。** orca 不拦截工具执行，所以 agent 真的会再跑一次 `npm test`，
-  而它真的会重新打印自己的耗时。如果一个请求的唯一差异落在工具输出里，现在会从录制中作答，
-  并记为一次 `major` 分歧，而不是让重放停下来。
-
-那次运行现在可以完整离线重放——`reused=7/7 exact=2 divergences=5 unmatched=0 exit=0`，
-每一处近似都有名字——而它的一次分叉最终到达了与录制相同的那棵树。如果你手上有一份它仍然搞错的录制，
-那就是你能寄来的最有用的东西。
-
-<a id="install"></a>
-
 ## 安装
 
 还没上 npm——包已经构建并验证过了，但还没有发布，所以今天只能从源码装：
@@ -522,6 +498,7 @@ OrcaReplay 由做 [OrcaRouter](https://www.orcarouter.ai) 的这群人打造，�
 
 - [`spec/orca-trace-v0.md`](../../spec/orca-trace-v0.md) —— 规范性的 trace 格式
 - [`docs/architecture.md`](../architecture.md) —— 捕获、重放和分叉的实际工作方式
+- [`docs/validation.md`](../validation.md) —— 第一次遇到真实 agent 时，什么坏了
 - [`docs/launch-path.md`](../launch-path.md) —— 哪些做完了、哪些还没有、接下来是什么
 - [`docs/plugins.md`](../plugins.md) —— 编写 adapter 或 provider
 - [`CONTRIBUTING.md`](../../CONTRIBUTING.md) —— 五分钟开发循环
