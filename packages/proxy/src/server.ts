@@ -503,7 +503,11 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     const configured = [...new Set(Object.values(options.upstream ?? {}))];
     if (configured.length === 1) return configured[0]!;
     const names = new Set(Object.keys(headers).map((h) => h.toLowerCase()));
-    const anthropic = names.has('anthropic-version') || names.has('anthropic-beta');
+    // `x-api-key` alongside the version headers: this request carries the caller's own credential,
+    // and a wrong guess does not merely fail — it hands one vendor a key issued by another.
+    // Anthropic's client is the one that announces itself, so absence of a signal means OpenAI.
+    const anthropic =
+      names.has('anthropic-version') || names.has('anthropic-beta') || names.has('x-api-key');
     return anthropic ? 'https://api.anthropic.com' : 'https://api.openai.com';
   }
 
@@ -523,10 +527,13 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     res: ServerResponse,
     startedAt: number,
   ): Promise<void> {
-    if (options.mode !== 'record') {
-      // Replay has the network blocked and no recording to serve from — orca never understood this
-      // call well enough to match it. Say so: a bare 502 mid-replay reads as orca being broken,
-      // when the honest fact is narrower and more useful than that.
+    // `hybrid` is a fork, and a fork runs a live agent — so it forwards, exactly as `record` does.
+    // Refusing here killed the fork on the first call orca could not read, which is the failure
+    // passthrough exists to prevent, reintroduced one mode over.
+    if (options.mode === 'replay') {
+      // Strict replay has the network blocked and no recording to serve from — orca never
+      // understood this call well enough to match it. Say so: a bare 502 mid-replay reads as orca
+      // being broken, when the honest fact is narrower and more useful than that.
       stats.unmatched += 1;
       const reason =
         `${path} was captured as opaque network traffic, not as a model exchange, so it ` +
@@ -540,7 +547,14 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     const origin = passthroughOrigin(headers);
     const upstreamRes = await doFetch(`${origin}${path}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', ...headers },
+      // `upstreamHeaders` too, as `goLive` does. Omitting them sent a gateway the agent's own
+      // credential — often the `orca-recorded` placeholder — and the call came back 401 for a
+      // reason nothing in the trace explained.
+      headers: {
+        'content-type': 'application/json',
+        ...headers,
+        ...(options.upstreamHeaders ?? {}),
+      },
       body: rawBody,
     });
 
@@ -674,9 +688,11 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     }
 
     const dialect = selectDialect(dialects, path);
-    // A GET is never a model call, and blind-forwarding every method would make orca an open relay
-    // for whatever else on the machine found this port. Passthrough is for the POST it redirected.
-    if (!dialect && req.method !== 'POST') {
+    // Only a POST is ever a model call. Relaxing this to `!dialect && …` let a PUT or a DELETE on
+    // a dialect path through to `goLive`, which forwarded it upstream and recorded it as a model
+    // exchange; and it turned `GET /v1/messages` into a 400 about unreadable JSON rather than the
+    // honest answer. Method first, then passthrough decides what to do with a POST orca cannot read.
+    if (req.method !== 'POST') {
       json(res, 404, {
         error: { message: `orca proxy does not handle ${req.method ?? 'GET'} ${path}` },
       });

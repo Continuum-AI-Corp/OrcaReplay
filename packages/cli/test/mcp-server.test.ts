@@ -243,6 +243,54 @@ describe('orca mcp', () => {
     await rm(workspace, { recursive: true, force: true });
   });
 
+  it('keeps stdout pure JSON-RPC while a tool runs a live agent', async () => {
+    // The failure this guards: `orca_replay` spawns the recorded agent, and the agent was given
+    // orca's own stdout — which here *is* the transport. One line of its output and the client
+    // drops the session. Only a real subprocess can see it: `stdio: 'inherit'` passes the file
+    // descriptor, not anything an in-process test can substitute.
+    const model = await startResponsesModel();
+    try {
+      await run('git', ['init', '-q'], { cwd: workspace });
+      await run('git', ['config', 'user.email', 'test@example.com'], { cwd: workspace });
+      await run('git', ['config', 'user.name', 'Test'], { cwd: workspace });
+      await writeFile(join(workspace, 'auth.ts'), 'export const fixed = false;\n');
+      await new Orca({ cwd: workspace }).record({
+        adapter: 'generic-openai',
+        command: [process.execPath, AGENT],
+        upstream: { openai: model.url },
+      });
+
+      const cli = join(here, '..', 'dist', 'cli.js');
+      const child = execFile(process.execPath, [cli, 'mcp'], { cwd: workspace });
+      const out: string[] = [];
+      child.stdout?.on('data', (c: Buffer) => out.push(c.toString('utf8')));
+      child.stdin?.write(
+        `${JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'orca_replay', arguments: { run: 'last' } },
+        })}\n`,
+      );
+      child.stdin?.end();
+      await new Promise((resolve) => child.on('exit', resolve));
+
+      const lines = out
+        .join('')
+        .split('\n')
+        .filter((l) => l.trim() !== '');
+      // Every line parses as JSON-RPC. The agent really printed during this — to stderr.
+      for (const line of lines) {
+        expect(() => JSON.parse(line), line.slice(0, 80)).not.toThrow();
+      }
+      expect(lines).toHaveLength(1);
+      const reply = JSON.parse(lines[0]!) as { result?: { content: { text: string }[] } };
+      expect(JSON.parse(reply.result!.content[0]!.text)).toMatchObject({ unmatched: 0 });
+    } finally {
+      await model.close();
+    }
+  });
+
   it('speaks MCP on stdio when launched as a subprocess', async () => {
     const cli = join(here, '..', 'dist', 'cli.js');
     const child = execFile(process.execPath, [cli, 'mcp'], { cwd: workspace });

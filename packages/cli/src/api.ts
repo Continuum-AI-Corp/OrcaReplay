@@ -99,6 +99,20 @@ export interface CompareOptions {
   flags?: string[];
 }
 
+/**
+ * What every command run through this API is told: orca's stdout belongs to someone else.
+ *
+ * `record`, `replay` and `compare` all spawn a real agent, and they spawn it with
+ * `stdio: 'inherit'` — the file descriptor, which no in-process substitution can intercept. So an
+ * embedded caller got the agent's output written over its own, and under `orca mcp` that
+ * descriptor *is* the JSON-RPC transport: one line of agent chatter ends the session.
+ *
+ * `--json` is the existing spelling of "stdout is not a terminal here". The commands read it only
+ * to route the child's stdout to stderr; the document itself is written by `jsonMain`, which this
+ * path never reaches.
+ */
+const QUIET = ['--json'] as const;
+
 export class Orca {
   readonly cwd: string;
   readonly #onLog: ((entry: LogEntry) => void) | undefined;
@@ -170,7 +184,7 @@ export class Orca {
       // `--upstream-openai` with chat completions, because it is one origin serving both.
       argv.push(`--upstream-${dialect.replace(/-responses$/, '')}`, origin);
     }
-    argv.push(...(options.flags ?? []));
+    argv.push(...QUIET, ...(options.flags ?? []));
     if (options.command && options.command.length > 0) argv.push('--', ...options.command);
 
     const { out, entries } = this.#collect();
@@ -186,7 +200,7 @@ export class Orca {
     if (options.from !== undefined) argv.push('--from', String(options.from));
     if (options.model !== undefined) argv.push('--model', options.model);
     if (options.worktree === true) argv.push('--worktree');
-    argv.push(...(options.flags ?? []));
+    argv.push(...QUIET, ...(options.flags ?? []));
     return replayCommand(parseArgs(argv), this.#collect().out, this.cwd);
   }
 
@@ -194,7 +208,7 @@ export class Orca {
     const argv = ['compare', selector, '--models', options.models.join(',')];
     if (options.from !== undefined) argv.push('--from', String(options.from));
     if (options.verify !== undefined) argv.push('--verify', options.verify);
-    argv.push(...(options.flags ?? []));
+    argv.push(...QUIET, ...(options.flags ?? []));
     return compareCommand(parseArgs(argv), this.#collect().out, this.cwd);
   }
 

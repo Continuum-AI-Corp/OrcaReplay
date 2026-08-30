@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { HOOK_FILENAME, nodeOptionsWithHook, writeFetchHook } from '../src/install.js';
+import { DEFAULT_INSTRUMENTED_HOSTS, hostMatches, rewriteUrl } from '../src/rewrite.js';
 
 const run = promisify(execFile);
 
@@ -43,6 +44,20 @@ describe('writeFetchHook', () => {
     const first = await readFile(await writeFetchHook(dir), 'utf8');
     const second = await readFile(await writeFetchHook(dir), 'utf8');
     expect(first).toBe(second);
+  });
+
+  it('carries the real matcher, not a copy of it', async () => {
+    // The finding this asserts: `rewrite.ts` calls itself the security boundary and is the only
+    // thing `rewrite.test.ts` covers, while the hook that actually ran carried a second,
+    // hand-written matcher. A fix to one would have gone green without touching the other.
+    const source = await readFile(await writeFetchHook(dir), 'utf8');
+    expect(source).toContain(rewriteUrl.toString());
+    expect(source).toContain(hostMatches.toString());
+  });
+
+  it('defaults to the same host list the module does', async () => {
+    const source = await readFile(await writeFetchHook(dir), 'utf8');
+    expect(source).toContain(DEFAULT_INSTRUMENTED_HOSTS.join(','));
   });
 
   it('is valid JavaScript that a bare node can load', async () => {

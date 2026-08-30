@@ -68,37 +68,33 @@ export function responsesToCanonicalRequest(body: unknown): CanonicalRequest {
   if (instructions !== undefined && instructions !== '') systemParts.push(instructions);
 
   const messages: CanonicalMessage[] = [];
-  /** Open message of each role, so consecutive items of a kind batch into one turn. */
-  let assistantBatch: CanonicalMessage | undefined;
-  let resultBatch: CanonicalMessage | undefined;
 
-  const push = (role: 'user' | 'assistant', block: CanonicalContent): void => {
-    const batch = role === 'assistant' ? assistantBatch : resultBatch;
-    if (batch) {
-      batch.content.push(block);
-      return;
-    }
-    const created: CanonicalMessage = { role, content: [block] };
-    messages.push(created);
-    if (role === 'assistant') assistantBatch = created;
-    else resultBatch = created;
-  };
-  const breakBatches = (): void => {
-    assistantBatch = undefined;
-    resultBatch = undefined;
+  /**
+   * Append to the open turn when the role matches, rather than starting a new message.
+   *
+   * This API models an assistant's prose and its tool calls as separate top-level items, and
+   * canonical follows Anthropic, where they are blocks of one assistant turn. A message per item
+   * produced `assistant, assistant` — which Anthropic rejects outright, so forking a Codex or
+   * Agents-SDK run onto Claude, the cross-provider case this tool is pitched on, failed on its
+   * first turn. The same rule keeps consecutive tool results in one user turn, which is what the
+   * hand-rolled batching here used to do.
+   */
+  const push = (role: 'user' | 'assistant', ...blocks: CanonicalContent[]): void => {
+    if (blocks.length === 0) return;
+    const last = messages[messages.length - 1];
+    if (last?.role === role) last.content.push(...blocks);
+    else messages.push({ role, content: [...blocks] });
   };
 
   const rawInput = src['input'];
   if (typeof rawInput === 'string') {
-    if (rawInput !== '')
-      messages.push({ role: 'user', content: [{ type: 'text', text: rawInput }] });
+    if (rawInput !== '') push('user', { type: 'text', text: rawInput });
   } else {
     for (const raw of asArray(rawInput)) {
       const item = asRecord(raw);
       const type = asString(item['type']);
 
       if (type === 'function_call') {
-        resultBatch = undefined;
         push('assistant', {
           type: 'tool_use',
           // `call_id`, never the item `id`: it is what the matching output references.
@@ -110,7 +106,6 @@ export function responsesToCanonicalRequest(body: unknown): CanonicalRequest {
       }
 
       if (type === 'function_call_output') {
-        assistantBatch = undefined;
         push('user', {
           type: 'tool_result',
           tool_use_id: asString(item['call_id']) ?? '',
@@ -120,7 +115,6 @@ export function responsesToCanonicalRequest(body: unknown): CanonicalRequest {
       }
 
       if (type === 'reasoning') {
-        resultBatch = undefined;
         const text = asArray(item['summary'])
           .map((part) => asString(asRecord(part)['text']) ?? '')
           .filter((t) => t !== '')
@@ -135,10 +129,7 @@ export function responsesToCanonicalRequest(body: unknown): CanonicalRequest {
         systemParts.push(flattenContent(item['content']));
         continue;
       }
-      breakBatches();
-      const content = messageContent(item['content']);
-      if (content.length === 0) continue;
-      messages.push({ role: role === 'assistant' ? 'assistant' : 'user', content });
+      push(role === 'assistant' ? 'assistant' : 'user', ...messageContent(item['content']));
     }
   }
 

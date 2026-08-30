@@ -45,8 +45,14 @@ export function rewriteUrl(raw: string, config: InstrumentConfig): string | unde
   return `${proxy.origin}${prefix}${target.pathname}${target.search}`;
 }
 
-/** Whole-hostname match. `endsWith` here is the bug that lets `api.openai.com.attacker.test` in. */
-function hostMatches(hostname: string, pattern: string): boolean {
+/**
+ * Whole-hostname match. `endsWith` alone is the bug that lets `api.openai.com.attacker.test` in.
+ *
+ * Exported, and deliberately self-contained — no imports, no closure, nothing TypeScript-only —
+ * because `install.ts` serialises this function into the hook that runs inside the agent's own
+ * process, where it cannot import anything of ours.
+ */
+export function hostMatches(hostname: string, pattern: string): boolean {
   const host = hostname.toLowerCase();
   const want = pattern.trim().toLowerCase();
   if (want === '') return false;

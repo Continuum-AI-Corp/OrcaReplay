@@ -179,6 +179,84 @@ describe('record mode — a path no dialect claims', () => {
   });
 });
 
+describe('a fork — hybrid mode — meets a path no dialect claims', () => {
+  it('forwards it, because a fork runs a live agent', async () => {
+    // Refusing here reintroduced the exact failure passthrough exists to prevent, one mode over:
+    // the fork dies on the first call orca cannot read. `record` and `hybrid` both run an agent
+    // against the network; only strict replay has nothing to forward to.
+    const up = stubUpstream(EMBEDDING);
+    const proxy = await createProxy({
+      mode: 'hybrid',
+      exchanges: [],
+      forkAt: 0,
+      forkModel: 'gpt-5.2-mini',
+      fetchImpl: up.fetchImpl,
+      passthroughUpstream: 'https://api.openai.com',
+    });
+    closers.push(proxy.close);
+
+    const res = await post(`${proxy.url}/v1/embeddings`, { input: 'hello' });
+
+    expect(res.status).toBe(200);
+    expect(up.calls[0]!.url).toBe('https://api.openai.com/v1/embeddings');
+    expect(proxy.stats().passedThrough).toBe(1);
+  });
+});
+
+describe('the method guard', () => {
+  it('refuses a non-POST on a dialect path instead of forwarding it upstream', async () => {
+    // Only a POST is ever a model call. A guard of `!dialect && method !== 'POST'` let a PUT on
+    // /v1/chat/completions reach the live path, where it was forwarded to the provider and
+    // recorded as a model exchange.
+    const up = stubUpstream(EMBEDDING);
+    const proxy = await createProxy({ mode: 'record', fetchImpl: up.fetchImpl });
+    closers.push(proxy.close);
+
+    const res = await fetch(`${proxy.url}/v1/chat/completions`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.2', messages: [] }),
+    });
+
+    expect(res.status).toBe(404);
+    expect(up.calls).toHaveLength(0);
+    expect(proxy.exchanges()).toHaveLength(0);
+  });
+
+  it('answers a GET on a dialect path honestly, naming the method', async () => {
+    // It came back as a 400 about unreadable JSON, which sends someone looking at their request
+    // body for a problem that is in their verb.
+    const proxy = await createProxy({
+      mode: 'record',
+      fetchImpl: stubUpstream(EMBEDDING).fetchImpl,
+    });
+    closers.push(proxy.close);
+
+    const res = await fetch(`${proxy.url}/v1/messages`);
+    expect(res.status).toBe(404);
+    expect(await res.text()).toContain('GET');
+  });
+});
+
+describe('passthrough carries the credentials a gateway needs', () => {
+  it('attaches upstreamHeaders, as the live model path does', async () => {
+    // Without them a configured gateway saw only the agent's own key — often the obviously-fake
+    // `orca-recorded` placeholder — and answered 401 for a reason nothing in the trace explained.
+    const up = stubUpstream(EMBEDDING);
+    const proxy = await createProxy({
+      mode: 'record',
+      fetchImpl: up.fetchImpl,
+      upstream: { anthropic: 'https://gw.example', openai: 'https://gw.example' },
+      upstreamHeaders: { authorization: 'Bearer sk-gateway-key' },
+    });
+    closers.push(proxy.close);
+
+    await post(`${proxy.url}/v1/embeddings`, { input: 'hello' });
+
+    expect(up.calls[0]!.headers['authorization']).toBe('Bearer sk-gateway-key');
+  });
+});
+
 describe('replay mode — a path no dialect claims', () => {
   it('refuses honestly instead of reaching the network', async () => {
     const dead = (async () => {

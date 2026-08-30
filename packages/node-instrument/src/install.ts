@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { DEFAULT_INSTRUMENTED_HOSTS, hostMatches, rewriteUrl } from './rewrite.js';
 
 /**
  * Getting the fetch hook into an agent that is not ours.
@@ -25,6 +26,22 @@ export const HOOK_FILENAME = 'orca-fetch-hook.cjs';
  * Everything is wrapped so that no failure inside it can reach the agent: a capture layer that
  * breaks the run it is capturing is worse than one that captures nothing.
  */
+/**
+ * The hook's source.
+ *
+ * Built from the *real* matcher rather than a copy of it. `rewrite.ts` documents itself as this
+ * package's security boundary and `rewrite.test.ts` is the only thing that tests it — but the hook
+ * that actually runs inside the agent cannot import it, so it carried a second, hand-written
+ * matcher. Two implementations of an allowlist, one of them tested and neither of them the other:
+ * a future fix to `rewrite.ts` would have gone green while changing nothing that runs.
+ *
+ * So the functions are serialised into the file. They are written to be self-contained for exactly
+ * this reason — no imports, no closure, nothing TypeScript-only left after compilation — and a test
+ * asserts the emitted source still contains them, so the two cannot drift apart again.
+ *
+ * Configured entirely from the environment, so the bytes are identical on every run: replay
+ * prepares the same launch as the recording, and a hook that varied would read as a divergence.
+ */
 const HOOK_SOURCE = `'use strict';
 /**
  * OrcaReplay fetch hook — written by \`orca record\`, deleted with the run directory.
@@ -33,48 +50,35 @@ const HOOK_SOURCE = `'use strict';
  * takes its origin as a constructor argument only, so redirecting the environment captures nothing
  * and the run still looks like a success. This redirects at the one place every such agent does
  * agree on — \`globalThis.fetch\` — and only for an allowlist of provider hosts.
+ *
+ * The two functions below are the instrument package's own, serialised in verbatim — this file
+ * imports nothing, because it loads inside an agent that has never heard of us.
  */
 (function () {
   var proxy = process.env.ORCA_PROXY_URL || '';
   if (!proxy || typeof globalThis.fetch !== 'function') return;
   if (globalThis.__orcaFetchHooked) return;
 
-  var hosts = (process.env.ORCA_INSTRUMENT_HOSTS || 'api.openai.com,api.anthropic.com')
-    .split(',')
-    .map(function (h) { return h.trim().toLowerCase(); })
-    .filter(Boolean);
+  ${hostMatches.toString()}
 
-  function hostMatches(hostname, pattern) {
-    if (pattern.slice(0, 2) === '*.') {
-      var parent = pattern.slice(2);
-      // A label boundary is part of the comparison. A bare \`endsWith\` is what lets
-      // \`api.openai.com.attacker.test\` through.
-      return hostname.length > parent.length + 1 && hostname.slice(-(parent.length + 1)) === '.' + parent;
-    }
-    return hostname === pattern;
-  }
+  ${rewriteUrl.toString()}
 
-  function rewrite(raw) {
-    var target, base;
-    try { target = new URL(raw); base = new URL(proxy); } catch (e) { return undefined; }
-    if (target.host === base.host) return undefined;
-    var name = target.hostname.toLowerCase();
-    for (var i = 0; i < hosts.length; i += 1) {
-      if (hostMatches(name, hosts[i])) {
-        return base.origin + base.pathname.replace(/\\/+$/, '') + target.pathname + target.search;
-      }
-    }
-    return undefined;
-  }
+  var config = {
+    proxyUrl: proxy,
+    hosts: (process.env.ORCA_INSTRUMENT_HOSTS || ${JSON.stringify(DEFAULT_INSTRUMENTED_HOSTS.join(','))})
+      .split(',')
+      .map(function (h) { return h.trim(); })
+      .filter(Boolean),
+  };
 
   var original = globalThis.fetch;
   globalThis.fetch = function orcaFetch(input, init) {
     try {
       if (typeof input === 'string' || input instanceof URL) {
-        var next = rewrite(String(input));
+        var next = rewriteUrl(String(input), config);
         if (next) return original.call(this, next, init);
       } else if (input && typeof input === 'object' && typeof input.url === 'string') {
-        var moved = rewrite(input.url);
+        var moved = rewriteUrl(input.url, config);
         // Rebuilding from the original Request copies method, headers and body; the SDKs that
         // hand fetch a Request rather than a string are exactly the ones this exists for.
         if (moved) return original.call(this, new Request(moved, input), init);

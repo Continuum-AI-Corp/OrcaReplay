@@ -105,6 +105,10 @@ export async function compareCommand(
         // the flag here and dropping it before the fork is exactly the silent-no-op the flag was
         // fixed for one layer up.
         ...(args.bool('tls-intercept') ? ['--tls-intercept'] : []),
+        // Same reasoning, and the same silent-no-op if dropped: every fork launches a live agent,
+        // and under --json orca's stdout is the result document. A fork that inherits it prints
+        // the agent's output into the middle of the JSON.
+        ...(args.bool('json') ? ['--json'] : []),
         ...(args.list('tls-hosts').flatMap((h) => ['--tls-hosts', h]) as string[]),
         ...upstreamFlags(args),
       ]);
