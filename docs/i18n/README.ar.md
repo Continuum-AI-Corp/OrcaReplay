@@ -23,8 +23,8 @@
 
 [![License](https://img.shields.io/badge/code-Apache--2.0-blue)](../../LICENSE)
 [![Spec](https://img.shields.io/badge/trace%20spec-CC%20BY%204.0-blue)](../../spec/orca-trace-v0.md)
-[![Node](https://img.shields.io/badge/node-20%2B-brightgreen)](#install)
-[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20opencode%20%C2%B7%20any-black)](#install)
+[![Node](https://img.shields.io/badge/node-20%2B-brightgreen)](#التثبيت)
+[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Agents%20SDK%20%C2%B7%20AI%20SDK%20%C2%B7%20any-black)](#التثبيت)
 [![Good first issues](https://img.shields.io/badge/good%20first%20issues-12-orange)](../good-first-issues.md)
 
 ![تسجيل تشغيل لـ Claude Code، ثم إعادته دون شبكة، ثم تفريعه إلى نموذجين](../demo-cli.gif)
@@ -43,7 +43,7 @@ orca replay last --from 4 --model claude-haiku-4-5 --ui
 السطر الثالث هو ما يجعل الناس يبقون: الملفات نفسها، وبادئة المحادثة نفسها، ونموذج مختلف ابتداءً من
 الخطوة 4. النموذج هو المتغيّر الوحيد، وهذا ما يجعل للإجابة معنى.
 
-ليس على npm بعد — [ثبّته من المصدر](#install)، يستغرق نحو دقيقة.
+ليس على npm بعد — [ثبّته من المصدر](#التثبيت)، يستغرق نحو دقيقة.
 
 ## لماذا وُجد هذا
 
@@ -70,22 +70,23 @@ orca replay last --from 4 --model claude-haiku-4-5 --ui
 سبب أن **OrcaReplay لا يعدّل وكيلك** — يشغّل وسيطًا محليًا، ويضبط متغيّري بيئة، ثم يبتعد عن الطريق.
 
 وهناك ثلاث طبقات أخرى تلتقط ما لا يستطيع البروتوكول رؤيته: رمز الخروج، والمدة الحقيقية، ومن أي
-تدفّق خرج البايت، وملف كُتب دون أن يُخبر أحدًا.
+تدفّق خرج البايت، وملف كُتب دون أن يُخبر أحدًا. وهناك خامسة لأولئك الوكلاء الذين لا يقرؤون أي متغيّر base-URL أصلًا — انظر «أي الوكلاء» أدناه.
 
 ```mermaid
 %%{init: {'theme':'neutral'}}%%
 flowchart LR
     A["<b>وكيلك</b><br/><i>دون تعديل</i>"]
 
-    subgraph orca["orca · أربع طبقات التقاط"]
+    subgraph orca["orca · خمس طبقات التقاط"]
         direction TB
         P["<b>الوسيط</b><br/>متغيّر base-URL"]
         SH["<b>حشوة PATH</b><br/>رمز الخروج · التوقيت · التدفّقات"]
         MC["<b>تفريع JSON-RPC</b><br/>إعادة كتابة إعداد MCP"]
         FS["<b>فهرس git الظلّي</b><br/>مساحة العمل في كل دور"]
+        FH["<b>خطّاف fetch</b><br/>حين يكون الأصل مكتوبًا في الشيفرة"]
     end
 
-    A --> P & SH & MC & FS
+    A --> P & SH & MC & FS & FH
     P -->|"يُمرَّر، والمصادقة سليمة"| U["<b>واجهة النموذج</b><br/><i>أو OrcaRouter · أي بوابة</i>"]
     orca ==> T[("<b>أثر واحد</b><br/>.orca/runs/run_a1b2c3")]
 ```
@@ -257,10 +258,74 @@ some-local-model           —          —
 بعد نزع المصادقة — فهو غير مرئي للتسجيل بحكم البنية، لا بحكم قاعدة على أحدهم أن يتذكّرها. ويُحجب
 كليًّا إذا وجّهت رايةٌ تلك الحركة إلى مكان غير البوابة التي أصدرته.
 
+## أي الوكلاء
+
+أمران يحدّدان إمكانية تسجيل مِهاد: هل يمكن توجيهه إلى الوسيط، وهل يفهم orca الصيغة التي يتحدثها حين
+تصل إليه.
+
+| الوكيل | كيف يُلتقط | الحالة |
+|---|---|---|
+| **Claude Code** | `ANTHROPIC_BASE_URL` | تعمل — تحقّقنا منها على إصلاح خلل حقيقي |
+| **Codex CLI** (مفتاح API) | `OPENAI_BASE_URL` ← واجهة Responses | تعمل |
+| **Codex CLI** (دخول ChatGPT) | `--tls-intercept` ← واجهة Responses | تعمل، مع قرار عليك أنت أن تتخذه |
+| **OpenAI Agents SDK** | `OPENAI_BASE_URL` ← واجهة Responses | تعمل |
+| **Vercel AI SDK** | خطّاف fetch — `orca record node -- node app.mjs` | تعمل |
+| **LangGraph / LangChain** | `OPENAI_BASE_URL` و`ANTHROPIC_BASE_URL` | يُفترض أن تعمل — تمرّ عبر العملاء الرسميين، لكن لا شيء هنا يختبرها بعد |
+| **opencode** | `orca record opencode` | المحوّل موجود، والأصلان معًا يُعاد توجيههما |
+| **أي شيء آخر** | `orca record generic-openai -- <cmd>` | تعمل إن كان يقرأ متغيّر base-URL؛ وإلا فـ`orca record node -- <cmd>` |
+
+Claude Code وحده هو ما شُغِّل من طرف إلى طرف على المِهاد الحقيقي. أما البقية فيصونها عقد المحوّلات
+وملفات التثبيت التي تسجّل بالضبط أي المتغيّرات يضبطها كل محوّل، فإن غيّر مِهادٌ اسم المتغيّر الذي يقرؤه
+احمرّ فحصٌ بدل أن يخرج تسجيل فارغ.
+
+اثنان من هؤلاء احتاجا أكثر من متغيّر بيئة، والفرق جدير بأن تعرفه قبل اختيار الأمر.
+
+**مِهاد يتحدث واجهة Responses.** يعتمد كل من OpenAI Agents SDK وCodex CLI افتراضيًا على
+`/v1/responses` لا على chat completions. وorca يتحدثها، فلا حاجة إلى شيء خاص — لكن على إصدار أقدم لم
+يكن العَرَض تسجيلًا ناقصًا، بل `404` في أول دور للوكيل.
+
+**مِهاد لا يقرأ أي متغيّر base-URL.** لا يقبل `@ai-sdk/openai` الأصل إلا وسيطًا في الباني، فالوكيل
+المبني على Vercel AI SDK يعمل تمامًا تحت `orca record`، ويخرج بالرمز 0، ويكتب تسجيلًا فارغًا. ومحوّل
+`node` لهذا بالضبط: يكتب ملف تحميل مسبق صغيرًا في مجلد التشغيل، ويوجّه `NODE_OPTIONS` إليه، ويعيد
+توجيه `globalThis.fetch` لقائمة مسموح بها من مضيفي المزوّدين لا غير.
+
+```console
+orca record node -- node agent.mjs
+orca record node -- npm run agent
+ORCA_INSTRUMENT_HOSTS='contoso.openai.azure.com' orca record node -- node agent.mjs
+```
+
+وهو محوّل مستقل لا سلوك افتراضي، لأن `NODE_OPTIONS` يصل إلى كل عملية Node يطلقها الوكيل — ثمن يستحق
+الدفع حين تعرف أن وكيلك يحتاجه، لا أن يُفرض على من يسجّل مِهادًا بلغة Python.
+
+يقبل Bun المتغيّر `NODE_OPTIONS` لكنه يتجاهل `--require` بداخله، ولذلك يُضبط `BUN_OPTIONS=--preload`
+إلى جانبه فيُغطّى وكيل Bun أيضًا. وهذا مُتحقَّق منه على `bun` حقيقي، لأن الإخفاق الذي يمنعه هو الصامت:
+ألا يعمل الخطّاف، فتذهب الحركة إلى المزوّد ولا يُسجَّل شيء.
+
+**وإن عاد التسجيل فارغًا رغم ذلك**، يقول `orca record` ذلك بدل أن ينتهي بهدوء:
+
+```console
+warn capture.empty exchanges=0 cause="the agent never called the proxy — it may not read a base-URL variable" set=ANTHROPIC_BASE_URL,OPENAI_API_BASE,OPENAI_BASE_URL next="orca doctor"
+```
+
+**وكلاء لم يسجّلهم أحد بعد.** يُسأل عنهم كثيرًا، والجواب واحد لهم جميعًا: orca يرصد **عملية** لا
+منتجًا، والبيئة التي يضبطها ترثها كل عملية تتفرّع عنها. فالسؤال إذن ليس إلا: أي الأشكال الثلاثة أدناه
+يشبه وكيلك.
+
+| | الشكل | جرّب |
+|---|---|---|
+| **grok-cli** | Bun، ونقطة xAI المتوافقة مع OpenAI | `ORCA_INSTRUMENT_HOSTS='api.x.ai' orca record node -- grok` |
+| **Hermes** (Nous Research) | خفيّ دائم التشغيل، ونقطة النموذج في إعداداته الخاصة | وجّهه إلى عنوان الوسيط الذي يطبعه `orca record`، أو سجّل استدعاء سطر الأوامر |
+| **OpenClaw** | بوابة تُطلق Claude Code أو Codex أو opencode كعمليات فرعية | `orca record generic-openai -- openclaw …` — والعملية الابنة ترث إعادة التوجيه |
+
+لا واحد من الثلاثة مختبَر هنا ولا لواحد منها محوّل. فإن سجّلت أحدها، فأنفع ما ترسله هو التسجيل نفسه:
+`orca export last -o run.html`.
+
 ## حين يرفض المِهاد أن يُعاد توجيهه
 
-حقن base-URL يلتقط كل مِهاد يقرأ متغيّر base-URL، وهم الأغلبية. أما Codex CLI الموقّع باشتراك ChatGPT
-فلا يقرأ أيًّا منها: إنه يتحدث إلى خادمه الخاص عبر TLS، وorca لا يرى شيئًا. `--tls-intercept` هو
+حقن base-URL يلتقط كل مِهاد يقرأ متغيّر base-URL، وخطّاف fetch يغطي وكلاء Node وBun الذين لا يقرؤون
+أيًّا منها. أما Codex CLI الموقّع باشتراك ChatGPT فليس من هؤلاء ولا من أولئك: إنه يتحدث إلى خادمه الخاص
+عبر TLS، فلا أصل يُعاد كتابته ولا `fetch` لنا يمكنه بلوغه. `--tls-intercept` هو
 الجواب على ذلك، وقد جُعل عمدًا قرارًا منفصلًا عليك أن تتخذه، لأنه يُصدر سلطة تصديق.
 
 ```console
@@ -276,6 +341,47 @@ orca record codex --tls-intercept --tls-hosts 'api.openai.com,*.chatgpt.com'
 وهو يعمل مع `orca replay --model` و`orca fork` و`orca compare` أيضًا، لأنها تشغّل وكيلًا حيًّا للسبب
 نفسه.
 
+## لوكيل أو سكربت أو CI
+
+التسجيل ملف — وهذا وحده ما لا تستطيع لوحة المراقبة أن تكونه. لذا فأنفع سؤال عن تشغيل فاشل هو سؤال
+يستطيع **وكيل** أن يطرحه: *أعِد تشغيل آخر جولة لي وقل لي أين حدث الانحراف.* كل أمر يجيب بالبيانات،
+وorca يقدّم نفسه عبر MCP.
+
+```console
+$ orca replay last --json
+{"runId":"run_a278eea7b535","mode":"exact","traceRunId":"run_687e3f84b208","matchedExact":2,"divergences":0,"unmatched":0,"liveCalls":0,"exitCode":0}
+
+$ orca show last --json | jq '.events[] | select(.kind == "TOOL")'
+$ orca checkpoints last --json | jq '.[-1].seq'
+```
+
+وثيقة JSON واحدة على stdout والتشخيص على stderr — ومعه مخرجات الوكيل المُسجَّل نفسه، فتبقى الوثيقة
+قابلة للتحليل بينما التشغيل يتكلم. والإخفاقات تجيب بـJSON أيضًا مع رمز خروج غير صفري. ويغطي `--json`
+الأوامر `list` و`show` و`events` و`checkpoints` و`record` و`replay` و`compare` و`doctor`.
+
+**أدواتٍ.** يقدّم `orca mcp` مخزن التسجيلات إلى وكيل عبر stdio:
+
+```json
+{ "mcpServers": { "orca": { "command": "orca", "args": ["mcp"] } } }
+```
+
+`orca_list_runs` و`orca_show_run` و`orca_checkpoints` و`orca_replay` و`orca_compare`. إعادة التشغيل
+مجانية وبلا شبكة؛ أما `orca_compare` فيقول في وصفه هو أنه ينفق رموزًا حقيقية، لأن النموذج حين يختار
+أداة لا يقرأ سوى ذلك النص.
+
+**من الشيفرة**، إن كنت تفضّل ألا تمرّ بالصدفة:
+
+```ts
+import { Orca } from 'orcareplay';
+
+const orca = new Orca({ cwd: process.cwd() });
+const { unmatched, divergences } = await orca.replay('last');
+const timeline = await orca.show('last');
+```
+
+لا يكتب أبدًا على stdout الخاص بك ولا يستدعي `process.exit` — وكلاهما مصون باختبار، لأن المكتبة التي
+تفعل أيًّا منهما لا يستطيع أحد أن يبني عليها.
+
 ## الحالة
 
 مبكّرة. `v0` هو الهيكل السائر للأوامر الثلاثة أعلاه.
@@ -284,6 +390,12 @@ orca record codex --tls-intercept --tls-hosts 'api.openai.com,*.chatgpt.com'
 |---|---|
 | صيغة الأثر v0 ومخطّط JSON | تعمل |
 | التقاط نماذج Anthropic والمتوافقة مع OpenAI | تعمل |
+| التقاط واجهة OpenAI Responses | تعمل — الصيغة التي يعتمدها OpenAI Agents SDK وCodex CLI افتراضيًا. تسجيل وإعادة تشغيل دون شبكة وتفريع؛ والتفريع يبقى على الصيغة التي يتحدثها الوكيل نفسه |
+| وكلاء لا يقرؤون أي متغيّر base-URL | تعمل — `orca record node -- <cmd>` يكتب ملف تحميل مسبق في مجلد التشغيل ويعيد توجيه `globalThis.fetch` لقائمة مسموح بها من مضيفي المزوّدين فقط. Node وBun معًا، لأن Bun يتجاهل `--require` داخل `NODE_OPTIONS`. هكذا يُلتقط وكيل مبني على Vercel AI SDK |
+| نداء لا يستطيع orca قراءته | تعمل — يُمرَّر بدل أن يُرفض، ويُسجَّل بوصفه `net.request` / `net.response`: دليل، لا دورًا قابلًا لإعادة التشغيل. والتسجيل الذي لم يلتقط شيئًا يُحذِّر بدل أن ينتهي بهدوء |
+| مخرجات يقرؤها الحاسوب (`--json`) | تعمل — وثيقة JSON واحدة على stdout، والتشخيص على stderr، والإخفاقات أيضًا JSON |
+| خادم MCP (`orca mcp`) | تعمل — خمس أدوات عبر stdio، ليتمكن وكيل من قراءة تشغيلاته وإعادة تشغيلها |
+| واجهة برمجية (`Orca`) | تعمل — الأوامر تعرض ما تُرجعه، فالطرفية مجرد رؤية واحدة لحقيقة واحدة |
 | إعادة دقيقة مع تقرير تباعد | تعمل — تستعيد نظام الملفات المسجَّل فوق شجرة عملك ثم تعيده كما كان؛ و`--worktree` لنسخة مؤقتة، و`--in-place` لعدم استعادة شيء. وتكتب تشغيلًا خاصًا بها يسجّل ما *اكتشفته* الإعادة — التباعدات والطلبات غير المطابَقة — وتشير إلى الأصل فيما كرّرته فحسب؛ و`--no-trace` لتخطّي ذلك |
 | إعادة متفرّعة من نقطة تحقق | تعمل — التفريع يسجّل لقطات نظام ملفات خاصة به، فهو تشغيل يمكن تفريعه بدوره |
 | المقارنة عبر النماذج | تعمل — يحفظ `orca setup` البوابة (OrcaRouter افتراضيًا، أو أي رابط تسمّيه)، والمفتاح، وقائمة النماذج، فلا يحتاج `orca compare` إلى أي راية |
@@ -425,6 +537,7 @@ orca scrub last --match my-hostname   # أزِل شيئًا بعد وقوعه
 
 - [`spec/orca-trace-v0.md`](../../spec/orca-trace-v0.md) — صيغة الأثر المعيارية
 - [`docs/architecture.md`](../architecture.md) — كيف يعمل الالتقاط والإعادة والتفريع فعلًا
+- [`docs/launch-path.md`](../launch-path.md) — ما أُنجز وما لم يُنجز وما هو التالي
 - [`docs/plugins.md`](../plugins.md) — كتابة محوّل أو مزوّد
 - [`CONTRIBUTING.md`](../../CONTRIBUTING.md) — حلقة تطوير من خمس دقائق
 - [Good first issues](../good-first-issues.md) — اثنتا عشرة، ومع كل واحدة الملف الذي تبدأ منه

@@ -21,8 +21,8 @@ standardmäßig, und deshalb ist `orca compare` ein einziger Befehl statt vier A
 
 [![License](https://img.shields.io/badge/code-Apache--2.0-blue)](../../LICENSE)
 [![Spec](https://img.shields.io/badge/trace%20spec-CC%20BY%204.0-blue)](../../spec/orca-trace-v0.md)
-[![Node](https://img.shields.io/badge/node-20%2B-brightgreen)](#install)
-[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20opencode%20%C2%B7%20any-black)](#install)
+[![Node](https://img.shields.io/badge/node-20%2B-brightgreen)](#installation)
+[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Agents%20SDK%20%C2%B7%20AI%20SDK%20%C2%B7%20any-black)](#installation)
 [![Good first issues](https://img.shields.io/badge/good%20first%20issues-12-orange)](../good-first-issues.md)
 
 ![Ein Claude-Code-Lauf wird aufgezeichnet, offline abgespielt und dann auf zwei Modelle abgezweigt](../demo-cli.gif)
@@ -43,7 +43,7 @@ Die dritte Zeile ist die, wegen der man bleibt: dieselben Dateien, dasselbe Gesp
 Schritt 4 ein anderes Modell. Das Modell ist die einzige Variable — und genau das gibt der Antwort
 ihre Bedeutung.
 
-Noch nicht auf npm — [aus dem Quellcode installieren](#install), dauert etwa eine Minute.
+Noch nicht auf npm — [aus dem Quellcode installieren](#installation), dauert etwa eine Minute.
 
 ## Warum es das gibt
 
@@ -74,22 +74,24 @@ zwei Umgebungsvariablen und geht aus dem Weg.
 
 Drei weitere Schichten fangen ein, was das Protokoll nicht sehen kann: einen Exit-Code, eine echte
 Laufzeit, aus welchem Stream ein Byte kam, eine Datei, die geschrieben wurde ohne es jemandem zu
-sagen.
+sagen. Eine fünfte gibt es für die Agenten, die überhaupt keine Base-URL-Variable lesen — siehe
+„Welche Agenten“ weiter unten.
 
 ```mermaid
 %%{init: {'theme':'neutral'}}%%
 flowchart LR
     A["<b>dein Agent</b><br/><i>unverändert</i>"]
 
-    subgraph orca["orca · vier Aufzeichnungsschichten"]
+    subgraph orca["orca · fünf Aufzeichnungsschichten"]
         direction TB
         P["<b>Proxy</b><br/>base-URL-Variable"]
         SH["<b>PATH-Shim</b><br/>Exit-Code · Timing · Streams"]
         MC["<b>JSON-RPC-Abzweig</b><br/>MCP-Konfiguration umschreiben"]
         FS["<b>Schatten-git-Index</b><br/>Workspace pro Runde"]
+        FH["<b>fetch-Hook</b><br/>für einen fest verdrahteten Origin"]
     end
 
-    A --> P & SH & MC & FS
+    A --> P & SH & MC & FS & FH
     P -->|"weitergeleitet, Auth intakt"| U["<b>die Modell-API</b><br/><i>oder OrcaRouter · beliebiges Gateway</i>"]
     orca ==> T[("<b>ein Trace</b><br/>.orca/runs/run_a1b2c3")]
 ```
@@ -276,11 +278,81 @@ her unsichtbar für die Aufzeichnung, nicht wegen einer Regel, die sich jemand m
 vollständig zurückgehalten, wenn ein Flag diesen Verkehr woandershin schickt als zu dem Gateway, das
 ihn ausgestellt hat.
 
+## Welche Agenten
+
+Zwei Dinge entscheiden, ob ein Harness aufgezeichnet werden kann: ob es auf den Proxy gelenkt werden
+kann, und ob orca das Format versteht, in dem es dort ankommt.
+
+| Agent | Wie er erfasst wird | Stand |
+|---|---|---|
+| **Claude Code** | `ANTHROPIC_BASE_URL` | funktioniert — an einer echten Fehlerbehebung geprüft |
+| **Codex CLI** (API-Key) | `OPENAI_BASE_URL` → Responses API | funktioniert |
+| **Codex CLI** (ChatGPT-Login) | `--tls-intercept` → Responses API | funktioniert, mit einer Entscheidung, die du selbst treffen musst |
+| **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | funktioniert |
+| **Vercel AI SDK** | fetch-Hook — `orca record node -- node app.mjs` | funktioniert |
+| **LangGraph / LangChain** | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | sollte funktionieren — es geht über die offiziellen Clients, aber hier testet es noch nichts |
+| **opencode** | `orca record opencode` | Adapter vorhanden, beide Origins werden umgelenkt |
+| **alles andere** | `orca record generic-openai -- <cmd>` | funktioniert, wenn es eine Base-URL-Variable liest; sonst `orca record node -- <cmd>` |
+
+Nur Claude Code ist Ende zu Ende gegen das echte Harness gelaufen. Der Rest hängt am Adaptervertrag
+und an Fixtures, die festhalten, welche Variablen jeder Adapter tatsächlich setzt — benennt ein
+Harness die Variable um, die es liest, wird eine Prüfung rot, statt dass eine leere Aufzeichnung
+entsteht.
+
+Zwei davon brauchten mehr als eine Umgebungsvariable, und der Unterschied ist es wert, ihn zu kennen,
+bevor du den Befehl wählst.
+
+**Ein Harness, das die Responses API spricht.** OpenAI Agents SDK und Codex CLI setzen beide
+standardmäßig auf `/v1/responses` statt auf Chat Completions. orca spricht das, es ist also nichts
+Besonderes nötig — auf einem älteren Build war das Symptom aber keine fehlende Aufzeichnung, sondern
+ein `404` in der ersten Runde des Agenten.
+
+**Ein Harness, das keine Base-URL-Variable liest.** `@ai-sdk/openai` nimmt seinen Origin nur als
+Konstruktorargument entgegen. Ein Agent auf dem Vercel AI SDK läuft unter `orca record` also
+tadellos, endet mit 0 und schreibt eine leere Aufzeichnung. Genau dafür ist der `node`-Adapter da: er
+schreibt ein kleines Preload ins Run-Verzeichnis, richtet `NODE_OPTIONS` darauf und lenkt
+`globalThis.fetch` nur für eine Allowlist von Anbieter-Hosts um.
+
+```console
+orca record node -- node agent.mjs
+orca record node -- npm run agent
+ORCA_INSTRUMENT_HOSTS='contoso.openai.azure.com' orca record node -- node agent.mjs
+```
+
+Ein eigener Adapter statt der Standardweg, weil `NODE_OPTIONS` jeden Node-Prozess erreicht, den der
+Agent startet — den Preis zahlt man gern, wenn man weiß, dass der eigene Agent ihn braucht, aber man
+drückt ihn niemandem auf, der ein Python-Harness aufzeichnet.
+
+Bun akzeptiert `NODE_OPTIONS`, ignoriert darin aber `--require`. Deshalb wird `BUN_OPTIONS=--preload`
+gleich mitgesetzt, und ein Bun-Agent ist ebenfalls abgedeckt. Das ist gegen ein echtes `bun` geprüft,
+denn der Fehler, den es verhindert, ist der stille: der Hook läuft nicht, der Verkehr geht zum
+Anbieter, und nichts wird aufgezeichnet.
+
+**Und wenn die Aufzeichnung trotzdem leer bleibt**, sagt `orca record` das, statt sauber zu enden:
+
+```console
+warn capture.empty exchanges=0 cause="the agent never called the proxy — it may not read a base-URL variable" set=ANTHROPIC_BASE_URL,OPENAI_API_BASE,OPENAI_BASE_URL next="orca doctor"
+```
+
+**Agenten, die noch niemand aufgezeichnet hat.** Danach wird oft gefragt, und die Antwort ist für alle
+dieselbe: orca instrumentiert einen **Prozess**, kein Produkt, und die Umgebung, die es setzt, erbt
+alles, was dieser Prozess startet. Die Frage ist also nur, welche der drei Formen dein Agent hat.
+
+| | Form | Versuch |
+|---|---|---|
+| **grok-cli** | Bun, der OpenAI-kompatible Endpunkt von xAI | `ORCA_INSTRUMENT_HOSTS='api.x.ai' orca record node -- grok` |
+| **Hermes** (Nous Research) | ein dauerhafter Daemon, Modell-Endpunkt in seiner eigenen Konfiguration | richte ihn auf die Proxy-URL, die `orca record` ausgibt, oder zeichne den CLI-Aufruf auf |
+| **OpenClaw** | ein Gateway, das Claude Code, Codex oder opencode als Unterprozesse startet | `orca record generic-openai -- openclaw …` — das Kind erbt die Umlenkung |
+
+Keiner der drei ist hier getestet, keiner hat einen Adapter. Wenn du einen aufzeichnest, ist die
+Aufzeichnung das Nützlichste, was du schicken kannst: `orca export last -o run.html`.
+
 ## Wenn sich das Harness nicht umlenken lässt
 
-Base-URL-Injection erfasst jedes Harness, das eine Base-URL-Variable liest — also die meisten. Eine
-Codex-CLI, die mit einem ChatGPT-Abo angemeldet ist, liest keine: sie spricht über TLS mit ihrem
-eigenen Backend, und orca sieht nichts. `--tls-intercept` ist die Antwort darauf, und es ist
+Base-URL-Injection erfasst jedes Harness, das eine Base-URL-Variable liest, und der fetch-Hook deckt
+die Node- und Bun-Agenten ab, die keine lesen. Eine Codex-CLI, die mit einem ChatGPT-Abo angemeldet
+ist, ist beides nicht: sie spricht über TLS mit ihrem eigenen Backend, es gibt also keinen Origin
+zum Umschreiben und kein `fetch` von uns, das sie erreichen könnte. `--tls-intercept` ist die Antwort darauf, und es ist
 bewusst eine eigene Entscheidung, die du treffen musst, weil dabei eine Zertifizierungsstelle
 entsteht.
 
@@ -299,6 +371,49 @@ erfüllt.
 Es funktioniert auch bei `orca replay --model`, `orca fork` und `orca compare`, die aus demselben
 Grund einen echten Agenten starten.
 
+## Für einen Agenten, ein Skript oder CI
+
+Eine Aufzeichnung ist eine Datei — das eine, was ein Observability-Dashboard nicht sein kann. Die
+nützlichste Frage zu einem gescheiterten Lauf ist deshalb eine, die ein **Agent** stellen kann:
+*spiel meinen letzten Lauf ab und sag mir, was abgewichen ist.* Jeder Befehl antwortet als Daten, und
+orca bietet sich selbst über MCP an.
+
+```console
+$ orca replay last --json
+{"runId":"run_a278eea7b535","mode":"exact","traceRunId":"run_687e3f84b208","matchedExact":2,"divergences":0,"unmatched":0,"liveCalls":0,"exitCode":0}
+
+$ orca show last --json | jq '.events[] | select(.kind == "TOOL")'
+$ orca checkpoints last --json | jq '.[-1].seq'
+```
+
+Ein JSON-Dokument auf stdout, Diagnose auf stderr — auch die Ausgabe des aufgezeichneten Agenten,
+damit das Dokument lesbar bleibt, während ein Lauf redet. Fehler antworten ebenfalls als JSON, mit
+einem Exit-Code ungleich null. `--json` deckt `list`, `show`, `events`, `checkpoints`, `record`,
+`replay`, `compare` und `doctor` ab.
+
+**Als Werkzeuge.** `orca mcp` reicht den Aufzeichnungsspeicher über stdio an einen Agenten:
+
+```json
+{ "mcpServers": { "orca": { "command": "orca", "args": ["mcp"] } } }
+```
+
+`orca_list_runs`, `orca_show_run`, `orca_checkpoints`, `orca_replay` und `orca_compare`. Replay ist
+kostenlos und offline; `orca_compare` sagt in seiner eigenen Beschreibung, dass es echte Token kostet
+— denn ein Modell, das ein Werkzeug wählt, liest genau diesen Text und sonst nichts.
+
+**Aus Code**, wenn du lieber nicht über die Shell gehst:
+
+```ts
+import { Orca } from 'orcareplay';
+
+const orca = new Orca({ cwd: process.cwd() });
+const { unmatched, divergences } = await orca.replay('last');
+const timeline = await orca.show('last');
+```
+
+Es schreibt nie auf dein stdout und ruft nie `process.exit` — beides ist per Test abgesichert, denn
+auf einer Bibliothek, die eines von beidem tut, lässt sich nichts aufbauen.
+
 ## Status
 
 Früh. `v0` ist das lauffähige Gerüst der drei Befehle oben.
@@ -307,6 +422,12 @@ Früh. `v0` ist das lauffähige Gerüst der drei Befehle oben.
 |---|---|
 | Trace-Format v0 + JSON Schema | funktioniert |
 | Anthropic-/OpenAI-kompatible Modellaufzeichnung | funktioniert |
+| Aufzeichnung der OpenAI Responses API | funktioniert — das Format, auf das OpenAI Agents SDK und Codex CLI standardmäßig setzen. Aufzeichnen, offline abspielen und forken; ein Fork bleibt auf dem Format, das der Agent selbst spricht |
+| Agenten, die keine Base-URL-Variable lesen | funktioniert — `orca record node -- <cmd>` schreibt ein Preload ins Run-Verzeichnis und lenkt `globalThis.fetch` nur für eine Allowlist von Anbieter-Hosts um. Node und Bun, denn Bun ignoriert `--require` in `NODE_OPTIONS`. So wird ein Vercel-AI-SDK-Agent erfasst |
+| Ein Aufruf, den orca nicht lesen kann | funktioniert — weitergeleitet statt abgelehnt und als `net.request` / `net.response` festgehalten: ein Beleg, keine abspielbare Runde. Eine Aufzeichnung, die nichts erfasst hat, warnt, statt sauber zu enden |
+| Maschinenlesbare Ausgabe (`--json`) | funktioniert — ein JSON-Dokument auf stdout, Diagnose auf stderr, Fehler ebenfalls als JSON |
+| MCP-Server (`orca mcp`) | funktioniert — fünf Werkzeuge über stdio, damit ein Agent seine eigenen Läufe lesen und abspielen kann |
+| Programmatische API (`Orca`) | funktioniert — die Befehle rendern, was sie zurückgibt; das Terminal ist eine Sicht auf eine einzige Wahrheit |
 | Exaktes Replay mit Divergenzbericht | funktioniert — stellt das aufgezeichnete Dateisystem über deinen Arbeitsbaum wieder her und danach zurück; `--worktree` für eine Wegwerfkopie, `--in-place` stellt nichts wieder her. Schreibt einen eigenen Lauf über das, was das Replay *herausgefunden* hat — Divergenzen, nicht zugeordnete Anfragen — und zeigt für das bloß Wiederholte auf den Eltern-Lauf; `--no-trace` überspringt das |
 | Fork-Replay ab einem Checkpoint | funktioniert — ein Fork zeichnet eigene Dateisystem-Snapshots auf und ist damit ein Lauf, den man erneut forken kann |
 | Vergleich über Modelle hinweg | funktioniert — `orca setup` speichert Gateway (standardmäßig OrcaRouter, sonst jede URL, die du nennst), Key und Modellliste, `orca compare` braucht also keine Flags |
@@ -464,6 +585,7 @@ Implementierung als Beleg, dass sie nicht um einen Anbieter herum geformt ist.
 
 - [`spec/orca-trace-v0.md`](../../spec/orca-trace-v0.md) — das normative Trace-Format
 - [`docs/architecture.md`](../architecture.md) — wie Aufzeichnung, Replay und Fork wirklich arbeiten
+- [`docs/launch-path.md`](../launch-path.md) — was gebaut ist, was nicht, und was als Nächstes kommt
 - [`docs/plugins.md`](../plugins.md) — einen Adapter oder Provider schreiben
 - [`CONTRIBUTING.md`](../../CONTRIBUTING.md) — die Fünf-Minuten-Dev-Schleife
 - [Good first issues](../good-first-issues.md) — zwölf davon, mit der Datei zum Anfangen

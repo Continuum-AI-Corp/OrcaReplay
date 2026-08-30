@@ -2,9 +2,6 @@
 
 <sub>**English** · [简体中文](docs/i18n/README.zh-CN.md) · [日本語](docs/i18n/README.ja.md) · [한국어](docs/i18n/README.ko.md) · [Deutsch](docs/i18n/README.de.md) · [Français](docs/i18n/README.fr.md) · [Español](docs/i18n/README.es.md) · [العربية](docs/i18n/README.ar.md)</sub>
 
-<sub>The translations are behind this page: they do not yet cover the Responses API, the `node`
-adapter, `--json` or `orca mcp`. English is the source of truth until they catch up.</sub>
-
 ### Your agent broke something at 2am. Replay it at 9am — exactly, offline, as many times as you like.
 
 Record any coding agent. Reproduce the run byte-for-byte with the network off. Fork it from any step

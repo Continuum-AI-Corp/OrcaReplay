@@ -21,8 +21,8 @@ Claude、GPT、Gemini、Grok、DeepSeek、Qwen ほかに届く。`orca setup` �
 
 [![License](https://img.shields.io/badge/code-Apache--2.0-blue)](../../LICENSE)
 [![Spec](https://img.shields.io/badge/trace%20spec-CC%20BY%204.0-blue)](../../spec/orca-trace-v0.md)
-[![Node](https://img.shields.io/badge/node-20%2B-brightgreen)](#install)
-[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20opencode%20%C2%B7%20any-black)](#install)
+[![Node](https://img.shields.io/badge/node-20%2B-brightgreen)](#インストール)
+[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Agents%20SDK%20%C2%B7%20AI%20SDK%20%C2%B7%20any-black)](#インストール)
 [![Good first issues](https://img.shields.io/badge/good%20first%20issues-12-orange)](../good-first-issues.md)
 
 ![Claude Code の実行を記録し、オフラインで再生し、2つのモデルへ分岐させる様子](../demo-cli.gif)
@@ -41,7 +41,7 @@ orca replay last --from 4 --model claude-haiku-4-5 --ui
 人が留まる理由は3行目にある。同じファイル、同じ会話の前半、ステップ4から先だけ別のモデル。
 変数はモデルだけ——だからこそ答えに意味が出る。
 
-npm 未公開——[ソースからインストール](#install)、1分ほど。
+npm 未公開——[ソースからインストール](#インストール)、1分ほど。
 
 ## なぜ作ったのか
 
@@ -70,22 +70,24 @@ OrcaReplay の答えは、その実行そのものを返すことだ。
 ローカルプロキシを立て、環境変数を2つ設定し、あとは道を空ける。
 
 プロトコルからは見えないものを捕まえる層があと3つある。終了コード、実際の所要時間、
-どちらのストリームから出たバイトか、そして誰にも告げずに書かれたファイル。
+どちらのストリームから出たバイトか、そして誰にも告げずに書かれたファイル。5つ目は、base-URL 変数を
+まったく読まないエージェントのためにある——下の「どのエージェントが使えるか」を参照。
 
 ```mermaid
 %%{init: {'theme':'neutral'}}%%
 flowchart LR
     A["<b>あなたのエージェント</b><br/><i>無改造</i>"]
 
-    subgraph orca["orca · 4つの捕捉層"]
+    subgraph orca["orca · 5つの捕捉層"]
         direction TB
         P["<b>プロキシ</b><br/>base-URL 環境変数"]
         SH["<b>PATH シム</b><br/>終了コード · 時間 · ストリーム"]
         MC["<b>JSON-RPC 分岐</b><br/>MCP 設定の書き換え"]
         FS["<b>影の git インデックス</b><br/>ターンごとのワークスペース"]
+        FH["<b>fetch フック</b><br/>オリジンが直書きの場合"]
     end
 
-    A --> P & SH & MC & FS
+    A --> P & SH & MC & FS & FH
     P -->|"認証はそのまま転送"| U["<b>モデル API</b><br/><i>または OrcaRouter · 任意のゲートウェイ</i>"]
     orca ==> T[("<b>1つのトレース</b><br/>.orca/runs/run_a1b2c3")]
 ```
@@ -258,6 +260,73 @@ OpenAI 互換の `/v1/models` とチャットエンドポイントを話すも�
 認証を取り除いて構成される。つまり誰かが規則を覚えているからではなく、構造上、記録には見えない。
 フラグによって発行元以外のゲートウェイへ送られる場合は、キーは完全に差し止められる。
 
+## どのエージェントが使えるか
+
+ハーネスを記録できるかどうかは二つで決まります。プロキシに向けられるかどうかと、届いた通信の
+ワイヤ形式を orca が理解できるかどうかです。
+
+| エージェント | 捕捉の仕方 | 状態 |
+|---|---|---|
+| **Claude Code** | `ANTHROPIC_BASE_URL` | 動作——実際のバグ修正で検証済み |
+| **Codex CLI**（API キー） | `OPENAI_BASE_URL` → Responses API | 動作 |
+| **Codex CLI**（ChatGPT ログイン） | `--tls-intercept` → Responses API | 動作。ただし自分で決めることがひとつあります |
+| **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | 動作 |
+| **Vercel AI SDK** | fetch フック——`orca record node -- node app.mjs` | 動作 |
+| **LangGraph / LangChain** | `OPENAI_BASE_URL`、`ANTHROPIC_BASE_URL` | 動くはず——公式クライアント経由だが、ここにはまだテストがない |
+| **opencode** | `orca record opencode` | アダプタあり。両方のオリジンを向け替える |
+| **それ以外** | `orca record generic-openai -- <cmd>` | base-URL 変数を読むなら動作。読まないなら `orca record node -- <cmd>` |
+
+実際のハーネスに対して端から端まで走らせたのは Claude Code だけです。ほかはアダプタ契約と
+フィクスチャで担保しています。フィクスチャは各アダプタが実際にどの変数を設定するかを記録するので、
+ハーネスが読む変数名を変えたときに赤くなるのはチェックであって、空の trace ではありません。
+
+このうち二つは環境変数だけでは足りません。コマンドを選ぶ前に知っておく価値があります。
+
+**Responses API を話すハーネス。** OpenAI Agents SDK と Codex CLI はどちらも chat completions では
+なく `/v1/responses` を既定で使います。orca はこれを理解するので特別な操作は要りません——ただし
+それ以前のビルドを使っている場合、症状は「trace が足りない」ではなく、エージェントが最初のターンで
+`404` を受け取ることでした。
+
+**base-URL 変数をまったく読まないハーネス。** `@ai-sdk/openai` はコンストラクタ引数でしかオリジンを
+受け取らないので、Vercel AI SDK 製のエージェントは `orca record` の下で問題なく走り、終了コード 0 で
+終わり、trace は空になります。`node` アダプタはまさにそのためのものです。実行ディレクトリに小さな
+プリロードを書き、`NODE_OPTIONS` をそこに向け、許可リストにあるプロバイダのホストにだけ
+`globalThis.fetch` を向け替えます。
+
+```console
+orca record node -- node agent.mjs
+orca record node -- npm run agent
+ORCA_INSTRUMENT_HOSTS='contoso.openai.azure.com' orca record node -- node agent.mjs
+```
+
+既定ではなく別のアダプタにしてあるのは、`NODE_OPTIONS` がエージェントの起こすすべての Node
+プロセスに伝わるからです。必要だと分かっているときには払う価値のある代償ですが、Python の
+ハーネスを記録している人に押し付けるものではありません。
+
+Bun は `NODE_OPTIONS` を受け取りますが、その中の `--require` は無視します。そこで
+`BUN_OPTIONS=--preload` も併せて設定してあり、Bun 製のエージェントも同じように捕捉できます。これは
+実際の `bun` で確かめてあります。防いでいるのが「フックが動かず、通信がそのままプロバイダへ行き、
+何も記録されない」という声を上げない失敗だからです。
+
+**それでも trace が空だったときは**、`orca record` はきれいに終了せず、はっきりそう言います。
+
+```console
+warn capture.empty exchanges=0 cause="the agent never called the proxy — it may not read a base-URL variable" set=ANTHROPIC_BASE_URL,OPENAI_API_BASE,OPENAI_BASE_URL next="orca doctor"
+```
+
+**まだ誰も記録していないエージェント。** よく聞かれるもので、答えはどれも同じです。orca が計測するのは
+**プロセス**であって製品ではなく、設定した環境はそのプロセスが起こすものすべてに引き継がれます。
+つまり問題は、あなたのエージェントが下の三つの形のどれかというだけです。
+
+| | 形 | 試すこと |
+|---|---|---|
+| **grok-cli** | Bun、xAI の OpenAI 互換エンドポイント | `ORCA_INSTRUMENT_HOSTS='api.x.ai' orca record node -- grok` |
+| **Hermes**（Nous Research） | 常駐デーモン。モデルのエンドポイントは自前の設定に書く | `orca record` が表示するプロキシ URL を向けるか、CLI 呼び出しのほうを記録する |
+| **OpenClaw** | Claude Code や Codex、opencode を子プロセスとして起動するゲートウェイ | `orca record generic-openai -- openclaw …`——子プロセスが向け替えを引き継ぎます |
+
+三つとも、ここにテストはなくアダプタもありません。記録できたなら、いちばん役に立つのはその trace
+です——`orca export last -o run.html`。
+
 ## ハーネスが向きを変えてくれないとき
 
 base-URL の注入は、base-URL 変数を読むあらゆるハーネスを捕捉する——ほとんどがそうだ。ChatGPT サブスクリプションで
@@ -278,6 +347,47 @@ orca がどこかへインストールしようと申し出ることはない。
 `orca replay --model`、`orca fork`、`orca compare` でも同じように働く。同じ理由で実際のエージェントを
 起動するからだ。
 
+## エージェント、スクリプト、CI のために
+
+trace はファイルです——これは observability のダッシュボードにはできない唯一のことです。だから失敗した
+実行についていちばん役に立つ問いは、**エージェント**が発せる問いです。*直前の実行を再生して、どこが
+ずれたか教えて。* すべてのコマンドがデータで答え、orca は自分自身を MCP で提供します。
+
+```console
+$ orca replay last --json
+{"runId":"run_a278eea7b535","mode":"exact","traceRunId":"run_687e3f84b208","matchedExact":2,"divergences":0,"unmatched":0,"liveCalls":0,"exitCode":0}
+
+$ orca show last --json | jq '.events[] | select(.kind == "TOOL")'
+$ orca checkpoints last --json | jq '.[-1].seq'
+```
+
+stdout には JSON ドキュメントがひとつだけ、診断は stderr——記録中のエージェント自身の出力も stderr に
+回すので、実行が喋っている間もドキュメントは壊れません。失敗も JSON で返り、終了コードは非ゼロです。
+`--json` は `list`、`show`、`events`、`checkpoints`、`record`、`replay`、`compare`、`doctor` に対応します。
+
+**ツールとして。** `orca mcp` は stdio 経由で trace ストアをエージェントに渡します。
+
+```json
+{ "mcpServers": { "orca": { "command": "orca", "args": ["mcp"] } } }
+```
+
+`orca_list_runs`、`orca_show_run`、`orca_checkpoints`、`orca_replay`、`orca_compare`。再生は無料で
+オフラインです。`orca_compare` は自分の説明文の中で「実際にトークンを使う」と明言しています。ツールを
+選ぶモデルが読むのはその文字列だけだからです。
+
+**コードから**、シェルを経由したくない場合は：
+
+```ts
+import { Orca } from 'orcareplay';
+
+const orca = new Orca({ cwd: process.cwd() });
+const { unmatched, divergences } = await orca.replay('last');
+const timeline = await orca.show('last');
+```
+
+あなたの stdout には決して書きませんし、`process.exit` も呼びません——どちらもテストで守っています。
+そのどちらかをするライブラリは、誰もその上に何かを build できないからです。
+
 ## 現状
 
 まだ初期段階。`v0` は上の3コマンドの「歩ける骨格」だ。
@@ -286,6 +396,12 @@ orca がどこかへインストールしようと申し出ることはない。
 |---|---|
 | トレース形式 v0 + JSON Schema | 動作 |
 | Anthropic / OpenAI 互換のモデル捕捉 | 動作 |
+| OpenAI Responses API の捕捉 | 動作——OpenAI Agents SDK と Codex CLI が既定で使う形式。記録・オフライン再生・分岐に対応し、分岐はエージェントが話すワイヤ形式のまま |
+| base-URL 変数を読まないエージェント | 動作——`orca record node -- <cmd>` が実行ディレクトリにプリロードを書き、許可リストのプロバイダホストにだけ `globalThis.fetch` を向け替える。Bun は `NODE_OPTIONS` の `--require` を無視するので Node と Bun の両方に対応。Vercel AI SDK のエージェントはこれで捕捉する |
+| orca が読めない呼び出し | 動作——拒否せず転送し、`net.request` / `net.response` として記録する。証拠であって、再生できるターンではない。何も捕捉できなかった記録は、きれいに終了せず警告する |
+| 機械可読な出力（`--json`） | 動作——stdout に JSON ドキュメント一つ、診断は stderr、失敗も JSON |
+| MCP サーバ（`orca mcp`） | 動作——stdio で五つのツール。エージェントが自分の実行記録を読んで再生できる |
+| プログラム API（`Orca`） | 動作——コマンドはこれが返すものを描画するだけなので、端末は唯一の事実のひとつのビュー |
 | 差分報告つきの完全再生 | 動作——記録されたファイルシステムを作業ツリーに復元し、終了後に戻す。`--worktree` で使い捨てコピー、`--in-place` で復元なし。再生が*発見*したこと（差分、未一致リクエスト）を記録する自前の run を書き、単に繰り返しただけの部分は親を指す。`--no-trace` で省略 |
 | チェックポイントからの分岐再生 | 動作——分岐は自身のファイルシステムスナップショットを記録するので、それ自体をさらに分岐できる |
 | モデル横断の比較 | 動作——`orca setup` がゲートウェイ（既定は OrcaRouter、指定すれば任意の URL）、キー、モデル一覧を保存するので `orca compare` にフラグは要らない |
@@ -431,6 +547,7 @@ OrcaReplay は [OrcaRouter](https://www.orcarouter.ai) を作っている人た�
 
 - [`spec/orca-trace-v0.md`](../../spec/orca-trace-v0.md) — 規範としてのトレース形式
 - [`docs/architecture.md`](../architecture.md) — 捕捉・再生・分岐の実際の動き
+- [`docs/launch-path.md`](../launch-path.md) — できていること、できていないこと、次にやること
 - [`docs/plugins.md`](../plugins.md) — アダプタや provider の書き方
 - [`CONTRIBUTING.md`](../../CONTRIBUTING.md) — 5分の開発ループ
 - [Good first issues](../good-first-issues.md) — 12件、着手するファイル付き
