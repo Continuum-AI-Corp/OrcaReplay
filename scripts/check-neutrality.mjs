@@ -9,8 +9,9 @@
  */
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const root = new URL('..', import.meta.url).pathname;
+const root = fileURLToPath(new URL('..', import.meta.url));
 const providersSrc = join(root, 'packages', 'providers', 'src');
 
 /** Packages a vendor provider plugin may import. Anything else is a privileged path. */

@@ -40,7 +40,7 @@ describe('shell shim', () => {
     );
   }
 
-  it('passes stdout through byte for byte', async () => {
+  it.skipIf(process.platform === 'win32')('passes stdout through byte for byte', async () => {
     // Compared against the *unshimmed* command rather than a hand-written expectation: the
     // property that matters is "the shim changes nothing", and writing the bytes out by hand
     // tests the author's understanding of printf instead — which is how the first version of
@@ -55,25 +55,31 @@ describe('shell shim', () => {
     expect((shimmed.stdout as Buffer).length).toBeGreaterThan(0);
   });
 
-  it('keeps stdout and stderr on their own streams', async () => {
-    const result = await through('sh', ['-c', 'printf out; printf err 1>&2']);
-    expect(result.stdout).toBe('out');
-    expect(result.stderr).toBe('err');
-  });
+  it.skipIf(process.platform === 'win32')(
+    'keeps stdout and stderr on their own streams',
+    async () => {
+      const result = await through('sh', ['-c', 'printf out; printf err 1>&2']);
+      expect(result.stdout).toBe('out');
+      expect(result.stderr).toBe('err');
+    },
+  );
 
-  it('forwards a non-zero exit code', async () => {
+  it.skipIf(process.platform === 'win32')('forwards a non-zero exit code', async () => {
     const result = await through('sh', ['-c', 'exit 3']);
     expect((result as { code?: number }).code).toBe(3);
   });
 
-  it('does not re-execute itself when the shim dir is first on PATH', async () => {
-    // If resolution ever returns the shim, this hangs or blows the process table rather than
-    // failing cleanly — so the assertion is really "this returned at all".
-    const result = await through('sh', ['-c', 'echo alive']);
-    expect(result.stdout.trim()).toBe('alive');
-  });
+  it.skipIf(process.platform === 'win32')(
+    'does not re-execute itself when the shim dir is first on PATH',
+    async () => {
+      // If resolution ever returns the shim, this hangs or blows the process table rather than
+      // failing cleanly — so the assertion is really "this returned at all".
+      const result = await through('sh', ['-c', 'echo alive']);
+      expect(result.stdout.trim()).toBe('alive');
+    },
+  );
 
-  it('records argv, cwd, exit code and duration', async () => {
+  it.skipIf(process.platform === 'win32')('records argv, cwd, exit code and duration', async () => {
     await through('sh', ['-c', 'exit 2']);
     const frames = await readShellFrames(shim.framesPath);
     expect(frames).toHaveLength(1);
@@ -85,55 +91,84 @@ describe('shell shim', () => {
     expect(frame.durationMs).toBeGreaterThanOrEqual(0);
   });
 
-  it('records the byte counts the model never sees', async () => {
-    await through('sh', ['-c', 'printf 12345; printf 678 1>&2']);
-    const [frame] = await readShellFrames(shim.framesPath);
-    expect(frame!.stdoutBytes).toBe(5);
-    expect(frame!.stderrBytes).toBe(3);
-  });
+  it.skipIf(process.platform === 'win32')(
+    'records the byte counts the model never sees',
+    async () => {
+      await through('sh', ['-c', 'printf 12345; printf 678 1>&2']);
+      const [frame] = await readShellFrames(shim.framesPath);
+      expect(frame!.stdoutBytes).toBe(5);
+      expect(frame!.stderrBytes).toBe(3);
+    },
+  );
 
-  it('appends one frame per invocation, in order', async () => {
-    await through('sh', ['-c', 'true']);
-    await through('sh', ['-c', 'false']);
-    const frames = await readShellFrames(shim.framesPath);
-    expect(frames.map((f) => f.exitCode)).toEqual([0, 1]);
-  });
+  it.skipIf(process.platform === 'win32')(
+    'appends one frame per invocation, in order',
+    async () => {
+      await through('sh', ['-c', 'true']);
+      await through('sh', ['-c', 'false']);
+      const frames = await readShellFrames(shim.framesPath);
+      expect(frames.map((f) => f.exitCode)).toEqual([0, 1]);
+    },
+  );
 
-  it('handles a large output without truncating or reordering it', async () => {
-    const result = await through('sh', [
-      '-c',
-      'i=0; while [ $i -lt 2000 ]; do echo line$i; i=$((i+1)); done',
-    ]);
-    const lines = result.stdout.trim().split('\n');
-    expect(lines).toHaveLength(2000);
-    expect(lines[0]).toBe('line0');
-    expect(lines[1999]).toBe('line1999');
-  });
+  it.skipIf(process.platform === 'win32')(
+    'handles a large output without truncating or reordering it',
+    async () => {
+      const result = await through('sh', [
+        '-c',
+        'i=0; while [ $i -lt 2000 ]; do echo line$i; i=$((i+1)); done',
+      ]);
+      const lines = result.stdout.trim().split('\n');
+      expect(lines).toHaveLength(2000);
+      expect(lines[0]).toBe('line0');
+      expect(lines[1999]).toBe('line1999');
+    },
+  );
 
-  it('keeps working when the frames file cannot be written', async () => {
-    // Capture is a nice-to-have; the command the user is running is not.
-    const broken = await installShellShim({ runDir, framesPath: '/proc/definitely/not/writable' });
-    const result = await run('sh', ['-c', 'echo survived'], {
-      env: { ...process.env, PATH: `${broken.dir}:${process.env.PATH ?? ''}` },
-    });
-    expect(result.stdout.trim()).toBe('survived');
-  });
+  it.skipIf(process.platform === 'win32')(
+    'keeps working when the frames file cannot be written',
+    async () => {
+      // Capture is a nice-to-have; the command the user is running is not.
+      const broken = await installShellShim({
+        runDir,
+        framesPath: '/proc/definitely/not/writable',
+      });
+      const result = await run('sh', ['-c', 'echo survived'], {
+        env: { ...process.env, PATH: `${broken.dir}:${process.env.PATH ?? ''}` },
+      });
+      expect(result.stdout.trim()).toBe('survived');
+    },
+  );
 
-  it('reports a clear error rather than hanging when the real binary is gone', async () => {
-    const result = await run(join(shim.dir, 'sh'), ['-c', 'true'], {
-      env: { ...process.env, PATH: shim.dir },
-    }).catch((err: NodeJS.ErrnoException & { stderr?: string; code?: number }) => ({
-      stderr: err.stderr ?? '',
-      code: err.code,
-    }));
-    expect((result as { code?: number }).code).not.toBe(0);
-    expect((result as { stderr: string }).stderr).toMatch(/orca/i);
-  });
+  it.skipIf(process.platform === 'win32')(
+    'reports a clear error rather than hanging when the real binary is gone',
+    async () => {
+      const result = await run(join(shim.dir, 'sh'), ['-c', 'true'], {
+        env: { ...process.env, PATH: shim.dir },
+      }).catch((err: NodeJS.ErrnoException & { stderr?: string; code?: number }) => ({
+        stderr: err.stderr ?? '',
+        code: err.code,
+      }));
+      expect((result as { code?: number }).code).not.toBe(0);
+      expect((result as { stderr: string }).stderr).toMatch(/orca/i);
+    },
+  );
 
-  it('shims the shells an agent actually uses', async () => {
+  it.skipIf(process.platform === 'win32')('shims the shells an agent actually uses', async () => {
     const contents = await readFile(join(shim.dir, 'bash'), 'utf8').catch(() => '');
     expect(contents).not.toBe('');
     expect(shim.shimmed).toContain('sh');
     expect(shim.shimmed).toContain('bash');
   });
+
+  it.skipIf(process.platform !== 'win32')(
+    'writes command shims Windows can launch from PATH',
+    async () => {
+      const contents = await readFile(join(shim.dir, 'sh.cmd'), 'utf8');
+      expect(contents).toContain('@echo off');
+      expect(contents).toContain('%*');
+      expect(await readFile(join(shim.dir, 'bash.cmd'), 'utf8')).not.toBe('');
+      expect(shim.shimmed).toEqual(['sh', 'bash']);
+    },
+  );
 });

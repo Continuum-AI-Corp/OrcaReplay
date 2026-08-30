@@ -1,6 +1,6 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
 import {
@@ -14,7 +14,10 @@ import {
 } from '../src/index.js';
 
 /** A PATH with `which` on it but none of the agent binaries, so detect() is deterministic. */
-const BARE_PATH = '/usr/bin:/bin';
+const BARE_PATH =
+  process.platform === 'win32'
+    ? join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
+    : '/usr/bin:/bin';
 
 let scratch: string;
 const saved = { ...process.env };
@@ -112,15 +115,21 @@ describe('hasBinary', () => {
   it('finds a binary that is on PATH', async () => {
     const bin = join(scratch, 'bin');
     mkdirSync(bin);
-    writeFileSync(join(bin, 'orca-fake-agent'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-    process.env.PATH = `${bin}:${BARE_PATH}`;
+    const filename = process.platform === 'win32' ? 'orca-fake-agent.cmd' : 'orca-fake-agent';
+    const contents =
+      process.platform === 'win32' ? '@echo off\r\nexit /b 0\r\n' : '#!/bin/sh\nexit 0\n';
+    writeFileSync(join(bin, filename), contents, { mode: 0o755 });
+    process.env.PATH = `${bin}${delimiter}${BARE_PATH}`;
     expect(await hasBinary('orca-fake-agent')).toBe(true);
   });
 
   it('is false for a binary that is not on PATH', async () => {
     const bin = join(scratch, 'bin');
     mkdirSync(bin);
-    writeFileSync(join(bin, 'orca-fake-agent'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const filename = process.platform === 'win32' ? 'orca-fake-agent.cmd' : 'orca-fake-agent';
+    const contents =
+      process.platform === 'win32' ? '@echo off\r\nexit /b 0\r\n' : '#!/bin/sh\nexit 0\n';
+    writeFileSync(join(bin, filename), contents, { mode: 0o755 });
     process.env.PATH = BARE_PATH;
     expect(await hasBinary('orca-fake-agent')).toBe(false);
   });
@@ -150,8 +159,11 @@ describe('claudeCodeAdapter', () => {
     const home = isolate();
     const bin = join(scratch, 'bin');
     mkdirSync(bin);
-    writeFileSync(join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-    process.env.PATH = `${bin}:${BARE_PATH}`;
+    const filename = process.platform === 'win32' ? 'claude.cmd' : 'claude';
+    const contents =
+      process.platform === 'win32' ? '@echo off\r\nexit /b 0\r\n' : '#!/bin/sh\nexit 0\n';
+    writeFileSync(join(bin, filename), contents, { mode: 0o755 });
+    process.env.PATH = `${bin}${delimiter}${BARE_PATH}`;
     expect(home).toBeTruthy();
     expect(await claudeCodeAdapter.detect('/work')).toBe(true);
   });

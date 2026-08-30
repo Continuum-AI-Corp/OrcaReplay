@@ -354,6 +354,10 @@ so instead. The release is a tagged, gated workflow — see [`RELEASING.md`](REL
 >=22.12.0`, because the test toolchain does; the root `package.json` declares that separately so
 `npm ci` tells you up front. No account, no signup, no API key changes.
 
+On Windows, shell capture writes `.cmd` shims and can instrument `sh.exe` or `bash.exe` when a
+POSIX shell such as Git for Windows is available. If neither is on `PATH`, `orca doctor` warns and
+you can record with `--no-shell`.
+
 ## Where your runs are kept
 
 Everything lands in **`.orca/runs/` inside the project you recorded in** — per-project, never a

@@ -25,10 +25,9 @@ export interface InstalledShim {
 /**
  * Write a directory of shim executables to prepend to PATH.
  *
- * Each shim is a POSIX `sh` script rather than a Node script, for one specific reason: its shebang
- * names an absolute interpreter, so it never consults PATH to start — and PATH is exactly where
- * our own shims live. A `#!/usr/bin/env node` shebang would resolve through the directory we just
- * poisoned.
+ * On POSIX, each shim is a small shell script whose shebang names an absolute interpreter, so it
+ * never consults PATH to start — and PATH is exactly where our own shims live. Windows cannot
+ * execute an extensionless script from PATH, so it gets a `.cmd` shim with the same argv contract.
  */
 export async function installShellShim(options: InstallOptions): Promise<InstalledShim> {
   const dir = join(options.runDir, 'shims');
@@ -39,15 +38,24 @@ export async function installShellShim(options: InstallOptions): Promise<Install
 
   const runner = await resolveRunnerBin();
   const node = process.execPath;
+  const windows = process.platform === 'win32';
 
   for (const name of shims) {
-    const script = [
-      '#!/bin/sh',
-      '# Written by orca record. Runs the real binary and notes what happened.',
-      `exec ${quote(node)} ${quote(runner)} ${quote(name)} ${quote(dir)} ${quote(framesPath)} -- "$@"`,
-      '',
-    ].join('\n');
-    const path = join(dir, name);
+    const script = windows
+      ? [
+          '@echo off',
+          'rem Written by orca record. Runs the real binary and notes what happened.',
+          `${quoteCmd(node)} ${quoteCmd(runner)} ${quoteCmd(name)} ${quoteCmd(dir)} ${quoteCmd(framesPath)} -- %*`,
+          'exit /b %ERRORLEVEL%',
+          '',
+        ].join('\r\n')
+      : [
+          '#!/bin/sh',
+          '# Written by orca record. Runs the real binary and notes what happened.',
+          `exec ${quotePosix(node)} ${quotePosix(runner)} ${quotePosix(name)} ${quotePosix(dir)} ${quotePosix(framesPath)} -- "$@"`,
+          '',
+        ].join('\n');
+    const path = join(dir, windows ? `${name}.cmd` : name);
     await writeFile(path, script, { mode: 0o755 });
     await chmod(path, 0o755);
   }
@@ -107,6 +115,10 @@ export async function resolveRunnerBin(): Promise<string> {
   );
 }
 
-function quote(value: string): string {
+function quotePosix(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function quoteCmd(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
 }
