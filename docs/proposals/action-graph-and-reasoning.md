@@ -34,6 +34,67 @@ answer *why did it delete my migration file* in one hop.
 
 Four edges are missing, and they are two different kinds of missing.
 
+### What the whole graph looks like
+
+Three turns of one run, every event placed by when it happened and by what kind of thing it is.
+Note what is *not* drawn: a request and its response are one exchange, not an edge, so nothing
+connects them.
+
+```
+                  TURN 1                     TURN 2               TURN 3
+MODEL     2    3 ───┐           ┌─▶ 8   9* ──┐            ┌─▶ 14   15   16
+          req  resp │           │       resp │            │   req  end  exit 0
+                    ▼           │            ▼            │
+TOOL                4 ─▶ 7 ─────┘            10* ─▶ 13 ───┘
+                    edit result              bash   result
+                    ┆                        ┆
+                    ▼                        ▼
+EFFECT              6                        11* ─▶ 12*
+                    auth.ts                  check  exit 1
+                                                    └── nothing consumes this
+
+  ─▶ written into `causes`      ┆▼ inferred, derived at read time, never written
+  *  the chain `orca graph last --to 12` returns
+```
+
+Two things this makes obvious that the timeline list does not.
+
+The run has a **motif** — request, response, call, effect, result, request — so a 400-event run is
+sixty repetitions of one shape, and anything that breaks the shape is worth looking at.
+
+And seq 12 has **no edge leaving it**. Nothing consumed the failure; turn 3 asks the model nothing
+about it and ends the run at `exit 0`. That absence is the bug, and an absence is far easier to see
+in a graph than in a list.
+
+### The same graph as data
+
+What ships first, and what an agent asking "why did this run fail" actually consumes. Every edge
+names the rule that produced it, so an inferred edge can be argued with:
+
+```console
+$ orca graph last --to 12 --json
+{
+  "runId": "run_6473f858b59e",
+  "nodes": [
+    { "seq": 9,  "type": "model.response", "attrs": { "stop_reason": "tool_use" } },
+    { "seq": 10, "type": "tool.call",      "attrs": { "name": "bash" } },
+    { "seq": 11, "type": "shell.exec",     "attrs": { "argv": ["sh","-c","node --check …"] } },
+    { "seq": 12, "type": "shell.result",   "attrs": { "exit_code": 1 } }
+  ],
+  "edges": [
+    { "from": 9,  "to": 10, "kind": "recorded", "rule": "tool_use block in the response" },
+    { "from": 10, "to": 11, "kind": "inferred", "rule": "argv matches tool input, same turn" },
+    { "from": 11, "to": 12, "kind": "recorded", "rule": "shell frame pair" }
+  ]
+}
+```
+
+`causes` points backwards in the trace, because the spec requires every entry to be less than its
+own `seq`. The graph output turns that around into `from`/`to`, since "9 caused 10" is what a reader
+wants and "10 was caused by 9" is only what the file can store. The `kind` field is the whole
+honesty mechanism: `recorded` edges came out of `causes`; `inferred` ones were derived just now by
+the named rule and are not in the trace at all.
+
 ### Observed — write them into `causes`
 
 These are not inferences. A `tool_use` block is physically inside the response that emitted it, and
