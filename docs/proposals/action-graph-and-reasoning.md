@@ -1,14 +1,20 @@
 # Proposal: the action graph, and an export that produces a picture
 
-Status: **steps 1–2 shipped**, steps 3–4 open. Read against `d20d471`; built on
+Status: **all four steps shipped**. Read against `d20d471`; built on
 `claude/orcaplay-action-causal-graph-jv6ekg`.
 
 | Step | State |
 |---|---|
 | 1. Observed edges, `runGraph()`, `orca graph --json` | shipped |
 | 2. `renderChainCard()` and `renderGraphCard()` — SVG | shipped |
-| 3. PNG output for both cards, and `compare --share --png` | open — needs the rasterizer decision below |
-| 4. GIF of the chain resolving | open — same decision |
+| 3. PNG for both cards, and `compare --share` | shipped |
+| 4. GIF of the chain resolving, one frame per hop | shipped |
+
+The rasterizer question was settled the way `docs/media/README.md` already answers it: the render
+toolchain stays out of `package.json`, is imported at the moment of use, and its absence is a
+message naming the one line that installs it. `orca doctor` reports it, and `.svg` never needs it.
+Deferred to a follow-up: the model's reasoning (section 2), and a graph pane inside the exported
+HTML viewer.
 
 Two things the build found that this plan had wrong. The inference window is one turn, not zero: a
 snapshot races the agent running the tool, so the same recording put an edit in turn 1's snapshot on

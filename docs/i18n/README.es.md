@@ -171,6 +171,43 @@ ejecución tapó: el archivo cambió de verdad (seq 6, `+1 −3`), la comprobaci
 **falló** (seq 12, `exit 1`), y aun así dio por terminado. La ejecución salió con 0 porque el
 *agente* salió con 0.
 
+Ese último hecho merece un comando propio. `orca show` da el orden en que pasaron las cosas;
+`orca graph` da qué produjo qué:
+
+```console
+$ orca graph last
+FROM              TO               KIND      WHY
+3 model.response  4 tool.call      recorded  tool_use block in the response
+4 tool.call       6 fs.change      inferred  changed path appears in tool input, same or previous turn
+4 tool.call       7 tool.result    recorded  tool result answers its call
+7 tool.result     8 model.request  recorded  tool_result block in the request
+
+  1 inferred — derived from this trace, not recorded in it
+```
+
+Dos clases de arista, y la diferencia importa. Una arista **recorded** se escribió cuando ocurrió
+la ejecución, porque un bloque `tool_use` está físicamente dentro de la respuesta que lo emitió. Una
+arista **inferred** se dedujo ahora mismo según la regla que nombra: una instantánea del sistema de
+ficheros se toma una vez por turno y no una vez por llamada, así que atribuir un cambio de fichero a
+una llamada *concreta* es una buena conjetura y no un hecho. Las aristas inferidas nunca se
+escriben de vuelta en el trace, igual que los checkpoints se derivan y nunca se graban.
+
+`orca export last --card bug.svg` dibuja esa cadena como una imagen para pegar en un issue, y
+`--graph-card` dibuja la ejecución entera con la cadena resaltada.
+
+SVG se ve en un issue de GitHub y casi en ningún otro sitio que importe — X no lo acepta como
+subida, y Slack y Discord no le dan vista previa — así que llama al fichero `.png` y tendrás uno, o
+`.gif` y la cadena se construye paso a paso. Ese camino necesita un navegador, y orca no depende de
+ninguno: `docs/media/README.md` mantiene las herramientas de render fuera de `package.json` para que
+nadie que ejecute `npm ci` pague una descarga de Chromium. Si falta, orca dice la única línea que lo
+arregla; `orca doctor` lo informa de todos modos, y `.svg` nunca necesita nada.
+
+```console
+orca export last --card bug.png       # the chain, ready to post
+orca export last --card bug.gif       # the same chain, one hop per frame
+npm i --no-save playwright-core pngjs gifenc   # only needed for the two above
+```
+
 Ahora reprodúcelo tantas veces como quieras, gratis:
 
 ```console
@@ -445,6 +482,8 @@ Temprano. `v0` es el esqueleto que camina de los tres comandos de arriba.
 | Agentes que no leen ninguna variable de base-URL | funciona — `orca record node -- <cmd>` escribe una precarga en el directorio de la ejecución y redirige `globalThis.fetch` solo para una lista blanca de hosts de proveedores. Node y Bun, porque Bun ignora `--require` dentro de `NODE_OPTIONS`. Así se captura un agente de Vercel AI SDK |
 | Una llamada que orca no sabe leer | funciona — se reenvía en vez de rechazarse y queda registrada como `net.request` / `net.response`: es evidencia, no un turno reproducible. Una grabación que no capturó nada avisa en lugar de terminar limpia |
 | Salida legible por máquina (`--json`) | funciona — un documento JSON en stdout, los diagnósticos en stderr, los fallos también en JSON |
+| Grafo causal (`orca graph`) | funciona — qué produjo qué, como tabla o como JSON. Cada arista dice si el trace la grabó o si orca acaba de deducirla, y nombra la regla en ambos casos. `--to N` reduce a la cadena que produjo un evento |
+| Tarjetas compartibles | funciona — `orca export --card` dibuja una cadena causal, `--graph-card` la ejecución entera con esa cadena resaltada, y `compare --share` la tabla de veredictos. Siempre `.svg`; `.png` y `.gif` con las herramientas de render opcionales, que `orca doctor` informa y `npm ci` nunca instala |
 | Servidor MCP (`orca mcp`) | funciona — seis herramientas por stdio, para que un agente pueda leer y reproducir sus propias ejecuciones |
 | API programática (`Orca`) | funciona — los comandos pintan lo que devuelve, así que la terminal es una vista de una sola verdad |
 | Reproducción exacta con informe de divergencias | funciona — restaura el sistema de archivos grabado sobre tu árbol de trabajo y luego lo devuelve; `--worktree` para una copia desechable, `--in-place` para no restaurar nada. Escribe una ejecución propia con lo que la reproducción *descubrió* —divergencias, peticiones sin emparejar— y apunta al padre para lo que se limitó a repetir; `--no-trace` para omitirlo |

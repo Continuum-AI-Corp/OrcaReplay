@@ -21,7 +21,8 @@ import { priceFor } from '@orcareplay/providers';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
 import { formatCost } from './compare.js';
-import { renderChainCard, renderGraphCard, scopeForCard, svgTarget } from '../share-card.js';
+import { renderChainCard, renderGraphCard, scopeForCard } from '../share-card.js';
+import { cardTarget, gifFrames, svgToPng, svgsToGif, type CardFormat } from '../rasterize.js';
 
 /** `orca list` — what runs are here, newest first. */
 export async function listCommand(
@@ -197,6 +198,29 @@ export function narrow(graph: RunGraph, to: number | undefined): RunGraph {
   return to === undefined ? graph : chainTo(graph, to);
 }
 
+/**
+ * Write a card in whichever format was asked for.
+ *
+ * SVG is the source and never needs anything; PNG and GIF go through the optional raster path,
+ * which explains itself when its packages are absent rather than failing obscurely.
+ */
+async function writeCard(
+  path: string,
+  format: CardFormat,
+  svgs: string[],
+  delays: number[],
+): Promise<number> {
+  if (format === 'svg') {
+    const svg = svgs[svgs.length - 1] ?? '';
+    await writeFile(path, svg, 'utf8');
+    return Buffer.byteLength(svg);
+  }
+  const buffer =
+    format === 'png' ? await svgToPng(svgs[svgs.length - 1] ?? '') : await svgsToGif(svgs, delays);
+  await writeFile(path, buffer);
+  return buffer.length;
+}
+
 /** `orca export` — the single self-contained file that makes a trace shareable. */
 export async function exportCommand(
   args: ParsedArgs,
@@ -213,7 +237,8 @@ export async function exportCommand(
   // The graph card shows the shape of a run; the chain card follows one path through it. Two
   // different pictures, so two flags rather than a mode switch on one.
   if (args.has('graph-card')) {
-    const cardPath = resolve(cwd, svgTarget(args.str('graph-card') ?? 'graph.svg', '--graph-card'));
+    const target = cardTarget(args.str('graph-card') ?? 'graph.svg', '--graph-card');
+    const cardPath = resolve(cwd, target.path);
     const events = await reader.events();
     const graph = runGraph(events);
     const to = args.num('to') ?? pickChainTarget(events);
@@ -222,13 +247,19 @@ export async function exportCommand(
       runId: manifest.run_id,
       highlight,
     });
-    await writeFile(cardPath, svg, 'utf8');
-    out.phase('carded', { path: cardPath, bytes: Buffer.byteLength(svg), kind: 'graph' });
+    // A graph is one picture: there is no sequence to animate, so a .gif of it would be a
+    // one-frame file pretending to be a clip.
+    if (target.format === 'gif') {
+      throw new Error('--graph-card draws one picture, so it has no animation. Use .svg or .png.');
+    }
+    const bytes = await writeCard(cardPath, target.format, [svg], []);
+    out.phase('carded', { path: cardPath, bytes, kind: 'graph', format: target.format });
     return;
   }
 
   if (args.has('card')) {
-    const cardPath = resolve(cwd, svgTarget(args.str('card') ?? 'chain.svg', '--card'));
+    const target = cardTarget(args.str('card') ?? 'chain.svg', '--card');
+    const cardPath = resolve(cwd, target.path);
     const events = await reader.events();
     const to = args.num('to') ?? pickChainTarget(events);
     if (to === undefined) {
@@ -240,9 +271,19 @@ export async function exportCommand(
           'Name the event yourself with `--to <seq>`, or `orca show` to find one.',
       );
     }
-    const svg = renderChainCard(chainTo(runGraph(events), to), { runId: manifest.run_id });
-    await writeFile(cardPath, svg, 'utf8');
-    out.phase('carded', { path: cardPath, bytes: Buffer.byteLength(svg), to });
+    const chain = chainTo(runGraph(events), to);
+    const frames = gifFrames(chain.nodes.length);
+    const svgs =
+      target.format === 'gif'
+        ? frames.map((f) => renderChainCard(chain, { runId: manifest.run_id, reveal: f.reveal }))
+        : [renderChainCard(chain, { runId: manifest.run_id })];
+    const bytes = await writeCard(
+      cardPath,
+      target.format,
+      svgs,
+      frames.map((f) => f.delayMs),
+    );
+    out.phase('carded', { path: cardPath, bytes, to, format: target.format });
     return;
   }
 

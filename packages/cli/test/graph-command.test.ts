@@ -223,15 +223,19 @@ describe('card and share filenames', () => {
     return stripAnsi(lines.join('\n'));
   }
 
-  it('refuses a raster filename rather than writing SVG bytes into it', async () => {
+  // PNG and GIF are real formats now; the refusal is for the ones orca genuinely cannot write,
+  // and for a raster asked for without the optional toolchain installed.
+  it('refuses a format it cannot write at all, naming what it can', async () => {
     const { dir } = await seed();
-    await expect(exportTo('chain.png', dir)).rejects.toThrow(/png/i);
+    await expect(exportTo('chain.jpg', dir)).rejects.toThrow(/\.svg/);
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('says what it can write, so the refusal is actionable', async () => {
+  it('explains the missing toolchain instead of failing obscurely on a raster', async () => {
     const { dir } = await seed();
-    await expect(exportTo('chain.gif', dir)).rejects.toThrow(/\.svg/);
+    const { missingRenderDeps } = await import('../src/rasterize.js');
+    if ((await missingRenderDeps()).length === 0) return; // installed here: nothing to assert
+    await expect(exportTo('chain.png', dir)).rejects.toThrow(/npm i --no-save/);
     await rm(dir, { recursive: true, force: true });
   });
 

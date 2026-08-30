@@ -160,3 +160,31 @@ describe('renderChainCard rail draws only real hops', () => {
     expect(svg.match(/<line[^>]*x1="92"[^>]*>/g) ?? []).toHaveLength(1);
   });
 });
+
+/**
+ * The GIF is the same card drawn repeatedly with one more hop each time, so the geometry has to
+ * stay fixed while the content grows — a card that resizes per frame jumps as it animates.
+ */
+describe('renderChainCard reveal', () => {
+  it('draws only the hops asked for', () => {
+    const svg = renderChainCard(chain, { runId: 'r', reveal: 2 });
+    expect(svg).toContain('model.response');
+    expect(svg).toContain('tool.call');
+    expect(svg).not.toContain('shell.result');
+  });
+
+  it('keeps the card the same size at every reveal, so the animation does not jump', () => {
+    const h = (s: string) => /viewBox="0 0 \d+ (\d+)"/.exec(s)?.[1];
+    const sizes = [1, 2, 3, 4].map((n) => h(renderChainCard(chain, { runId: 'r', reveal: n })));
+    expect(new Set(sizes).size).toBe(1);
+  });
+
+  it('shows the whole chain when no reveal is asked for', () => {
+    expect(renderChainCard(chain, { runId: 'r' })).toContain('shell.result');
+  });
+
+  it('keeps the headline from the final event, not the last one revealed', () => {
+    // The claim is what the chain ends in; a frame that has not reached it yet still says so.
+    expect(renderChainCard(chain, { runId: 'r', reveal: 1 })).toMatch(/exited 1/);
+  });
+});

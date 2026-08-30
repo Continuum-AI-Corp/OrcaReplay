@@ -163,6 +163,42 @@ info usage input=201 output=25 cost=$0.004890
 (seq 6, `+1 −3`), 에이전트가 돌린 확인은 **실패했으며** (seq 12, `exit 1`), 그런데도 끝냈다.
 실행이 0으로 끝난 건 *에이전트*가 0으로 끝났기 때문일 뿐이다.
 
+이 마지막 사실은 자기 명령을 가질 만하다. `orca show`는 일이 일어난 순서를 주고,
+`orca graph`는 무엇이 무엇을 낳았는지를 준다.
+
+```console
+$ orca graph last
+FROM              TO               KIND      WHY
+3 model.response  4 tool.call      recorded  tool_use block in the response
+4 tool.call       6 fs.change      inferred  changed path appears in tool input, same or previous turn
+4 tool.call       7 tool.result    recorded  tool result answers its call
+7 tool.result     8 model.request  recorded  tool_result block in the request
+
+  1 inferred — derived from this trace, not recorded in it
+```
+
+간선에는 두 종류가 있고, 그 차이가 중요하다. **recorded** 간선은 실행 당시에 기록된 것이다.
+`tool_use` 블록은 그것을 내보낸 응답 안에 물리적으로 들어 있기 때문이다. **inferred** 간선은
+방금 이름 붙은 규칙으로 유도된 것이다 — 파일시스템 스냅샷은 도구 호출마다가 아니라 턴마다
+한 번 찍히므로, 파일 변경을 *특정* 호출에 귀속시키는 것은 좋은 추측이지 사실이 아니다. 유도된
+간선은 결코 트레이스에 다시 쓰이지 않는다. 체크포인트가 유도되고 기록되지 않는 것과 같다.
+
+`orca export last --card bug.svg`는 그 사슬을 이슈에 붙일 그림으로 그리고, `--graph-card`는
+실행 전체를 그 사슬을 밝혀 그린다.
+
+SVG는 GitHub 이슈에서는 보이지만 중요한 다른 곳에서는 거의 보이지 않는다 — X는 업로드로 받지
+않고, Slack과 Discord는 미리보기를 주지 않는다. 그러니 파일 이름을 `.png`로 하면 PNG를, `.gif`로
+하면 사슬이 한 홉씩 쌓이는 GIF를 얻는다. 이 경로에는 브라우저가 필요하지만 orca는 브라우저에
+의존하지 않는다. `docs/media/README.md`가 렌더 도구를 `package.json` 밖에 두어, `npm ci`를
+실행하는 사람이 Chromium 내려받기를 부담하지 않게 한다. 없으면 orca가 그것을 고치는 한 줄을
+알려준다. `orca doctor`는 어느 쪽이든 보고하고, `.svg`는 아무것도 필요로 하지 않는다.
+
+```console
+orca export last --card bug.png       # the chain, ready to post
+orca export last --card bug.gif       # the same chain, one hop per frame
+npm i --no-save playwright-core pngjs gifenc   # only needed for the two above
+```
+
 이제 원하는 만큼, 공짜로 재현한다:
 
 ```console
@@ -415,6 +451,8 @@ const timeline = await orca.show('last');
 | base-URL 변수를 읽지 않는 에이전트 | 동작 — `orca record node -- <cmd>`가 실행 디렉터리에 프리로드를 쓰고, 허용 목록의 프로바이더 호스트에만 `globalThis.fetch`를 돌린다. Bun은 `NODE_OPTIONS` 안의 `--require`를 무시하므로 Node와 Bun 둘 다 지원. Vercel AI SDK 에이전트는 이렇게 포착한다 |
 | orca가 읽지 못하는 호출 | 동작 — 거부하지 않고 전달하며 `net.request` / `net.response`로 기록한다. 증거이지 재생 가능한 턴은 아니다. 아무것도 포착하지 못한 기록은 조용히 끝나지 않고 경고한다 |
 | 기계가 읽는 출력(`--json`) | 동작 — stdout에 JSON 문서 하나, 진단은 stderr, 실패도 JSON |
+| 인과 그래프(`orca graph`) | 동작 — 무엇이 무엇을 낳았는지를 표 또는 JSON으로. 각 간선은 트레이스가 기록한 것인지 orca가 방금 유도한 것인지를 말하고, 어느 쪽이든 규칙을 이름으로 밝힌다. `--to N`은 한 사건을 낳은 사슬로 좁힌다 |
+| 공유용 카드 | 동작 — `orca export --card`는 인과 사슬 하나를, `--graph-card`는 그 사슬을 밝힌 실행 전체를, `compare --share`는 판정 표를 그린다. `.svg`는 언제나, `.png`와 `.gif`는 선택적 렌더 도구가 있을 때. `orca doctor`가 보고하고 `npm ci`는 절대 끌어오지 않는다 |
 | MCP 서버(`orca mcp`) | 동작 — stdio로 여섯 개 도구. 에이전트가 자기 실행 기록을 읽고 재생할 수 있다 |
 | 프로그래밍 API(`Orca`) | 동작 — 명령은 이것이 돌려준 것을 그릴 뿐이라, 터미널은 하나의 사실에 대한 하나의 뷰다 |
 | 발산 보고가 붙은 정확 재생 | 동작 — 기록된 파일시스템을 작업 트리 위에 복원하고 끝나면 되돌린다. `--worktree`는 임시 사본, `--in-place`는 아무것도 복원하지 않음. 재생이 *발견한* 것(발산, 미일치 요청)을 담은 자기 자신의 run을 쓰고, 단지 되풀이한 부분은 부모를 가리킨다. `--no-trace`로 생략 |

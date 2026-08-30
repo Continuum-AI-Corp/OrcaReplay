@@ -173,6 +173,43 @@ verdeckt hat: die Datei hat sich wirklich geändert (seq 6, `+1 −3`), die Prü
 ausgeführt hat, ist **fehlgeschlagen** (seq 12, `exit 1`), und er hat trotzdem aufgehört. Der Lauf
 endete mit 0, weil der *Agent* mit 0 endete.
 
+Diese letzte Tatsache verdient einen eigenen Befehl. `orca show` zeigt die Reihenfolge, in der
+Dinge passiert sind; `orca graph` zeigt, was was hervorgebracht hat:
+
+```console
+$ orca graph last
+FROM              TO               KIND      WHY
+3 model.response  4 tool.call      recorded  tool_use block in the response
+4 tool.call       6 fs.change      inferred  changed path appears in tool input, same or previous turn
+4 tool.call       7 tool.result    recorded  tool result answers its call
+7 tool.result     8 model.request  recorded  tool_result block in the request
+
+  1 inferred — derived from this trace, not recorded in it
+```
+
+Zwei Arten von Kante, und der Unterschied zählt. Eine **recorded** Kante wurde beim Lauf selbst
+geschrieben, weil ein `tool_use`-Block physisch in der Antwort steckt, die ihn ausgegeben hat. Eine
+**inferred** Kante wurde eben erst nach der genannten Regel hergeleitet — ein Dateisystem-Snapshot
+entsteht einmal pro Zug und nicht einmal pro Tool-Aufruf, also ist die Zuordnung einer Dateiänderung
+zu einem *bestimmten* Aufruf eine gute Vermutung und keine Tatsache. Hergeleitete Kanten werden nie
+in den Trace zurückgeschrieben, genauso wie Checkpoints hergeleitet und nie aufgezeichnet werden.
+
+`orca export last --card bug.svg` zeichnet diese Kette als Bild für ein Issue, und `--graph-card`
+zeichnet den ganzen Lauf mit der hervorgehobenen Kette.
+
+SVG rendert in einem GitHub-Issue und sonst kaum irgendwo — X nimmt es nicht als Upload an, Slack
+und Discord zeigen keine Vorschau — also nenne die Datei `.png` und du bekommst eins, oder `.gif`,
+dann baut sich die Kette Schritt für Schritt auf. Dieser Weg braucht einen Browser, und orca hängt
+nicht von einem ab: `docs/media/README.md` hält die Render-Werkzeuge aus `package.json` heraus,
+damit niemand bei `npm ci` einen Chromium-Download bezahlt. Fehlt es, nennt orca die eine Zeile, die
+es behebt; `orca doctor` meldet es ohnehin, und `.svg` braucht nie etwas.
+
+```console
+orca export last --card bug.png       # the chain, ready to post
+orca export last --card bug.gif       # the same chain, one hop per frame
+npm i --no-save playwright-core pngjs gifenc   # only needed for the two above
+```
+
 Jetzt reproduziere es so oft du willst, umsonst:
 
 ```console
@@ -450,6 +487,8 @@ Früh. `v0` ist das lauffähige Gerüst der drei Befehle oben.
 | Agenten, die keine Base-URL-Variable lesen | funktioniert — `orca record node -- <cmd>` schreibt ein Preload ins Run-Verzeichnis und lenkt `globalThis.fetch` nur für eine Allowlist von Anbieter-Hosts um. Node und Bun, denn Bun ignoriert `--require` in `NODE_OPTIONS`. So wird ein Vercel-AI-SDK-Agent erfasst |
 | Ein Aufruf, den orca nicht lesen kann | funktioniert — weitergeleitet statt abgelehnt und als `net.request` / `net.response` festgehalten: ein Beleg, keine abspielbare Runde. Eine Aufzeichnung, die nichts erfasst hat, warnt, statt sauber zu enden |
 | Maschinenlesbare Ausgabe (`--json`) | funktioniert — ein JSON-Dokument auf stdout, Diagnose auf stderr, Fehler ebenfalls als JSON |
+| Kausalgraph (`orca graph`) | funktioniert — was was hervorgebracht hat, als Tabelle oder JSON. Jede Kante sagt, ob der Trace sie aufgezeichnet oder orca sie eben hergeleitet hat, und nennt in beiden Fällen die Regel. `--to N` engt auf die Kette ein, die ein Ereignis erzeugt hat |
+| Teilbare Karten | funktioniert — `orca export --card` zeichnet eine Kausalkette, `--graph-card` den ganzen Lauf mit dieser Kette hervorgehoben, `compare --share` die Ergebnistabelle. Immer `.svg`; `.png` und `.gif`, wenn die optionalen Render-Werkzeuge installiert sind, die `orca doctor` meldet und `npm ci` nie mitzieht |
 | MCP-Server (`orca mcp`) | funktioniert — sechs Werkzeuge über stdio, damit ein Agent seine eigenen Läufe lesen und abspielen kann |
 | Programmatische API (`Orca`) | funktioniert — die Befehle rendern, was sie zurückgibt; das Terminal ist eine Sicht auf eine einzige Wahrheit |
 | Exaktes Replay mit Divergenzbericht | funktioniert — stellt das aufgezeichnete Dateisystem über deinen Arbeitsbaum wieder her und danach zurück; `--worktree` für eine Wegwerfkopie, `--in-place` stellt nichts wieder her. Schreibt einen eigenen Lauf über das, was das Replay *herausgefunden* hat — Divergenzen, nicht zugeordnete Anfragen — und zeigt für das bloß Wiederholte auf den Eltern-Lauf; `--no-trace` überspringt das |

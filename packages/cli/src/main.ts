@@ -30,14 +30,14 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
                                  fork the same checkpoint onto several models
         --from N                 checkpoint to fork every model from
         --verify <cmd>           run this in each fork; its exit code is the verdict
-        --share [file.svg]       write the verdict table as a shareable card
+        --share [f.svg|png]      write the verdict table as a shareable card
   orca show [run]                the timeline, in the terminal
   orca checkpoints [run]         where you can fork from
   orca graph [run]               what caused what — recorded edges and derived ones
         --to N                   just the chain that produced event N
   orca export [run] -o file.html a single self-contained file you can attach
-        --card [file.svg]        one causal chain as a picture, ready to paste
-        --graph-card [file.svg]  the whole run as a graph, with the chain lit
+        --card [f.svg|png|gif]   one causal chain as a picture, ready to paste
+        --graph-card [f.svg|png] the whole run as a graph, with the chain lit
         --to N                   which event the card is about (default: the failure)
   orca scrub [run] --match X     remove something from a recorded trace
         --dry-run                say what would go, and write nothing

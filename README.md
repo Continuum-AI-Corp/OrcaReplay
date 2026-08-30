@@ -192,6 +192,20 @@ something orca made up.
 `orca export last --card bug.svg` draws that chain as a picture you can paste into an issue, and
 `--graph-card` draws the whole run with the chain lit against it.
 
+SVG renders in a GitHub issue and almost nowhere else that matters — X will not take it as an
+upload, and Slack and Discord give it no preview — so name the file `.png` and you get one, or
+`.gif` and the chain builds a hop at a time. That path needs a browser, and orca does not depend on
+one: `docs/media/README.md` keeps the render toolchain out of `package.json` so nobody running
+`npm ci` pays for a Chromium download, and a picture command is not a reason to reverse that. Ask
+for a raster without it and orca says the one line that fixes it; `orca doctor` reports it either
+way, and `.svg` never needs anything.
+
+```console
+orca export last --card bug.png       # the chain, ready to post
+orca export last --card bug.gif       # the same chain, one hop per frame
+npm i --no-save playwright-core pngjs gifenc   # only needed for the two above
+```
+
 Now reproduce it as often as you like, for nothing:
 
 ```console
@@ -447,7 +461,7 @@ Early. `v0` is the walking skeleton of the three commands above. Everything belo
 | A call orca cannot read | working — forwarded rather than refused, and recorded as `net.request` / `net.response`: evidence, not a replayable turn. A recording that captured nothing warns instead of exiting clean |
 | Machine-readable output (`--json`) | working — one JSON document on stdout, diagnostics on stderr, failures as JSON |
 | Causal graph (`orca graph`) | working — what caused what, as a table or as JSON. Every edge says whether the trace recorded it or orca derived it just now, and names the rule either way. `--to N` narrows to the chain that produced one event |
-| Shareable cards | working — `orca export --card` draws one causal chain, `--graph-card` draws the whole run with that chain lit, and `compare --share` draws the verdict table. All SVG; nothing here rasterises to PNG or GIF yet |
+| Shareable cards | working — `orca export --card` draws one causal chain, `--graph-card` draws the whole run with that chain lit, and `compare --share` draws the verdict table. `.svg` always; `.png` and `.gif` when the optional render toolchain is installed, which `orca doctor` reports and `npm ci` never pulls in |
 | MCP server (`orca mcp`) | working — six tools over stdio, so an agent can read, explain and replay its own runs |
 | Programmatic API (`Orca`) | working — the commands render what it returns, so the terminal is a view of one source of truth |
 | Exact replay with divergence reporting | working — restores the recorded filesystem over your working tree, then puts it back; `--worktree` for a scratch copy, `--in-place` to restore nothing. Writes a run of its own recording what the replay *discovered* — divergences, unmatched requests — and points at the parent for what it merely repeated; `--no-trace` to skip |

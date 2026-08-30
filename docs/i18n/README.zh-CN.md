@@ -157,6 +157,39 @@ info usage input=201 output=25 cost=$0.004890
 agent 跑的那次检查**失败了**（seq 12，`exit 1`），然后它照样收工。整次运行退出码是 0，
 只因为那个 *agent* 退出码是 0。
 
+最后这个事实值得一条自己的命令。`orca show` 给出事情发生的顺序；`orca graph` 给出什么产生了什么：
+
+```console
+$ orca graph last
+FROM              TO               KIND      WHY
+3 model.response  4 tool.call      recorded  tool_use block in the response
+4 tool.call       6 fs.change      inferred  changed path appears in tool input, same or previous turn
+4 tool.call       7 tool.result    recorded  tool result answers its call
+7 tool.result     8 model.request  recorded  tool_result block in the request
+
+  1 inferred — derived from this trace, not recorded in it
+```
+
+边有两种，而且区别很重要。**recorded** 边是运行当时写下的，因为 `tool_use` 块就物理地待在发出它的
+那条响应里。**inferred** 边是刚刚按它自己写明的规则推导出来的——文件系统快照是每轮拍一次，而不是每次
+工具调用拍一次，所以把一处文件改动归给*某一次具体调用*是个不错的猜测，不是事实。推导出的边永远不会
+写回 trace，就像 checkpoint 是推导出来的、从不被记录一样。
+
+`orca export last --card bug.svg` 把这条链画成一张能贴进 issue 的图，`--graph-card` 则画出整个运行，
+并把这条链点亮。
+
+SVG 在 GitHub issue 里能渲染，在其他要紧的地方几乎都不行——X 不接受它作为上传，Slack 和 Discord
+不给预览。所以把文件名写成 `.png` 就得到 PNG，写成 `.gif` 就得到一跳一帧逐步搭起来的动图。这条路需要
+一个浏览器，而 orca 并不依赖浏览器：`docs/media/README.md` 特意把渲染工具挡在 `package.json` 之外，
+好让跑 `npm ci` 的人不用为下载 Chromium 买单。缺了它，orca 会告诉你修好它的那一行；`orca doctor`
+无论如何都会报告，而 `.svg` 从来什么都不需要。
+
+```console
+orca export last --card bug.png       # the chain, ready to post
+orca export last --card bug.gif       # the same chain, one hop per frame
+npm i --no-save playwright-core pngjs gifenc   # only needed for the two above
+```
+
 现在你想复现多少遍都行，而且不花钱：
 
 ```console
@@ -402,6 +435,8 @@ const timeline = await orca.show('last');
 | 不读 base-URL 变量的 agent | 可用——`orca record node -- <cmd>` 往运行目录写一个预加载文件，只对白名单里的 provider 主机改道 `globalThis.fetch`。Node 和 Bun 都覆盖，因为 Bun 会忽略 `NODE_OPTIONS` 里的 `--require`。Vercel AI SDK 的 agent 就是这么抓到的 |
 | orca 读不懂的调用 | 可用——转发而不是拒绝，并记成 `net.request` / `net.response`：是证据，不是可重放的一轮。什么都没抓到的录制会告警，而不是干净退出 |
 | 机器可读输出（`--json`） | 可用——stdout 上一份 JSON 文档，诊断信息走 stderr，失败也是 JSON |
+| 因果图（`orca graph`） | 可用——什么产生了什么，可输出为表格或 JSON。每条边都说明它是 trace 记录下来的，还是 orca 刚刚推导出来的，两种情况都写明规则。`--to N` 收窄到产生某个事件的那条链 |
+| 可分享的卡片 | 可用——`orca export --card` 画一条因果链，`--graph-card` 画整个运行并点亮该链，`compare --share` 画判定表。`.svg` 始终可用；装了可选的渲染工具后还能出 `.png` 和 `.gif`，`orca doctor` 会报告，而 `npm ci` 从不安装它们 |
 | MCP 服务端（`orca mcp`） | 可用——stdio 上六个工具，让 agent 能读取和重放自己的运行记录 |
 | 编程接口（`Orca`） | 可用——命令渲染它返回的东西，所以终端只是同一份事实的一个视图 |
 | 带分歧报告的精确重放 | 可用——把录制下来的文件系统还原到你的工作区之上，结束后再放回去；`--worktree` 用临时副本，`--in-place` 则什么都不还原。它会为重放本身写一份自己的 run，记录这次重放*发现*了什么——分歧、未匹配的请求——而单纯重复的部分则指向父 run；`--no-trace` 可跳过 |
