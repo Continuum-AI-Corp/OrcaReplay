@@ -372,7 +372,7 @@ stdout 上只有一份 JSON 文档，诊断信息全走 stderr——包括被录
 { "mcpServers": { "orca": { "command": "orca", "args": ["mcp"] } } }
 ```
 
-`orca_list_runs`、`orca_show_run`、`orca_checkpoints`、`orca_replay` 和 `orca_compare`。重放是免费且
+`orca_list_runs`、`orca_show_run`、`orca_checkpoints`、`orca_graph`、`orca_replay` 和 `orca_compare`。重放是免费且
 离线的；`orca_compare` 在自己的描述里就写明它会花掉真金白银的 token，因为模型挑工具时读的就是那段
 字符串，别的都不看。
 
@@ -402,7 +402,7 @@ const timeline = await orca.show('last');
 | 不读 base-URL 变量的 agent | 可用——`orca record node -- <cmd>` 往运行目录写一个预加载文件，只对白名单里的 provider 主机改道 `globalThis.fetch`。Node 和 Bun 都覆盖，因为 Bun 会忽略 `NODE_OPTIONS` 里的 `--require`。Vercel AI SDK 的 agent 就是这么抓到的 |
 | orca 读不懂的调用 | 可用——转发而不是拒绝，并记成 `net.request` / `net.response`：是证据，不是可重放的一轮。什么都没抓到的录制会告警，而不是干净退出 |
 | 机器可读输出（`--json`） | 可用——stdout 上一份 JSON 文档，诊断信息走 stderr，失败也是 JSON |
-| MCP 服务端（`orca mcp`） | 可用——stdio 上五个工具，让 agent 能读取和重放自己的运行记录 |
+| MCP 服务端（`orca mcp`） | 可用——stdio 上六个工具，让 agent 能读取和重放自己的运行记录 |
 | 编程接口（`Orca`） | 可用——命令渲染它返回的东西，所以终端只是同一份事实的一个视图 |
 | 带分歧报告的精确重放 | 可用——把录制下来的文件系统还原到你的工作区之上，结束后再放回去；`--worktree` 用临时副本，`--in-place` 则什么都不还原。它会为重放本身写一份自己的 run，记录这次重放*发现*了什么——分歧、未匹配的请求——而单纯重复的部分则指向父 run；`--no-trace` 可跳过 |
 | 从检查点分叉重放 | 可用——分叉会记录自己的文件系统快照，所以它本身也是一次可以再被分叉的 run |

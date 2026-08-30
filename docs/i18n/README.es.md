@@ -416,7 +416,7 @@ responden en JSON, con código de salida distinto de cero. `--json` cubre `list`
 { "mcpServers": { "orca": { "command": "orca", "args": ["mcp"] } } }
 ```
 
-`orca_list_runs`, `orca_show_run`, `orca_checkpoints`, `orca_replay` y `orca_compare`. Reproducir es
+`orca_list_runs`, `orca_show_run`, `orca_checkpoints`, `orca_graph`, `orca_replay` y `orca_compare`. Reproducir es
 gratis y sin red; `orca_compare` dice en su propia descripción que gasta tokens de verdad, porque un
 modelo que elige una herramienta lee esa cadena y nada más.
 
@@ -445,7 +445,7 @@ Temprano. `v0` es el esqueleto que camina de los tres comandos de arriba.
 | Agentes que no leen ninguna variable de base-URL | funciona — `orca record node -- <cmd>` escribe una precarga en el directorio de la ejecución y redirige `globalThis.fetch` solo para una lista blanca de hosts de proveedores. Node y Bun, porque Bun ignora `--require` dentro de `NODE_OPTIONS`. Así se captura un agente de Vercel AI SDK |
 | Una llamada que orca no sabe leer | funciona — se reenvía en vez de rechazarse y queda registrada como `net.request` / `net.response`: es evidencia, no un turno reproducible. Una grabación que no capturó nada avisa en lugar de terminar limpia |
 | Salida legible por máquina (`--json`) | funciona — un documento JSON en stdout, los diagnósticos en stderr, los fallos también en JSON |
-| Servidor MCP (`orca mcp`) | funciona — cinco herramientas por stdio, para que un agente pueda leer y reproducir sus propias ejecuciones |
+| Servidor MCP (`orca mcp`) | funciona — seis herramientas por stdio, para que un agente pueda leer y reproducir sus propias ejecuciones |
 | API programática (`Orca`) | funciona — los comandos pintan lo que devuelve, así que la terminal es una vista de una sola verdad |
 | Reproducción exacta con informe de divergencias | funciona — restaura el sistema de archivos grabado sobre tu árbol de trabajo y luego lo devuelve; `--worktree` para una copia desechable, `--in-place` para no restaurar nada. Escribe una ejecución propia con lo que la reproducción *descubrió* —divergencias, peticiones sin emparejar— y apunta al padre para lo que se limitó a repetir; `--no-trace` para omitirlo |
 | Reproducción bifurcada desde un punto de control | funciona — una bifurcación graba sus propias instantáneas de sistema de archivos, así que es una ejecución que puedes volver a bifurcar |

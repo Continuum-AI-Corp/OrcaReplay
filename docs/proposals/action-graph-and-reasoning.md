@@ -1,6 +1,20 @@
 # Proposal: the action graph, and an export that produces a picture
 
-Status: scoped. Read against `d20d471`.
+Status: **steps 1–2 shipped**, steps 3–4 open. Read against `d20d471`; built on
+`claude/orcaplay-action-causal-graph-jv6ekg`.
+
+| Step | State |
+|---|---|
+| 1. Observed edges, `runGraph()`, `orca graph --json` | shipped |
+| 2. `renderChainCard()` and `renderGraphCard()` — SVG | shipped |
+| 3. PNG output for both cards, and `compare --share --png` | open — needs the rasterizer decision below |
+| 4. GIF of the chain resolving | open — same decision |
+
+Two things the build found that this plan had wrong. The inference window is one turn, not zero: a
+snapshot races the agent running the tool, so the same recording put an edit in turn 1's snapshot on
+one run and turn 2's on the next. And the fork path was a second call site of the exchange deriver
+that wrote no `causes` at all, so a forked run could be replayed and forked again but not
+explained; both now go through one shared writer.
 
 Three additions were suggested together: an action/causal graph over a run, the model's private
 chain-of-thought, and an artefact with a UI. **The scope is now the first and the third — the graph,

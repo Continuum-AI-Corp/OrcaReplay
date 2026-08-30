@@ -421,7 +421,7 @@ einem Exit-Code ungleich null. `--json` deckt `list`, `show`, `events`, `checkpo
 { "mcpServers": { "orca": { "command": "orca", "args": ["mcp"] } } }
 ```
 
-`orca_list_runs`, `orca_show_run`, `orca_checkpoints`, `orca_replay` und `orca_compare`. Replay ist
+`orca_list_runs`, `orca_show_run`, `orca_checkpoints`, `orca_graph`, `orca_replay` und `orca_compare`. Replay ist
 kostenlos und offline; `orca_compare` sagt in seiner eigenen Beschreibung, dass es echte Token kostet
 — denn ein Modell, das ein Werkzeug wählt, liest genau diesen Text und sonst nichts.
 
@@ -450,7 +450,7 @@ Früh. `v0` ist das lauffähige Gerüst der drei Befehle oben.
 | Agenten, die keine Base-URL-Variable lesen | funktioniert — `orca record node -- <cmd>` schreibt ein Preload ins Run-Verzeichnis und lenkt `globalThis.fetch` nur für eine Allowlist von Anbieter-Hosts um. Node und Bun, denn Bun ignoriert `--require` in `NODE_OPTIONS`. So wird ein Vercel-AI-SDK-Agent erfasst |
 | Ein Aufruf, den orca nicht lesen kann | funktioniert — weitergeleitet statt abgelehnt und als `net.request` / `net.response` festgehalten: ein Beleg, keine abspielbare Runde. Eine Aufzeichnung, die nichts erfasst hat, warnt, statt sauber zu enden |
 | Maschinenlesbare Ausgabe (`--json`) | funktioniert — ein JSON-Dokument auf stdout, Diagnose auf stderr, Fehler ebenfalls als JSON |
-| MCP-Server (`orca mcp`) | funktioniert — fünf Werkzeuge über stdio, damit ein Agent seine eigenen Läufe lesen und abspielen kann |
+| MCP-Server (`orca mcp`) | funktioniert — sechs Werkzeuge über stdio, damit ein Agent seine eigenen Läufe lesen und abspielen kann |
 | Programmatische API (`Orca`) | funktioniert — die Befehle rendern, was sie zurückgibt; das Terminal ist eine Sicht auf eine einzige Wahrheit |
 | Exaktes Replay mit Divergenzbericht | funktioniert — stellt das aufgezeichnete Dateisystem über deinen Arbeitsbaum wieder her und danach zurück; `--worktree` für eine Wegwerfkopie, `--in-place` stellt nichts wieder her. Schreibt einen eigenen Lauf über das, was das Replay *herausgefunden* hat — Divergenzen, nicht zugeordnete Anfragen — und zeigt für das bloß Wiederholte auf den Eltern-Lauf; `--no-trace` überspringt das |
 | Fork-Replay ab einem Checkpoint | funktioniert — ein Fork zeichnet eigene Dateisystem-Snapshots auf und ist damit ein Lauf, den man erneut forken kann |

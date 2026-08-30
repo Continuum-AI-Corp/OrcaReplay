@@ -420,7 +420,7 @@ répondent aussi en JSON, avec un code de sortie non nul. `--json` couvre `list`
 { "mcpServers": { "orca": { "command": "orca", "args": ["mcp"] } } }
 ```
 
-`orca_list_runs`, `orca_show_run`, `orca_checkpoints`, `orca_replay` et `orca_compare`. Le rejeu est
+`orca_list_runs`, `orca_show_run`, `orca_checkpoints`, `orca_graph`, `orca_replay` et `orca_compare`. Le rejeu est
 gratuit et hors ligne ; `orca_compare` dit dans sa propre description qu'il dépense de vrais tokens,
 parce qu'un modèle qui choisit un outil lit cette chaîne et rien d'autre.
 
@@ -449,7 +449,7 @@ Précoce. `v0` est le squelette qui marche des trois commandes ci-dessus.
 | Agents qui ne lisent aucune variable de base-URL | fonctionne — `orca record node -- <cmd>` écrit un préchargement dans le répertoire du run et redirige `globalThis.fetch` pour une liste blanche d'hôtes fournisseurs. Node et Bun, puisque Bun ignore `--require` dans `NODE_OPTIONS`. C'est ainsi qu'un agent Vercel AI SDK est capturé |
 | Un appel qu'orca ne sait pas lire | fonctionne — transmis plutôt que refusé, et consigné en `net.request` / `net.response` : une preuve, pas un tour rejouable. Un enregistrement qui n'a rien capturé avertit au lieu de se terminer proprement |
 | Sortie lisible par une machine (`--json`) | fonctionne — un document JSON sur stdout, les diagnostics sur stderr, les échecs aussi en JSON |
-| Serveur MCP (`orca mcp`) | fonctionne — cinq outils sur stdio, pour qu'un agent puisse lire et rejouer ses propres runs |
+| Serveur MCP (`orca mcp`) | fonctionne — six outils sur stdio, pour qu'un agent puisse lire et rejouer ses propres runs |
 | API programmatique (`Orca`) | fonctionne — les commandes affichent ce qu'elle renvoie, le terminal n'est donc qu'une vue sur une seule vérité |
 | Rejeu exact avec rapport de divergence | fonctionne — restaure le système de fichiers enregistré par-dessus votre arbre de travail, puis le remet ; `--worktree` pour une copie jetable, `--in-place` pour ne rien restaurer. Écrit sa propre exécution consignant ce que le rejeu a *découvert* — divergences, requêtes non appariées — et pointe vers le parent pour ce qu'il n'a fait que répéter ; `--no-trace` pour s'en passer |
 | Rejeu bifurqué depuis un point de contrôle | fonctionne — une bifurcation enregistre ses propres instantanés de système de fichiers, c'est donc une exécution que l'on peut bifurquer à son tour |

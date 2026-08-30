@@ -391,7 +391,7 @@ stdout には JSON ドキュメントがひとつだけ、診断は stderr——
 { "mcpServers": { "orca": { "command": "orca", "args": ["mcp"] } } }
 ```
 
-`orca_list_runs`、`orca_show_run`、`orca_checkpoints`、`orca_replay`、`orca_compare`。再生は無料で
+`orca_list_runs`、`orca_show_run`、`orca_checkpoints`、`orca_graph`、`orca_replay`、`orca_compare`。再生は無料で
 オフラインです。`orca_compare` は自分の説明文の中で「実際にトークンを使う」と明言しています。ツールを
 選ぶモデルが読むのはその文字列だけだからです。
 
@@ -420,7 +420,7 @@ const timeline = await orca.show('last');
 | base-URL 変数を読まないエージェント | 動作——`orca record node -- <cmd>` が実行ディレクトリにプリロードを書き、許可リストのプロバイダホストにだけ `globalThis.fetch` を向け替える。Bun は `NODE_OPTIONS` の `--require` を無視するので Node と Bun の両方に対応。Vercel AI SDK のエージェントはこれで捕捉する |
 | orca が読めない呼び出し | 動作——拒否せず転送し、`net.request` / `net.response` として記録する。証拠であって、再生できるターンではない。何も捕捉できなかった記録は、きれいに終了せず警告する |
 | 機械可読な出力（`--json`） | 動作——stdout に JSON ドキュメント一つ、診断は stderr、失敗も JSON |
-| MCP サーバ（`orca mcp`） | 動作——stdio で五つのツール。エージェントが自分の実行記録を読んで再生できる |
+| MCP サーバ（`orca mcp`） | 動作——stdio で六つのツール。エージェントが自分の実行記録を読んで再生できる |
 | プログラム API（`Orca`） | 動作——コマンドはこれが返すものを描画するだけなので、端末は唯一の事実のひとつのビュー |
 | 差分報告つきの完全再生 | 動作——記録されたファイルシステムを作業ツリーに復元し、終了後に戻す。`--worktree` で使い捨てコピー、`--in-place` で復元なし。再生が*発見*したこと（差分、未一致リクエスト）を記録する自前の run を書き、単に繰り返しただけの部分は親を指す。`--no-trace` で省略 |
 | チェックポイントからの分岐再生 | 動作——分岐は自身のファイルシステムスナップショットを記録するので、それ自体をさらに分岐できる |

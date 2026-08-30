@@ -167,6 +167,31 @@ Three facts the model's own transcript could not have told you, and the run's ex
 file really changed (seq 6, `+1 −3`), the check the agent ran **failed** (seq 12, `exit 1`), and it
 finished anyway. The run exited 0 because the *agent* exited 0.
 
+That last fact is the one worth a command of its own. `orca show` gives you the order things
+happened in; `orca graph` gives you what produced what:
+
+```console
+$ orca graph last
+FROM              TO               KIND      WHY
+3 model.response  4 tool.call      recorded  tool_use block in the response
+4 tool.call       6 fs.change      inferred  changed path appears in tool input, same or previous turn
+4 tool.call       7 tool.result    recorded  tool result answers its call
+7 tool.result     8 model.request  recorded  tool_result block in the request
+
+  1 inferred — derived from this trace, not recorded in it
+```
+
+Two kinds of edge, and the difference matters. A **recorded** edge was written when the run
+happened, because a `tool_use` block is physically inside the response that emitted it. An
+**inferred** edge was worked out just now by the rule it names — a filesystem snapshot is taken
+once per turn rather than once per tool call, so attributing a file change to a *particular* call
+is a good guess and not a fact. Inferred edges are never written back into the trace, the same way
+checkpoints are derived and never recorded, so a field a third-party reader trusts never contains
+something orca made up.
+
+`orca export last --card bug.svg` draws that chain as a picture you can paste into an issue, and
+`--graph-card` draws the whole run with the chain lit against it.
+
 Now reproduce it as often as you like, for nothing:
 
 ```console
@@ -380,8 +405,8 @@ $ orca checkpoints last --json | jq '.[-1].seq'
 
 One JSON document on stdout, diagnostics on stderr — including the recorded agent's own output, so
 the document stays parseable while a run is talking. Failures answer in JSON too, with a non-zero
-exit. `--json` covers `list`, `show`, `events`, `checkpoints`, `record`, `replay`, `compare` and
-`doctor`.
+exit. `--json` covers `list`, `show`, `events`, `checkpoints`, `graph`, `record`, `replay`,
+`compare` and `doctor`.
 
 **As tools.** `orca mcp` serves the trace store to an agent over stdio:
 
@@ -389,9 +414,11 @@ exit. `--json` covers `list`, `show`, `events`, `checkpoints`, `record`, `replay
 { "mcpServers": { "orca": { "command": "orca", "args": ["mcp"] } } }
 ```
 
-`orca_list_runs`, `orca_show_run`, `orca_checkpoints`, `orca_replay` and `orca_compare`. Replay is
-free and offline; `orca_compare` says in its own description that it spends real tokens, because a
-model choosing a tool reads that string and nothing else.
+`orca_list_runs`, `orca_show_run`, `orca_checkpoints`, `orca_graph`, `orca_replay` and
+`orca_compare`. Replay is free and offline; `orca_compare` says in its own description that it
+spends real tokens, because a model choosing a tool reads that string and nothing else — and
+`orca_graph` spends its description saying what `recorded` and `inferred` mean, for the same
+reason.
 
 **From code**, if you would rather not shell out:
 
@@ -419,7 +446,9 @@ Early. `v0` is the walking skeleton of the three commands above. Everything belo
 | Agents that read no base-URL variable | working — `orca record node -- <cmd>` writes a preload into the run directory and redirects `globalThis.fetch` for an allowlist of provider hosts. Node and Bun both, since Bun ignores `--require` in `NODE_OPTIONS`. This is how a Vercel AI SDK agent is captured |
 | A call orca cannot read | working — forwarded rather than refused, and recorded as `net.request` / `net.response`: evidence, not a replayable turn. A recording that captured nothing warns instead of exiting clean |
 | Machine-readable output (`--json`) | working — one JSON document on stdout, diagnostics on stderr, failures as JSON |
-| MCP server (`orca mcp`) | working — five tools over stdio, so an agent can read and replay its own runs |
+| Causal graph (`orca graph`) | working — what caused what, as a table or as JSON. Every edge says whether the trace recorded it or orca derived it just now, and names the rule either way. `--to N` narrows to the chain that produced one event |
+| Shareable cards | working — `orca export --card` draws one causal chain, `--graph-card` draws the whole run with that chain lit, and `compare --share` draws the verdict table. All SVG; nothing here rasterises to PNG or GIF yet |
+| MCP server (`orca mcp`) | working — six tools over stdio, so an agent can read, explain and replay its own runs |
 | Programmatic API (`Orca`) | working — the commands render what it returns, so the terminal is a view of one source of truth |
 | Exact replay with divergence reporting | working — restores the recorded filesystem over your working tree, then puts it back; `--worktree` for a scratch copy, `--in-place` to restore nothing. Writes a run of its own recording what the replay *discovered* — divergences, unmatched requests — and points at the parent for what it merely repeated; `--no-trace` to skip |
 | Fork replay from a checkpoint | working — a fork records its own filesystem snapshots, so it is a run you can fork again |

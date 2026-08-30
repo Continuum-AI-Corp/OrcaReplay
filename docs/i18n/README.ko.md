@@ -386,7 +386,7 @@ stdout에는 JSON 문서 하나, 진단은 stderr — 기록 중인 에이전트
 { "mcpServers": { "orca": { "command": "orca", "args": ["mcp"] } } }
 ```
 
-`orca_list_runs`, `orca_show_run`, `orca_checkpoints`, `orca_replay`, `orca_compare`. 재생은 공짜이고
+`orca_list_runs`, `orca_show_run`, `orca_checkpoints`, `orca_graph`, `orca_replay`, `orca_compare`. 재생은 공짜이고
 오프라인이다. `orca_compare`는 자기 설명 안에서 진짜 토큰을 쓴다고 말한다. 도구를 고르는 모델이 읽는
 것은 그 문자열뿐이기 때문이다.
 
@@ -415,7 +415,7 @@ const timeline = await orca.show('last');
 | base-URL 변수를 읽지 않는 에이전트 | 동작 — `orca record node -- <cmd>`가 실행 디렉터리에 프리로드를 쓰고, 허용 목록의 프로바이더 호스트에만 `globalThis.fetch`를 돌린다. Bun은 `NODE_OPTIONS` 안의 `--require`를 무시하므로 Node와 Bun 둘 다 지원. Vercel AI SDK 에이전트는 이렇게 포착한다 |
 | orca가 읽지 못하는 호출 | 동작 — 거부하지 않고 전달하며 `net.request` / `net.response`로 기록한다. 증거이지 재생 가능한 턴은 아니다. 아무것도 포착하지 못한 기록은 조용히 끝나지 않고 경고한다 |
 | 기계가 읽는 출력(`--json`) | 동작 — stdout에 JSON 문서 하나, 진단은 stderr, 실패도 JSON |
-| MCP 서버(`orca mcp`) | 동작 — stdio로 다섯 개 도구. 에이전트가 자기 실행 기록을 읽고 재생할 수 있다 |
+| MCP 서버(`orca mcp`) | 동작 — stdio로 여섯 개 도구. 에이전트가 자기 실행 기록을 읽고 재생할 수 있다 |
 | 프로그래밍 API(`Orca`) | 동작 — 명령은 이것이 돌려준 것을 그릴 뿐이라, 터미널은 하나의 사실에 대한 하나의 뷰다 |
 | 발산 보고가 붙은 정확 재생 | 동작 — 기록된 파일시스템을 작업 트리 위에 복원하고 끝나면 되돌린다. `--worktree`는 임시 사본, `--in-place`는 아무것도 복원하지 않음. 재생이 *발견한* 것(발산, 미일치 요청)을 담은 자기 자신의 run을 쓰고, 단지 되풀이한 부분은 부모를 가리킨다. `--no-trace`로 생략 |
 | 체크포인트에서의 분기 재생 | 동작 — 분기는 자신의 파일시스템 스냅숏을 기록하므로, 그것 자체를 다시 분기할 수 있다 |

@@ -1,5 +1,6 @@
 import type { CanonicalContent, CanonicalRequest, CanonicalResponse } from '@orcareplay/plugin-api';
 import type { RecordedExchange } from '@orcareplay/proxy';
+import type { TraceWriter } from '@orcareplay/core';
 
 /**
  * Turning intercepted model exchanges into trace events.
@@ -174,4 +175,46 @@ function collectToolUses(
   return res.content.filter(
     (b): b is Extract<CanonicalContent, { type: 'tool_use' }> => b.type === 'tool_use',
   );
+}
+
+/**
+ * Derive one exchange's events, resolve their causal references, and write them.
+ *
+ * Shared because it has two callers — `orca record` and the live half of a fork — and they drifted:
+ * the fork wrote every model exchange with no `causes` at all, so a forked run could be replayed
+ * and forked again but not explained. The seq resolution is the part that is easy to leave out,
+ * since it cannot happen until the writer has appended, so it lives here rather than in either
+ * caller.
+ */
+export async function appendDerivedEvents(
+  writer: TraceWriter,
+  deriver: ExchangeEventDeriver,
+  exchange: RecordedExchange,
+  turn: number,
+): Promise<void> {
+  /** `written[i]` is the seq of the i-th derived event, which is what `causesIndex` refers to. */
+  const written: number[] = [];
+  for (const derived of deriver.derive(exchange, turn)) {
+    const causes: number[] = [];
+    if (derived.causesToolId) {
+      const seq = deriver.seqOf(derived.causesToolId);
+      if (seq !== undefined) causes.push(seq);
+    }
+    for (const index of derived.causesIndex ?? []) {
+      const seq = written[index];
+      if (seq !== undefined) causes.push(seq);
+    }
+    const event = await writer.append({
+      type: derived.type,
+      actor: derived.actor,
+      turn,
+      attrs: derived.attrs,
+      payload: derived.payload as never,
+      ...(causes.length > 0 ? { causes } : {}),
+    });
+    written.push(event.seq);
+    if (derived.type === 'tool.call') {
+      deriver.markPending(String(derived.attrs['tool_use_id']), event.seq);
+    }
+  }
 }
