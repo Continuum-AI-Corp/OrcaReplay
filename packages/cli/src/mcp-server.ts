@@ -70,6 +70,25 @@ export const MCP_TOOLS: McpTool[] = [
     inputSchema: { type: 'object', properties: { ...RUN_ARG } },
   },
   {
+    name: 'orca_graph',
+    description:
+      'What caused what in a run, as a list of edges. Each edge says which event produced which, ' +
+      'and whether it is `recorded` — the recorder watched it happen and wrote it into the trace ' +
+      '— or `inferred`, meaning this derived it just now from the rule it names and the trace ' +
+      'does not vouch for it. Pass `to` to get only the chain that produced one event, which is ' +
+      'the shape of an answer to "why did this fail" rather than "what happened".',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...RUN_ARG,
+        to: {
+          type: 'number',
+          description: 'Narrow to the chain that produced this event seq. Omit for the whole run.',
+        },
+      },
+    },
+  },
+  {
     name: 'orca_replay',
     description:
       'Re-run a recording exactly, with the network blocked and no tokens spent, and report what ' +
@@ -212,6 +231,13 @@ async function callTool(orca: Orca, params: Record<string, unknown>): Promise<un
         return ok(await orca.show(run));
       case 'orca_checkpoints':
         return ok(await orca.checkpoints(run));
+      case 'orca_graph': {
+        const to = args['to'];
+        if (to !== undefined && typeof to !== 'number') {
+          return content('to must be a number', true);
+        }
+        return ok(await orca.graph(run, to === undefined ? {} : { to }));
+      }
       case 'orca_replay': {
         const worktree = args['worktree'];
         if (worktree !== undefined && typeof worktree !== 'boolean') {

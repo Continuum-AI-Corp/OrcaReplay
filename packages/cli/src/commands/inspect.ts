@@ -1,5 +1,13 @@
 import { resolve } from 'node:path';
-import { TraceReader, deriveCheckpoints, listRuns, resolveRunSelector } from '@orcareplay/core';
+import {
+  TraceReader,
+  chainTo,
+  deriveCheckpoints,
+  listRuns,
+  resolveRunSelector,
+  runGraph,
+} from '@orcareplay/core';
+import type { RunGraph } from '@orcareplay/core';
 import {
   buildTimeline,
   detectLoops,
@@ -134,6 +142,56 @@ export async function checkpointsCommand(
   );
   out.plain('');
   out.plain(`  orca replay last --from ${checkpoints.at(-1)!.seq} --model <other-model>`);
+}
+
+/**
+ * `orca graph` — what caused what.
+ *
+ * The timeline says what happened in what order; this says what produced what. Every row names
+ * both ends and, crucially, whether the trace vouches for the edge or a rule here worked it out —
+ * a reader who cannot tell the two apart has been handed a guess dressed as a fact.
+ */
+export async function graphCommand(
+  args: ParsedArgs,
+  out: Output,
+  cwd = process.cwd(),
+): Promise<void> {
+  const reader = await TraceReader.open(
+    (await resolveRunSelector(cwd, args.positionals[0] ?? 'last')).dir,
+  );
+  const events = await reader.events();
+  const graph = narrow(runGraph(events), args.num('to'));
+  const label = new Map(graph.nodes.map((n) => [n.seq, n.type]));
+
+  if (graph.edges.length === 0) {
+    out.plain('no causal edges in this run');
+    // Naming the likely cause beats leaving someone to wonder whether the feature works at all.
+    out.plain(
+      '  a run with no tool calls has nothing to connect; try `orca show` for the timeline',
+    );
+    return;
+  }
+
+  out.table(
+    ['FROM', 'TO', 'KIND', 'WHY'],
+    graph.edges.map((e) => [
+      `${e.from} ${label.get(e.from) ?? ''}`.trim(),
+      `${e.to} ${label.get(e.to) ?? ''}`.trim(),
+      e.kind,
+      e.rule,
+    ]),
+  );
+
+  const inferred = graph.edges.filter((e) => e.kind === 'inferred').length;
+  if (inferred > 0) {
+    out.plain('');
+    out.plain(`  ${inferred} inferred — derived from this trace, not recorded in it`);
+  }
+}
+
+/** The whole graph, or just the chain that produced `to`. */
+export function narrow(graph: RunGraph, to: number | undefined): RunGraph {
+  return to === undefined ? graph : chainTo(graph, to);
 }
 
 /** `orca export` — the single self-contained file that makes a trace shareable. */

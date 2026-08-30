@@ -1,10 +1,13 @@
 import { resolve } from 'node:path';
 import {
   TraceReader,
+  chainTo,
   deriveCheckpoints,
   listRuns,
   resolveRunSelector,
+  runGraph,
   type Checkpoint,
+  type RunGraph,
   type RunRef,
 } from '@orcareplay/core';
 import type { TraceEvent } from '@orcareplay/schema';
@@ -166,6 +169,18 @@ export class Orca {
   /** Where a fork can start: points whose conversation prefix is complete and tree was snapshotted. */
   async checkpoints(selector = 'last'): Promise<Checkpoint[]> {
     return deriveCheckpoints(await this.events(selector));
+  }
+
+  /**
+   * What caused what in a run, as nodes and typed edges.
+   *
+   * `to` narrows it to the chain that produced one event, which is the shape of an answer to
+   * "why did this fail" rather than "what happened". Every edge says whether the trace recorded
+   * it or this derived it, so a caller can weigh the two differently.
+   */
+  async graph(selector = 'last', options: { to?: number } = {}): Promise<RunGraph> {
+    const graph = runGraph(await this.events(selector));
+    return options.to === undefined ? graph : chainTo(graph, options.to);
   }
 
   /** The absolute path of a run's directory, for a caller that wants to read it directly. */
