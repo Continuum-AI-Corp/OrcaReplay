@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   causalChain,
   chainTo,
+  pickChainTarget,
   deriveCheckpoints,
   runGraph,
   snapToCheckpoint,
@@ -429,5 +430,53 @@ describe('chainTo', () => {
 
   it('reports a seq that is not in the trace', () => {
     expect(() => chainTo(runGraph(run), 42)).toThrow(/42/);
+  });
+});
+
+describe('pickChainTarget', () => {
+  it('picks a shell command that exited non-zero, which is usually the story', () => {
+    const events = [
+      ev(1, 'fs.change', { attrs: { path: 'a.ts' } }),
+      ev(2, 'shell.result', { attrs: { exit_code: 1 } }),
+    ];
+    expect(pickChainTarget(events)).toBe(2);
+  });
+
+  it('ignores a shell command that succeeded', () => {
+    const events = [ev(1, 'shell.result', { attrs: { exit_code: 0 } })];
+    expect(pickChainTarget(events)).toBeUndefined();
+  });
+
+  it('takes the last failure when several failed, since that is where the run ended up', () => {
+    const events = [
+      ev(1, 'shell.result', { attrs: { exit_code: 1 } }),
+      ev(5, 'shell.result', { attrs: { exit_code: 2 } }),
+    ];
+    expect(pickChainTarget(events)).toBe(5);
+  });
+
+  it('falls back to a tool that reported an error', () => {
+    const events = [
+      ev(1, 'fs.change', { attrs: { path: 'a.ts' } }),
+      ev(2, 'tool.result', { attrs: { is_error: true } }),
+    ];
+    expect(pickChainTarget(events)).toBe(2);
+  });
+
+  it('falls back to the last file the run changed when nothing failed', () => {
+    const events = [
+      ev(1, 'fs.change', { attrs: { path: 'a.ts' } }),
+      ev(4, 'fs.change', { attrs: { path: 'b.ts' } }),
+      ev(5, 'model.response'),
+    ];
+    expect(pickChainTarget(events)).toBe(4);
+  });
+
+  // Refusing beats drawing something arbitrary: a card gets screenshotted whether or not it is
+  // the interesting one, so a bad pick travels further than no card at all.
+  it('picks nothing from a run where nothing stands out', () => {
+    expect(
+      pickChainTarget([ev(0, 'run.start'), ev(1, 'model.request'), ev(2, 'run.end')]),
+    ).toBeUndefined();
   });
 });

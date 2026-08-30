@@ -1,9 +1,11 @@
 import { resolve } from 'node:path';
+import { writeFile } from 'node:fs/promises';
 import {
   TraceReader,
   chainTo,
   deriveCheckpoints,
   listRuns,
+  pickChainTarget,
   resolveRunSelector,
   runGraph,
 } from '@orcareplay/core';
@@ -19,6 +21,7 @@ import { priceFor } from '@orcareplay/providers';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
 import { formatCost } from './compare.js';
+import { renderChainCard } from '../share-card.js';
 
 /** `orca list` — what runs are here, newest first. */
 export async function listCommand(
@@ -201,10 +204,32 @@ export async function exportCommand(
   cwd = process.cwd(),
 ): Promise<void> {
   const runDir = (await resolveRunSelector(cwd, args.positionals[0] ?? 'last')).dir;
-  const target = resolve(cwd, args.str('o') ?? args.str('out') ?? 'trace.html');
-
   const reader = await TraceReader.open(runDir);
   const manifest = reader.manifest();
+
+  // `--card` is a different artefact from `--out`, not a variation on it: one chain as a picture
+  // rather than the whole trace as a page. It leaks far less too — a card carries the events on
+  // one chain and none of the payloads — so it does not print the disclosure the page needs.
+  if (args.has('card')) {
+    const cardPath = resolve(cwd, args.str('card') ?? 'chain.svg');
+    const events = await reader.events();
+    const to = args.num('to') ?? pickChainTarget(events);
+    if (to === undefined) {
+      // Refusing beats drawing something arbitrary: a card gets screenshotted whether or not it
+      // happens to be the interesting one, so a bad pick travels further than no card at all.
+      throw new Error(
+        `nothing in ${manifest.run_id} stands out as the subject of a card — ` +
+          'no failing command, no tool error and no file change. ' +
+          'Name the event yourself with `--to <seq>`, or `orca show` to find one.',
+      );
+    }
+    const svg = renderChainCard(chainTo(runGraph(events), to), { runId: manifest.run_id });
+    await writeFile(cardPath, svg, 'utf8');
+    out.phase('carded', { path: cardPath, bytes: Buffer.byteLength(svg), to });
+    return;
+  }
+
+  const target = resolve(cwd, args.str('o') ?? args.str('out') ?? 'trace.html');
 
   // Say what is about to leave the machine before it does. A trace can contain file contents and
   // shell output, and the person exporting it is usually about to attach it to a public issue.

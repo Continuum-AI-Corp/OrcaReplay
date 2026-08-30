@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -154,5 +154,57 @@ describe('orca graph is discoverable', () => {
     expect(tool).toBeDefined();
     // The model reads this string and nothing else, so it has to say what the answer means.
     expect(tool!.description).toMatch(/inferred|derived/i);
+  });
+});
+
+describe('orca export --card', () => {
+  async function exportCard(argv: string[], dir: string) {
+    const lines: string[] = [];
+    const out = new Output({ write: (l) => void lines.push(l), isTTY: false });
+    const { exportCommand } = await import('../src/commands/inspect.js');
+    await exportCommand(parseArgs(argv), out, dir);
+    return stripAnsi(lines.join('\n'));
+  }
+
+  it('writes the chain as an SVG rather than the whole-trace page', async () => {
+    const { dir, runId } = await seed();
+    const text = await exportCard(['export', runId, '--card', 'chain.svg'], dir);
+    const svg = await readFile(join(dir, 'chain.svg'), 'utf8');
+    expect(svg.trimStart().startsWith('<svg')).toBe(true);
+    expect(svg).toContain('shell.result');
+    expect(text).toContain('chain.svg');
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('picks the failure without being told which event to draw', async () => {
+    const { dir, runId } = await seed();
+    await exportCard(['export', runId, '--card', 'chain.svg'], dir);
+    const svg = await readFile(join(dir, 'chain.svg'), 'utf8');
+    expect(svg).toContain('exited 1');
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('honours --to when the caller knows which event they mean', async () => {
+    const { dir, runId } = await seed();
+    await exportCard(['export', runId, '--card', 'chain.svg', '--to', '4'], dir);
+    const svg = await readFile(join(dir, 'chain.svg'), 'utf8');
+    expect(svg).toContain('--to 4');
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  // A card gets screenshotted whether or not it is the interesting one, so an arbitrary pick
+  // travels further than no card at all.
+  it('refuses rather than drawing an arbitrary chain when nothing stands out', async () => {
+    const { dir, runId } = await seed([{ type: 'run.start' }, { type: 'run.end' }]);
+    await expect(exportCard(['export', runId, '--card', 'chain.svg'], dir)).rejects.toThrow(/--to/);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('still writes the HTML page when no card was asked for', async () => {
+    const { dir, runId } = await seed();
+    await exportCard(['export', runId, '-o', 'trace.html'], dir);
+    const html = await readFile(join(dir, 'trace.html'), 'utf8');
+    expect(html).toContain('<!doctype html>');
+    await rm(dir, { recursive: true, force: true });
   });
 });

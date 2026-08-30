@@ -343,3 +343,34 @@ export function chainTo(graph: RunGraph, seq: number): RunGraph {
     edges: edges.sort((a, b) => a.to - b.to || a.from - b.from),
   };
 }
+
+/**
+ * The event a card about this run should be about, or undefined when nothing stands out.
+ *
+ * Which chain to draw *is* the feature. A card gets screenshotted whether or not it happens to be
+ * the interesting one, so an arbitrary pick travels further than no card at all — hence a run with
+ * nothing notable returns undefined and the caller refuses rather than drawing something.
+ *
+ * The order is failure first, then the largest visible effect: a command that exited non-zero, a
+ * tool that reported an error, an error orca itself recorded, a replay divergence, and only then
+ * the last file the run changed. Within a kind the last one wins, since that is where the run
+ * ended up.
+ */
+export function pickChainTarget(events: TraceEvent[]): number | undefined {
+  const ordered = bySeq(events);
+  const last = (match: (e: TraceEvent) => boolean): number | undefined => {
+    for (let i = ordered.length - 1; i >= 0; i--) {
+      const event = ordered[i];
+      if (event && match(event)) return event.seq;
+    }
+    return undefined;
+  };
+
+  return (
+    last((e) => e.type === 'shell.result' && (e.attrs?.['exit_code'] ?? 0) !== 0) ??
+    last((e) => e.type === 'tool.result' && e.attrs?.['is_error'] === true) ??
+    last((e) => e.type === 'error') ??
+    last((e) => e.type === 'divergence') ??
+    last((e) => e.type === 'fs.change')
+  );
+}
