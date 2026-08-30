@@ -18,6 +18,13 @@ import { upstreamPlan } from '../upstream.js';
 import { ORCA_VERSION } from '../version.js';
 
 export interface RecordResult {
+  /**
+   * Model exchanges the proxy captured.
+   *
+   * Zero is the failure this whole field exists for, and it has to be readable by a caller that
+   * has no terminal to watch: the agent answers, the exit code is zero, and the trace is empty.
+   */
+  modelExchanges: number;
   runId: string;
   runDir: string;
   events: number;
@@ -246,6 +253,8 @@ async function runRecording(
       launch.args,
       { ...process.env, ...launch.env },
       launch.cwd ?? cwd,
+      // Under --json, stdout is the result document. The agent's own output must not land in it.
+      args.bool('json'),
     );
   } catch (err) {
     // Two failures share this path, and both were silent in their own way.
@@ -384,18 +393,35 @@ async function runRecording(
     runId: writer.runId,
     runDir: writer.runDir,
     events: manifest.counts?.events ?? writer.seq,
+    modelExchanges,
     exitCode,
   };
 }
 
+/**
+ * Launch the agent.
+ *
+ * `stdio: 'inherit'` by default, and that matters: an interactive harness needs the real terminal,
+ * and anything less turns a TUI into a stream of escape codes.
+ *
+ * `quietStdout` is for `--json`, where orca's stdout is a document rather than a terminal. The
+ * agent's own chatter is still shown — it moves to stderr, where a human reads it and a parser
+ * does not. stdin and stderr stay inherited so the agent can still prompt and still colour.
+ */
 function runChild(
   command: string,
   argv: string[],
   env: NodeJS.ProcessEnv,
   cwd: string,
+  quietStdout = false,
 ): Promise<number> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, argv, { env, cwd, stdio: 'inherit' });
+    const child = spawn(command, argv, {
+      env,
+      cwd,
+      stdio: quietStdout ? ['inherit', 'pipe', 'inherit'] : 'inherit',
+    });
+    child.stdout?.pipe(process.stderr);
     // Forward interrupts so Ctrl-C reaches the agent rather than orphaning it behind the proxy.
     const forward = (signal: NodeJS.Signals) => () => child.kill(signal);
     const onInt = forward('SIGINT');

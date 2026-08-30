@@ -42,8 +42,27 @@ const SECRET_KEYS = /^(api[_-]?key|key|token|secret|password|authorization|cooki
 export type Scalar = string | number | boolean | null | undefined;
 export type Fields = Record<string, Scalar>;
 
+/**
+ * One structured fact, before it is turned into a line of text.
+ *
+ * The same record that becomes `warn capture.empty exchanges=0 …` on a terminal. A caller that
+ * embedded orca has no stdout to read, and an agent asking for `--json` should not be handed
+ * prose to parse — so every fact is available as data at the point it is emitted, and the line is
+ * a rendering of it rather than the only form it ever takes.
+ *
+ * Fields arrive redacted, exactly as the terminal would show them: a key must not reach a JSON
+ * consumer just because it took a different route out.
+ */
+export interface LogEntry {
+  level: 'info' | 'warn' | 'error' | 'debug';
+  event: string;
+  fields: Record<string, Scalar>;
+}
+
 export interface OutputOptions {
   write: (s: string) => void;
+  /** Receives every fact as data, in the order it was emitted. */
+  sink?: (entry: LogEntry) => void;
   isTTY?: boolean;
   env?: Record<string, string | undefined>;
   verbose?: boolean;
@@ -68,10 +87,12 @@ export class Output {
   readonly #tty: boolean;
   readonly #verbose: boolean;
   readonly #ci: boolean;
+  readonly #sink: ((entry: LogEntry) => void) | undefined;
 
   constructor(opts: OutputOptions) {
     const env = opts.env ?? {};
     this.#write = opts.write;
+    this.#sink = opts.sink;
     this.#tty = opts.isTTY ?? false;
     this.#ci = opts.ci ?? false;
     this.#verbose = opts.verbose ?? false;
@@ -148,10 +169,15 @@ export class Output {
 
   #line(level: string, event: string, fields: Fields, style?: string): void {
     const parts = [level, event];
+    const structured: Record<string, Scalar> = {};
     for (const [k, v] of Object.entries(fields)) {
       if (v === undefined || v === null) continue;
+      // Redacted once, for both destinations. A secret must not reach a JSON consumer merely
+      // because it left by a different door than the terminal.
+      structured[k] = redactValue(k, v);
       parts.push(`${k}=${formatValue(k, v)}`);
     }
+    this.#sink?.({ level: level as LogEntry['level'], event, fields: structured });
     const body = parts.join(' ');
     this.#write(
       `${style ? this.#paint(style) : ''}${body}${style ? this.#paint(STYLE.reset) : ''}\n`,
@@ -159,9 +185,17 @@ export class Output {
   }
 }
 
+function isSecret(key: string, raw: string): boolean {
+  return SECRET_KEYS.test(key) || SECRET_PATTERNS.some((re) => re.test(raw));
+}
+
+/** The value as data — the number or boolean kept as itself, anything secret replaced. */
+function redactValue(key: string, value: Scalar): Scalar {
+  return isSecret(key, String(value)) ? '<redacted>' : (value ?? null);
+}
+
 function formatValue(key: string, value: Scalar): string {
   const raw = String(value);
-  const secret = SECRET_KEYS.test(key) || SECRET_PATTERNS.some((re) => re.test(raw));
-  const text = secret ? '<redacted>' : raw;
+  const text = isSecret(key, raw) ? '<redacted>' : raw;
   return /[\s"]/.test(text) ? JSON.stringify(text) : text;
 }

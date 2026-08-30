@@ -31,6 +31,14 @@ export interface ReplayResult {
   mode: 'exact' | 'fork';
   matchedExact: number;
   divergences: number;
+  /**
+   * Requests the recording could not serve.
+   *
+   * Printed in `replay.done` since the beginning and never returned, so every caller that was not
+   * a terminal had to scrape it back out of the log line — while `exitCode` folds it into a single
+   * bit. It is the number that says whether a replay actually reproduced the run.
+   */
+  unmatched: number;
   liveCalls: number;
   exitCode: number;
   /**
@@ -322,6 +330,7 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
       launch.args,
       { ...process.env, ...launch.env },
       workspace.dir,
+      args.bool('json'),
     );
   } finally {
     // In a finally because the whole justification for restoring over the working tree is that it
@@ -383,6 +392,7 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
     ...(trace === undefined ? {} : { traceRunId: trace.runId }),
     matchedExact: stats.matchedExact,
     divergences: stats.divergences,
+    unmatched: stats.unmatched,
     liveCalls: stats.liveCalls,
     exitCode: verdict,
   };
@@ -627,6 +637,7 @@ async function replayFork(
       launch.args,
       { ...process.env, ...launch.env },
       worktree,
+      args.bool('json'),
     );
   } catch (err) {
     // The same two failures `orca record` had. A listening proxy keeps Node's event loop alive, so
@@ -668,6 +679,7 @@ async function replayFork(
     mode: 'fork',
     matchedExact: stats.matchedExact,
     divergences: stats.divergences,
+    unmatched: stats.unmatched,
     liveCalls: stats.liveCalls,
     exitCode,
   };
@@ -766,14 +778,27 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
   };
 }
 
+/**
+ * Launch the agent for a replay or a fork.
+ *
+ * `quietStdout` is for `--json`: orca's stdout is the result document there, so the replayed
+ * agent's own output moves to stderr rather than landing in the middle of it. stdin and stderr
+ * stay inherited, so a harness that prompts still can.
+ */
 function runChild(
   command: string,
   argv: string[],
   env: NodeJS.ProcessEnv,
   cwd = process.cwd(),
+  quietStdout = false,
 ): Promise<number> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, argv, { env, cwd, stdio: 'inherit' });
+    const child = spawn(command, argv, {
+      env,
+      cwd,
+      stdio: quietStdout ? ['inherit', 'pipe', 'inherit'] : 'inherit',
+    });
+    child.stdout?.pipe(process.stderr);
     child.on('error', (err) =>
       reject(new Error(`could not launch "${command}": ${String(err)}\n  is it on your PATH?`)),
     );

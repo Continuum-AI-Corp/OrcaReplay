@@ -1,4 +1,6 @@
-import { parseArgs } from './args.js';
+import { parseArgs, type ParsedArgs } from './args.js';
+import { Orca } from './api.js';
+import { serveMcp } from './mcp-server.js';
 import { Output } from './out.js';
 import { recordCommand } from './commands/record.js';
 import { replayCommand } from './commands/replay.js';
@@ -81,13 +83,25 @@ these two are for. They apply to record, replay, fork and compare alike:
 Everything after -- goes to the agent:
   orca record claude -- -p "fix the failing test"
 
+For a script, an agent, or CI — every command below also answers as data:
+
+  --json         one JSON document on stdout, diagnostics on stderr
+                 list · show · events · checkpoints · record · replay · compare · doctor
+
+  orca mcp       serve orca to an agent over MCP on stdio, so it can read its own runs:
+                 {"command": "orca", "args": ["mcp"]}
+
 Docs: https://github.com/Continuum-AI-Corp/OrcaReplay
 `;
 
 export async function main(argv: string[], cwd = process.cwd()): Promise<number> {
   const args = parseArgs(argv);
+  if (args.bool('json')) return jsonMain(args, cwd);
+  // Under `orca mcp`, stdout is the JSON-RPC transport. A single info line on it corrupts the
+  // stream and the client drops the session with no useful error.
+  const toStderr = args.command === 'mcp';
   const out = new Output({
-    write: (s) => process.stdout.write(s),
+    write: (s) => void (toStderr ? process.stderr : process.stdout).write(s),
     isTTY: Boolean(process.stdout.isTTY),
     env: process.env,
     verbose: args.bool('verbose'),
@@ -146,6 +160,11 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
       case 'models':
         await modelsCommand(args, out);
         return 0;
+      case 'mcp':
+        // stdout is the transport here, so nothing else may touch it: `out` already writes to
+        // stderr under this command, and the server owns the stream until stdin closes.
+        await serveMcp({ orca: new Orca({ cwd }), input: process.stdin, output: process.stdout });
+        return 0;
       default:
         out.failure({
           event: 'unknown_command',
@@ -163,6 +182,88 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
       why: rest.join('\n').trim() || undefined,
     });
     if (out.isVerbose && err instanceof Error && err.stack) out.plain(err.stack);
+    return 1;
+  }
+}
+
+/**
+ * `--json`: one JSON document on stdout, diagnostics on stderr.
+ *
+ * The split is the whole design. A caller wants the answer, so stdout is one document rather than
+ * a stream of log objects — `orca show last --json | jq .events` works with nothing in front of
+ * it. And a run that warns must not corrupt that document, so every `info`/`warn` line goes to
+ * stderr, where a human still reads it and a parser never sees it.
+ *
+ * Failures come back as JSON too. An agent that only handles the happy path is an agent that
+ * hangs on the first bad run, so an error is a document with an `error` key and a non-zero exit,
+ * never prose.
+ */
+async function jsonMain(args: ParsedArgs, cwd: string): Promise<number> {
+  const out = new Output({
+    // Diagnostics only. Nothing here may reach stdout.
+    write: (s) => void process.stderr.write(s),
+    env: process.env,
+    verbose: args.bool('verbose'),
+    ci: true,
+    color: false,
+  });
+  const emit = (doc: unknown): void => void process.stdout.write(`${JSON.stringify(doc)}\n`);
+
+  try {
+    const orca = new Orca({ cwd });
+    const selector = args.positionals[0] ?? 'last';
+    switch (args.command) {
+      case 'list':
+        emit(await orca.list());
+        return 0;
+      case 'show':
+        emit(await orca.show(selector));
+        return 0;
+      case 'events':
+        emit(await orca.events(selector));
+        return 0;
+      case 'checkpoints':
+        emit(await orca.checkpoints(selector));
+        return 0;
+      case 'record': {
+        const result = await recordCommand(args, out, cwd);
+        emit(result);
+        return result.exitCode;
+      }
+      case 'replay': {
+        const result = await replayCommand(args, out, cwd);
+        emit(result);
+        return result.exitCode;
+      }
+      case 'compare':
+        emit(await compareCommand(args, out, cwd));
+        return 0;
+      case 'doctor': {
+        const result = await doctorCommand(args, out, cwd);
+        emit(result);
+        return result.ok ? 0 : 1;
+      }
+      default:
+        emit({
+          error: {
+            message: `--json does not cover '${args.command}'`,
+            // Naming what it does cover beats making someone try them one at a time.
+            supported: [
+              'list',
+              'show',
+              'events',
+              'checkpoints',
+              'record',
+              'replay',
+              'compare',
+              'doctor',
+            ],
+          },
+        });
+        return 2;
+    }
+  } catch (err) {
+    emit({ error: { message: err instanceof Error ? err.message : String(err) } });
     return 1;
   }
 }
