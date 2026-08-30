@@ -269,7 +269,7 @@ describe('document structure', () => {
 
   it('ends with the exact footer line', () => {
     expect(basic()).toContain(
-      'Recorded with OrcaReplay · built by the @OrcaRouter team · github.com/Continuum-AI-Corp/OrcaReplay',
+      'Recorded with OrcaReplay · built by the OrcaRouter.ai team · github.com/Continuum-AI-Corp/OrcaReplay',
     );
     expect(basic()).not.toMatch(/<img|<svg/i);
   });

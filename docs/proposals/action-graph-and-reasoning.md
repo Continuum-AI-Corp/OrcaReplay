@@ -255,7 +255,7 @@ that travels without its trace launders a guess into a fact — the same discipl
 Both cards and the exported page sign themselves, from one constant so they cannot drift:
 
 ```
-Recorded with OrcaReplay · built by the @OrcaRouter team    github.com/Continuum-AI-Corp/OrcaReplay
+Recorded with OrcaReplay · built by the OrcaRouter.ai team  github.com/Continuum-AI-Corp/OrcaReplay
 ```
 
 Shipped ahead of the rest of this plan, since `renderCompareCard` and the viewer footer both
@@ -264,8 +264,8 @@ existed already and both carried the same literal in two packages. It now lives 
 artefact says about itself, and `cli` already depends on it, so no new edge in the package graph.
 
 The card sets the two halves against opposite margins at 10px rather than one line at 11px: together
-they are 95 characters, and at 11px the halves leave 37px between them — close enough that a
-monospace fallback advancing wider than the one this was measured in would overlap them.
+they are 97 characters, and at 11px they leave 24px between them — a monospace fallback advancing
+0.66em rather than the usual 0.6em overlaps them by 40px. At 10px the gap is 82px.
 
 This makes the README's old "shows up in exactly one place" claim false, so that section now says
 two places and draws the line where it actually matters: a default you can overtype and a credit on

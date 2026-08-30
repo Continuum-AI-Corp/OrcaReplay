@@ -94,7 +94,7 @@ describe('renderCompareCard', () => {
   // carry the same literal in two packages. Asserting against the constant is what keeps a change
   // to one from silently leaving the other behind.
   it('credits the team from the same constant the exported page uses', () => {
-    expect(CREDIT_MADE_BY).toContain('@OrcaRouter');
+    expect(CREDIT_MADE_BY).toContain('OrcaRouter.ai');
     expect(renderCompareCard(rows, meta)).toContain('text-anchor="end"');
   });
 
