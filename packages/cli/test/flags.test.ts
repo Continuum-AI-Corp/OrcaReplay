@@ -1,6 +1,9 @@
+import { readFileSync, readdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parseArgs } from '../src/args.js';
-import { assertKnownFlags } from '../src/flags.js';
+import { BY_COMMAND, GLOBAL, assertKnownFlags } from '../src/flags.js';
 
 /**
  * A flag is an instruction. The parser takes any it is given, which is right for parsing and wrong
@@ -55,5 +58,54 @@ describe('assertKnownFlags', () => {
 
   it('says nothing about an unknown command, which the dispatcher reports better', () => {
     expect(check(['bogus', '--whatever'])).not.toThrow();
+  });
+});
+
+/**
+ * The list is hand-written, and a hand-written mirror of the code drifts the moment the code moves.
+ * These two read the source and hold it to the same standard the file claims for itself.
+ *
+ * Both were written after the list shipped with real holes in it: `orca export --card` — a picture
+ * command the README documents and `inspect.ts` implements — was rejected outright, and `graph`
+ * had no entry at all, so every flag it took went unchecked. One file, `inspect.ts`, serves show,
+ * graph, export and ui, and the list was built a command at a time; the flags of the other three
+ * were simply never looked for.
+ */
+describe('the allowlist against the source it mirrors', () => {
+  const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
+
+  /** Every `args.bool|str|num|list('name')` in the CLI's own source. */
+  function flagsReadInSource(): Set<string> {
+    const found = new Set<string>();
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) walk(path);
+        else if (entry.name.endsWith('.ts')) {
+          const src = readFileSync(path, 'utf8');
+          for (const m of src.matchAll(/args\.(?:bool|str|num|list)\('([^']+)'\)/g)) {
+            found.add(m[1]!);
+          }
+        }
+      }
+    };
+    walk(SRC);
+    return found;
+  }
+
+  it('allows every flag the CLI actually reads somewhere', () => {
+    const allowed = new Set<string>([...GLOBAL, ...Object.values(BY_COMMAND).flat()]);
+    const unreachable = [...flagsReadInSource()].filter((name) => !allowed.has(name)).sort();
+    // A flag the code reads and no command allows can never be passed: the command throws first.
+    expect(unreachable).toEqual([]);
+  });
+
+  it('has an entry for every command the dispatcher handles', () => {
+    const main = readFileSync(join(SRC, 'main.ts'), 'utf8');
+    const dispatched = [...main.matchAll(/case '([a-z-]+)':/g)].map((m) => m[1]!);
+    // Without an entry, assertKnownFlags returns early and the command validates nothing at all —
+    // silently, which is the failure this whole file exists to prevent.
+    const unvalidated = dispatched.filter((c) => BY_COMMAND[c] === undefined).sort();
+    expect(unvalidated).toEqual([]);
   });
 });
