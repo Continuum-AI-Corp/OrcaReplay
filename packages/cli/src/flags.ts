@@ -12,7 +12,7 @@ import type { ParsedArgs } from './args.js';
  * Building it the other way round is how a flag that never existed came to be recommended in the
  * first place, and a list that allows more than the code understands would rebuild exactly that.
  */
-const GLOBAL = ['ci', 'json', 'verbose', 'color', 'help', 'version', 'h'] as const;
+export const GLOBAL = ['ci', 'json', 'verbose', 'color', 'help', 'version', 'h'] as const;
 
 /** Read by `config.ts` for any command that can reach a provider. */
 const UPSTREAM = ['upstream-anthropic', 'upstream-openai'] as const;
@@ -20,7 +20,7 @@ const UPSTREAM = ['upstream-anthropic', 'upstream-openai'] as const;
 /** Read by `tls-capture.ts`, which record, replay and compare all set up. */
 const TLS = ['tls-intercept', 'tls-hosts'] as const;
 
-const BY_COMMAND: Record<string, readonly string[]> = {
+export const BY_COMMAND: Record<string, readonly string[]> = {
   record: ['fs', 'shell', 'mcp-config', ...TLS, ...UPSTREAM],
   replay: [
     'from',
@@ -39,7 +39,13 @@ const BY_COMMAND: Record<string, readonly string[]> = {
   compare: ['from', 'models', 'verify', 'share', 'loose', ...TLS, ...UPSTREAM],
   show: [],
   checkpoints: [],
-  export: ['o', 'out'],
+  events: [],
+  // `inspect.ts` serves graph, export and ui from one file, so the flags of all three are read
+  // there. Reading a file rather than a command is how the first version of this list came to
+  // give `export` two flags and lose the three it needs — `--card`, `--graph-card` and `--to`
+  // are the picture commands the README documents, and rejecting them broke a working feature.
+  graph: ['to'],
+  export: ['o', 'out', 'card', 'graph-card', 'to'],
   ui: ['port'],
   scrub: ['match', 'matches', 'dry-run', 'drop-fs'],
   list: [],
