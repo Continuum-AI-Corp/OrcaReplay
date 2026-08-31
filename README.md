@@ -489,6 +489,7 @@ Early. `v0` is the walking skeleton of the three commands above. Everything belo
 | Post-hoc scrubbing (`orca scrub`) | working |
 | Shell capture (`PATH` shim) | working — exit codes, duration and the stdout/stderr split. `--no-shell` to skip |
 | Non-model network capture | working — opt in with `--tls-intercept`; mints a per-run CA the launched agent alone trusts, decrypts an allowlist of hosts, tunnels the rest unread, and deletes the key when the run ends |
+| Codex subscription model capture/replay | working — recognizes the `/backend-api/codex/responses` HTTPS fallback, decodes zstd request bodies for matching, and serves the recorded SSE response without opening the origin during replay |
 | Validated against a real agent | Claude Code, recording a real fix to a real bug: recorded, replayed offline end to end, forked from a checkpoint and exported. It broke four things no fixture could have produced, all since fixed — [what a real agent found](docs/validation.md) |
 | Subscription-auth harnesses | Claude Code works. A Codex CLI signed in with a ChatGPT subscription talks to its own backend, so there is no origin to rewrite: it needs `--tls-intercept`. With an API key it needs nothing special |
 

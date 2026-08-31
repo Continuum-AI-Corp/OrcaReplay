@@ -103,6 +103,7 @@ export class ExchangeEventDeriver {
       attrs: {
         model: exchange.canonicalRequest.model,
         dialect: exchange.dialect,
+        path: exchange.path,
         messages: exchange.canonicalRequest.messages.length,
         tools: exchange.canonicalRequest.tools?.length ?? 0,
       },

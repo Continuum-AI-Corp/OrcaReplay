@@ -7,6 +7,7 @@ import type { AddressInfo, Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { connect as tlsConnect } from 'node:tls';
+import { zstdCompressSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunCa } from '../src/ca.js';
 import {
@@ -16,6 +17,7 @@ import {
   type TunnelRecord,
 } from '../src/server.js';
 import type { RecordedExchange } from '../src/server.js';
+import { defaultDialects } from '../src/server.js';
 
 /**
  * The interception itself, driven the way a real agent drives it: an HTTP `CONNECT` to the proxy,
@@ -35,7 +37,7 @@ interface ProxiedRequest {
   trust: string[];
   method?: string;
   path?: string;
-  body?: string;
+  body?: string | Buffer;
   headers?: Record<string, string>;
   onFirstChunk?: (chunk: string) => void;
 }
@@ -357,6 +359,84 @@ describe('TLS interception', () => {
     expect(modelExchanges[0]!.dialect).toBe('openai');
     expect(modelExchanges[0]!.canonicalRequest.model).toBe('gpt-5.2');
     expect(modelExchanges[0]!.status).toBe(200);
+    expect(netExchanges).toHaveLength(0);
+  });
+
+  it('replays a zstd-compressed Codex request inside intercepted TLS', async () => {
+    const dialect = defaultDialects().find((candidate) => candidate.id === 'codex')!;
+    const request = {
+      model: 'gpt-5.6-luna',
+      instructions: 'Answer briefly.',
+      input: [
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'say hello' }],
+        },
+      ],
+      stream: true,
+    };
+    const response =
+      'event: response.created\n' +
+      'data: ' +
+      JSON.stringify({
+        type: 'response.created',
+        response: { id: 'resp_test', model: 'gpt-5.6-luna', status: 'in_progress' },
+      }) +
+      '\n\n' +
+      'event: response.output_text.delta\n' +
+      'data: ' +
+      JSON.stringify({ type: 'response.output_text.delta', delta: 'CODEX_REPLAY_OK' }) +
+      '\n\n' +
+      'event: response.completed\n' +
+      'data: ' +
+      JSON.stringify({
+        type: 'response.completed',
+        response: {
+          id: 'resp_test',
+          model: 'gpt-5.6-luna',
+          status: 'completed',
+          usage: { input_tokens: 3, output_tokens: 1 },
+        },
+      }) +
+      '\n\n';
+    proxy = await createProxy({
+      mode: 'replay',
+      exchanges: [
+        {
+          seq: 0,
+          dialect: 'codex',
+          path: '/backend-api/codex/responses',
+          rawRequest: JSON.stringify(request),
+          rawResponse: response,
+          status: 200,
+          streamed: true,
+          canonicalRequest: dialect.toCanonicalRequest(request),
+          canonicalResponse: dialect.parseStream(response),
+        },
+      ],
+      tls: {
+        ca: runCa,
+        hosts: [`127.0.0.1:${model.port}`],
+        trustedOriginCerts: [originCa.certPem],
+      },
+    });
+
+    const replayed = await through({
+      proxyPort: proxy.port,
+      host: '127.0.0.1',
+      port: model.port,
+      trust: [runCa.certPem],
+      method: 'POST',
+      path: '/backend-api/codex/responses',
+      body: zstdCompressSync(Buffer.from(JSON.stringify(request))),
+      headers: { 'content-type': 'application/json', 'content-encoding': 'zstd' },
+    });
+
+    expect(replayed.status).toBe(200);
+    expect(replayed.body).toBe(response);
+    expect(proxy.stats().matchedExact).toBe(1);
+    expect(proxy.stats().unmatched).toBe(0);
     expect(netExchanges).toHaveLength(0);
   });
 

@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import type { TraceWriter } from '@orcareplay/core';
 import {
   DEFAULT_TLS_HOSTS,
@@ -30,7 +31,9 @@ import type { SerialQueue } from './serial.js';
 export interface TlsCaptureRequest {
   args: ParsedArgs;
   out: Output;
-  writer: TraceWriter;
+  writer?: TraceWriter;
+  /** Used by an exact replay running with --no-trace, where there is no writer to own the CA. */
+  runDir?: string;
   writes: SerialQueue;
   /**
    * The turn a frame belongs to, read when the frame is persisted rather than when capture is set
@@ -62,7 +65,9 @@ export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCaptur
   const hosts = tlsHosts.length > 0 ? tlsHosts : DEFAULT_TLS_HOSTS;
   HostPolicy.from(hosts);
   const trustedOriginCerts = await extraOriginRoots();
-  const ca = await RunCa.create({ runDir: writer.runDir });
+  const runDir = writer?.runDir ?? req.runDir;
+  if (!runDir) throw new Error('TLS interception needs a run directory');
+  const ca = await RunCa.create({ runDir });
 
   return {
     ca,
@@ -71,11 +76,15 @@ export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCaptur
         ca,
         hosts,
         trustedOriginCerts,
-        onNetExchange: (exchange: NetExchange) => {
-          writes.push(() => persistNetExchange(writer, req.turn(), exchange));
-        },
+        ...(writer
+          ? {
+              onNetExchange: (exchange: NetExchange) => {
+                writes.push(() => persistNetExchange(writer, req.turn(), exchange));
+              },
+            }
+          : {}),
         onTunnel: (tunnel: TunnelRecord) => {
-          writes.push(() => persistTunnel(writer, req.turn(), tunnel));
+          if (writer) writes.push(() => persistTunnel(writer, req.turn(), tunnel));
         },
         onFailure: (failure: InterceptFailure) => out.warn('tls.handshake_failed', { ...failure }),
       },
@@ -92,7 +101,7 @@ export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCaptur
  * is only two halves working together, so both halves belong in one place.
  */
 export async function trustRunCa(
-  writer: TraceWriter,
+  writer: TraceWriter | undefined,
   proxyTls: TlsInterceptInfo,
   proxyUrl: string,
   env: Record<string, string>,
@@ -126,7 +135,7 @@ export async function trustRunCa(
   out.warn('tls.intercepting', {
     hosts: proxyTls.hosts,
     ca_sha256: proxyTls.fingerprint,
-    ca_dir: `${writer.runDir}/tls`,
+    ca_dir: dirname(proxyTls.caCertPath),
   });
   out.plain('  TLS interception is on for this run. Traffic to the hosts above is decrypted,');
   out.plain('  recorded and re-encrypted; everything else is tunnelled unread. The certificate');
@@ -136,12 +145,14 @@ export async function trustRunCa(
   // A digest, never the certificate and never the key. The CA is deleted when the run ends, so
   // this line is the only lasting evidence of which authority signed what — enough to match a
   // certificate someone finds later to the run that minted it, and useless for anything else.
-  await writer.append({
-    type: 'note',
-    actor: 'orca',
-    turn: 0,
-    attrs: { rule: 'tls_intercept', hosts: proxyTls.hosts, ca_sha256: proxyTls.fingerprint },
-  });
+  if (writer) {
+    await writer.append({
+      type: 'note',
+      actor: 'orca',
+      turn: 0,
+      attrs: { rule: 'tls_intercept', hosts: proxyTls.hosts, ca_sha256: proxyTls.fingerprint },
+    });
+  }
 }
 
 /**

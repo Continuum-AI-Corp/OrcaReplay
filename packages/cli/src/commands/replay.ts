@@ -78,7 +78,14 @@ export async function loadExchanges(reader: TraceReader): Promise<RecordedExchan
     exchanges.push({
       seq: req.seq,
       dialect: dialectId,
-      path: dialectId === 'anthropic' ? '/v1/messages' : '/v1/chat/completions',
+      path: String(
+        req.attrs?.path ??
+          (dialectId === 'anthropic'
+            ? '/v1/messages'
+            : dialectId === 'codex'
+              ? '/backend-api/codex/responses'
+              : '/v1/chat/completions'),
+      ),
       rawRequest,
       rawResponse,
       status: Number(res?.attrs?.status ?? 200),
@@ -213,6 +220,17 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
   const writes = new SerialQueue();
 
   const plan = await upstreamPlan(args);
+  // A subscription-backed harness does not use the ordinary base URL, so exact replay needs the
+  // same per-run CA and HTTPS proxy as recording. The proxy's TLS hook then answers Codex's model
+  // request from the trace before it can open an origin connection.
+  const tls = await setupTlsCapture({
+    args,
+    out,
+    writer: trace,
+    runDir: ctx.runDir,
+    writes,
+    turn: () => 0,
+  });
 
   const proxy = await createProxy({
     mode: 'replay',
@@ -220,6 +238,7 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
     loose: args.bool('loose'),
     upstream: plan.upstream,
     upstreamHeaders: plan.headers,
+    ...tls.proxyOptions,
     onDivergence: (d) => {
       divergences.push(d);
       if (!trace) return;
@@ -321,6 +340,7 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
     userArgs: ctx.manifest.argv.slice(1),
     env: process.env,
   });
+  if (proxy.tls) await trustRunCa(trace, proxy.tls, proxy.url, launch.env, out);
   if (mcp) pointAtMcpConfig(launch.env, mcp.configPath);
 
   let exitCode: number;
@@ -337,6 +357,7 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
     // is put back — a throw between here and there would leave someone's checkout holding a
     // recorded run's files.
     await workspace.release();
+    await tls.ca?.dispose();
   }
 
   await writes.drain();

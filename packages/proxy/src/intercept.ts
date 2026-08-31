@@ -6,6 +6,7 @@ import {
 import { Agent, request as httpsRequest } from 'node:https';
 import { connect as netConnect, isIP, type Socket } from 'node:net';
 import { createSecureContext, rootCertificates, TLSSocket, type SecureContext } from 'node:tls';
+import * as zlib from 'node:zlib';
 import { AUTH_REQUEST_HEADERS, AUTH_RESPONSE_HEADERS } from '@orcareplay/core';
 import type { RunCa } from './ca.js';
 import { HostPolicy } from './tls-hosts.js';
@@ -69,6 +70,43 @@ export interface NetExchange {
   durationMs: number;
 }
 
+/** A decrypted request before it is sent to the origin. */
+export interface NetRequest {
+  host: string;
+  port: number;
+  method: string;
+  path: string;
+  requestHeaders: Record<string, string>;
+  /** The original bytes, needed for clients that use a binary content encoding such as zstd. */
+  requestBytes: Buffer;
+  requestTruncated: boolean;
+}
+
+/** A response supplied by replay for a request inside an intercepted TLS session. */
+export interface InterceptResponse {
+  status: number;
+  headers?: Record<string, string>;
+  body: string;
+}
+
+/** Decode a request body for model-dialect parsing while leaving forwarding byte-for-byte. */
+export function decodeRequestBody(bytes: Buffer, contentEncoding?: string): string {
+  const encoding = contentEncoding?.split(',')[0]?.trim().toLowerCase();
+  if (encoding === 'zstd') {
+    // zstd was added to Node's built-in zlib API after the oldest runtime Orca supports. Keep the
+    // import compatible there; a Codex call degrades to opaque net capture with a clear error.
+    const decompress = (
+      zlib as typeof zlib & {
+        zstdDecompressSync?: (input: Buffer) => Buffer;
+      }
+    ).zstdDecompressSync;
+    if (!decompress)
+      throw new Error('zstd request encoding requires a Node runtime with zstd support');
+    return decompress(bytes).toString('utf8');
+  }
+  return bytes.toString('utf8');
+}
+
 /**
  * A connection orca deliberately did not read.
  *
@@ -105,6 +143,10 @@ export interface TlsInterceptOptions {
    */
   trustedOriginCerts?: readonly string[];
   maxCapturedBytes?: number;
+  /** Answer a decrypted request from a recording. Undefined falls through to the live origin. */
+  onRequest?: (
+    request: NetRequest,
+  ) => InterceptResponse | undefined | Promise<InterceptResponse | undefined>;
   onNetExchange?: (exchange: NetExchange) => void;
   onTunnel?: (tunnel: TunnelRecord) => void;
   onFailure?: (failure: InterceptFailure) => void;
@@ -234,6 +276,28 @@ export function attachTlsIntercept(
     outboundHeaders.host = req.headers.host ?? target.host;
 
     const requestBody = new Capture(maxCaptured);
+
+    // Replay has to decide before opening an origin connection. Buffer only when that hook is in
+    // use; the recording path below retains the original streaming behaviour and bounded capture.
+    if (options.onRequest) {
+      for await (const chunk of req) requestBody.add(Buffer.from(chunk as Buffer));
+      const reply = await options.onRequest({
+        host: target.host,
+        port: target.port,
+        method: req.method ?? 'GET',
+        path,
+        requestHeaders: recordableHeaders,
+        requestBytes: requestBody.buffer(),
+        requestTruncated: requestBody.truncated,
+      });
+      if (reply) {
+        res.writeHead(reply.status, reply.headers ?? {});
+        res.end(reply.body);
+        counters.intercepted += 1;
+        return;
+      }
+    }
+
     const upstream = httpsRequest({
       host: target.host,
       port: target.port,
@@ -246,7 +310,18 @@ export function attachTlsIntercept(
       ...(originTrust ? { ca: originTrust } : {}),
     });
 
-    req.on('data', (chunk: Buffer) => requestBody.add(chunk));
+    if (options.onRequest) {
+      // The hook consumed the request. The bounded size is deliberately also the maximum replay
+      // request size; sending a truncated body upstream would be worse than a clear failure.
+      if (requestBody.truncated) {
+        upstream.destroy(new Error(`request exceeded capture limit of ${maxCaptured} bytes`));
+      } else {
+        upstream.end(requestBody.buffer());
+      }
+    } else {
+      req.on('data', (chunk: Buffer) => requestBody.add(chunk));
+      req.pipe(upstream);
+    }
 
     const finished = new Promise<void>((resolve, reject) => {
       upstream.on('error', reject);
@@ -283,7 +358,12 @@ export function attachTlsIntercept(
             method: req.method ?? 'GET',
             path,
             requestHeaders: recordableHeaders,
-            requestBody: requestBody.text(),
+            requestBody: decodeRequestBody(
+              requestBody.buffer(),
+              typeof req.headers['content-encoding'] === 'string'
+                ? req.headers['content-encoding']
+                : undefined,
+            ),
             requestTruncated: requestBody.truncated,
             status: originRes.statusCode ?? 0,
             responseHeaders,
@@ -297,7 +377,6 @@ export function attachTlsIntercept(
       });
     });
 
-    req.pipe(upstream);
     await finished;
   }
 
@@ -433,6 +512,10 @@ class Capture {
 
   text(): string {
     return Buffer.concat(this.#chunks).toString('utf8');
+  }
+
+  buffer(): Buffer {
+    return Buffer.concat(this.#chunks);
   }
 
   get truncated(): boolean {

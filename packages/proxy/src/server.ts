@@ -24,17 +24,27 @@ import {
 } from '@orcareplay/providers';
 import {
   anthropicDialect,
+  codexDialect,
   openaiDialect,
   responsesDialect,
   selectDialect,
   type Dialect,
 } from './dialects.js';
-import { attachTlsIntercept, type NetExchange, type TlsInterceptOptions } from './intercept.js';
+import {
+  attachTlsIntercept,
+  decodeRequestBody,
+  type InterceptResponse,
+  type NetExchange,
+  type NetRequest,
+  type TlsInterceptOptions,
+} from './intercept.js';
 import { RequestMatcher, type Divergence } from './matching.js';
 
 export type {
   InterceptFailure,
+  InterceptResponse,
   NetExchange,
+  NetRequest,
   TlsInterceptOptions,
   TunnelRecord,
 } from './intercept.js';
@@ -216,6 +226,7 @@ const SECRET_REQUEST_HEADERS = new Set(AUTH_REQUEST_HEADERS);
 
 export function defaultDialects(): Dialect[] {
   return [
+    codexDialect(),
     anthropicDialect({
       toCanonicalRequest: anthropicToCanonicalRequest,
       toCanonicalResponse: anthropicToCanonicalResponse,
@@ -316,7 +327,12 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     const dialect = selectDialect(dialects, exchange.path);
     if (dialect && exchange.method === 'POST' && !exchange.requestTruncated) {
       try {
-        const streamed = (exchange.responseHeaders['content-type'] ?? '').includes('event-stream');
+        // Codex's HTTPS fallback currently labels this SSE body as application/json. The wire
+        // framing is authoritative when the provider header is not, otherwise we lose the
+        // canonical response and replay sends the right bytes with the wrong content type.
+        const streamed =
+          (exchange.responseHeaders['content-type'] ?? '').includes('event-stream') ||
+          exchange.responseBody.startsWith('event:');
         const built = buildExchange({
           dialect,
           path: exchange.path,
@@ -339,8 +355,116 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     options.tls?.onNetExchange?.(exchange);
   }
 
+  /**
+   * Replay hook for requests inside an intercepted TLS session. The ordinary HTTP proxy reaches
+   * `handle()` below, but the TLS interceptor has already terminated the outer CONNECT and needs
+   * the same matcher before it opens an origin connection.
+   */
+  function onInterceptedRequest(request: NetRequest): InterceptResponse | undefined {
+    const path = request.path.split('?')[0] ?? '/';
+    const dialect = selectDialect(dialects, path);
+    if (!dialect || request.method !== 'POST' || request.requestTruncated) return undefined;
+
+    let rawBody: string;
+    try {
+      rawBody = decodeRequestBody(request.requestBytes, request.requestHeaders['content-encoding']);
+    } catch (err) {
+      if (options.mode !== 'replay' || !options.loose) {
+        stats.unmatched += 1;
+        return replayError(`cannot decode intercepted request body: ${String(err)}`);
+      }
+      return undefined;
+    }
+
+    const result = tryReplay(dialect, rawBody);
+    if (result?.exchange) {
+      return {
+        status: result.exchange.status,
+        headers: {
+          'content-type': result.exchange.streamed ? 'text/event-stream' : 'application/json',
+        },
+        body: result.exchange.rawResponse,
+      };
+    }
+    if (result?.error) return replayError(result.error);
+    return undefined;
+  }
+
+  function tryReplay(
+    dialect: Dialect,
+    rawBody: string,
+  ): { exchange?: RecordedExchange; error?: string } | undefined {
+    let canonical: CanonicalRequest;
+    try {
+      canonical = dialect.toCanonicalRequest(JSON.parse(rawBody));
+    } catch (err) {
+      return { error: `unparseable request body: ${String(err)}` };
+    }
+
+    const beyondFork =
+      options.mode === 'hybrid' && matcher.cursor >= (options.forkAt ?? replayable.length);
+    if (beyondFork) return undefined;
+
+    const result = matcher.match(canonical);
+    if (result.matched) {
+      const exchange = replayable[result.index]!;
+      if (result.divergence) {
+        stats.matchedInexact += 1;
+        stats.divergences += 1;
+        options.onDivergence?.({ ...result.divergence, seq: exchange.seq });
+      } else {
+        stats.matchedExact += 1;
+      }
+      return { exchange };
+    }
+
+    stats.unmatched += 1;
+    if (options.mode === 'hybrid' || options.loose) {
+      stats.divergences += 1;
+      options.onDivergence?.({
+        level: 'major',
+        rung: 4,
+        distance: -1,
+        detail: result.reason ?? 'request does not match the recording; served live instead',
+        seq: replayable[result.index]?.seq ?? -1,
+      });
+      return undefined;
+    }
+    const reason = result.reason ?? 'request does not match the recording';
+    options.onUnmatched?.({
+      seq: replayable[result.index]?.seq ?? -1,
+      index: result.index,
+      reason,
+    });
+    return { error: `orca: replay halted — ${reason}` };
+  }
+
+  function replayError(message: string): InterceptResponse {
+    return {
+      status: 400,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          message:
+            `${message}. Re-run with \`orca replay <run> --loose\` to continue live from this point, ` +
+            'or `orca show <run>` to see what was recorded.',
+        },
+      }),
+    };
+  }
+
   const interception = options.tls
-    ? attachTlsIntercept(server, { ...options.tls, onNetExchange: onDecrypted }, stats)
+    ? attachTlsIntercept(
+        server,
+        {
+          ...options.tls,
+          ...(options.mode === 'record' ? {} : { onRequest: onInterceptedRequest }),
+          onNetExchange: onDecrypted,
+        },
+        stats,
+      )
     : undefined;
 
   async function goLive(
