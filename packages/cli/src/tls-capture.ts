@@ -162,7 +162,7 @@ export async function trustRunCa(
  * this is what makes them real. The pair is deliberately shaped like `model.request` /
  * `model.response` so the timeline reads the same either way.
  */
-async function persistNetExchange(
+export async function persistNetExchange(
   writer: TraceWriter,
   turn: number,
   exchange: NetExchange,

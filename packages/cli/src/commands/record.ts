@@ -3,21 +3,28 @@ import { readFile } from 'node:fs/promises';
 import { delimiter, resolve } from 'node:path';
 import { TraceWriter, ensureRunsDir } from '@orcareplay/core';
 import { FsCapture } from '@orcareplay/fs-capture';
-import { createProxy, RunCa, type RecordedExchange } from '@orcareplay/proxy';
+import { createProxy, RunCa, type NetExchange, type RecordedExchange } from '@orcareplay/proxy';
 import { defaultAdapters } from '@orcareplay/adapters';
 import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
-import { ExchangeEventDeriver } from '../exchange-events.js';
+import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
 import { installShellShim, readShellFrames } from '@orcareplay/shell-shim';
 import { drainMcpFrames, pointAtMcpConfig, setupMcpCapture, type McpCapture } from '../mcp.js';
 import { SerialQueue } from '../serial.js';
 import { appendSnapshot } from '../fs-events.js';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
-import { setupTlsCapture, trustRunCa } from '../tls-capture.js';
+import { persistNetExchange, setupTlsCapture, trustRunCa } from '../tls-capture.js';
 import { upstreamPlan } from '../upstream.js';
 import { ORCA_VERSION } from '../version.js';
 
 export interface RecordResult {
+  /**
+   * Model exchanges the proxy captured.
+   *
+   * Zero is the failure this whole field exists for, and it has to be readable by a caller that
+   * has no terminal to watch: the agent answers, the exit code is zero, and the trace is empty.
+   */
+  modelExchanges: number;
   runId: string;
   runDir: string;
   events: number;
@@ -159,12 +166,22 @@ async function runRecording(
   if (tls.ca) minted.push(tls.ca);
   const ca = tls.ca;
 
+  /** Model exchanges the proxy actually captured — the number the warning below turns on. */
+  let modelExchanges = 0;
+
   const proxy = await createProxy({
     mode: 'record',
     upstream: plan.upstream,
     upstreamHeaders: plan.headers,
     onExchange: (exchange: RecordedExchange) => {
+      modelExchanges += 1;
       writes.push(() => persist(exchange));
+    },
+    // A POST on a path no dialect claims is forwarded rather than refused, and lands in the trace
+    // as the same `net.*` pair unrecognised TLS traffic does. Orca holds the bytes but not the
+    // meaning, so it is evidence, not a replayable turn.
+    onNetExchange: (exchange: NetExchange) => {
+      writes.push(() => persistNetExchange(writer, turn, exchange));
     },
     ...tls.proxyOptions,
   });
@@ -172,24 +189,7 @@ async function runRecording(
   async function persist(exchange: RecordedExchange): Promise<void> {
     turn += 1;
     turnStartedAt.push({ turn, at: Date.now() });
-    for (const derived of deriver.derive(exchange, turn)) {
-      const causes: number[] = [];
-      if (derived.causesToolId) {
-        const seq = deriver.seqOf(derived.causesToolId);
-        if (seq !== undefined) causes.push(seq);
-      }
-      const event = await writer.append({
-        type: derived.type,
-        actor: derived.actor,
-        turn,
-        attrs: derived.attrs,
-        payload: derived.payload as never,
-        ...(causes.length > 0 ? { causes } : {}),
-      });
-      if (derived.type === 'tool.call') {
-        deriver.markPending(String(derived.attrs.tool_use_id), event.seq);
-      }
-    }
+    await appendDerivedEvents(writer, deriver, exchange, turn);
 
     if (fs) await appendSnapshot(fs, writer, out, turn);
   }
@@ -236,6 +236,8 @@ async function runRecording(
       launch.args,
       { ...process.env, ...launch.env },
       launch.cwd ?? cwd,
+      // Under --json, stdout is the result document. The agent's own output must not land in it.
+      args.bool('json'),
     );
   } catch (err) {
     // Two failures share this path, and both were silent in their own way.
@@ -341,6 +343,31 @@ async function runRecording(
     exit: exitCode,
     dir: writer.runDir,
   });
+
+  /**
+   * The quietest way orca can fail, and the most damaging.
+   *
+   * Capture works by pointing a base-URL variable at the proxy, so a harness that reads none of
+   * them is never redirected — and there is nothing to notice. The agent answers, the exit code is
+   * zero, and the trace is empty. `@ai-sdk/openai` is the live example: it takes its base URL only
+   * as a constructor argument, so an agent built on the Vercel AI SDK produces exactly this.
+   *
+   * `contract.ts` already names this shape as what the adapter checks exist to prevent. They guard
+   * the adapters; this guards the run, which is where a user actually meets it.
+   */
+  if (modelExchanges === 0) {
+    out.warn('capture.empty', {
+      exchanges: 0,
+      cause: 'the agent never called the proxy — it may not read a base-URL variable',
+      set:
+        Object.keys(launch.env)
+          .filter((name) => /(?:_BASE_URL|_API_BASE)$/.test(name))
+          .sort()
+          .join(',') || 'none',
+      next: 'orca doctor',
+    });
+  }
+
   out.plain('');
   out.plain(`  orca replay ${writer.runId}            # reproduce it exactly`);
   out.plain(`  orca replay ${writer.runId} --ui       # open the timeline`);
@@ -349,18 +376,35 @@ async function runRecording(
     runId: writer.runId,
     runDir: writer.runDir,
     events: manifest.counts?.events ?? writer.seq,
+    modelExchanges,
     exitCode,
   };
 }
 
+/**
+ * Launch the agent.
+ *
+ * `stdio: 'inherit'` by default, and that matters: an interactive harness needs the real terminal,
+ * and anything less turns a TUI into a stream of escape codes.
+ *
+ * `quietStdout` is for `--json`, where orca's stdout is a document rather than a terminal. The
+ * agent's own chatter is still shown — it moves to stderr, where a human reads it and a parser
+ * does not. stdin and stderr stay inherited so the agent can still prompt and still colour.
+ */
 function runChild(
   command: string,
   argv: string[],
   env: NodeJS.ProcessEnv,
   cwd: string,
+  quietStdout = false,
 ): Promise<number> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, argv, { env, cwd, stdio: 'inherit' });
+    const child = spawn(command, argv, {
+      env,
+      cwd,
+      stdio: quietStdout ? ['inherit', 'pipe', 'inherit'] : 'inherit',
+    });
+    child.stdout?.pipe(process.stderr);
     // Forward interrupts so Ctrl-C reaches the agent rather than orphaning it behind the proxy.
     const forward = (signal: NodeJS.Signals) => () => child.kill(signal);
     const onInt = forward('SIGINT');

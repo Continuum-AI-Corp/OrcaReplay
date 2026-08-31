@@ -22,8 +22,8 @@ de proveedor.
 
 [![License](https://img.shields.io/badge/code-Apache--2.0-blue)](../../LICENSE)
 [![Spec](https://img.shields.io/badge/trace%20spec-CC%20BY%204.0-blue)](../../spec/orca-trace-v0.md)
-[![Node](https://img.shields.io/badge/node-20%2B-brightgreen)](#install)
-[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20opencode%20%C2%B7%20any-black)](#install)
+[![Node](https://img.shields.io/badge/node-20%2B-brightgreen)](#instalación)
+[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Agents%20SDK%20%C2%B7%20AI%20SDK%20%C2%B7%20any-black)](#instalación)
 [![Good first issues](https://img.shields.io/badge/good%20first%20issues-12-orange)](../good-first-issues.md)
 
 ![Una ejecución de Claude Code grabada, reproducida sin red y luego bifurcada hacia dos modelos](../demo-cli.gif)
@@ -44,7 +44,7 @@ La tercera línea es por la que la gente se queda: los mismos archivos, el mismo
 conversación, otro modelo a partir del paso 4. El modelo es la única variable, y eso es lo que hace
 que la respuesta signifique algo.
 
-Todavía no está en npm — [instálalo desde el código](#install), tarda cosa de un minuto.
+Todavía no está en npm — [instálalo desde el código](#instalación), tarda cosa de un minuto.
 
 ## Por qué existe
 
@@ -63,6 +63,15 @@ OrcaReplay la responde devolviéndote la ejecución.
 | Te deja cambiar de modelo y repetir desde el paso 4 | ❌ | ✅ |
 | Exige modificar tu agente | normalmente un wrapper de SDK | ❌ dos variables de entorno |
 | Sirve después de cerrar el terminal | ❌ | ✅ es un archivo |
+| Ve más allá de la API del modelo — códigos de salida de shell, escrituras de archivos | ❌ | ✅ en cada turno |
+| Graba un agente sin endpoint de API que redirigir | ❌ | ✅ opt-in `--tls-intercept` |
+
+Las dos últimas filas son las que un wrapper de SDK no puede alcanzar por construcción. La captura
+ocurre *por debajo* del agente —en la frontera de procesos y sockets—, así que da igual si el agente
+es tuyo, si puedes editarlo o si siquiera tiene una clave de API: un Codex CLI conectado con una
+suscripción de ChatGPT habla con su propio backend por TLS y no tiene ninguna base URL que apuntar a
+otro sitio, y orca lo graba igualmente. Ver
+[cuando el harness no se deja redirigir](#cuando-el-harness-no-se-deja-redirigir).
 
 ## Cómo funciona
 
@@ -74,22 +83,24 @@ herramienta, y es la razón de que **OrcaReplay no parchee tu agente** — levan
 define dos variables de entorno y se aparta.
 
 Otras tres capas capturan lo que el protocolo no puede ver: un código de salida, una duración real,
-de qué flujo salió un byte, un archivo escrito sin avisar a nadie.
+de qué flujo salió un byte, un archivo escrito sin avisar a nadie. Hay una quinta para los agentes que no leen ninguna variable de base-URL — véase
+«Qué agentes»  — [lo que encontró un agente de verdad](../validation.md).
 
 ```mermaid
 %%{init: {'theme':'neutral'}}%%
 flowchart LR
     A["<b>tu agente</b><br/><i>sin modificar</i>"]
 
-    subgraph orca["orca · cuatro capas de captura"]
+    subgraph orca["orca · cinco capas de captura"]
         direction TB
         P["<b>proxy</b><br/>variable base-URL"]
         SH["<b>shim de PATH</b><br/>código de salida · tiempos · flujos"]
         MC["<b>derivación JSON-RPC</b><br/>reescritura de la config MCP"]
         FS["<b>índice git en la sombra</b><br/>el workspace por turno"]
+        FH["<b>hook de fetch</b><br/>para un origen fijado en el código"]
     end
 
-    A --> P & SH & MC & FS
+    A --> P & SH & MC & FS & FH
     P -->|"reenviado, auth intacta"| U["<b>la API del modelo</b><br/><i>u OrcaRouter · cualquier gateway</i>"]
     orca ==> T[("<b>una traza</b><br/>.orca/runs/run_a1b2c3")]
 ```
@@ -159,6 +170,43 @@ Tres hechos que la propia transcripción del modelo no podía darte y que el có
 ejecución tapó: el archivo cambió de verdad (seq 6, `+1 −3`), la comprobación que lanzó el agente
 **falló** (seq 12, `exit 1`), y aun así dio por terminado. La ejecución salió con 0 porque el
 *agente* salió con 0.
+
+Ese último hecho merece un comando propio. `orca show` da el orden en que pasaron las cosas;
+`orca graph` da qué produjo qué:
+
+```console
+$ orca graph last
+FROM              TO               KIND      WHY
+3 model.response  4 tool.call      recorded  tool_use block in the response
+4 tool.call       6 fs.change      inferred  changed path appears in tool input, same or previous turn
+4 tool.call       7 tool.result    recorded  tool result answers its call
+7 tool.result     8 model.request  recorded  tool_result block in the request
+
+  1 inferred — derived from this trace, not recorded in it
+```
+
+Dos clases de arista, y la diferencia importa. Una arista **recorded** se escribió cuando ocurrió
+la ejecución, porque un bloque `tool_use` está físicamente dentro de la respuesta que lo emitió. Una
+arista **inferred** se dedujo ahora mismo según la regla que nombra: una instantánea del sistema de
+ficheros se toma una vez por turno y no una vez por llamada, así que atribuir un cambio de fichero a
+una llamada *concreta* es una buena conjetura y no un hecho. Las aristas inferidas nunca se
+escriben de vuelta en el trace, igual que los checkpoints se derivan y nunca se graban.
+
+`orca export last --card bug.svg` dibuja esa cadena como una imagen para pegar en un issue, y
+`--graph-card` dibuja la ejecución entera con la cadena resaltada.
+
+SVG se ve en un issue de GitHub y casi en ningún otro sitio que importe — X no lo acepta como
+subida, y Slack y Discord no le dan vista previa — así que llama al fichero `.png` y tendrás uno, o
+`.gif` y la cadena se construye paso a paso. Ese camino necesita un navegador, y orca no depende de
+ninguno: `docs/media/README.md` mantiene las herramientas de render fuera de `package.json` para que
+nadie que ejecute `npm ci` pague una descarga de Chromium. Si falta, orca dice la única línea que lo
+arregla; `orca doctor` lo informa de todos modos, y `.svg` nunca necesita nada.
+
+```console
+orca export last --card bug.png       # the chain, ready to post
+orca export last --card bug.gif       # the same chain, one hop per frame
+npm i --no-save playwright-core pngjs gifenc   # only needed for the two above
+```
 
 Ahora reprodúcelo tantas veces como quieras, gratis:
 
@@ -273,11 +321,90 @@ graba se construye a partir de la petición *entrante* con la auth quitada — e
 grabación por construcción, no por una regla que alguien tenga que recordar. Se retiene por completo
 si algún flag envía ese tráfico a un sitio distinto del gateway que la emitió.
 
+## Qué agentes
+
+Dos cosas deciden si un harness se puede grabar: si se le puede apuntar al proxy, y si orca entiende
+el formato que habla una vez que el tráfico llega.
+
+| Agente | Cómo se captura | Estado |
+|---|---|---|
+| **Claude Code** | `ANTHROPIC_BASE_URL` | funciona — verificado contra un arreglo de bug real, [en detalle](../validation.md) |
+| **Codex CLI** (clave de API) | `OPENAI_BASE_URL` → API Responses | funciona |
+| **Codex CLI** (sesión de ChatGPT) | `--tls-intercept` → API Responses | funciona, con una decisión que tomas tú |
+| **OpenAI Agents SDK** | `OPENAI_BASE_URL` → API Responses | funciona |
+| **Vercel AI SDK** | hook de fetch — `orca record node -- node app.mjs` | funciona |
+| **LangGraph / LangChain** | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | debería funcionar — pasa por los clientes oficiales, pero aquí todavía no lo prueba nada |
+| **grok-cli** (y su bot de Telegram) | `orca record grok` — `GROK_BASE_URL`, más el hook para sus subagentes | funciona |
+| **OpenClaw** | `orca record openclaw` — el hook para la pasarela, variables heredadas para los agentes que lanza | funciona |
+| **opencode** | `orca record opencode` | adaptador incluido, ambos orígenes redirigidos |
+| **Hermes** (Nous Research) | `ORCA_BASE_URL_VARS=… orca record generic-openai -- hermes …` | debería funcionar — sobrescribe por proveedor, véase abajo |
+| **cualquier otra cosa** | `orca record generic-openai -- <cmd>` | funciona si lee una variable de base-URL; si no, `orca record node -- <cmd>` |
+
+Solo Claude Code se ha llevado de extremo a extremo contra el harness real. Al resto lo sostienen el
+contrato de adaptador y unas fixtures que anotan exactamente qué variables pone cada uno: si un
+harness renombra la variable que lee, lo que se pone rojo es una comprobación, no una grabación
+vacía.
+
+Dos de esos casos necesitaron más que una variable de entorno, y conviene saber la diferencia antes
+de elegir el comando.
+
+**Un harness que habla la API Responses.** El OpenAI Agents SDK y el Codex CLI usan por defecto
+`/v1/responses` en vez de chat completions. orca la habla, así que no hace falta nada especial —
+pero en una versión anterior el síntoma no era una grabación incompleta, era un `404` en el primer
+turno del agente.
+
+**Un harness que no lee ninguna variable de base-URL.** `@ai-sdk/openai` solo acepta el origen como
+argumento del constructor, así que un agente hecho con el Vercel AI SDK corre perfectamente bajo
+`orca record`, sale con 0 y escribe una grabación vacía. El adaptador `node` es exactamente para eso:
+escribe una precarga pequeña en el directorio de la ejecución, apunta `NODE_OPTIONS` ahí y redirige
+`globalThis.fetch` solo para una lista blanca de hosts de proveedores.
+
+```console
+orca record node -- node agent.mjs
+orca record node -- npm run agent
+ORCA_INSTRUMENT_HOSTS='contoso.openai.azure.com' orca record node -- node agent.mjs
+```
+
+Es un adaptador aparte y no el comportamiento por defecto porque `NODE_OPTIONS` llega a todos los
+procesos Node que el agente lance — un precio que vale la pena cuando sabes que tu agente lo
+necesita, pero que no hay que imponerle a quien está grabando un harness de Python.
+
+Bun acepta `NODE_OPTIONS` pero ignora `--require` dentro. Por eso se pone también
+`BUN_OPTIONS=--preload` y un agente basado en Bun queda cubierto igual. Está comprobado contra un
+`bun` de verdad, porque el fallo que evita es el silencioso: el hook no corre, el tráfico se va al
+proveedor y no se graba nada.
+
+**Y si aun así la grabación sale vacía**, `orca record` lo dice en lugar de terminar limpio:
+
+```console
+warn capture.empty exchanges=0 cause="the agent never called the proxy — it may not read a base-URL variable" set=ANTHROPIC_BASE_URL,OPENAI_API_BASE,OPENAI_BASE_URL next="orca doctor"
+```
+
+**Una variable de base-URL de la que orca nunca ha oído hablar.** Enumerarlas no tiene remedio:
+solo el `.env.example` de Hermes trae `NOVITA_BASE_URL`, `GLM_BASE_URL`, `KIMI_BASE_URL`,
+`MINIMAX_BASE_URL`, `HF_BASE_URL`, `NEBIUS_BASE_URL` y una docena más. Una lista fijada dentro de
+orca estaría obsoleta a la semana siguiente, así que nombra la variable:
+
+```console
+ORCA_BASE_URL_VARS='OPENROUTER_BASE_URL' orca record generic-openai -- hermes
+ORCA_BASE_URL_VARS='GLM_BASE_URL,KIMI_BASE_URL' orca record generic-openai -- my-agent
+```
+
+Cada nombre apunta al proxy con `/v1` añadido, que es lo que quiere una sobrescritura compatible
+con OpenAI; `=<ruta>` lo cambia y `=/` da el origen pelado.
+
+**Una pasarela que lanza el agente de código.** OpenClaw no programa: lanza Claude Code, Codex u
+opencode como subprocesos. Sus propias llamadas las captura el hook de fetch; las del agente de
+código las capturan las variables de siempre — no porque OpenClaw las lea, sino porque **un proceso
+hijo hereda el entorno de su padre**. Eso es una propiedad del sistema operativo, no de orca, y por
+eso lo vigila un test.
+
 ## Cuando el harness no se deja redirigir
 
-La inyección de base-URL captura todo harness que lea una variable de base-URL, que son casi todos.
-Un Codex CLI conectado con una suscripción de ChatGPT no lee ninguna: habla con su propio backend
-por TLS, y orca no ve nada. `--tls-intercept` es la respuesta a eso, y es deliberadamente una
+La inyección de base-URL captura todo harness que lea una variable de base-URL, y el hook de fetch
+cubre los agentes de Node y Bun que no leen ninguna. Un Codex CLI conectado con una suscripción de
+ChatGPT no es ni lo uno ni lo otro: habla con su propio backend por TLS, así que no hay origen que
+reescribir ni `fetch` nuestro al que llegar. `--tls-intercept` es la respuesta a eso, y es deliberadamente una
 decisión aparte que tienes que tomar, porque emite una autoridad certificadora.
 
 ```console
@@ -292,8 +419,56 @@ permitidos se tunelizan sin leerse y se graban como una dirección y un número 
 sin cuerpo, porque orca nunca tuvo el texto en claro. Pedir interceptarlo todo se rechaza en lugar
 de concederse.
 
+Lo que vuelve por ahí no es una línea de log. Una petición interceptada la analizan los mismos
+dialectos de protocolo que a cualquier otra, así que aterriza en la traza como un intercambio
+corriente: reproducible sin red y bifurcable a otro modelo, en una ejecución en la que nunca entró
+una clave de API tuya.
+
 Funciona también en `orca replay --model`, `orca fork` y `orca compare`, que lanzan un agente real
 por el mismo motivo.
+
+## Para un agente, un script o CI
+
+Una grabación es un archivo — lo único que un panel de observabilidad no puede ser. Por eso la
+pregunta más útil sobre una ejecución fallida es una que puede hacer un **agente**: *reproduce mi
+última ejecución y dime qué divergió.* Cada comando responde como datos, y orca se ofrece a sí mismo
+por MCP.
+
+```console
+$ orca replay last --json
+{"runId":"run_a278eea7b535","mode":"exact","traceRunId":"run_687e3f84b208","matchedExact":2,"divergences":0,"unmatched":0,"liveCalls":0,"exitCode":0}
+
+$ orca show last --json | jq '.events[] | select(.kind == "TOOL")'
+$ orca checkpoints last --json | jq '.[-1].seq'
+```
+
+Un único documento JSON en stdout y los diagnósticos en stderr — incluida la salida del propio agente
+grabado, para que el documento siga siendo analizable mientras la ejecución habla. Los fallos también
+responden en JSON, con código de salida distinto de cero. `--json` cubre `list`, `show`, `events`,
+`checkpoints`, `graph`, `record`, `replay`, `compare` y `doctor`.
+
+**Como herramientas.** `orca mcp` sirve el almacén de grabaciones a un agente por stdio:
+
+```json
+{ "mcpServers": { "orca": { "command": "orca", "args": ["mcp"] } } }
+```
+
+`orca_list_runs`, `orca_show_run`, `orca_checkpoints`, `orca_graph`, `orca_replay` y `orca_compare`. Reproducir es
+gratis y sin red; `orca_compare` dice en su propia descripción que gasta tokens de verdad, porque un
+modelo que elige una herramienta lee esa cadena y nada más.
+
+**Desde código**, si prefieres no pasar por la shell:
+
+```ts
+import { Orca } from 'orcareplay';
+
+const orca = new Orca({ cwd: process.cwd() });
+const { unmatched, divergences } = await orca.replay('last');
+const timeline = await orca.show('last');
+```
+
+Nunca escribe en tu stdout ni llama a `process.exit` — las dos cosas están cubiertas por tests,
+porque sobre una biblioteca que haga cualquiera de las dos no se puede construir nada.
 
 ## Estado
 
@@ -303,6 +478,14 @@ Temprano. `v0` es el esqueleto que camina de los tres comandos de arriba.
 |---|---|
 | Formato de traza v0 + JSON Schema | funciona |
 | Captura de modelos Anthropic / compatibles con OpenAI | funciona |
+| Captura de la API Responses de OpenAI | funciona — el formato que el OpenAI Agents SDK y el Codex CLI usan por defecto. Graba, reproduce sin red y bifurca; una bifurcación se queda en el formato que habla el agente |
+| Agentes que no leen ninguna variable de base-URL | funciona — `orca record node -- <cmd>` escribe una precarga en el directorio de la ejecución y redirige `globalThis.fetch` solo para una lista blanca de hosts de proveedores. Node y Bun, porque Bun ignora `--require` dentro de `NODE_OPTIONS`. Así se captura un agente de Vercel AI SDK |
+| Una llamada que orca no sabe leer | funciona — se reenvía en vez de rechazarse y queda registrada como `net.request` / `net.response`: es evidencia, no un turno reproducible. Una grabación que no capturó nada avisa en lugar de terminar limpia |
+| Salida legible por máquina (`--json`) | funciona — un documento JSON en stdout, los diagnósticos en stderr, los fallos también en JSON |
+| Grafo causal (`orca graph`) | funciona — qué produjo qué, como tabla o como JSON. Cada arista dice si el trace la grabó o si orca acaba de deducirla, y nombra la regla en ambos casos. `--to N` reduce a la cadena que produjo un evento |
+| Tarjetas compartibles | funciona — `orca export --card` dibuja una cadena causal, `--graph-card` la ejecución entera con esa cadena resaltada, y `compare --share` la tabla de veredictos. Siempre `.svg`; `.png` y `.gif` con las herramientas de render opcionales, que `orca doctor` informa y `npm ci` nunca instala |
+| Servidor MCP (`orca mcp`) | funciona — seis herramientas por stdio, para que un agente pueda leer y reproducir sus propias ejecuciones |
+| API programática (`Orca`) | funciona — los comandos pintan lo que devuelve, así que la terminal es una vista de una sola verdad |
 | Reproducción exacta con informe de divergencias | funciona — restaura el sistema de archivos grabado sobre tu árbol de trabajo y luego lo devuelve; `--worktree` para una copia desechable, `--in-place` para no restaurar nada. Escribe una ejecución propia con lo que la reproducción *descubrió* —divergencias, peticiones sin emparejar— y apunta al padre para lo que se limitó a repetir; `--no-trace` para omitirlo |
 | Reproducción bifurcada desde un punto de control | funciona — una bifurcación graba sus propias instantáneas de sistema de archivos, así que es una ejecución que puedes volver a bifurcar |
 | Comparación entre modelos | funciona — `orca setup` guarda un gateway (OrcaRouter por defecto, cualquier URL que nombres si no), una clave y una lista de modelos, así que `orca compare` no necesita flags |
@@ -314,37 +497,6 @@ Temprano. `v0` es el esqueleto que camina de los tres comandos de arriba.
 | Captura de red no-modelo | funciona — actívalo con `--tls-intercept`; emite una CA por ejecución que solo confía el agente lanzado, descifra una lista de hosts permitidos, tuneliza el resto sin leerlo y borra la clave al terminar |
 | Verificado contra un agente de verdad | Claude Code arreglando de verdad un bug de verdad: grabado, reproducido sin red de principio a fin, bifurcado desde un punto de control y exportado. Cuatro bugs encontrados por el camino, todos corregidos — ver abajo |
 | Harness con auth por suscripción | Claude Code funciona. Un Codex CLI con suscripción de ChatGPT habla con su propio backend y no lee ninguna variable de base-URL, así que necesita `--tls-intercept` |
-
-### Lo que encontró un agente de verdad
-
-Todo lo anterior se construyó contra fixtures. La primera ejecución de Claude Code grabada con esto
-rompió cuatro cosas, cada una de un tipo que ninguna fixture puede producir:
-
-- **Una deriva de dieciséis caracteres puntuó 217.568.** La distancia era el prefijo y el sufijo
-  comunes del cuerpo entero de la petición, y Claude Code lleva un id de sesión en su prompt de
-  sistema *y* otro en la descripción de una herramienta — así que los 200 KB de en medio contaban
-  como cambiados y ninguna petición llegaba al peldaño 2. Ahora la distancia se suma por campo, y
-  por línea dentro de un campo.
-- **La redacción hacía inalcanzable una coincidencia exacta.** Los digests de los marcadores llevan
-  sal por ejecución a propósito, así que una petición grabada no podía volver a ser igual a sí
-  misma. Ahora el emparejador redacta también la petición entrante del mismo modo y compara el
-  *tipo* de secreto en vez de su digest — e informa de ese pliegue, porque es una aproximación.
-- **La redacción rompía además todas las bifurcaciones.** Los ids `tool_use` y las firmas de los
-  bloques de razonamiento son cadenas de alta entropía, así que el barrido las sustituía; una
-  bifurcación reproduce esos turnos, el agente los devuelve, y la API responde `400`. Los valores de
-  protocolo que tienen que ir y volver intactos quedan exentos de la *conjetura* — nunca de las
-  reglas de credenciales.
-- **Reproducir vuelve a ejecutar las herramientas.** Orca no intercepta la ejecución de
-  herramientas, así que el agente lanza `npm test` otra vez de verdad, y eso reimprime de verdad sus
-  propios tiempos. Una petición cuya única diferencia está dentro de la salida de una herramienta
-  ahora se sirve desde la grabación como divergencia `major` en lugar de detener la reproducción.
-
-Esa ejecución se reproduce ahora sin red de principio a fin — `reused=7/7 exact=2 divergences=5
-unmatched=0 exit=0`, con cada aproximación nombrada — y una bifurcación llega al mismo árbol que la
-grabación. Si tienes una grabación en la que todavía se equivoca, eso es lo más útil que puedes
-enviar.
-
-<a id="install"></a>
 
 ## Instalación
 
@@ -460,6 +612,8 @@ implementación que demuestre que no está moldeada alrededor de un proveedor.
 
 - [`spec/orca-trace-v0.md`](../../spec/orca-trace-v0.md) — el formato de traza normativo
 - [`docs/architecture.md`](../architecture.md) — cómo funcionan de verdad captura, reproducción y bifurcación
+- [`docs/validation.md`](../validation.md) — qué se rompió la primera vez que se enfrentó a un agente real
+- [`docs/launch-path.md`](../launch-path.md) — qué está hecho, qué no, y qué viene después
 - [`docs/plugins.md`](../plugins.md) — escribir un adaptador o un provider
 - [`CONTRIBUTING.md`](../../CONTRIBUTING.md) — el bucle de desarrollo de cinco minutos
 - [Good first issues](../good-first-issues.md) — doce, con el archivo por el que empezar

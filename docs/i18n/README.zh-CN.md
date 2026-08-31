@@ -20,8 +20,8 @@ Gemini、Grok、DeepSeek、Qwen 等等。它是 `orca setup` 的默认网关，�
 
 [![License](https://img.shields.io/badge/code-Apache--2.0-blue)](../../LICENSE)
 [![Spec](https://img.shields.io/badge/trace%20spec-CC%20BY%204.0-blue)](../../spec/orca-trace-v0.md)
-[![Node](https://img.shields.io/badge/node-20%2B-brightgreen)](#install)
-[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20opencode%20%C2%B7%20any-black)](#install)
+[![Node](https://img.shields.io/badge/node-20%2B-brightgreen)](#安装)
+[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Agents%20SDK%20%C2%B7%20AI%20SDK%20%C2%B7%20any-black)](#安装)
 [![Good first issues](https://img.shields.io/badge/good%20first%20issues-12-orange)](../good-first-issues.md)
 
 ![录制一次 Claude Code 运行，离线重放，再分叉到两个模型上](../demo-cli.gif)
@@ -40,7 +40,7 @@ orca replay last --from 4 --model claude-haiku-4-5 --ui
 第三行才是让人留下来的那条：同样的文件、同样的对话前缀，从第 4 步起换一个模型。模型是唯一的变量，
 这正是答案有意义的原因。
 
-还没发到 npm——请[从源码安装](#install)，大约一分钟。
+还没发到 npm——请[从源码安装](#安装)，大约一分钟。
 
 ## 为什么会有这个东西
 
@@ -58,6 +58,13 @@ OrcaReplay 的回答方式，是把那次运行还给你。
 | 让你换个模型、从第 4 步重跑 | ❌ | ✅ |
 | 需要你改造 agent | 通常要套一层 SDK | ❌ 两个环境变量 |
 | 关掉终端之后还能用 | ❌ | ✅ 它就是个文件 |
+| 看得见模型 API 之外的事——shell 退出码、文件写入 | ❌ | ✅ 每一轮都有 |
+| 记录一个没有 API 端点可改道的 agent | ❌ | ✅ 需自行开启 `--tls-intercept` |
+
+最后两行是套一层 SDK 在结构上就够不着的。捕获发生在 agent **下面**——进程与套接字这一层——所以
+agent 是不是你写的、你能不能改它、它手里有没有 API key，都不重要：用 ChatGPT 订阅登录的 Codex CLI
+通过 TLS 和自家后端对话，没有任何 base URL 可以指向别处，orca 照样能录下它。见
+[当 harness 不肯被改道时](#当-harness-不肯被改道时)。
 
 ## 它是怎么工作的
 
@@ -67,26 +74,28 @@ OrcaReplay 的回答方式，是把那次运行还给你。
 agent** 的原因——它起一个本地代理、设两个环境变量，然后就让开。
 
 另外三层负责抓协议看不见的东西：退出码、真实耗时、某个字节来自哪条流、悄悄写下的一个文件。
+还有第五层，专门对付那些根本不读 base-URL 变量的 agent————[一个真实的 agent 发现了什么](../validation.md)的“支持哪些 agent”。
 
 ```mermaid
 %%{init: {'theme':'neutral'}}%%
 flowchart LR
     A["<b>你的 agent</b><br/><i>未经修改</i>"]
 
-    subgraph orca["orca · 四层捕获"]
+    subgraph orca["orca · 五层捕获"]
         direction TB
         P["<b>代理</b><br/>base-URL 环境变量"]
         SH["<b>PATH 垫片</b><br/>退出码 · 计时 · 流"]
         MC["<b>JSON-RPC 分流</b><br/>改写 MCP 配置"]
         FS["<b>影子 git 索引</b><br/>每轮的工作区"]
+        FH["<b>fetch 钩子</b><br/>应对写死的 origin"]
     end
 
-    A --> P & SH & MC & FS
+    A --> P & SH & MC & FS & FH
     P -->|"原样转发，鉴权不动"| U["<b>模型 API</b><br/><i>或 OrcaRouter · 任意网关</i>"]
     orca ==> T[("<b>一份 trace</b><br/>.orca/runs/run_a1b2c3")]
 ```
 
-四层最终汇入同一条时间线，按事情**真正发生**的先后排序，而不是按 orca 什么时候读到它们。
+它们最终汇入同一条时间线，按事情**真正发生**的先后排序，而不是按 orca 什么时候读到它们。
 
 ### 精确重放、分叉、对比，其实是一件事
 
@@ -147,6 +156,39 @@ info usage input=201 output=25 cost=$0.004890
 三个事实：模型自己的对话记录说不出来，而这次运行的退出码把它们藏了起来——文件确实变了（seq 6，`+1 −3`）、
 agent 跑的那次检查**失败了**（seq 12，`exit 1`），然后它照样收工。整次运行退出码是 0，
 只因为那个 *agent* 退出码是 0。
+
+最后这个事实值得一条自己的命令。`orca show` 给出事情发生的顺序；`orca graph` 给出什么产生了什么：
+
+```console
+$ orca graph last
+FROM              TO               KIND      WHY
+3 model.response  4 tool.call      recorded  tool_use block in the response
+4 tool.call       6 fs.change      inferred  changed path appears in tool input, same or previous turn
+4 tool.call       7 tool.result    recorded  tool result answers its call
+7 tool.result     8 model.request  recorded  tool_result block in the request
+
+  1 inferred — derived from this trace, not recorded in it
+```
+
+边有两种，而且区别很重要。**recorded** 边是运行当时写下的，因为 `tool_use` 块就物理地待在发出它的
+那条响应里。**inferred** 边是刚刚按它自己写明的规则推导出来的——文件系统快照是每轮拍一次，而不是每次
+工具调用拍一次，所以把一处文件改动归给*某一次具体调用*是个不错的猜测，不是事实。推导出的边永远不会
+写回 trace，就像 checkpoint 是推导出来的、从不被记录一样。
+
+`orca export last --card bug.svg` 把这条链画成一张能贴进 issue 的图，`--graph-card` 则画出整个运行，
+并把这条链点亮。
+
+SVG 在 GitHub issue 里能渲染，在其他要紧的地方几乎都不行——X 不接受它作为上传，Slack 和 Discord
+不给预览。所以把文件名写成 `.png` 就得到 PNG，写成 `.gif` 就得到一跳一帧逐步搭起来的动图。这条路需要
+一个浏览器，而 orca 并不依赖浏览器：`docs/media/README.md` 特意把渲染工具挡在 `package.json` 之外，
+好让跑 `npm ci` 的人不用为下载 Chromium 买单。缺了它，orca 会告诉你修好它的那一行；`orca doctor`
+无论如何都会报告，而 `.svg` 从来什么都不需要。
+
+```console
+orca export last --card bug.png       # the chain, ready to post
+orca export last --card bug.gif       # the same chain, one hop per frame
+npm i --no-save playwright-core pngjs gifenc   # only needed for the two above
+```
 
 现在你想复现多少遍都行，而且不花钱：
 
@@ -246,11 +288,82 @@ some-local-model           —          —
 构造的——所以它对录制是**结构上**不可见的，而不是靠谁记得一条规则。如果某个参数把这部分流量发去了
 签发它的网关之外的地方，这把 key 会被完全扣下。
 
+## 支持哪些 agent
+
+一个 harness 能不能被录下来，取决于两件事：能不能把它指向代理，以及流量到了以后 orca 认不认得
+它说的那套线协议。
+
+| Agent | 怎么抓 | 状态 |
+|---|---|---|
+| **Claude Code** | `ANTHROPIC_BASE_URL` | 可用——已对着真实的修 bug 过程验证过，[细节在这里](../validation.md) |
+| **Codex CLI**（API key） | `OPENAI_BASE_URL` → Responses API | 可用 |
+| **Codex CLI**（ChatGPT 登录） | `--tls-intercept` → Responses API | 可用，但需要你自己做一个决定 |
+| **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | 可用 |
+| **Vercel AI SDK** | fetch 钩子——`orca record node -- node app.mjs` | 可用 |
+| **LangGraph / LangChain** | `OPENAI_BASE_URL`、`ANTHROPIC_BASE_URL` | 应该可用——它走的是官方客户端，但这里还没有测试覆盖 |
+| **grok-cli**（含它的 Telegram bot） | `orca record grok`——`GROK_BASE_URL`，外加给子 agent 的 fetch 钩子 | 可用 |
+| **OpenClaw** | `orca record openclaw`——网关自己用钩子，它拉起的 agent 靠继承来的变量 | 可用 |
+| **opencode** | `orca record opencode` | 已有适配器，两个 origin 都改道 |
+| **Hermes**（Nous Research） | `ORCA_BASE_URL_VARS=… orca record generic-openai -- hermes …` | 应该可用——它按 provider 分别覆盖，见下面 |
+| **其它任何东西** | `orca record generic-openai -- <cmd>` | 只要它读 base-URL 变量就行；不读的话用 `orca record node -- <cmd>` |
+
+只有 Claude Code 是对着真实 harness 端到端跑通过的。其余的靠适配器契约和 fixture 保证：fixture
+记下每个适配器到底设了哪些变量，所以某个 harness 改了它读的变量名时，红的是检查，而不是变成一份
+空 trace。
+
+其中两种情况光靠环境变量是不够的，选命令之前值得先知道。
+
+**说 Responses API 的 harness。** OpenAI Agents SDK 和 Codex CLI 默认都用 `/v1/responses`，而不是
+chat completions。orca 认得这套协议，所以不需要额外做什么——但如果你用的是这之前的版本，症状不是
+trace 缺东西，而是 agent 第一轮就收到 `404`。
+
+**根本不读 base-URL 变量的 harness。** `@ai-sdk/openai` 只接受构造函数参数里的 origin，别的都不看，
+所以基于 Vercel AI SDK 的 agent 在 `orca record` 下跑得好好的、退出码 0、trace 却是空的。`node`
+适配器就是干这个的：它往运行目录里写一个很小的预加载文件，用 `NODE_OPTIONS` 指过去，只对白名单里的
+provider 主机改道 `globalThis.fetch`，别的一概不动。
+
+```console
+orca record node -- node agent.mjs
+orca record node -- npm run agent
+ORCA_INSTRUMENT_HOSTS='contoso.openai.azure.com' orca record node -- node agent.mjs
+```
+
+它是一个单独的适配器、而不是默认行为，因为 `NODE_OPTIONS` 会传给 agent 起的每一个 Node 进程——
+你知道自己需要时这个代价值得付，但不该强加给一个在录 Python harness 的人。
+
+Bun 认 `NODE_OPTIONS`，却会忽略里面的 `--require`，所以这里同时设了 `BUN_OPTIONS=--preload`，基于
+Bun 的 agent 也一样能覆盖到。这一条是拿真的 `bun` 验过的，因为它防的正是那种不出声的失败：钩子没跑，
+流量直接去了 provider，什么都没录下。
+
+**万一 trace 最后还是空的**，`orca record` 会明说，而不是干干净净地退出：
+
+```console
+warn capture.empty exchanges=0 cause="the agent never called the proxy — it may not read a base-URL variable" set=ANTHROPIC_BASE_URL,OPENAI_API_BASE,OPENAI_BASE_URL next="orca doctor"
+```
+
+**orca 没听说过的 base-URL 变量。** 把它们列全是没指望的：Hermes 一个项目的 `.env.example` 里就有
+`NOVITA_BASE_URL`、`GLM_BASE_URL`、`KIMI_BASE_URL`、`MINIMAX_BASE_URL`、`HF_BASE_URL`、
+`NEBIUS_BASE_URL` 还有十几个。写死在 orca 里的清单，写完第二周就过时了。所以直接把变量名告诉它:
+
+```console
+ORCA_BASE_URL_VARS='OPENROUTER_BASE_URL' orca record generic-openai -- hermes
+ORCA_BASE_URL_VARS='GLM_BASE_URL,KIMI_BASE_URL' orca record generic-openai -- my-agent
+```
+
+每个名字都会指向代理并补上 `/v1`——这是 OpenAI 兼容覆盖想要的形式；`=<path>` 可以改掉它，`=/`
+则给出裸 origin。
+
+**一个会拉起编程 agent 的网关。** OpenClaw 自己不写代码，它把 Claude Code、Codex 或 opencode 作为
+子进程拉起来。网关自己的调用靠 fetch 钩子抓；被拉起的 agent 那部分靠普通的环境变量抓——不是因为
+OpenClaw 读它们，而是因为**子进程会继承父进程的环境**。这一条属于操作系统而不属于 orca，所以它有
+一个测试盯着。
+
 ## 当 harness 不肯被改道时
 
-base-URL 注入能捕获所有读 base-URL 变量的 harness，这是绝大多数。用 ChatGPT 订阅登录的 Codex CLI
-一个都不读：它通过 TLS 直接和自家后端对话，orca 什么也看不见。`--tls-intercept` 就是为此存在的，
-而它被刻意做成一个你必须单独作出的决定，因为它会签发一个证书颁发机构。
+base-URL 注入能捕获所有读 base-URL 变量的 harness，fetch 钩子又补上了那些不读的 Node 与 Bun
+agent。用 ChatGPT 订阅登录的 Codex CLI 两者都不是：它通过 TLS 直接和自家后端对话，既没有 origin
+可改，也没有我们够得着的 `fetch`。`--tls-intercept` 就是为此存在的，而它被刻意做成一个你必须单独
+作出的决定，因为它会签发一个证书颁发机构。
 
 ```console
 orca record codex --tls-intercept
@@ -262,17 +375,70 @@ orca record codex --tls-intercept --tls-hosts 'api.openai.com,*.chatgpt.com'
 不被读取，只记录一个地址和一个字节数，没有路径也没有 body，因为 orca 从未持有过明文。要求拦截一切
 会被拒绝，而不是被满足。
 
+从中回来的东西不是一行日志。被拦截的请求由同一套 wire dialect 解析，因此它作为一次普通的交换落进
+trace——可以离线重放，也可以分叉到另一个模型，而这次运行里从来没有出现过你的 API key。
+
 它在 `orca replay --model`、`orca fork` 和 `orca compare` 上同样有效——它们出于同样的原因会启动一个
 真实的 agent。
 
+## 给 agent、脚本和 CI 用
+
+一份 trace 就是一个文件——这恰恰是 observability 面板做不到的事。所以关于一次失败运行，最有用的
+问题是一个 **agent** 能问出来的那个：*把我上一次运行重放一遍，告诉我哪里发生了偏离。* 每条命令都能
+以数据形式作答，orca 也把自己作为 MCP 服务暴露出去。
+
+```console
+$ orca replay last --json
+{"runId":"run_a278eea7b535","mode":"exact","traceRunId":"run_687e3f84b208","matchedExact":2,"divergences":0,"unmatched":0,"liveCalls":0,"exitCode":0}
+
+$ orca show last --json | jq '.events[] | select(.kind == "TOOL")'
+$ orca checkpoints last --json | jq '.[-1].seq'
+```
+
+stdout 上只有一份 JSON 文档，诊断信息全走 stderr——包括被录制 agent 自己的输出，所以哪怕运行过程中
+一直在打印，那份文档也始终是可解析的。失败同样以 JSON 返回，并带非零退出码。`--json` 覆盖 `list`、
+`show`、`events`、`checkpoints`、`graph`、`record`、`replay`、`compare` 和 `doctor`。
+
+**作为工具。** `orca mcp` 通过 stdio 把 trace 仓库交给 agent：
+
+```json
+{ "mcpServers": { "orca": { "command": "orca", "args": ["mcp"] } } }
+```
+
+`orca_list_runs`、`orca_show_run`、`orca_checkpoints`、`orca_graph`、`orca_replay` 和 `orca_compare`。重放是免费且
+离线的；`orca_compare` 在自己的描述里就写明它会花掉真金白银的 token，因为模型挑工具时读的就是那段
+字符串，别的都不看。
+
+**从代码里调用**，如果你不想走命令行：
+
+```ts
+import { Orca } from 'orcareplay';
+
+const orca = new Orca({ cwd: process.cwd() });
+const { unmatched, divergences } = await orca.replay('last');
+const timeline = await orca.show('last');
+```
+
+它从不往你的 stdout 里写东西，也从不调用 `process.exit`——两条都有测试守着，因为一个会做这两件事的
+库，别人没法在上面搭东西。
+
 ## 现状
 
-早期阶段。`v0` 是上面三条命令的可行走骨架。
+早期阶段。`v0` 是上面三条命令的可行走骨架。下面的每一项都由 1248 个测试、trace 格式一致性检查
+和插件 API 中立性检查覆盖，Node 20 和 22 都跑。
 
 | 能力 | 状态 |
 |---|---|
 | Trace 格式 v0 + JSON Schema | 可用 |
 | Anthropic / OpenAI 兼容的模型捕获 | 可用 |
+| OpenAI Responses API 捕获 | 可用——OpenAI Agents SDK 和 Codex CLI 默认用的就是这套格式。录制、离线重放、分叉都支持；分叉会留在 agent 自己说的那套线协议上 |
+| 不读 base-URL 变量的 agent | 可用——`orca record node -- <cmd>` 往运行目录写一个预加载文件，只对白名单里的 provider 主机改道 `globalThis.fetch`。Node 和 Bun 都覆盖，因为 Bun 会忽略 `NODE_OPTIONS` 里的 `--require`。Vercel AI SDK 的 agent 就是这么抓到的 |
+| orca 读不懂的调用 | 可用——转发而不是拒绝，并记成 `net.request` / `net.response`：是证据，不是可重放的一轮。什么都没抓到的录制会告警，而不是干净退出 |
+| 机器可读输出（`--json`） | 可用——stdout 上一份 JSON 文档，诊断信息走 stderr，失败也是 JSON |
+| 因果图（`orca graph`） | 可用——什么产生了什么，可输出为表格或 JSON。每条边都说明它是 trace 记录下来的，还是 orca 刚刚推导出来的，两种情况都写明规则。`--to N` 收窄到产生某个事件的那条链 |
+| 可分享的卡片 | 可用——`orca export --card` 画一条因果链，`--graph-card` 画整个运行并点亮该链，`compare --share` 画判定表。`.svg` 始终可用；装了可选的渲染工具后还能出 `.png` 和 `.gif`，`orca doctor` 会报告，而 `npm ci` 从不安装它们 |
+| MCP 服务端（`orca mcp`） | 可用——stdio 上六个工具，让 agent 能读取和重放自己的运行记录 |
+| 编程接口（`Orca`） | 可用——命令渲染它返回的东西，所以终端只是同一份事实的一个视图 |
 | 带分歧报告的精确重放 | 可用——把录制下来的文件系统还原到你的工作区之上，结束后再放回去；`--worktree` 用临时副本，`--in-place` 则什么都不还原。它会为重放本身写一份自己的 run，记录这次重放*发现*了什么——分歧、未匹配的请求——而单纯重复的部分则指向父 run；`--no-trace` 可跳过 |
 | 从检查点分叉重放 | 可用——分叉会记录自己的文件系统快照，所以它本身也是一次可以再被分叉的 run |
 | 跨模型对比 | 可用——`orca setup` 会存下网关（默认 OrcaRouter，也可以是你指定的任意 URL）、key 和模型列表，所以 `orca compare` 不需要任何参数 |
@@ -283,31 +449,7 @@ orca record codex --tls-intercept --tls-hosts 'api.openai.com,*.chatgpt.com'
 | Shell 捕获（`PATH` 垫片） | 可用——退出码、耗时，以及 stdout/stderr 的分离。`--no-shell` 可跳过 |
 | 非模型网络捕获 | 可用——用 `--tls-intercept` 开启；签发一个只有被启动的 agent 信任的单次 CA，解密白名单主机，其余原样隧道转发，运行结束即删除密钥 |
 | 已在真实 agent 上验证 | Claude Code，一次对真实 bug 的真实修复：录制、完整离线重放、从检查点分叉、并导出。做这件事时发现了四个 bug，都已修复——见下文 |
-| 订阅制鉴权的 harness | Claude Code 可用。用 ChatGPT 订阅登录的 Codex CLI 和自家后端对话、不读任何 base-URL 变量，所以需要 `--tls-intercept` |
-
-### 一个真实的 agent 发现了什么
-
-上面这些都是对着 fixture 造出来的。第一次真正录制 Claude Code 的运行，就一次打破了四件事，
-而每一件都是 fixture 造不出来的：
-
-- **十六个字符的漂移被算成了 217,568。** 距离取的是整个请求体的公共前缀和后缀，而 Claude Code
-  在系统提示里带着一个会话 id、在某个工具描述里又带着另一个——于是夹在中间的 200 KB 全被算作变化，
-  没有任何请求能够到达第 2 级。现在距离按字段求和，字段内部再按行求和。
-- **脱敏让「完全一致」在结构上不可能达到。** 占位符摘要按设计是每次运行加盐的，
-  所以一个录制下来的请求永远不可能再次等于它自己。匹配器现在用同样的策略对入站请求脱敏，
-  并比较秘密的*种类*而不是它的摘要——而且会把这次折叠报告出来，因为那确实是一次近似。
-- **脱敏还让每一次分叉都失败。** `tool_use` 的 id 和 thinking 块的签名都是高熵字符串，
-  会被扫描替换掉；分叉会重放这些轮次，agent 把它们原样回传，于是 API 返回 `400`。
-  必须原样往返的协议值现在被排除在这条*猜测*之外——但绝不排除在凭据规则之外。
-- **重放会真的再跑一遍工具。** orca 不拦截工具执行，所以 agent 真的会再跑一次 `npm test`，
-  而它真的会重新打印自己的耗时。如果一个请求的唯一差异落在工具输出里，现在会从录制中作答，
-  并记为一次 `major` 分歧，而不是让重放停下来。
-
-那次运行现在可以完整离线重放——`reused=7/7 exact=2 divergences=5 unmatched=0 exit=0`，
-每一处近似都有名字——而它的一次分叉最终到达了与录制相同的那棵树。如果你手上有一份它仍然搞错的录制，
-那就是你能寄来的最有用的东西。
-
-<a id="install"></a>
+| 订阅制鉴权的 harness | Claude Code 可用。用 ChatGPT 订阅登录的 Codex CLI 和自家后端对话，没有 origin 可改，所以需要 `--tls-intercept`。用 API key 的话不需要任何特别处理 |
 
 ## 安装
 
@@ -408,6 +550,8 @@ OrcaReplay 由做 [OrcaRouter](https://www.orcarouter.ai) 的这群人打造，�
 
 - [`spec/orca-trace-v0.md`](../../spec/orca-trace-v0.md) —— 规范性的 trace 格式
 - [`docs/architecture.md`](../architecture.md) —— 捕获、重放和分叉的实际工作方式
+- [`docs/validation.md`](../validation.md) —— 第一次遇到真实 agent 时，什么坏了
+- [`docs/launch-path.md`](../launch-path.md) —— 哪些做完了、哪些还没有、接下来是什么
 - [`docs/plugins.md`](../plugins.md) —— 编写 adapter 或 provider
 - [`CONTRIBUTING.md`](../../CONTRIBUTING.md) —— 五分钟开发循环
 - [Good first issues](../good-first-issues.md) —— 十二个，每个都写明了从哪个文件开始

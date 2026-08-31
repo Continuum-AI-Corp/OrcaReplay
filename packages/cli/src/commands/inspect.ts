@@ -1,5 +1,15 @@
 import { resolve } from 'node:path';
-import { TraceReader, deriveCheckpoints, listRuns, resolveRunSelector } from '@orcareplay/core';
+import { writeFile } from 'node:fs/promises';
+import {
+  TraceReader,
+  chainTo,
+  deriveCheckpoints,
+  listRuns,
+  pickChainTarget,
+  resolveRunSelector,
+  runGraph,
+} from '@orcareplay/core';
+import type { RunGraph } from '@orcareplay/core';
 import {
   buildTimeline,
   detectLoops,
@@ -11,6 +21,8 @@ import { priceFor } from '@orcareplay/providers';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
 import { formatCost } from './compare.js';
+import { renderChainCard, renderGraphCard, scopeForCard } from '../share-card.js';
+import { cardTarget, gifFrames, svgToPng, svgsToGif, type CardFormat } from '../rasterize.js';
 
 /** `orca list` — what runs are here, newest first. */
 export async function listCommand(
@@ -136,6 +148,79 @@ export async function checkpointsCommand(
   out.plain(`  orca replay last --from ${checkpoints.at(-1)!.seq} --model <other-model>`);
 }
 
+/**
+ * `orca graph` — what caused what.
+ *
+ * The timeline says what happened in what order; this says what produced what. Every row names
+ * both ends and, crucially, whether the trace vouches for the edge or a rule here worked it out —
+ * a reader who cannot tell the two apart has been handed a guess dressed as a fact.
+ */
+export async function graphCommand(
+  args: ParsedArgs,
+  out: Output,
+  cwd = process.cwd(),
+): Promise<void> {
+  const reader = await TraceReader.open(
+    (await resolveRunSelector(cwd, args.positionals[0] ?? 'last')).dir,
+  );
+  const events = await reader.events();
+  const graph = narrow(runGraph(events), args.num('to'));
+  const label = new Map(graph.nodes.map((n) => [n.seq, n.type]));
+
+  if (graph.edges.length === 0) {
+    out.plain('no causal edges in this run');
+    // Naming the likely cause beats leaving someone to wonder whether the feature works at all.
+    out.plain(
+      '  a run with no tool calls has nothing to connect; try `orca show` for the timeline',
+    );
+    return;
+  }
+
+  out.table(
+    ['FROM', 'TO', 'KIND', 'WHY'],
+    graph.edges.map((e) => [
+      `${e.from} ${label.get(e.from) ?? ''}`.trim(),
+      `${e.to} ${label.get(e.to) ?? ''}`.trim(),
+      e.kind,
+      e.rule,
+    ]),
+  );
+
+  const inferred = graph.edges.filter((e) => e.kind === 'inferred').length;
+  if (inferred > 0) {
+    out.plain('');
+    out.plain(`  ${inferred} inferred — derived from this trace, not recorded in it`);
+  }
+}
+
+/** The whole graph, or just the chain that produced `to`. */
+export function narrow(graph: RunGraph, to: number | undefined): RunGraph {
+  return to === undefined ? graph : chainTo(graph, to);
+}
+
+/**
+ * Write a card in whichever format was asked for.
+ *
+ * SVG is the source and never needs anything; PNG and GIF go through the optional raster path,
+ * which explains itself when its packages are absent rather than failing obscurely.
+ */
+async function writeCard(
+  path: string,
+  format: CardFormat,
+  svgs: string[],
+  delays: number[],
+): Promise<number> {
+  if (format === 'svg') {
+    const svg = svgs[svgs.length - 1] ?? '';
+    await writeFile(path, svg, 'utf8');
+    return Buffer.byteLength(svg);
+  }
+  const buffer =
+    format === 'png' ? await svgToPng(svgs[svgs.length - 1] ?? '') : await svgsToGif(svgs, delays);
+  await writeFile(path, buffer);
+  return buffer.length;
+}
+
 /** `orca export` — the single self-contained file that makes a trace shareable. */
 export async function exportCommand(
   args: ParsedArgs,
@@ -143,10 +228,66 @@ export async function exportCommand(
   cwd = process.cwd(),
 ): Promise<void> {
   const runDir = (await resolveRunSelector(cwd, args.positionals[0] ?? 'last')).dir;
-  const target = resolve(cwd, args.str('o') ?? args.str('out') ?? 'trace.html');
-
   const reader = await TraceReader.open(runDir);
   const manifest = reader.manifest();
+
+  // `--card` is a different artefact from `--out`, not a variation on it: one chain as a picture
+  // rather than the whole trace as a page. It leaks far less too — a card carries the events on
+  // one chain and none of the payloads — so it does not print the disclosure the page needs.
+  // The graph card shows the shape of a run; the chain card follows one path through it. Two
+  // different pictures, so two flags rather than a mode switch on one.
+  if (args.has('graph-card')) {
+    const target = cardTarget(args.str('graph-card') ?? 'graph.svg', '--graph-card');
+    const cardPath = resolve(cwd, target.path);
+    const events = await reader.events();
+    const graph = runGraph(events);
+    const to = args.num('to') ?? pickChainTarget(events);
+    const highlight = new Set(to === undefined ? [] : chainTo(graph, to).nodes.map((n) => n.seq));
+    const svg = renderGraphCard(scopeForCard(graph, highlight), {
+      runId: manifest.run_id,
+      highlight,
+    });
+    // A graph is one picture: there is no sequence to animate, so a .gif of it would be a
+    // one-frame file pretending to be a clip.
+    if (target.format === 'gif') {
+      throw new Error('--graph-card draws one picture, so it has no animation. Use .svg or .png.');
+    }
+    const bytes = await writeCard(cardPath, target.format, [svg], []);
+    out.phase('carded', { path: cardPath, bytes, kind: 'graph', format: target.format });
+    return;
+  }
+
+  if (args.has('card')) {
+    const target = cardTarget(args.str('card') ?? 'chain.svg', '--card');
+    const cardPath = resolve(cwd, target.path);
+    const events = await reader.events();
+    const to = args.num('to') ?? pickChainTarget(events);
+    if (to === undefined) {
+      // Refusing beats drawing something arbitrary: a card gets screenshotted whether or not it
+      // happens to be the interesting one, so a bad pick travels further than no card at all.
+      throw new Error(
+        `nothing in ${manifest.run_id} stands out as the subject of a card — ` +
+          'no failing command, no tool error and no file change. ' +
+          'Name the event yourself with `--to <seq>`, or `orca show` to find one.',
+      );
+    }
+    const chain = chainTo(runGraph(events), to);
+    const frames = gifFrames(chain.nodes.length);
+    const svgs =
+      target.format === 'gif'
+        ? frames.map((f) => renderChainCard(chain, { runId: manifest.run_id, reveal: f.reveal }))
+        : [renderChainCard(chain, { runId: manifest.run_id })];
+    const bytes = await writeCard(
+      cardPath,
+      target.format,
+      svgs,
+      frames.map((f) => f.delayMs),
+    );
+    out.phase('carded', { path: cardPath, bytes, to, format: target.format });
+    return;
+  }
+
+  const target = resolve(cwd, args.str('o') ?? args.str('out') ?? 'trace.html');
 
   // Say what is about to leave the machine before it does. A trace can contain file contents and
   // shell output, and the person exporting it is usually about to attach it to a public issue.

@@ -112,6 +112,21 @@ describe('config', () => {
       expect(up?.openai).toBe('https://gw.example');
     });
 
+    it('routes the Responses dialect to the gateway too', async () => {
+      // The proxy resolves an origin by dialect id, and the Responses API is its own dialect —
+      // so a map holding only `openai` sends a Codex run straight past a gateway the user
+      // configured, on their own key, without saying so.
+      await writeConfig({ gateway: { url: 'https://gw.example' } }, env);
+      const up = await resolveUpstream(parseArgs(['compare']), env);
+      expect(up?.['openai-responses']).toBe('https://gw.example');
+    });
+
+    it('follows --upstream-openai onto the Responses dialect', async () => {
+      const args = parseArgs(['compare', '--upstream-openai', 'https://from-flag']);
+      const up = await resolveUpstream(args, env);
+      expect(up?.['openai-responses']).toBe('https://from-flag');
+    });
+
     it('returns undefined when nothing is configured, so vendor defaults apply', async () => {
       expect(await resolveUpstream(parseArgs(['compare']), env)).toBeUndefined();
     });

@@ -222,3 +222,115 @@ describe('ExchangeEventDeriver', () => {
     expect(events[1]!.attrs.stop_reason).toBe('unknown');
   });
 });
+
+/**
+ * A `tool_use` block is physically inside the response that emitted it, and a `tool_result` block
+ * is physically inside the request that carried it back. Neither is an inference, so both belong
+ * in `causes` — but the deriver has no seqs, which only exist once the writer has appended. It
+ * names positions in its own batch instead, and the recorder resolves them.
+ */
+describe('ExchangeEventDeriver causal references', () => {
+  const withToolUse = exchange({
+    canonicalResponse: {
+      id: 'msg_0',
+      model: 'claude-opus-5',
+      stop_reason: 'tool_use',
+      content: [{ type: 'tool_use', id: 'tu_1', name: 'bash', input: { cmd: 'npm test' } }],
+      usage: { input_tokens: 10, output_tokens: 3 },
+    },
+  });
+
+  it('points a tool.call at the model.response that emitted it', () => {
+    const events = new ExchangeEventDeriver().derive(withToolUse, 1);
+    const responseAt = events.findIndex((e) => e.type === 'model.response');
+    const call = events.find((e) => e.type === 'tool.call');
+    expect(call?.causesIndex).toEqual([responseAt]);
+  });
+
+  it('points a model.request at the tool.result it carried back', () => {
+    const d = new ExchangeEventDeriver();
+    d.derive(withToolUse, 1);
+    const next = d.derive(
+      exchange({
+        canonicalRequest: {
+          model: 'claude-opus-5',
+          messages: [
+            {
+              role: 'user',
+              content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: 'ok' }],
+            },
+          ],
+        },
+      }),
+      2,
+    );
+    const resultAt = next.findIndex((e) => e.type === 'tool.result');
+    const request = next.find((e) => e.type === 'model.request');
+    expect(resultAt).toBeGreaterThanOrEqual(0);
+    expect(request?.causesIndex).toEqual([resultAt]);
+  });
+
+  it('leaves the reference off a request that carried no result, rather than naming nothing', () => {
+    const events = new ExchangeEventDeriver().derive(exchange(), 1);
+    expect(events.find((e) => e.type === 'model.request')?.causesIndex).toBeUndefined();
+  });
+
+  it('names every result when one request carries several', () => {
+    const d = new ExchangeEventDeriver();
+    d.derive(
+      exchange({
+        canonicalResponse: {
+          id: 'msg_0',
+          model: 'claude-opus-5',
+          stop_reason: 'tool_use',
+          content: [
+            { type: 'tool_use', id: 'tu_1', name: 'bash', input: {} },
+            { type: 'tool_use', id: 'tu_2', name: 'edit', input: {} },
+          ],
+          usage: { input_tokens: 10, output_tokens: 3 },
+        },
+      }),
+      1,
+    );
+    const next = d.derive(
+      exchange({
+        canonicalRequest: {
+          model: 'claude-opus-5',
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'tool_result', tool_use_id: 'tu_1', content: 'a' },
+                { type: 'tool_result', tool_use_id: 'tu_2', content: 'b' },
+              ],
+            },
+          ],
+        },
+      }),
+      2,
+    );
+    expect(next.find((e) => e.type === 'model.request')?.causesIndex).toEqual([0, 1]);
+  });
+
+  it('points both tool.calls of one response at that same response', () => {
+    const events = new ExchangeEventDeriver().derive(
+      exchange({
+        canonicalResponse: {
+          id: 'msg_0',
+          model: 'claude-opus-5',
+          stop_reason: 'tool_use',
+          content: [
+            { type: 'tool_use', id: 'tu_1', name: 'bash', input: {} },
+            { type: 'tool_use', id: 'tu_2', name: 'edit', input: {} },
+          ],
+          usage: { input_tokens: 10, output_tokens: 3 },
+        },
+      }),
+      1,
+    );
+    const responseAt = events.findIndex((e) => e.type === 'model.response');
+    const calls = events.filter((e) => e.type === 'tool.call');
+    expect(calls).toHaveLength(2);
+    for (const call of calls) expect(call.causesIndex).toEqual([responseAt]);
+  });
+});

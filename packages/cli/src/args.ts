@@ -38,6 +38,7 @@ export interface ParsedArgs {
  */
 const VALUELESS = new Set([
   'ui',
+  'json',
   'loose',
   'in-place',
   'worktree',

@@ -367,6 +367,45 @@ function omitUndefined<T extends Record<string, unknown>>(value: T): T {
   return value;
 }
 
+/**
+ * The OpenAI Responses API.
+ *
+ * Kept apart from `openaiDialect` rather than folded into it, because the two share a provider and
+ * almost nothing else: the system prompt is a top-level string, tool traffic is a list of
+ * top-level items, and the stream is typed events rather than choice deltas. One dialect trying to
+ * be both would have to sniff the body shape on every request, and guess wrong on the empty ones.
+ *
+ * It is registered *after* `openaiDialect` for a reason that only shows up on forks: `ownsModel`
+ * cannot distinguish them — both serve everything that is not Claude — so the later position means
+ * an ordinary chat-completions run forking to another OpenAI model still goes to chat completions.
+ * A Responses run stays on Responses through the recorded-dialect preference in `goLive`.
+ */
+export function responsesDialect(translators: {
+  toCanonicalRequest: (raw: unknown) => CanonicalRequest;
+  toCanonicalResponse: (raw: unknown) => CanonicalResponse;
+  parseSse: (body: string) => CanonicalResponse;
+  fromCanonicalRequest: (req: CanonicalRequest) => Record<string, unknown>;
+  fromCanonicalResponse: (res: CanonicalResponse) => Record<string, unknown>;
+  toSse: (res: CanonicalResponse) => string;
+}): Dialect {
+  return {
+    id: 'openai-responses',
+    defaultUpstream: 'https://api.openai.com',
+    requestPath: '/v1/responses',
+    // Agents reach it as `/v1/responses` or `/responses` depending on whether their SDK considers
+    // the version segment part of the base url, and a gateway may mount it under a prefix.
+    matches: (p) => p.endsWith('/responses'),
+    ownsModel: (m) => !/^(?:.*\/)?claude[-.]/i.test(m.trim()),
+    toCanonicalRequest: translators.toCanonicalRequest,
+    toCanonicalResponse: translators.toCanonicalResponse,
+    parseStream: translators.parseSse,
+    withModel: (raw, model) => ({ ...(raw as Record<string, unknown>), model }),
+    fromCanonicalRequest: translators.fromCanonicalRequest,
+    fromCanonicalResponse: (res, streamed) =>
+      streamed ? translators.toSse(res) : JSON.stringify(translators.fromCanonicalResponse(res)),
+  };
+}
+
 export function selectDialect(dialects: Dialect[], path: string): Dialect | undefined {
   return dialects.find((d) => d.matches(path));
 }

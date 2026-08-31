@@ -21,8 +21,8 @@ Claude, GPT, Gemini, Grok, DeepSeek, Qwen 등에 닿는다. `orca setup`이 기�
 
 [![License](https://img.shields.io/badge/code-Apache--2.0-blue)](../../LICENSE)
 [![Spec](https://img.shields.io/badge/trace%20spec-CC%20BY%204.0-blue)](../../spec/orca-trace-v0.md)
-[![Node](https://img.shields.io/badge/node-20%2B-brightgreen)](#install)
-[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20opencode%20%C2%B7%20any-black)](#install)
+[![Node](https://img.shields.io/badge/node-20%2B-brightgreen)](#설치)
+[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Agents%20SDK%20%C2%B7%20AI%20SDK%20%C2%B7%20any-black)](#설치)
 [![Good first issues](https://img.shields.io/badge/good%20first%20issues-12-orange)](../good-first-issues.md)
 
 ![Claude Code 실행을 기록하고, 오프라인으로 재생하고, 두 모델로 분기시키는 장면](../demo-cli.gif)
@@ -41,7 +41,7 @@ orca replay last --from 4 --model claude-haiku-4-5 --ui
 사람들이 머무는 이유는 세 번째 줄이다. 같은 파일, 같은 대화 앞부분, 4단계부터만 다른 모델.
 변수는 모델 하나뿐이고, 그래서 답에 의미가 생긴다.
 
-아직 npm에 없다 — [소스에서 설치](#install), 1분쯤 걸린다.
+아직 npm에 없다 — [소스에서 설치](#설치), 1분쯤 걸린다.
 
 ## 왜 만들었나
 
@@ -60,6 +60,14 @@ OrcaReplay의 답은 그 실행 자체를 돌려주는 것이다.
 | 모델을 바꿔 4단계부터 다시 돌린다 | ❌ | ✅ |
 | 에이전트 개조가 필요하다 | 보통 SDK 래퍼 | ❌ 환경 변수 두 개 |
 | 터미널을 닫은 뒤에도 쓸 수 있다 | ❌ | ✅ 파일이니까 |
+| 모델 API 바깥까지 본다 — 셸 종료 코드, 파일 쓰기 | ❌ | ✅ 매 턴 |
+| 돌려세울 API 엔드포인트가 없는 에이전트를 기록한다 | ❌ | ✅ 직접 켜는 `--tls-intercept` |
+
+마지막 두 줄은 SDK 래퍼로는 구조적으로 닿을 수 없는 것들이다. 포착은 에이전트 **아래** — 프로세스와
+소켓 경계 — 에서 일어나므로, 그 에이전트가 당신 것인지, 고칠 수 있는지, 애초에 API 키를 들고 있는지는
+상관이 없다. ChatGPT 구독으로 로그인한 Codex CLI는 자기 백엔드와 TLS로 말하고 어디로도 돌려세울 base
+URL이 없지만, orca는 그래도 기록한다.
+[하네스가 방향을 바꾸지 않을 때](#하네스가-방향을-바꾸지-않을-때)를 보라.
 
 ## 어떻게 작동하나
 
@@ -70,22 +78,24 @@ OrcaReplay의 답은 그 실행 자체를 돌려주는 것이다.
 비켜선다.
 
 프로토콜이 볼 수 없는 것을 잡는 층이 셋 더 있다. 종료 코드, 실제 소요 시간, 어느 스트림에서 나온
-바이트인지, 그리고 아무에게도 알리지 않고 쓰인 파일.
+바이트인지, 그리고 아무에게도 알리지 않고 쓰인 파일. 다섯 번째는 base-URL 변수를 아예 읽지 않는 에이전트를 위한 것이다 —
+아래 「어떤 에이전트가 되나」를 보라.
 
 ```mermaid
 %%{init: {'theme':'neutral'}}%%
 flowchart LR
     A["<b>당신의 에이전트</b><br/><i>수정 없음</i>"]
 
-    subgraph orca["orca · 네 개의 포착 층"]
+    subgraph orca["orca · 다섯 개의 포착 층"]
         direction TB
         P["<b>프록시</b><br/>base-URL 환경 변수"]
         SH["<b>PATH 심</b><br/>종료 코드 · 시간 · 스트림"]
         MC["<b>JSON-RPC 분기</b><br/>MCP 설정 재작성"]
         FS["<b>그림자 git 인덱스</b><br/>턴마다의 작업 공간"]
+        FH["<b>fetch 훅</b><br/>오리진이 코드에 박힌 경우"]
     end
 
-    A --> P & SH & MC & FS
+    A --> P & SH & MC & FS & FH
     P -->|"인증 그대로 전달"| U["<b>모델 API</b><br/><i>또는 OrcaRouter · 임의의 게이트웨이</i>"]
     orca ==> T[("<b>하나의 트레이스</b><br/>.orca/runs/run_a1b2c3")]
 ```
@@ -152,6 +162,42 @@ info usage input=201 output=25 cost=$0.004890
 모델 자신의 기록으로는 알 수 없고 실행의 종료 코드가 감춰버린 사실 셋: 파일은 실제로 바뀌었고
 (seq 6, `+1 −3`), 에이전트가 돌린 확인은 **실패했으며** (seq 12, `exit 1`), 그런데도 끝냈다.
 실행이 0으로 끝난 건 *에이전트*가 0으로 끝났기 때문일 뿐이다.
+
+이 마지막 사실은 자기 명령을 가질 만하다. `orca show`는 일이 일어난 순서를 주고,
+`orca graph`는 무엇이 무엇을 낳았는지를 준다.
+
+```console
+$ orca graph last
+FROM              TO               KIND      WHY
+3 model.response  4 tool.call      recorded  tool_use block in the response
+4 tool.call       6 fs.change      inferred  changed path appears in tool input, same or previous turn
+4 tool.call       7 tool.result    recorded  tool result answers its call
+7 tool.result     8 model.request  recorded  tool_result block in the request
+
+  1 inferred — derived from this trace, not recorded in it
+```
+
+간선에는 두 종류가 있고, 그 차이가 중요하다. **recorded** 간선은 실행 당시에 기록된 것이다.
+`tool_use` 블록은 그것을 내보낸 응답 안에 물리적으로 들어 있기 때문이다. **inferred** 간선은
+방금 이름 붙은 규칙으로 유도된 것이다 — 파일시스템 스냅샷은 도구 호출마다가 아니라 턴마다
+한 번 찍히므로, 파일 변경을 *특정* 호출에 귀속시키는 것은 좋은 추측이지 사실이 아니다. 유도된
+간선은 결코 트레이스에 다시 쓰이지 않는다. 체크포인트가 유도되고 기록되지 않는 것과 같다.
+
+`orca export last --card bug.svg`는 그 사슬을 이슈에 붙일 그림으로 그리고, `--graph-card`는
+실행 전체를 그 사슬을 밝혀 그린다.
+
+SVG는 GitHub 이슈에서는 보이지만 중요한 다른 곳에서는 거의 보이지 않는다 — X는 업로드로 받지
+않고, Slack과 Discord는 미리보기를 주지 않는다. 그러니 파일 이름을 `.png`로 하면 PNG를, `.gif`로
+하면 사슬이 한 홉씩 쌓이는 GIF를 얻는다. 이 경로에는 브라우저가 필요하지만 orca는 브라우저에
+의존하지 않는다. `docs/media/README.md`가 렌더 도구를 `package.json` 밖에 두어, `npm ci`를
+실행하는 사람이 Chromium 내려받기를 부담하지 않게 한다. 없으면 orca가 그것을 고치는 한 줄을
+알려준다. `orca doctor`는 어느 쪽이든 보고하고, `.svg`는 아무것도 필요로 하지 않는다.
+
+```console
+orca export last --card bug.png       # the chain, ready to post
+orca export last --card bug.gif       # the same chain, one hop per frame
+npm i --no-save playwright-core pngjs gifenc   # only needed for the two above
+```
 
 이제 원하는 만큼, 공짜로 재현한다:
 
@@ -255,11 +301,83 @@ URL이나 죽은 키는 비교 도중의 401이 아니라 지금 여기서의 �
 떼어내어 구성한다. 누가 규칙을 기억하기 때문이 아니라 구조상 기록에 보이지 않는다는 뜻이다.
 플래그가 그 트래픽을 발급한 게이트웨이가 아닌 곳으로 보내면 키는 통째로 보류된다.
 
+## 어떤 에이전트가 되나
+
+하네스를 기록할 수 있는지는 두 가지가 정한다. 프록시로 향하게 할 수 있는지, 그리고 도착한 트래픽의
+와이어 형식을 orca가 아는지.
+
+| 에이전트 | 포착 방법 | 상태 |
+|---|---|---|
+| **Claude Code** | `ANTHROPIC_BASE_URL` | 동작 — 실제 버그 수정으로 검증됨, [자세히](../validation.md) |
+| **Codex CLI**(API 키) | `OPENAI_BASE_URL` → Responses API | 동작 |
+| **Codex CLI**(ChatGPT 로그인) | `--tls-intercept` → Responses API | 동작. 다만 직접 내려야 할 결정이 하나 있다 |
+| **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | 동작 |
+| **Vercel AI SDK** | fetch 훅 — `orca record node -- node app.mjs` | 동작 |
+| **LangGraph / LangChain** | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | 될 것이다 — 공식 클라이언트를 거치지만 아직 테스트가 없다 |
+| **grok-cli**(텔레그램 봇 포함) | `orca record grok` — `GROK_BASE_URL`, 그리고 서브에이전트용 fetch 훅 | 동작 |
+| **OpenClaw** | `orca record openclaw` — 게이트웨이는 훅으로, 그것이 띄우는 에이전트는 상속된 변수로 | 동작 |
+| **opencode** | `orca record opencode` | 어댑터 있음. 두 오리진 모두 돌린다 |
+| **Hermes**(Nous Research) | `ORCA_BASE_URL_VARS=… orca record generic-openai -- hermes …` | 될 것이다 — 프로바이더마다 덮어쓴다. 아래 참고 |
+| **그 밖의 모든 것** | `orca record generic-openai -- <cmd>` | base-URL 변수를 읽으면 동작. 읽지 않으면 `orca record node -- <cmd>` |
+
+실제 하네스로 끝까지 돌려본 것은 Claude Code뿐이다. 나머지는 어댑터 계약과 픽스처가 지킨다. 픽스처는
+각 어댑터가 실제로 어떤 변수를 설정하는지 기록하므로, 하네스가 읽는 변수 이름을 바꾸면 빨개지는 것은
+검사이지 빈 트레이스가 아니다.
+
+이 중 둘은 환경 변수만으로는 부족하다. 명령을 고르기 전에 알아둘 값어치가 있다.
+
+**Responses API를 쓰는 하네스.** OpenAI Agents SDK와 Codex CLI는 둘 다 chat completions가 아니라
+`/v1/responses`를 기본으로 쓴다. orca가 이 형식을 알므로 특별히 할 일은 없다 — 다만 그전 빌드를
+쓰고 있다면 증상은 트레이스가 비는 것이 아니라 에이전트가 첫 턴에 `404`를 받는 것이었다.
+
+**base-URL 변수를 전혀 읽지 않는 하네스.** `@ai-sdk/openai`는 생성자 인자로만 오리진을 받는다. 그래서
+Vercel AI SDK로 만든 에이전트는 `orca record` 아래에서 멀쩡히 돌고, 0으로 끝나고, 트레이스는 빈다.
+`node` 어댑터가 정확히 그것을 위한 것이다. 실행 디렉터리에 작은 프리로드를 쓰고 `NODE_OPTIONS`를
+거기로 향하게 해, 허용 목록에 있는 프로바이더 호스트에 한해서만 `globalThis.fetch`를 돌린다.
+
+```console
+orca record node -- node agent.mjs
+orca record node -- npm run agent
+ORCA_INSTRUMENT_HOSTS='contoso.openai.azure.com' orca record node -- node agent.mjs
+```
+
+기본값이 아니라 별도 어댑터인 이유는 `NODE_OPTIONS`가 에이전트가 띄우는 모든 Node 프로세스에
+전해지기 때문이다. 필요한 줄 알 때는 치를 만한 값이지만, Python 하네스를 기록하는 사람에게 강요할
+것은 아니다.
+
+Bun은 `NODE_OPTIONS`를 받아들이지만 그 안의 `--require`는 무시한다. 그래서 `BUN_OPTIONS=--preload`도
+함께 설정해 Bun 기반 에이전트까지 포함한다. 이건 진짜 `bun`으로 확인했다. 막으려는 것이 소리 없는
+실패 — 훅이 돌지 않고, 트래픽이 그대로 프로바이더로 가고, 아무것도 기록되지 않는 — 이기 때문이다.
+
+**그래도 트레이스가 비면**, `orca record`는 조용히 끝나지 않고 그렇다고 말한다.
+
+```console
+warn capture.empty exchanges=0 cause="the agent never called the proxy — it may not read a base-URL variable" set=ANTHROPIC_BASE_URL,OPENAI_API_BASE,OPENAI_BASE_URL next="orca doctor"
+```
+
+**orca가 모르는 base-URL 변수.** 전부 나열하는 건 가망이 없다. Hermes 하나의 `.env.example`에만
+`NOVITA_BASE_URL`, `GLM_BASE_URL`, `KIMI_BASE_URL`, `MINIMAX_BASE_URL`, `HF_BASE_URL`,
+`NEBIUS_BASE_URL` 등 십수 개가 있다. orca에 박아 넣은 목록은 다음 주면 낡는다. 그러니 변수 이름을
+직접 알려주면 된다.
+
+```console
+ORCA_BASE_URL_VARS='OPENROUTER_BASE_URL' orca record generic-openai -- hermes
+ORCA_BASE_URL_VARS='GLM_BASE_URL,KIMI_BASE_URL' orca record generic-openai -- my-agent
+```
+
+각 이름은 `/v1`이 붙어 프록시를 가리킨다. OpenAI 호환 덮어쓰기가 원하는 형태다. `=<path>`로 바꿀 수
+있고 `=/`면 오리진만 남는다.
+
+**코딩 에이전트를 띄우는 게이트웨이.** OpenClaw는 직접 코딩하지 않는다. Claude Code, Codex,
+opencode를 자식 프로세스로 띄운다. 게이트웨이 자신의 호출은 fetch 훅이, 띄워진 에이전트의 호출은
+평범한 환경 변수가 잡는다 — OpenClaw가 그것을 읽어서가 아니라 **자식 프로세스가 부모의 환경을
+상속**하기 때문이다. 이건 orca가 아니라 운영체제의 성질이라, 테스트가 지키고 있다.
+
 ## 하네스가 방향을 바꾸지 않을 때
 
-base-URL 주입은 base-URL 변수를 읽는 모든 하네스를 포착하며, 대부분이 그렇다. ChatGPT 구독으로
-로그인한 Codex CLI는 하나도 읽지 않는다. 자기 백엔드와 TLS로 말하므로 orca에게는 아무것도 보이지
-않는다. `--tls-intercept`가 그 답이고, 인증 기관을 발급하는 일이므로 일부러 따로 내려야 하는 결정으로
+base-URL 주입은 base-URL 변수를 읽는 모든 하네스를 포착하고, fetch 훅은 읽지 않는 Node·Bun
+에이전트를 메운다. ChatGPT 구독으로 로그인한 Codex CLI는 둘 다 아니다. 자기 백엔드와 TLS로 말하므로
+바꿔 칠 오리진도, 우리가 닿을 `fetch`도 없다. `--tls-intercept`가 그 답이고, 인증 기관을 발급하는 일이므로 일부러 따로 내려야 하는 결정으로
 두었다.
 
 ```console
@@ -273,8 +391,53 @@ CA는 그 실행에만 고유하며, orca가 띄운 에이전트만이 — 그 �
 경로도 본문도 없다. orca가 평문을 가진 적이 없기 때문이다. 전부 가로채 달라는 요청은 들어주는 대신
 거절된다.
 
+거기서 돌아오는 것은 로그 한 줄이 아니다. 가로챈 요청은 다른 것과 똑같은 wire dialect로 파싱되어
+평범한 교환으로 트레이스에 들어간다 — 오프라인으로 재생할 수 있고, 다른 모델로 분기할 수 있으며,
+그 실행에는 당신의 API 키가 한 번도 들어간 적이 없다.
+
 `orca replay --model`, `orca fork`, `orca compare`에서도 동작한다. 같은 이유로 실제 에이전트를 띄우기
 때문이다.
+
+## 에이전트, 스크립트, CI를 위해
+
+트레이스는 파일이다 — 관측 대시보드가 될 수 없는 단 하나가 그것이다. 그래서 실패한 실행에 대해 가장
+쓸모 있는 질문은 **에이전트**가 던질 수 있는 질문이다. *내 지난 실행을 재생하고 무엇이 어긋났는지
+말해줘.* 모든 명령이 데이터로 답하고, orca는 자기 자신을 MCP로 내놓는다.
+
+```console
+$ orca replay last --json
+{"runId":"run_a278eea7b535","mode":"exact","traceRunId":"run_687e3f84b208","matchedExact":2,"divergences":0,"unmatched":0,"liveCalls":0,"exitCode":0}
+
+$ orca show last --json | jq '.events[] | select(.kind == "TOOL")'
+$ orca checkpoints last --json | jq '.[-1].seq'
+```
+
+stdout에는 JSON 문서 하나, 진단은 stderr — 기록 중인 에이전트 자신의 출력까지 stderr로 보내므로,
+실행이 떠드는 동안에도 그 문서는 계속 파싱된다. 실패도 JSON으로 답하고 종료 코드는 0이 아니다.
+`--json`은 `list`, `show`, `events`, `checkpoints`, `graph`, `record`, `replay`, `compare`, `doctor`를 덮는다.
+
+**도구로서.** `orca mcp`는 stdio로 트레이스 저장소를 에이전트에게 내준다.
+
+```json
+{ "mcpServers": { "orca": { "command": "orca", "args": ["mcp"] } } }
+```
+
+`orca_list_runs`, `orca_show_run`, `orca_checkpoints`, `orca_graph`, `orca_replay`, `orca_compare`. 재생은 공짜이고
+오프라인이다. `orca_compare`는 자기 설명 안에서 진짜 토큰을 쓴다고 말한다. 도구를 고르는 모델이 읽는
+것은 그 문자열뿐이기 때문이다.
+
+**코드에서**, 셸을 거치고 싶지 않다면:
+
+```ts
+import { Orca } from 'orcareplay';
+
+const orca = new Orca({ cwd: process.cwd() });
+const { unmatched, divergences } = await orca.replay('last');
+const timeline = await orca.show('last');
+```
+
+당신의 stdout에 절대 쓰지 않고 `process.exit`도 부르지 않는다 — 둘 다 테스트가 지킨다. 그 둘 중
+하나라도 하는 라이브러리 위에는 아무것도 세울 수 없기 때문이다.
 
 ## 현재 상태
 
@@ -284,6 +447,14 @@ CA는 그 실행에만 고유하며, orca가 띄운 에이전트만이 — 그 �
 |---|---|
 | 트레이스 형식 v0 + JSON Schema | 동작 |
 | Anthropic / OpenAI 호환 모델 포착 | 동작 |
+| OpenAI Responses API 포착 | 동작 — OpenAI Agents SDK와 Codex CLI가 기본으로 쓰는 형식. 기록·오프라인 재생·분기 모두 되고, 분기는 에이전트가 쓰는 와이어 형식에 그대로 남는다 |
+| base-URL 변수를 읽지 않는 에이전트 | 동작 — `orca record node -- <cmd>`가 실행 디렉터리에 프리로드를 쓰고, 허용 목록의 프로바이더 호스트에만 `globalThis.fetch`를 돌린다. Bun은 `NODE_OPTIONS` 안의 `--require`를 무시하므로 Node와 Bun 둘 다 지원. Vercel AI SDK 에이전트는 이렇게 포착한다 |
+| orca가 읽지 못하는 호출 | 동작 — 거부하지 않고 전달하며 `net.request` / `net.response`로 기록한다. 증거이지 재생 가능한 턴은 아니다. 아무것도 포착하지 못한 기록은 조용히 끝나지 않고 경고한다 |
+| 기계가 읽는 출력(`--json`) | 동작 — stdout에 JSON 문서 하나, 진단은 stderr, 실패도 JSON |
+| 인과 그래프(`orca graph`) | 동작 — 무엇이 무엇을 낳았는지를 표 또는 JSON으로. 각 간선은 트레이스가 기록한 것인지 orca가 방금 유도한 것인지를 말하고, 어느 쪽이든 규칙을 이름으로 밝힌다. `--to N`은 한 사건을 낳은 사슬로 좁힌다 |
+| 공유용 카드 | 동작 — `orca export --card`는 인과 사슬 하나를, `--graph-card`는 그 사슬을 밝힌 실행 전체를, `compare --share`는 판정 표를 그린다. `.svg`는 언제나, `.png`와 `.gif`는 선택적 렌더 도구가 있을 때. `orca doctor`가 보고하고 `npm ci`는 절대 끌어오지 않는다 |
+| MCP 서버(`orca mcp`) | 동작 — stdio로 여섯 개 도구. 에이전트가 자기 실행 기록을 읽고 재생할 수 있다 |
+| 프로그래밍 API(`Orca`) | 동작 — 명령은 이것이 돌려준 것을 그릴 뿐이라, 터미널은 하나의 사실에 대한 하나의 뷰다 |
 | 발산 보고가 붙은 정확 재생 | 동작 — 기록된 파일시스템을 작업 트리 위에 복원하고 끝나면 되돌린다. `--worktree`는 임시 사본, `--in-place`는 아무것도 복원하지 않음. 재생이 *발견한* 것(발산, 미일치 요청)을 담은 자기 자신의 run을 쓰고, 단지 되풀이한 부분은 부모를 가리킨다. `--no-trace`로 생략 |
 | 체크포인트에서의 분기 재생 | 동작 — 분기는 자신의 파일시스템 스냅숏을 기록하므로, 그것 자체를 다시 분기할 수 있다 |
 | 모델 간 비교 | 동작 — `orca setup`이 게이트웨이(기본 OrcaRouter, 원하면 임의의 URL), 키, 모델 목록을 저장하므로 `orca compare`에 플래그가 필요 없다 |
@@ -293,35 +464,8 @@ CA는 그 실행에만 고유하며, orca가 띄운 에이전트만이 — 그 �
 | 사후 제거(`orca scrub`) | 동작 |
 | 셸 포착(`PATH` 심) | 동작 — 종료 코드, 소요 시간, stdout/stderr 분리. `--no-shell`로 생략 |
 | 모델 외 네트워크 포착 | 동작 — `--tls-intercept`로 켠다. 띄운 에이전트만 신뢰하는 실행별 CA를 발급하고, 허용 목록 호스트를 복호화하고, 나머지는 읽지 않고 터널링하며, 끝나면 키를 지운다 |
-| 진짜 에이전트로 검증됨 | Claude Code가 진짜 버그를 진짜로 고친 실행 하나를 기록하고, 처음부터 끝까지 오프라인으로 재생하고, 체크포인트에서 분기하고, 내보냈다. 그 과정에서 버그 네 개를 찾아 모두 고쳤다 — 아래 참고 |
+| 진짜 에이전트로 검증됨 | Claude Code가 진짜 버그를 진짜로 고친 실행 하나를 기록하고, 처음부터 끝까지 오프라인으로 재생하고, 체크포인트에서 분기하고, 내보냈다. 그 과정에서 픽스처로는 만들 수 없는 네 가지가 깨졌고, 모두 고쳤다 — [진짜 에이전트가 찾아낸 것](../validation.md) |
 | 구독 인증 하네스 | Claude Code는 동작. ChatGPT 구독의 Codex CLI는 자기 백엔드와 말하고 base-URL 변수를 읽지 않으므로 `--tls-intercept`가 필요하다 |
-
-### 진짜 에이전트가 찾아낸 것
-
-여기까지는 전부 픽스처를 상대로 만든 것이었다. 실제 Claude Code 실행을 처음 기록해 보자 네 가지가
-한꺼번에 깨졌고, 넷 다 픽스처로는 만들어낼 수 없는 종류였다.
-
-- **열여섯 글자의 흔들림이 217,568로 채점됐다.** 거리는 요청 본문 전체의 공통 접두·접미로 쟀는데,
-  Claude Code는 시스템 프롬프트에 세션 id를, 어느 도구 설명에 또 하나를 담고 있다 — 그래서 그 사이의
-  200 KB가 통째로 바뀐 것으로 세어졌고 어떤 요청도 2단에 닿을 수 없었다. 이제 거리는 필드별로,
-  필드 안에서는 줄별로 더한다.
-- **가림 처리 때문에 정확한 일치가 구조적으로 불가능했다.** 자리표시자 다이제스트는 설계상 실행마다
-  소금을 치므로, 기록된 요청이 자기 자신과 다시 같아질 수 없다. 이제 매처는 들어오는 요청도 같은
-  방식으로 가리고, 다이제스트가 아니라 비밀의 *종류*를 비교한다 — 그리고 그 접기를 보고한다.
-  근사이기 때문이다.
-- **가림 처리는 모든 분기도 깨뜨리고 있었다.** `tool_use` id와 thinking 블록 서명은 고엔트로피
-  문자열이라 훑기에 걸려 대체됐다. 분기는 그 턴들을 재생하고, 에이전트가 그대로 돌려보내고, API는
-  `400`으로 답한다. 그대로 왕복해야 하는 프로토콜 값은 이제 그 *추측*에서 제외된다 — 자격 증명
-  규칙에서는 결코 아니다.
-- **재생은 도구를 진짜로 다시 돌린다.** orca는 도구 실행을 가로채지 않으므로 에이전트는 정말로
-  `npm test`를 다시 돌리고, 그것은 정말로 자기 소요 시간을 다시 찍는다. 차이가 도구 출력 안에만
-  있는 요청은 이제 재생을 멈추는 대신 기록에서 답하고 `major` 발산으로 남긴다.
-
-그 실행은 이제 처음부터 끝까지 오프라인으로 재생된다 — `reused=7/7 exact=2 divergences=5
-unmatched=0 exit=0`, 모든 근사에 이름이 붙는다 — 그리고 그것의 분기는 기록과 같은 트리에 도달했다.
-아직도 틀리는 기록을 가지고 있다면, 그게 보내줄 수 있는 가장 유용한 것이다.
-
-<a id="install"></a>
 
 ## 설치
 
@@ -426,6 +570,8 @@ no-op으로 통과한다. 하나가 등장하는 순간부터는 workspace 소�
 
 - [`spec/orca-trace-v0.md`](../../spec/orca-trace-v0.md) — 규범으로서의 트레이스 형식
 - [`docs/architecture.md`](../architecture.md) — 포착, 재생, 분기가 실제로 동작하는 방식
+- [`docs/validation.md`](../validation.md) — 진짜 에이전트를 처음 만났을 때 무엇이 깨졌나
+- [`docs/launch-path.md`](../launch-path.md) — 무엇이 되었고, 무엇이 안 되었고, 다음은 무엇인지
 - [`docs/plugins.md`](../plugins.md) — 어댑터나 provider 작성하기
 - [`CONTRIBUTING.md`](../../CONTRIBUTING.md) — 5분 개발 루프
 - [Good first issues](../good-first-issues.md) — 12개, 시작할 파일과 함께

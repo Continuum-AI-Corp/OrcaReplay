@@ -17,6 +17,7 @@ export default defineConfig({
       '@orcareplay/providers': pkg('providers'),
       '@orcareplay/proxy': pkg('proxy'),
       '@orcareplay/adapters': pkg('adapters'),
+      '@orcareplay/node-instrument': pkg('node-instrument'),
       '@orcareplay/mcp-shim': pkg('mcp-shim'),
       '@orcareplay/shell-shim': pkg('shell-shim'),
       '@orcareplay/viewer': pkg('viewer'),

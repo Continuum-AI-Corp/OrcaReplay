@@ -5,6 +5,7 @@ import type { Output } from '../out.js';
 import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { renderCompareCard } from '../share-card.js';
+import { cardTarget, svgToPng } from '../rasterize.js';
 import { replayCommand } from './replay.js';
 import { readConfig } from '../config.js';
 
@@ -105,6 +106,10 @@ export async function compareCommand(
         // the flag here and dropping it before the fork is exactly the silent-no-op the flag was
         // fixed for one layer up.
         ...(args.bool('tls-intercept') ? ['--tls-intercept'] : []),
+        // Same reasoning, and the same silent-no-op if dropped: every fork launches a live agent,
+        // and under --json orca's stdout is the result document. A fork that inherits it prints
+        // the agent's output into the middle of the JSON.
+        ...(args.bool('json') ? ['--json'] : []),
         ...(args.list('tls-hosts').flatMap((h) => ['--tls-hosts', h]) as string[]),
         ...upstreamFlags(args),
       ]);
@@ -164,14 +169,23 @@ export async function compareCommand(
   );
 
   if (args.has('share')) {
-    const target = resolve(cwd, args.str('share') ?? 'compare.svg');
+    const picked = cardTarget(args.str('share') ?? 'compare.svg', '--share');
+    if (picked.format === 'gif') {
+      throw new Error('--share draws one table, so it has no animation. Use .svg or .png.');
+    }
+    const target = resolve(cwd, picked.path);
     const svg = renderCompareCard(rows, {
       runId,
       forkPoint: from,
       verify: args.str('verify'),
     });
-    await writeFile(target, svg, { mode: 0o644 });
-    out.phase('shared', { path: target, bytes: Buffer.byteLength(svg) });
+    const body = picked.format === 'png' ? await svgToPng(svg) : svg;
+    await writeFile(target, body, { mode: 0o644 });
+    out.phase('shared', {
+      path: target,
+      bytes: typeof body === 'string' ? Buffer.byteLength(body) : body.length,
+      format: picked.format,
+    });
   }
 
   return rows;
