@@ -128,6 +128,32 @@ export function nodeOptionsWithHook(hookPath: string, existing: string | undefin
  * package exists to prevent. `--preload` is Bun's own spelling and `BUN_OPTIONS` is how it reaches
  * a command orca did not write. Both were checked against a real `bun` before this was written.
  */
-export function bunOptionsWithHook(hookPath: string, existing: string | undefined): string {
-  return withHook('--preload', hookPath, existing);
+export function bunOptionsWithHook(
+  hookPath: string,
+  existing: string | undefined,
+  platform: string = process.platform,
+): string {
+  return withHook('--preload', bunReadablePath(hookPath, platform), existing);
+}
+
+/**
+ * A path Bun will still recognise after it has parsed `BUN_OPTIONS`.
+ *
+ * Bun splits that variable with a parser that treats a backslash as an escape, so a Windows path
+ * arrives at the loader with its separators eaten and the run dies on `preload not found` before
+ * the agent starts. Quoting does not help and is worse: Bun then accepts the argument, loads
+ * nothing, and the agent runs uninstrumented while orca reports success — the silent miss this
+ * package exists to prevent.
+ *
+ * Forward slashes survive that parser and Windows accepts them everywhere, so the separator is
+ * simply changed. Checked against bun 1.4 on Windows: backslashes fail, quoted backslashes load
+ * nothing, forward slashes load the hook.
+ *
+ * Only on Windows: a backslash is a legal character in a POSIX filename, so rewriting one there
+ * would corrupt a path rather than repair it. `platform` is a parameter so both branches are
+ * reachable from a test on either OS — the Windows behaviour is the whole point of this
+ * function, and a test that can only run on Windows leaves it unproven everywhere CI runs.
+ */
+export function bunReadablePath(path: string, platform: string = process.platform): string {
+  return platform === 'win32' ? path.replaceAll('\\', '/') : path;
 }

@@ -7,6 +7,7 @@ import {
   AdapterRegistry,
   claudeCodeAdapter,
   codexAdapter,
+  selectedProvider,
   defaultAdapters,
   genericOpenAiAdapter,
   hasBinary,
@@ -213,14 +214,17 @@ describe('claudeCodeAdapter', () => {
     expect(launch.env.ANTHROPIC_API_KEY).toBe('sk-real');
   });
 
-  it('substitutes a placeholder key when none is set', async () => {
+  // Not a placeholder, unlike every SDK-shaped adapter: a Claude Code signed in to claude.ai has
+  // no ANTHROPIC_API_KEY, and inventing one stops the launch on an interactive trust prompt and
+  // then authenticates as nobody. The absence is what lets its own credential win.
+  it('invents no key when none is set, so a subscription login still authenticates', async () => {
     const launch = await claudeCodeAdapter.prepare(ctx());
-    expect(launch.env.ANTHROPIC_API_KEY).toBe('orca-recorded');
+    expect('ANTHROPIC_API_KEY' in launch.env).toBe(false);
   });
 
   it('treats an empty key as unset', async () => {
     const launch = await claudeCodeAdapter.prepare(ctx({ env: { ANTHROPIC_API_KEY: '' } }));
-    expect(launch.env.ANTHROPIC_API_KEY).toBe('orca-recorded');
+    expect('ANTHROPIC_API_KEY' in launch.env).toBe(false);
   });
 
   it('passes ANTHROPIC_AUTH_TOKEN through only when it is set', async () => {
@@ -249,11 +253,42 @@ describe('codexAdapter', () => {
     expect(launch.env.OPENAI_BASE_URL).toBe('http://127.0.0.1:51733/v1');
   });
 
-  it('passes OPENAI_API_KEY through, or substitutes a placeholder', async () => {
+  // No placeholder: Codex authenticates from its own auth.json, and inventing the variable
+  // overrides that with a key that is not real.
+  it('passes OPENAI_API_KEY through, and invents none when it is unset', async () => {
     const real = await codexAdapter.prepare(ctx({ env: { OPENAI_API_KEY: 'sk-real' } }));
     expect(real.env.OPENAI_API_KEY).toBe('sk-real');
-    const none = await codexAdapter.prepare(ctx());
-    expect(none.env.OPENAI_API_KEY).toBe('orca-recorded');
+    const none = await codexAdapter.prepare(ctx({ env: { CODEX_HOME: 'no-such-dir' } }));
+    expect('OPENAI_API_KEY' in none.env).toBe(false);
+  });
+
+  // The variable alone never reached a Codex pointed at a gateway: the origin comes from
+  // `model_providers.<name>.base_url`, so the override has to name whichever provider is selected.
+  it('overrides the selected provider base_url on the command line', async () => {
+    const launch = await codexAdapter.prepare(ctx({ env: { CODEX_HOME: 'no-such-dir' } }));
+    expect(launch.args.slice(0, 2)).toEqual([
+      '-c',
+      'model_providers.openai.base_url=http://127.0.0.1:51733/v1',
+    ]);
+  });
+
+  it('reads the provider name out of config.toml, ignoring same-named keys in tables', () => {
+    expect(selectedProvider('model_provider = "crs"\n[model_providers.crs]\n')).toBe('crs');
+    expect(selectedProvider("model = 'x'\nmodel_provider = 'gw'\n")).toBe('gw');
+    expect(selectedProvider('[a]\nmodel_provider = "ignored"\n')).toBe('openai');
+    expect(selectedProvider('')).toBe('openai');
+  });
+
+  it('puts the override before the user argv, so an explicit -c still wins', async () => {
+    const launch = await codexAdapter.prepare(
+      ctx({ env: { CODEX_HOME: 'no-such-dir' }, userArgs: ['exec', '--skip-git-repo-check'] }),
+    );
+    expect(launch.args).toEqual([
+      '-c',
+      'model_providers.openai.base_url=http://127.0.0.1:51733/v1',
+      'exec',
+      '--skip-git-repo-check',
+    ]);
   });
 
   it('detects by ~/.codex, and not at all in a bare environment', async () => {

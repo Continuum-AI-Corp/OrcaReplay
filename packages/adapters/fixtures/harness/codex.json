@@ -1,10 +1,10 @@
 {
   "adapter": "codex",
   "harness_versions": null,
-  "verified_at": "2026-08-29",
+  "verified_at": "2026-08-31",
   "command": "codex",
-  "env_vars": ["OPENAI_API_KEY", "OPENAI_BASE_URL"],
+  "env_vars": ["OPENAI_BASE_URL"],
   "base_urls": { "OPENAI_BASE_URL": "/v1" },
-  "optional_env_vars": [],
-  "note": "OpenAI SDK clients expect the version segment in the base url. A Codex signed in with a ChatGPT subscription talks to its own backend, which base-url redirection does not capture."
+  "optional_env_vars": ["OPENAI_API_KEY"],
+  "note": "OPENAI_BASE_URL alone does not capture a Codex that has a config.toml: it resolves its origin from model_providers.<name>.base_url, so the adapter also passes -c model_providers.<selected>.base_url=<proxy>/v1, reading the provider name from config.toml (CODEX_HOME honoured). No placeholder key — Codex authenticates from its own auth.json. A Codex signed in with a ChatGPT subscription talks to its own backend, which base-url redirection does not capture."
 }
