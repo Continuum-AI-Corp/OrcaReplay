@@ -401,3 +401,49 @@ export function pickChainTarget(events: TraceEvent[]): number | undefined {
     last((e) => e.type === 'fs.change')
   );
 }
+
+/** Attributes as a plain record, since the envelope leaves them optional. */
+function toAttrs(event: TraceEvent): Record<string, unknown> {
+  return event.attrs ?? {};
+}
+
+/** Tool calls that hand work to another agent, by the argument every harness gives them. */
+export function isDelegation(event: TraceEvent): boolean {
+  if (event.type !== 'tool.call') return false;
+  const input = toAttrs(event)['input'];
+  if (input === null || typeof input !== 'object') return false;
+  const shape = input as Record<string, unknown>;
+  return typeof shape['subagent_type'] === 'string' || typeof shape['agent'] === 'string';
+}
+
+/**
+ * The delegation whose span encloses `seq`, if any.
+ *
+ * A replay that halts inside one is the hardest kind of miss to read: the distance is small, the
+ * trace is intact, and nothing on the line says why the same run asked a different question. The
+ * answer is that the harness wrote the delegate's prompt itself and writes a fresh one every time,
+ * so that request genuinely was not the recorded one. Naming the delegation turns a number into
+ * that sentence.
+ */
+export function enclosingDelegation(
+  events: TraceEvent[],
+  seq: number,
+): { seq: number; subagent: string } | undefined {
+  const closesAt = new Map<number, number>();
+  for (const event of events) {
+    if (event.type !== 'tool.result') continue;
+    for (const cause of event.causes ?? []) closesAt.set(cause, event.seq);
+  }
+  let found: { seq: number; subagent: string } | undefined;
+  for (const event of events) {
+    if (event.seq > seq) break;
+    if (!isDelegation(event)) continue;
+    const closes = closesAt.get(event.seq);
+    // Still open at `seq`: an unclosed delegation ran to the end of the trace.
+    if (closes !== undefined && closes < seq) continue;
+    const input = toAttrs(event)['input'] as Record<string, unknown> | undefined;
+    const subagent = String(input?.['subagent_type'] ?? input?.['agent'] ?? 'sub-agent');
+    found = { seq: event.seq, subagent };
+  }
+  return found;
+}

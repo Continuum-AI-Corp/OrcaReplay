@@ -32,6 +32,7 @@
         "checkpoint",
         "fork",
         "route.decision",
+        "session.snapshot",
         "note"
       ]
     },

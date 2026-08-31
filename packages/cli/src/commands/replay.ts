@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
+  enclosingDelegation,
   TraceReader,
   deriveCheckpoints,
   resolveRunSelector,
@@ -12,7 +13,7 @@ import {
 } from '@orcareplay/core';
 import { FsCapture } from '@orcareplay/fs-capture';
 import { createProxy, defaultDialects, type RecordedExchange } from '@orcareplay/proxy';
-import { defaultAdapters } from '@orcareplay/adapters';
+import { defaultAdapters, resolveLaunch } from '@orcareplay/adapters';
 import { serveViewer } from '@orcareplay/viewer';
 import { isBlobRef, type TraceEvent } from '@orcareplay/schema';
 import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
@@ -132,6 +133,78 @@ async function rawBodyOf(reader: TraceReader, event: TraceEvent): Promise<string
   return JSON.stringify(payload ?? {});
 }
 
+/**
+ * The arguments that will make the agent ask again.
+ *
+ * A run recorded as `orca record claude -- -p "..."` carries its prompt in argv, and replaying it
+ * is simply a matter of passing it back. A run driven by hand carries nothing: the prompt went
+ * into a terminal, and argv is just `["claude"]`. Replaying that launched an agent with no reason
+ * to call anything, so the recorded exchanges were never requested and the replay came back empty.
+ *
+ * The prompts recorded from the harness's own transcript are what closes that gap. Only the first
+ * turn is driven — the harnesses take one prompt per non-interactive invocation — so a multi-turn
+ * conversation says how much of itself it is reproducing instead of quietly reproducing one turn
+ * and calling it a replay.
+ */
+function driveArgs(
+  adapter: { driveArgs?(prompts: string[], recorded: string[]): string[] | undefined },
+  ctx: { manifest: { argv: string[] }; prompts: string[] },
+  out: Output,
+): string[] {
+  const recorded = ctx.manifest.argv.slice(1);
+  const prompts = ctx.prompts;
+  if (prompts.length === 0) return recorded;
+
+  // Whether argv already drives the run, decided by comparing it against the prompts the harness
+  // recorded rather than by looking for a flag. `codex exec` with the prompt on stdin has a
+  // non-empty argv that carries no prompt at all, so "argv is non-empty" answers the wrong
+  // question; "argv contains what the person actually asked" answers the right one.
+  if (prompts.some((prompt) => recorded.includes(prompt))) return recorded;
+
+  const driven = adapter.driveArgs?.(prompts, recorded);
+  if (driven === undefined) return recorded;
+
+  // Said before the run, not after, because it reframes every divergence that follows. A harness
+  // driven without a terminal does not send byte-identical requests to the ones it sent with one —
+  // Claude Code splices an extra reminder turn into an interactive conversation, and the calls it
+  // makes for itself, like naming the session, have no counterpart at all. Those show up as
+  // unmatched, and without this line they read as a corrupt trace rather than as the cost of
+  // reproducing a conversation nobody recorded the keystrokes of.
+  out.info('replay.driven', {
+    source: 'harness transcript',
+    turns_recorded: prompts.length,
+    turns_driven: 1,
+    note:
+      prompts.length > 1
+        ? 'the harness takes one prompt per non-interactive run; later turns are not re-asked'
+        : 'requests the harness made for itself may not recur',
+  });
+  return driven;
+}
+
+/**
+ * Prompts off a `session.snapshot`.
+ *
+ * The transcript rides in the same payload, so this spills to a blob for any real session — which
+ * is why it takes the reader rather than reading the event alone.
+ */
+async function readPrompts(reader: TraceReader, events: TraceEvent[]): Promise<string[]> {
+  const event = events.find((e) => e.type === 'session.snapshot');
+  if (event === undefined) return [];
+  let payload: unknown = event.payload;
+  try {
+    if (isBlobRef(payload)) {
+      payload = JSON.parse(new TextDecoder().decode(await reader.blob(payload)));
+    }
+    if (typeof payload === 'string') payload = JSON.parse(payload);
+  } catch {
+    return [];
+  }
+  if (payload === null || typeof payload !== 'object') return [];
+  const prompts = (payload as { prompts?: unknown }).prompts;
+  return Array.isArray(prompts) ? prompts.filter((p): p is string => typeof p === 'string') : [];
+}
+
 export async function replayCommand(
   args: ParsedArgs,
   out: Output,
@@ -161,13 +234,23 @@ export async function replayCommand(
   }
 
   const exchanges = await loadExchanges(reader);
+  const prompts = await readPrompts(reader, events);
   const from = args.num('from');
   const model = args.str('model');
   const isFork = from !== undefined || model !== undefined;
 
   const result = isFork
-    ? await replayFork(args, out, { manifest, events, exchanges, runDir, cwd, from, model })
-    : await replayExact(args, out, { manifest, events, exchanges, runDir, cwd });
+    ? await replayFork(args, out, {
+        manifest,
+        events,
+        exchanges,
+        runDir,
+        cwd,
+        prompts,
+        from,
+        model,
+      })
+    : await replayExact(args, out, { manifest, events, exchanges, runDir, cwd, prompts });
 
   if (args.bool('ui')) {
     // Show the run you just produced: after a fork that is the child, not the parent, because
@@ -196,6 +279,8 @@ interface Ctx {
   exchanges: RecordedExchange[];
   runDir: string;
   cwd: string;
+  /** The user's turns, recovered from the harness transcript. Empty when there was none. */
+  prompts: string[];
 }
 
 /**
@@ -265,10 +350,21 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
     // file contents — by far the most common cause of a halt, and invisible from the number alone.
     onUnmatched: (u) => {
       unmatched.push(u);
+      // A halt inside a delegation is not a corrupt trace and not a bug, and looks like both. The
+      // harness writes the delegate's prompt itself, fresh on every run, so the request really is
+      // a different question — which is exactly what the matcher refuses to serve from a
+      // recording. Without this the operator sees `distance 54` and goes looking for the fault.
+      const delegation = enclosingDelegation(ctx.events, u.seq);
       out.warn('replay.unmatched', {
         seq: u.seq,
         index: u.index,
         reason: u.reason,
+        ...(delegation === undefined
+          ? {}
+          : {
+              inside: `${delegation.subagent} delegated at seq ${delegation.seq}`,
+              why: 'the harness writes a delegate prompt of its own each run, so this request is a different question rather than a drifted one',
+            }),
         recorded_in: ctx.manifest.cwd,
         replayed_in: workspace.dir,
         next:
@@ -329,7 +425,10 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
   // talks to servers orca cannot see — or, for a harness that requires the variable, does not start
   // at all, which is how a replay of a working recording exits non-zero for a reason that has
   // nothing to do with the recording.
-  const mcp = trace === undefined ? undefined : await mcpForReplay(args, ctx.events, trace, out);
+  const mcp =
+    trace === undefined
+      ? undefined
+      : await mcpForReplay(args, ctx.events, trace, out, join(ctx.runDir, 'mcp-frames.jsonl'));
 
   const adapter = defaultAdapters().get(ctx.manifest.adapter.id);
   const launch = await adapter.prepare({
@@ -337,11 +436,17 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
     cwd: workspace.dir,
     proxyUrl: proxy.url,
     runDir: ctx.runDir,
-    userArgs: ctx.manifest.argv.slice(1),
+    userArgs: driveArgs(adapter, ctx, out),
     env: process.env,
   });
   if (proxy.tls) await trustRunCa(trace, proxy.tls, proxy.url, launch.env, out);
-  if (mcp) pointAtMcpConfig(launch.env, mcp.configPath);
+  if (mcp) {
+    pointAtMcpConfig(launch.env, mcp.configPath);
+    // Same as record: the path has to reach the harness the way the harness actually reads it, or
+    // a replay re-instruments a config nothing opens and every recorded MCP call goes unmatched.
+    const mcpArgs = adapter.mcpConfigArgs?.(mcp.configPath);
+    if (mcpArgs !== undefined) launch.args = [...mcpArgs, ...launch.args];
+  }
 
   let exitCode: number;
   try {
@@ -634,14 +739,20 @@ async function replayFork(
     cwd: worktree,
     proxyUrl: proxy.url,
     runDir: writer.runDir,
-    userArgs: ctx.manifest.argv.slice(1),
+    userArgs: driveArgs(adapter, ctx, out),
     env: process.env,
   });
 
   if (proxy.tls) {
     await trustRunCa(writer, proxy.tls, proxy.url, launch.env, out);
   }
-  if (mcp) pointAtMcpConfig(launch.env, mcp.configPath);
+  if (mcp) {
+    pointAtMcpConfig(launch.env, mcp.configPath);
+    // Same as record: the path has to reach the harness the way the harness actually reads it, or
+    // a replay re-instruments a config nothing opens and every recorded MCP call goes unmatched.
+    const mcpArgs = adapter.mcpConfigArgs?.(mcp.configPath);
+    if (mcpArgs !== undefined) launch.args = [...mcpArgs, ...launch.args];
+  }
 
   let exitCode: number;
   try {
@@ -798,17 +909,20 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
  * agent's own output moves to stderr rather than landing in the middle of it. stdin and stderr
  * stay inherited, so a harness that prompts still can.
  */
-function runChild(
+async function runChild(
   command: string,
   argv: string[],
   env: NodeJS.ProcessEnv,
   cwd = process.cwd(),
   quietStdout = false,
 ): Promise<number> {
+  // Same resolution as record and as detection; see resolveLaunch.
+  const target = await resolveLaunch(command, argv);
   return new Promise((resolve, reject) => {
-    const child = spawn(command, argv, {
+    const child = spawn(target.file, target.args, {
       env,
       cwd,
+      shell: target.shell,
       stdio: quietStdout ? ['inherit', 'pipe', 'inherit'] : 'inherit',
     });
     child.stdout?.pipe(process.stderr);

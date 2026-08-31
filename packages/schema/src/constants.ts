@@ -28,6 +28,7 @@ export const EVENT_TYPES = [
   'checkpoint',
   'fork',
   'route.decision',
+  'session.snapshot',
   'note',
 ] as const;
 

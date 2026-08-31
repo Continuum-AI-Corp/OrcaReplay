@@ -51,6 +51,7 @@ EVENT_TYPES: Final[frozenset[str]] = frozenset(
         "fs.change",
         "net.request",
         "net.response",
+        "session.snapshot",
         "error",
         "divergence",
         "checkpoint",

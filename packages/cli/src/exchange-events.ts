@@ -192,6 +192,14 @@ export async function appendDerivedEvents(
   deriver: ExchangeEventDeriver,
   exchange: RecordedExchange,
   turn: number,
+  /**
+   * Each derived event as it is written.
+   *
+   * The recorder needs to know whether the agent ran any commands, so it can say when the shell
+   * layer was on and saw none of them. That is only knowable from what the model asked for, and
+   * this is the one place the derived events exist.
+   */
+  onDerived?: (derived: DerivedEvent) => void,
 ): Promise<void> {
   /** `written[i]` is the seq of the i-th derived event, which is what `causesIndex` refers to. */
   const written: number[] = [];
@@ -214,6 +222,7 @@ export async function appendDerivedEvents(
       ...(causes.length > 0 ? { causes } : {}),
     });
     written.push(event.seq);
+    onDerived?.(derived);
     if (derived.type === 'tool.call') {
       deriver.markPending(String(derived.attrs['tool_use_id']), event.seq);
     }
