@@ -480,6 +480,7 @@ Early. `v0` is the walking skeleton of the three commands above. Everything belo
 | Shareable cards | working — `orca export --card` draws one causal chain, `--graph-card` draws the whole run with that chain lit, and `compare --share` draws the verdict table. `.svg` always; `.png` and `.gif` when the optional render toolchain is installed, which `orca doctor` reports and `npm ci` never pulls in |
 | MCP server (`orca mcp`) | working — six tools over stdio, so an agent can read, explain and replay its own runs |
 | Programmatic API (`Orca`) | working — the commands render what it returns, so the terminal is a view of one source of truth |
+| Replaying a session you typed into | working, and approximate — [what that means](#replaying-a-session-you-typed-into) |
 | Exact replay with divergence reporting | working — restores the recorded filesystem over your working tree, then puts it back; `--worktree` for a scratch copy, `--in-place` to restore nothing. Writes a run of its own recording what the replay *discovered* — divergences, unmatched requests — and points at the parent for what it merely repeated; `--no-trace` to skip |
 | Fork replay from a checkpoint | working — a fork records its own filesystem snapshots, so it is a run you can fork again |
 | Compare across models | working — `orca setup` stores a gateway (OrcaRouter by default, any URL you name otherwise), key and model list, so `orca compare` needs no flags |
@@ -492,6 +493,27 @@ Early. `v0` is the walking skeleton of the three commands above. Everything belo
 | Codex subscription model capture/replay | working — recognizes the `/backend-api/codex/responses` HTTPS fallback, decodes zstd request bodies for matching, and serves the recorded SSE response without opening the origin during replay |
 | Validated against a real agent | Claude Code, recording a real fix to a real bug: recorded, replayed offline end to end, forked from a checkpoint and exported. It broke four things no fixture could have produced, all since fixed — [what a real agent found](docs/validation.md) |
 | Subscription-auth harnesses | Claude Code works. A Codex CLI signed in with a ChatGPT subscription talks to its own backend, so there is no origin to rewrite: it needs `--tls-intercept`. With an API key it needs nothing special |
+
+## Replaying a session you typed into
+
+A run started as `orca record claude` and driven by hand has its prompts nowhere on the wire. Orca
+recovers them from the harness's own transcript and replays the session by handing them back
+without a terminal — which reproduces the conversation, and does not reproduce the run byte for
+byte. Two differences are inherent rather than defects, and orca names both rather than papering
+over them:
+
+- **The harness makes calls for itself.** A quota probe before the first turn, a request to name
+  the session, a delegation prompt written fresh for a sub-agent. A replay does not repeat them.
+  The matcher steps over them onto the next real match and reports how many, so `reused=3/5` on an
+  interactive recording is a complete replay of what you asked, not a partial one.
+- **A terminal session is offered tools a replay cannot have.** `AskUserQuestion`, `EnterPlanMode`,
+  `ExitPlanMode`, `EndConversation` all need a person in front of them, so they are absent when the
+  same agent is driven without one. Their schemas are large, so a request carrying them can differ
+  from the recorded one by enough to halt; the halt says which tools are missing and why.
+
+Recording with a prompt in argv — `orca record claude -- -p "…"` — has neither problem, because the
+replay is started exactly the way the recording was. Use that for a run you intend to replay
+exactly. Reading a run is unaffected either way: `orca show` and the viewer are complete for both.
 
 ## Install
 

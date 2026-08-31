@@ -60,6 +60,48 @@ export type {
 
 export type ProxyMode = 'record' | 'replay' | 'hybrid';
 
+/**
+ * Beta flags that belong to the model that was recorded, not to the request.
+ *
+ * `anthropic-beta` is a header, so substituting a model in the body leaves it untouched — and a
+ * fork of a run made on a 1M-context model onto one without that entitlement comes back
+ * `400 The long context beta is not yet available for this subscription`. The failure names the
+ * subscription rather than the flag, so it reads as an account problem and not as orca carrying
+ * over something it should have dropped.
+ *
+ * Only entitlement-gated flags are removed. The rest of the header is what the harness needs to
+ * speak its own protocol — tool shapes, output formats — and dropping those would break the fork
+ * in a way that is much harder to see than a 400.
+ */
+const MODEL_GATED_BETAS = [/^context-\d+m\b/i];
+
+/** `anthropic-beta` with the recorded model's entitlements taken out, or undefined if empty. */
+export function betasForModelChange(value: string): string | undefined {
+  const kept = value
+    .split(',')
+    .map((flag) => flag.trim())
+    .filter((flag) => flag !== '' && !MODEL_GATED_BETAS.some((re) => re.test(flag)));
+  return kept.length > 0 ? kept.join(',') : undefined;
+}
+
+/** The outbound headers for a live call, reconciled with a model the recording did not use. */
+function headersForModel(
+  headers: Record<string, string>,
+  forkModel: string | undefined,
+): Record<string, string> {
+  if (forkModel === undefined) return headers;
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() !== 'anthropic-beta') {
+      out[key] = value;
+      continue;
+    }
+    const kept = betasForModelChange(value);
+    if (kept !== undefined) out[key] = kept;
+  }
+  return out;
+}
+
 export interface RecordedExchange {
   seq: number;
   dialect: string;
@@ -539,7 +581,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        ...headers,
+        ...headersForModel(headers, options.forkModel),
         ...(options.upstreamHeaders ?? {}),
       },
       body: outboundBody,

@@ -208,6 +208,58 @@ describe('diff', () => {
   });
 });
 
+describe('line-ending-only changes', () => {
+  /**
+   * The shadow store keeps the bytes that were on disk, deliberately: normalising line endings
+   * would make the record disagree with the disk. The consequence on Windows is a one-character
+   * fix reported as every line changed, because the tool that made it wrote LF over a CRLF file.
+   * The counts are right, and unhelpful without this.
+   */
+  const CRLF = 'one\r\ntwo\r\nthree\r\n';
+  const LF = 'one\ntwo\nthree\n';
+
+  it('marks a file whose only change is CRLF to LF', async () => {
+    const { workTree, shadow } = await fixture();
+    await write(workTree, 'f.txt', CRLF);
+    const before = await shadow.snapshot();
+    await write(workTree, 'f.txt', LF);
+    const after = await shadow.snapshot();
+
+    const change = byPath(await shadow.diff(before, after), 'f.txt');
+    expect(change.status).toBe('modified');
+    // Honest, not silently normalised away: those lines really do differ byte for byte.
+    expect(change.insertions).toBe(3);
+    expect(change.deletions).toBe(3);
+    expect(change.eolOnly).toBe(true);
+  });
+
+  it('does not mark a real edit that also changed line endings', async () => {
+    const { workTree, shadow } = await fixture();
+    await write(workTree, 'f.txt', CRLF);
+    const before = await shadow.snapshot();
+    await write(workTree, 'f.txt', 'one\nTWO\nthree\n');
+    const after = await shadow.snapshot();
+    expect(byPath(await shadow.diff(before, after), 'f.txt').eolOnly).toBeUndefined();
+  });
+
+  it('does not mark a plain edit that left line endings alone', async () => {
+    const { workTree, shadow } = await fixture();
+    await write(workTree, 'f.txt', LF);
+    const before = await shadow.snapshot();
+    await write(workTree, 'f.txt', 'one\nTWO\nthree\n');
+    const after = await shadow.snapshot();
+    expect(byPath(await shadow.diff(before, after), 'f.txt').eolOnly).toBeUndefined();
+  });
+
+  it('does not mark a newly added file', async () => {
+    const { workTree, shadow } = await fixture();
+    const before = await shadow.snapshot();
+    await write(workTree, 'new.txt', CRLF);
+    const after = await shadow.snapshot();
+    expect(byPath(await shadow.diff(before, after), 'new.txt').eolOnly).toBeUndefined();
+  });
+});
+
 describe('exclusions', () => {
   itGit("honours the workspace's own .gitignore", async () => {
     const { workTree, shadow } = await fixture();

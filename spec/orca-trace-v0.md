@@ -72,6 +72,7 @@ Because every model turn resends the whole conversation, content addressing is w
 | `shell.exec` / `shell.result` | A shell command, from the PATH shim. |
 | `fs.snapshot` / `fs.change` | A workspace tree id, and a diff against the previous tree. |
 | `net.request` / `net.response` | Non-model HTTP seen by the proxy. |
+| `session.snapshot` | The harness's own transcript, captured at the point the run ended. Carries what the run was *asked*, which a hand-driven run leaves nowhere on the wire. |
 | `error` | A failure derived from another event or reported by the harness. |
 | `divergence` | Replay matched inexactly. See §4. |
 | `checkpoint` | A forkable point. Derived, not recorded live. See §3. |

@@ -135,6 +135,23 @@ try {
     attrs: { server: 'files', kind: 'response', id: 1 },
     payload: JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools: [] } }),
   });
+  // The harness's own transcript, which `orca record` captures for real whenever the adapter
+  // knows where the harness keeps one. It is the only record of what a hand-driven run was
+  // *asked*, so a trace missing it cannot be replayed at all — worth a line here for the same
+  // reason the MCP pair above is.
+  await writer.append({
+    type: 'session.snapshot',
+    actor: 'harness',
+    turn: 1,
+    attrs: {
+      harness: 'claude-code',
+      session_id: '11111111-2222-3333-4444-555555555555',
+      rel_path: 'a1b2c3.jsonl',
+      prompts: 2,
+      bytes: 128,
+    },
+    payload: JSON.stringify({ type: 'user', message: { role: 'user', content: 'hello' } }),
+  });
   // A fork and the divergence a fork reports. Both come out of `orca replay --from N --model X`.
   await writer.append({
     type: 'fork',

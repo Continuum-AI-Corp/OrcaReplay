@@ -1,3 +1,4 @@
+import { assertKnownFlags } from './flags.js';
 import { parseArgs, type ParsedArgs } from './args.js';
 import { Orca } from './api.js';
 import { serveMcp } from './mcp-server.js';
@@ -129,6 +130,11 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
   }
 
   try {
+    // Before anything runs: a flag the command does not have is an instruction that would be
+    // silently ignored, and a run that quietly did something else is the failure orca exists to
+    // surface. Inside the try so it is reported the same way every other failure is.
+    assertKnownFlags(args);
+
     switch (args.command) {
       case 'record':
         return (await recordCommand(args, out, cwd)).exitCode;

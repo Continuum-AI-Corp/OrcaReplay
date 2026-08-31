@@ -15,6 +15,16 @@ export interface FileChange {
   oldPath?: string;
   insertions: number;
   deletions: number;
+  /**
+   * True when the file's only change is its line endings.
+   *
+   * The shadow store keeps the bytes that were on disk, with no end-of-line normalisation — which
+   * is the right choice for a record of what happened, and produces a startling report on Windows.
+   * A tool that rewrites a CRLF file with LF changes every line as far as git is concerned, so a
+   * one-character fix comes back as `+42 −42`. The counts stay honest; this says why they are
+   * what they are.
+   */
+  eolOnly?: boolean;
 }
 
 export interface ShadowIndexOptions {
@@ -210,6 +220,11 @@ export class ShadowIndex {
       counts.set(path, { insertions, deletions });
     }
 
+    // Second pass, ignoring carriage returns at end of line. A file that reports changes in the
+    // first pass and none in this one changed only its line endings. Run once for the whole diff
+    // rather than per file, so the cost is one extra git invocation however many files moved.
+    const contentful = await this.changedIgnoringEol(fromTree, toTree);
+
     return records.map((record) => {
       const count = counts.get(record.path) ?? { insertions: 0, deletions: 0 };
       const change: FileChange = {
@@ -219,8 +234,50 @@ export class ShadowIndex {
         deletions: count.deletions,
       };
       if (record.oldPath !== undefined) change.oldPath = record.oldPath;
+      if (
+        contentful !== undefined &&
+        change.status === 'modified' &&
+        count.insertions + count.deletions > 0 &&
+        !contentful.has(record.path)
+      ) {
+        change.eolOnly = true;
+      }
       return change;
     });
+  }
+
+  /**
+   * Paths that still differ once a trailing carriage return is not counted as a difference, or
+   * undefined when this git cannot answer — in which case nothing is annotated, which is better
+   * than claiming a real edit was only line endings.
+   */
+  private async changedIgnoringEol(
+    fromTree: string,
+    toTree: string,
+  ): Promise<Set<string> | undefined> {
+    try {
+      const out = await this.run([
+        'diff-tree',
+        '-r',
+        '-M',
+        '-z',
+        '--numstat',
+        '--ignore-cr-at-eol',
+        fromTree,
+        toTree,
+      ]);
+      const paths = new Set<string>();
+      for (const token of out.split(' ')) {
+        if (token === '') continue;
+        const fields = token.split('	');
+        const path = fields[2];
+        if (path !== undefined && path !== '') paths.add(path);
+      }
+      return paths;
+    } catch {
+      // An older git without --ignore-cr-at-eol.
+      return undefined;
+    }
   }
 
   async patch(fromTree: string, toTree: string, path?: string): Promise<string> {

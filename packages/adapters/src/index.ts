@@ -11,3 +11,4 @@ export * from './mcp-config.js';
 export * from './opencode.js';
 export * from './registry.js';
 export * from './scaffold.js';
+export * from './session.js';

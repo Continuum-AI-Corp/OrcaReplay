@@ -7,6 +7,7 @@
  */
 
 import type { Manifest, TraceEvent } from '@orcareplay/schema';
+import { isDelegation } from '@orcareplay/core';
 
 export type Tone = 'attention' | 'normal' | 'quiet';
 
@@ -20,6 +21,16 @@ export interface TimelineRow {
   kind: string;
   /** The one thing worth reading at a glance. Never empty. */
   label: string;
+  /**
+   * How many sub-agent calls this row is inside.
+   *
+   * A harness that delegates runs the delegate's model and tool calls through the same proxy, so
+   * they land in the same flat sequence as the parent's — and a run that spawned an Explore agent
+   * read as one stream in which no line said whose work it was. The nesting is already in the
+   * trace: the `tool.result` closing a sub-agent call names it in `causes`, so everything between
+   * the two belongs to the delegate.
+   */
+  depth: number;
   /** Secondary text, dimmed. */
   detail: string;
   /** Right-aligned trailing text (ids, token counts, durations). */
@@ -43,8 +54,20 @@ export interface RunSummary {
 export interface LoopFinding {
   fromTurn: number;
   toTurn: number;
-  tree: string;
   turns: number[];
+  /** Why this run was called a loop, which is also what makes it actionable. */
+  kind: 'repeated-action' | 'error-spin';
+  /** The action being repeated, for `repeated-action`. */
+  signature?: string;
+  /** Times the cycle went round, for `repeated-action`. */
+  repeats?: number;
+  /**
+   * Filesystem tree the run sat on, when every turn in it shared one.
+   *
+   * Optional now: it was the whole basis of the old detector and is only context here, and an
+   * error-spin can happen in a run that has no filesystem capture at all.
+   */
+  tree?: string;
 }
 
 const KIND_BY_TYPE: Record<string, string> = {
@@ -223,6 +246,9 @@ function parts(event: TraceEvent): RowParts {
         pick(a, 'status'),
         added === undefined ? '' : `+${added}`,
         removed === undefined ? '' : `−${removed}`,
+        // Without this, a tool that rewrote a CRLF file with LF reports every line as changed and
+        // there is nothing to say the content is the same.
+        a['eol_only'] === true ? '(line endings only)' : '',
       ]
         .filter(Boolean)
         .join(' ');
@@ -289,14 +315,45 @@ function parts(event: TraceEvent): RowParts {
   }
 }
 
+/**
+ * Nesting depth per seq, from the delegation calls open in the trace at that point.
+ *
+ * Read off `causes` rather than guessed from ordering: the result event of a delegation names the
+ * call it answers, so the span is exactly [call, result] and survives interleaving, background
+ * tasks and delegations inside delegations.
+ */
+function depthBySeq(events: TraceEvent[]): Map<number, number> {
+  const closesAt = new Map<number, number>();
+  for (const event of events) {
+    if (event.type !== 'tool.result') continue;
+    for (const cause of event.causes ?? []) closesAt.set(cause, event.seq);
+  }
+
+  const open: number[] = [];
+  const depth = new Map<number, number>();
+  for (const event of events) {
+    while (open.length > 0 && event.seq > open[open.length - 1]!) open.pop();
+    // The opening call sits at the parent's level; everything up to and including the result
+    // that closes it is nested, so the block reads as one piece.
+    depth.set(event.seq, open.length);
+    if (isDelegation(event)) {
+      const closes = closesAt.get(event.seq);
+      if (closes !== undefined) open.push(closes);
+    }
+  }
+  return depth;
+}
+
 /** One display row per event, in trace order. */
 export function buildTimeline(events: TraceEvent[]): TimelineRow[] {
+  const depth = depthBySeq(events);
   return events.map((event) => {
     const derived = parts(event);
     return {
       seq: event.seq,
       monoUs: event.mono_us,
       turn: event.turn,
+      depth: depth.get(event.seq) ?? 0,
       kind: kindForType(event.type),
       label: clamp(oneLine(derived.label || humanize(event.type)), LABEL_MAX),
       detail: clamp(oneLine(derived.detail ?? ''), DETAIL_MAX),
@@ -394,29 +451,161 @@ export function summarize(manifest: Manifest, events: TraceEvent[]): RunSummary 
  * emitted no snapshot says nothing about the tree either way. Where a turn carries several
  * snapshots, the last one is that turn's end state.
  */
+/**
+ * Loops, meaning the agent is going round rather than getting somewhere.
+ *
+ * The first version of this asked whether the filesystem tree had changed, and called three turns
+ * on one tree a loop. That is not what a loop is. It fires on any conversation that runs three
+ * turns without writing a file — a question answered in prose, a plan discussed before any edit —
+ * so a real agent session raised it almost every time and the finding meant nothing. What makes a
+ * loop a loop is the agent *repeating itself*, so that is what is looked for here.
+ *
+ * Two shapes, because agents get stuck in two ways:
+ *
+ *   - **repeated-action** — the same tool call, or the same short cycle of them, over and over.
+ *     Three repetitions, since two of anything is a retry and retries are how agents work.
+ *   - **error-spin** — turns that call the model and then do nothing at all, after something has
+ *     already failed. Two is enough here: the error is the evidence that the agent was trying,
+ *     which is exactly what an ordinary conversation lacks and why this does not fire on one.
+ */
 export function detectLoops(events: TraceEvent[]): LoopFinding[] {
-  const lastTreeByTurn = new Map<number, string>();
+  return [...repeatedActions(events), ...errorSpins(events)].sort(
+    (a, b) => a.fromTurn - b.fromTurn,
+  );
+}
+
+/** Identity of a tool call: the same tool with the same arguments is the same action. */
+function actionSignature(event: TraceEvent): string {
+  const a = attrs(event);
+  const name = typeof a['name'] === 'string' ? a['name'] : 'tool';
+  let input = '';
+  try {
+    input = JSON.stringify(event.payload ?? a['input'] ?? '');
+  } catch {
+    // A payload that will not serialise still identifies the tool it belongs to.
+  }
+  // Bounded so one enormous argument cannot dominate the comparison or the memory.
+  return `${name}:${input.slice(0, 512)}`;
+}
+
+const MAX_CYCLE = 4;
+const MIN_REPEATS = 3;
+
+function repeatedActions(events: TraceEvent[]): LoopFinding[] {
+  const calls = events
+    .filter((e) => e.type === 'tool.call')
+    .map((e) => ({ turn: e.turn, sig: actionSignature(e) }));
+
+  const findings: LoopFinding[] = [];
+  let i = 0;
+  while (i < calls.length) {
+    let best: { period: number; repeats: number } | undefined;
+    // Shortest cycle first: a run of one repeated call is that, not a 2-cycle of it with itself.
+    for (let period = 1; period <= MAX_CYCLE; period += 1) {
+      if (i + period * MIN_REPEATS > calls.length) break;
+      let repeats = 1;
+      while (
+        i + period * (repeats + 1) <= calls.length &&
+        matchesCycle(calls, i, period, repeats)
+      ) {
+        repeats += 1;
+      }
+      if (repeats >= MIN_REPEATS) {
+        best = { period, repeats };
+        break;
+      }
+    }
+    if (best === undefined) {
+      i += 1;
+      continue;
+    }
+    const span = calls.slice(i, i + best.period * best.repeats);
+    const turns = [...new Set(span.map((c) => c.turn))].sort((a, b) => a - b);
+    findings.push({
+      fromTurn: turns[0]!,
+      toTurn: turns[turns.length - 1]!,
+      turns,
+      kind: 'repeated-action',
+      signature: span[0]!.sig.slice(0, 120),
+      repeats: best.repeats,
+    });
+    i += best.period * best.repeats;
+  }
+  return findings;
+}
+
+/** Whether the `repeats`-th repetition of a `period`-length cycle starting at `i` matches. */
+function matchesCycle(
+  calls: { sig: string }[],
+  i: number,
+  period: number,
+  repeats: number,
+): boolean {
+  for (let k = 0; k < period; k += 1) {
+    if (calls[i + k]!.sig !== calls[i + repeats * period + k]!.sig) return false;
+  }
+  return true;
+}
+
+const MIN_SPIN_TURNS = 2;
+
+function errorSpins(events: TraceEvent[]): LoopFinding[] {
+  const turns = [...new Set(events.map((e) => e.turn))].sort((a, b) => a - b);
+  const called = new Set<number>();
+  const modelled = new Set<number>();
+  const changed = new Set<number>();
+  let firstErrorTurn: number | undefined;
+
   for (const event of events) {
-    if (event.type !== 'fs.snapshot') continue;
-    const tree = attrs(event)['tree'];
-    if (typeof tree !== 'string' || tree === '') continue;
-    lastTreeByTurn.set(event.turn, tree);
+    if (event.type === 'tool.call') called.add(event.turn);
+    if (event.type === 'model.request') modelled.add(event.turn);
+    if (event.type === 'fs.snapshot' && Number(attrs(event)['changes'] ?? 0) > 0) {
+      changed.add(event.turn);
+    }
+    const isError =
+      event.type === 'error' || (event.type === 'tool.result' && attrs(event)['is_error'] === true);
+    if (isError && firstErrorTurn === undefined) firstErrorTurn = event.turn;
   }
 
-  const turns = [...lastTreeByTurn.keys()].sort((a, b) => a - b);
+  /** A turn that asked the model something and then did nothing with the answer. */
+  const spinning = (turn: number): boolean =>
+    modelled.has(turn) && !called.has(turn) && !changed.has(turn);
+
   const findings: LoopFinding[] = [];
   let start = 0;
   while (start < turns.length) {
-    const tree = lastTreeByTurn.get(turns[start]!)!;
+    if (!spinning(turns[start]!)) {
+      start += 1;
+      continue;
+    }
     let end = start;
-    while (end + 1 < turns.length && lastTreeByTurn.get(turns[end + 1]!) === tree) end += 1;
+    while (end + 1 < turns.length && spinning(turns[end + 1]!)) end += 1;
     const run = turns.slice(start, end + 1);
-    if (run.length >= 3) {
-      findings.push({ fromTurn: run[0]!, toTurn: run[run.length - 1]!, tree, turns: run });
+    // Only after something has failed. Without that, turns like these are a conversation.
+    const afterError = firstErrorTurn !== undefined && run[0]! >= firstErrorTurn;
+    if (run.length >= MIN_SPIN_TURNS && afterError) {
+      findings.push({
+        fromTurn: run[0]!,
+        toTurn: run[run.length - 1]!,
+        turns: run,
+        kind: 'error-spin',
+        tree: treeAt(events, run[run.length - 1]!),
+      });
     }
     start = end + 1;
   }
   return findings;
+}
+
+/** The last filesystem tree seen in a turn, as context on a finding. */
+function treeAt(events: TraceEvent[], turn: number): string | undefined {
+  let tree: string | undefined;
+  for (const event of events) {
+    if (event.type !== 'fs.snapshot' || event.turn !== turn) continue;
+    const value = attrs(event)['tree'];
+    if (typeof value === 'string' && value !== '') tree = value;
+  }
+  return tree;
 }
 
 /** `842ms`, `9.4s`, `42s`, `4m 51s`, `2h 14m`. Fixed shapes so columns line up. */

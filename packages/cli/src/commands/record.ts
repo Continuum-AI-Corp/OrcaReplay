@@ -4,7 +4,7 @@ import { delimiter, resolve } from 'node:path';
 import { TraceWriter, ensureRunsDir } from '@orcareplay/core';
 import { FsCapture } from '@orcareplay/fs-capture';
 import { createProxy, RunCa, type NetExchange, type RecordedExchange } from '@orcareplay/proxy';
-import { defaultAdapters } from '@orcareplay/adapters';
+import { captureSession, defaultAdapters, resolveLaunch, snapshotDir } from '@orcareplay/adapters';
 import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
 import { installShellShim, readShellFrames } from '@orcareplay/shell-shim';
@@ -42,6 +42,19 @@ export interface RecordResult {
  * happens before any teardown runs. Owning the key's lifetime out here means no failure path
  * inside can skip it.
  */
+/**
+ * Whether a tool call ran a command.
+ *
+ * By the shape of the arguments rather than by the tool's name: every harness names it something
+ * different — `Bash`, `shell`, `run_command`, `exec` — and a list of names would be wrong for the
+ * next one. A `command` string is what they all have in common.
+ */
+function isCommandTool(input: unknown): boolean {
+  if (input === null || typeof input !== 'object') return false;
+  const command = (input as { command?: unknown }).command;
+  return typeof command === 'string' && command.trim() !== '';
+}
+
 export async function recordCommand(
   args: ParsedArgs,
   out: Output,
@@ -168,6 +181,18 @@ async function runRecording(
 
   /** Model exchanges the proxy actually captured — the number the warning below turns on. */
   let modelExchanges = 0;
+  /**
+   * Tool calls that ran a command, counted from the model exchanges rather than from the shim.
+   *
+   * This is the evidence half of the shell-shim check. The shim reports success when it installs,
+   * which says nothing about whether the harness ever went through it: Claude Code on Windows
+   * resolves its shell without consulting PATH, so `shell=on` printed happily while the frames
+   * file stayed empty for a run full of Bash calls. Comparing what the model asked for against
+   * what the shim saw is what turns that silence into something orca can say out loud.
+   */
+  let commandToolCalls = 0;
+  /** Commands the shim actually saw. Zero against a non-zero `commandToolCalls` is the warning. */
+  let shellFrames = 0;
 
   const proxy = await createProxy({
     mode: 'record',
@@ -189,7 +214,11 @@ async function runRecording(
   async function persist(exchange: RecordedExchange): Promise<void> {
     turn += 1;
     turnStartedAt.push({ turn, at: Date.now() });
-    await appendDerivedEvents(writer, deriver, exchange, turn);
+    await appendDerivedEvents(writer, deriver, exchange, turn, (derived) => {
+      if (derived.type === 'tool.call' && isCommandTool(derived.attrs['input'])) {
+        commandToolCalls += 1;
+      }
+    });
 
     if (fs) await appendSnapshot(fs, writer, out, turn);
   }
@@ -212,10 +241,30 @@ async function runRecording(
     env: process.env,
   };
   const launch = await adapter.prepare(ctx);
+
+  // Listed before the agent starts, so the file it writes can be told from the ones already there.
+  // The harness's transcript is the only record of what the person typed; without it an
+  // interactive run is captured but not replayable.
+  const sessionBefore = await snapshotDir(adapter.session?.dir(cwd, process.env));
+
   if (shell) {
     launch.env.PATH = `${shell.dir}${delimiter}${process.env.PATH ?? ''}`;
   }
-  if (mcp) pointAtMcpConfig(launch.env, mcp.configPath);
+  if (mcp) {
+    pointAtMcpConfig(launch.env, mcp.configPath);
+    // The variables above are belt and braces for a harness orca has not met. What actually
+    // reaches Claude Code is this: it takes the path on the command line and reads no environment
+    // variable for it, so without this the instrumented config was written and never opened.
+    const mcpArgs = adapter.mcpConfigArgs?.(mcp.configPath);
+    if (mcpArgs !== undefined) launch.args = [...mcpArgs, ...launch.args];
+    else
+      out.warn('mcp.not_wired', {
+        adapter: adapter.id,
+        cause: `${adapter.id} has no command-line form for an MCP config, and reads none of the variables orca sets`,
+        effect:
+          'the instrumented config exists but the agent will not load it, so no MCP frames will be captured',
+      });
+  }
 
   if (proxy.tls) {
     await trustRunCa(writer, proxy.tls, proxy.url, launch.env, out);
@@ -277,7 +326,9 @@ async function runRecording(
     // exited, so stamping them at write time put every shell command at the end of the run with
     // the final turn number — which makes `mono_us` describe the drain rather than the command,
     // and leaves the commands unable to interleave with the model turns they happened between.
-    for (const frame of await readShellFrames(shell.framesPath)) {
+    const frames = await readShellFrames(shell.framesPath);
+    shellFrames = frames.length;
+    for (const frame of frames) {
       const startedAt = Date.parse(frame.startedAt);
       const at = Number.isNaN(startedAt) ? undefined : new Date(startedAt);
       const frameTurn = at === undefined ? turn : turnAt(startedAt);
@@ -333,6 +384,41 @@ async function runRecording(
     }
   }
 
+  /**
+   * The harness's own transcript, and with it the prompts nothing on the wire carries.
+   *
+   * Written before `run.end` so it is part of the run rather than an appendix, and stored as the
+   * harness's own bytes so a fork can put the file back and resume into it natively.
+   */
+  let session: Awaited<ReturnType<typeof captureSession>>;
+  if (adapter.session) {
+    try {
+      session = await captureSession(adapter.session, cwd, process.env, sessionBefore);
+    } catch (err) {
+      out.warn('session.unavailable', { reason: String(err) });
+    }
+  }
+  if (session) {
+    await writer.append({
+      type: 'session.snapshot',
+      actor: 'harness',
+      turn,
+      attrs: {
+        harness: adapter.id,
+        session_id: session.id,
+        rel_path: session.relPath,
+        prompts: session.prompts.length,
+        bytes: session.bytes.byteLength,
+      },
+      // The writer spills anything over the inline limit to a content-addressed blob, so the
+      // transcript rides the same path every other large payload does — redaction included.
+      payload: {
+        prompts: session.prompts,
+        transcript: new TextDecoder().decode(session.bytes),
+      },
+    });
+  }
+
   await writer.append({ type: 'run.end', actor: 'orca', turn, attrs: { exit_code: exitCode } });
   const manifest = await writer.close(exitCode);
 
@@ -368,6 +454,50 @@ async function runRecording(
     });
   }
 
+  /**
+   * Shell capture that was on and recorded nothing.
+   *
+   * `installShellShim` succeeding means a `bash` and an `sh` were written into the run directory
+   * and put at the front of PATH. It does not mean the harness went through them, and on Windows
+   * Claude Code does not: it finds its shell without consulting PATH, so the shim sits there
+   * unused while `shell=on` is printed and the frames file stays empty. What is lost is precisely
+   * what only the shim can see — the real exit code, the real duration, and which stream each byte
+   * came from — while the commands still appear as tool calls, so nothing looks wrong.
+   *
+   * The condition is evidence, not a platform check: commands demonstrably ran and the layer that
+   * was supposed to see them saw none of them, whatever the reason.
+   */
+  if (shell && shellFrames === 0 && commandToolCalls > 0) {
+    out.warn('shell.ineffective', {
+      commands: commandToolCalls,
+      captured: 0,
+      cause: 'the harness ran its shell without going through the PATH shim',
+      effect: 'exit codes, durations and the stdout/stderr split are not in this trace',
+      next: 'record with --no-shell, which claims nothing rather than claiming this',
+    });
+  }
+
+  /**
+   * A recording that captured turns but cannot be replayed.
+   *
+   * `capture.empty` covers the run that recorded nothing. This is the other half: an interactive
+   * run records its model calls perfectly, but the prompts that caused them were typed into a
+   * terminal and exist nowhere orca can see. Replaying it launches an agent with nothing to make
+   * it ask anything, and it comes back blank — which the user discovers only after paying for the
+   * recording. Saying so here, while they are still looking at it, is the whole point.
+   */
+  const drivable = args.passthrough.length > 0 || (session?.prompts.length ?? 0) > 0;
+  if (modelExchanges > 0 && !drivable) {
+    out.warn('replay.undrivable', {
+      exchanges: modelExchanges,
+      cause: adapter.session
+        ? 'no prompt in argv, and none found in the harness transcript'
+        : `no prompt in argv, and ${adapter.id} exposes no transcript orca can read`,
+      effect: 'this run can be inspected, but replay and fork have nothing to drive the agent with',
+      next: `orca show ${writer.runId}`,
+    });
+  }
+
   out.plain('');
   out.plain(`  orca replay ${writer.runId}            # reproduce it exactly`);
   out.plain(`  orca replay ${writer.runId} --ui       # open the timeline`);
@@ -391,17 +521,21 @@ async function runRecording(
  * agent's own chatter is still shown — it moves to stderr, where a human reads it and a parser
  * does not. stdin and stderr stay inherited so the agent can still prompt and still colour.
  */
-function runChild(
+async function runChild(
   command: string,
   argv: string[],
   env: NodeJS.ProcessEnv,
   cwd: string,
   quietStdout = false,
 ): Promise<number> {
+  // Resolved the way detection resolves, so a launcher never reports ENOENT for an agent that
+  // `orca doctor` just called present.
+  const target = await resolveLaunch(command, argv);
   return new Promise((resolve, reject) => {
-    const child = spawn(command, argv, {
+    const child = spawn(target.file, target.args, {
       env,
       cwd,
+      shell: target.shell,
       stdio: quietStdout ? ['inherit', 'pipe', 'inherit'] : 'inherit',
     });
     child.stdout?.pipe(process.stderr);

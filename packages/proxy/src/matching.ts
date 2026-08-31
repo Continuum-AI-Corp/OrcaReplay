@@ -34,6 +34,16 @@ export interface MatchResult {
   index: number;
   divergence?: Divergence;
   reason?: string;
+  /**
+   * Recorded requests passed over to reach this one.
+   *
+   * A recording holds calls the harness made for itself — a quota probe before the first turn, a
+   * request to name the session — and a replay driven without a terminal does not repeat them. The
+   * cursor used to stop dead at the first of those, so a recording of an ordinary interactive
+   * session could not be replayed at all. Skipping is only ever done onto an exact or near-exact
+   * match, and is reported here because a silently skipped exchange is a replay that lies.
+   */
+  skipped?: number;
 }
 
 /** Fields that change every run and say nothing about what was asked. */
@@ -49,6 +59,15 @@ const VOLATILE_METADATA = new Set([
 
 /** Rung 2 accepts differences up to this share of the request's total size. */
 const MINOR_DISTANCE_RATIO = 0.15;
+
+/**
+ * How many unplayed recorded requests a live one may step over.
+ *
+ * Small on purpose. The calls a harness makes for itself cluster at the start of a session — a
+ * quota probe, a title — so a handful is enough for the case this exists for, and a wide window
+ * turns a coincidental near-match into a wrong answer served under a `minor` label.
+ */
+const LOOKAHEAD = 8;
 
 /**
  * Reduce a request to what actually determines the model's answer: same model, same conversation,
@@ -335,6 +354,20 @@ export interface MatcherOptions {
  * a conversation replays forwards, so a match behind the cursor would mean the agent went
  * backwards, which is a divergence rather than a match.
  */
+/**
+ * Tools the recording had and the replay does not.
+ *
+ * The reason a miss is worth naming rather than counting. A session recorded through a terminal is
+ * offered tools that only make sense with a person in front of it — asking a question, entering
+ * plan mode, ending the conversation — and a replay driven without one is not offered them. Their
+ * schemas are large, so the distance runs into the hundreds of thousands and reads as a corrupted
+ * trace, when what happened is that the same agent was started two different ways.
+ */
+function toolsOnlyInRecording(live: CanonicalRequest, recorded: CanonicalRequest): string[] {
+  const replayed = new Set((live.tools ?? []).map((t) => t.name));
+  return (recorded.tools ?? []).map((t) => t.name).filter((name) => !replayed.has(name));
+}
+
 export class RequestMatcher {
   readonly #recorded: CanonicalRequest[];
   /** Redacted but unfolded — rung 1 compares these, so "exact" still means exact. */
@@ -372,13 +405,54 @@ export class RequestMatcher {
       };
     }
 
-    const index = this.#cursor;
+    const at = this.#matchAt(incoming, this.#cursor);
+    if (at.matched) {
+      this.#cursor = at.index + 1;
+      return at;
+    }
+
+    // Nothing at the cursor. Before halting, look for this request further along: a recording made
+    // through a terminal carries calls the harness made for itself — a quota probe, a request to
+    // name the session — and a replay driven from a transcript never repeats them. Only an exact
+    // or near-exact match is worth stepping over an unplayed exchange for; anything looser and the
+    // agent would be handed some other turn's answer.
+    for (let ahead = this.#cursor + 1; ahead <= this.#lookaheadLimit(); ahead += 1) {
+      const later = this.#matchAt(incoming, ahead);
+      if (!later.matched || later.rung > 2) continue;
+      const skipped = ahead - this.#cursor;
+      this.#cursor = ahead + 1;
+      const skippedNote =
+        `, skipping ${skipped} recorded ${skipped === 1 ? 'request' : 'requests'} ` +
+        'the replay did not repeat';
+      return {
+        ...later,
+        skipped,
+        // Always said, even when the match had a divergence of its own: a skipped exchange that
+        // goes unmentioned is a replay claiming to have reproduced something it stepped over.
+        divergence: {
+          level: later.divergence?.level ?? 'minor',
+          rung: later.rung,
+          distance: later.divergence?.distance ?? 0,
+          detail: `${later.divergence?.detail ?? `matched request ${ahead}`}${skippedNote}`,
+        },
+      };
+    }
+
+    return at;
+  }
+
+  /** How far ahead a skip may reach. Bounded: past this, a match is more likely a coincidence. */
+  #lookaheadLimit(): number {
+    return Math.min(this.#cursor + LOOKAHEAD, this.#recorded.length - 1);
+  }
+
+  /** Match against one recorded request, without moving the cursor. */
+  #matchAt(incoming: CanonicalRequest, index: number): MatchResult {
     const recorded = this.#comparable[index]!;
 
     // Rung 1 — canonical hash. Redacted the same way the recording was, but not folded: a request
     // only counts as exact when nothing in it had to be approximated.
     if (hashOf(redactedForm(incoming, this.#redactor)) === this.#strict[index]) {
-      this.#cursor += 1;
       return { matched: true, rung: 1, index };
     }
 
@@ -391,7 +465,6 @@ export class RequestMatcher {
     // is reported rather than waved through: this is the ordinary shape of replaying a real
     // harness, whose own prompt carries a session id.
     if (distance === 0) {
-      this.#cursor += 1;
       const secrets = this.#secrets[index]!;
       return {
         matched: true,
@@ -423,7 +496,6 @@ export class RequestMatcher {
       messageCount(live) === messageCount(recorded) &&
       distance <= Math.max(64, size * MINOR_DISTANCE_RATIO)
     ) {
-      this.#cursor += 1;
       return {
         matched: true,
         rung: 2,
@@ -442,7 +514,6 @@ export class RequestMatcher {
 
     // Rung 3 — the ask is the same, the history is not. Typical after context compaction.
     if (sameAsk) {
-      this.#cursor += 1;
       return {
         matched: true,
         rung: 3,
@@ -468,7 +539,6 @@ export class RequestMatcher {
     // A message count that differs is already covered: `leafDistance` charges the full weight of
     // any message only one side has, so it cannot come back zero.
     if (leafDistance(withoutToolOutput(live), withoutToolOutput(recorded)) === 0) {
-      this.#cursor += 1;
       return {
         matched: true,
         rung: 3,
@@ -485,6 +555,7 @@ export class RequestMatcher {
     }
 
     // Rung 4 — no match. Halt and report; the caller decides whether --loose continues live.
+    const missingTools = toolsOnlyInRecording(incoming, this.#recorded[index]!);
     return {
       matched: false,
       rung: 4,
@@ -492,7 +563,13 @@ export class RequestMatcher {
       reason:
         `request ${index} does not match the recording ` +
         `(distance ${distance}, ${messageCount(recorded)} recorded vs ` +
-        `${messageCount(live)} replayed messages)`,
+        `${messageCount(live)} replayed messages)` +
+        (missingTools.length === 0
+          ? ''
+          : `; the recording offered ${missingTools.length} tools this replay is not: ` +
+            `${missingTools.slice(0, 6).join(', ')}` +
+            `${missingTools.length > 6 ? ', …' : ''}` +
+            ' — a session recorded through a terminal carries tools that need one'),
     };
   }
 }

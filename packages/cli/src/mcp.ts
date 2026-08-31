@@ -68,10 +68,12 @@ export function usedMcp(events: { type: string }[]): boolean {
  * no MCP calls" instead of "orca was not looking".
  */
 export async function mcpForReplay(
-  args: { str(name: string): string | undefined },
+  args: { str(name: string): string | undefined; bool?(name: string, dflt?: boolean): boolean },
   events: { type: string; attrs?: Record<string, unknown> }[],
   writer: TraceWriter,
   out: Output,
+  /** The recording's own frames, so the servers are answered from rather than started. */
+  recordedFrames?: string,
 ): Promise<McpCapture | undefined> {
   const source = mcpSourceFrom(args.str('mcp-config'), events);
   if (source === undefined) {
@@ -90,7 +92,15 @@ export async function mcpForReplay(
     });
     return undefined;
   }
-  return setupMcpCapture({ sourceConfigPath: source, runDir: writer.runDir, out });
+  return setupMcpCapture({
+    sourceConfigPath: source,
+    runDir: writer.runDir,
+    out,
+    // A replay that starts the real servers is not a replay of them: it is a second live run whose
+    // answers happen to be read back through the same shim. Answering from the recording is what
+    // makes an MCP run reproducible after the server it talked to is gone.
+    ...(recordedFrames === undefined ? {} : { replayFrames: recordedFrames }),
+  });
 }
 
 /**
@@ -147,6 +157,16 @@ export async function setupMcpCapture(opts: {
   sourceConfigPath: string;
   runDir: string;
   out: Output;
+  /**
+   * Frames to answer from instead of starting the servers.
+   *
+   * Capture was only half of what this layer is for. The reason to record a server's traffic is
+   * that the run stays reproducible once the server is not — the token revoked, the repository
+   * moved, the service retired. Replay re-instrumented the same config and started the real server
+   * again, so an MCP recording could be read but not reproduced, and came apart on the first call
+   * when the server had gone. Pointed at a capture, the shim serves from it and launches nothing.
+   */
+  replayFrames?: string;
 }): Promise<McpCapture | undefined> {
   const raw = await readFile(opts.sourceConfigPath, 'utf8').catch(() => undefined);
   if (raw === undefined) {
@@ -164,11 +184,14 @@ export async function setupMcpCapture(opts: {
 
   const framesPath = join(opts.runDir, 'mcp-frames.jsonl');
   const shim = resolveShimEntry();
-  const { config, rewritten, skipped } = rewriteMcpConfig(parsed, process.execPath, [
-    shim,
-    '--out',
-    framesPath,
-  ]);
+  // Recording and replay are the same rewrite with a different flag: `--out` writes what the
+  // servers say, `--replay` says it back. Both keep `--out` so a replay records its own frames and
+  // is itself a run that can be read.
+  const shimArgs =
+    opts.replayFrames === undefined
+      ? [shim, '--out', framesPath]
+      : [shim, '--out', framesPath, '--replay', opts.replayFrames];
+  const { config, rewritten, skipped } = rewriteMcpConfig(parsed, process.execPath, shimArgs);
 
   const configPath = join(opts.runDir, 'mcp-config.json');
   await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
@@ -176,6 +199,7 @@ export async function setupMcpCapture(opts: {
   opts.out.info('mcp.instrumented', {
     servers: rewritten.length,
     skipped: skipped.length,
+    mode: opts.replayFrames === undefined ? 'record' : 'replay',
     config: configPath,
   });
 

@@ -330,14 +330,25 @@ describe('document structure', () => {
     expect(html).toContain('Recorded with OrcaReplay');
   });
 
+  // Three turns on one tree used to be the definition of a loop, and is now the definition of a
+  // conversation. What the page has to surface is the agent repeating an action.
   it('surfaces loop findings from the derived analyzer', () => {
+    const call = (turn: number) =>
+      ev({ type: 'tool.call', turn, actor: 'model', attrs: { name: 'grep', input: { q: 'JWT' } } });
+    const html = renderTraceHtml({
+      manifest: manifest(),
+      events: [call(0), call(1), call(2)],
+    });
+    expect(html).toContain('LOOP');
+    expect(html).toMatch(/turns 0.{1,3}2/);
+  });
+
+  it('does not call a conversation a loop', () => {
     const html = renderTraceHtml({
       manifest: manifest(),
       events: [snap(0, 'tree_b'), snap(1, 'tree_b'), snap(2, 'tree_b')],
     });
-    expect(html).toContain('LOOP');
-    expect(html).toContain('tree_b');
-    expect(html).toMatch(/turns 0.{1,3}2/);
+    expect(html).not.toContain('LOOP');
   });
 });
 

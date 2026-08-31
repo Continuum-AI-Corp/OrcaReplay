@@ -55,6 +55,8 @@ export async function appendSnapshot(
         status: change.status,
         insertions: change.insertions,
         deletions: change.deletions,
+        // Only when true, so a trace is not littered with a false on every unremarkable change.
+        ...(change.eolOnly === true ? { eol_only: true } : {}),
       },
     });
   }
