@@ -324,79 +324,178 @@ describe('summarize', () => {
 });
 
 describe('detectLoops', () => {
-  it('finds three or more consecutive turns with the same tree', () => {
-    const events = [
-      snap(0, 'tree_a'),
-      snap(1, 'tree_b'),
-      snap(2, 'tree_b'),
-      snap(3, 'tree_b'),
-      snap(4, 'tree_c'),
-    ];
-    const found = detectLoops(events);
-    expect(found).toHaveLength(1);
-    expect(found[0]).toEqual({ fromTurn: 1, toTurn: 3, tree: 'tree_b', turns: [1, 2, 3] });
-  });
+  /**
+   * The detector this replaced asked only whether the filesystem tree had changed, and called
+   * three turns on one tree a loop. Every one of these cases came back positive under it: a
+   * question answered in prose, a plan discussed before the first edit, a run that simply had no
+   * files to write. A finding that fires on almost every session is not a finding, so what is
+   * checked here is the agent repeating itself.
+   */
+  const call = (turn: number, name: string, input: unknown = {}) =>
+    ev({ type: 'tool.call', turn, actor: 'model', attrs: { name }, payload: input as never });
+  const model = (turn: number) => ev({ type: 'model.request', turn, actor: 'agent' });
+  const failure = (turn: number) =>
+    ev({ type: 'tool.result', turn, actor: 'tool', attrs: { is_error: true } });
 
-  it('does not flag two consecutive turns', () => {
-    expect(detectLoops([snap(0, 'tree_a'), snap(1, 'tree_a'), snap(2, 'tree_b')])).toEqual([]);
-  });
-
-  it('does not flag a repeated tree that is interrupted by real work', () => {
-    const events = [snap(0, 'tree_a'), snap(1, 'tree_a'), snap(2, 'tree_z'), snap(3, 'tree_a')];
-    expect(detectLoops(events)).toEqual([]);
-  });
-
-  it('uses the last snapshot in a turn as that turn end state', () => {
-    const events = [
-      snap(0, 'tree_a'),
-      snap(1, 'tree_x'),
-      snap(1, 'tree_a'),
-      snap(2, 'tree_a'),
-      snap(3, 'tree_a'),
-    ];
-    const found = detectLoops(events);
-    expect(found).toHaveLength(1);
-    expect(found[0]!.turns).toEqual([0, 1, 2, 3]);
-  });
-
-  it('reports several independent loops', () => {
-    const events = [
-      snap(0, 'a'),
-      snap(1, 'a'),
-      snap(2, 'a'),
-      snap(3, 'b'),
-      snap(4, 'c'),
-      snap(5, 'c'),
-      snap(6, 'c'),
-      snap(7, 'c'),
-    ];
-    const found = detectLoops(events);
-    expect(found.map((f) => [f.fromTurn, f.toTurn])).toEqual([
-      [0, 2],
-      [4, 7],
+  it('finds the same call repeated three times', () => {
+    resetSeq();
+    const found = detectLoops([
+      call(1, 'grep', { q: 'JWT' }),
+      call(2, 'grep', { q: 'JWT' }),
+      call(3, 'grep', { q: 'JWT' }),
     ]);
-    expect(found[1]!.turns).toEqual([4, 5, 6, 7]);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.kind).toBe('repeated-action');
+    expect(found[0]!.repeats).toBe(3);
+    expect(found[0]!.turns).toEqual([1, 2, 3]);
   });
 
-  it('ignores snapshots with no tree and traces with none at all', () => {
-    expect(detectLoops([])).toEqual([]);
+  // Two of anything is a retry, and retries are how agents work.
+  it('does not flag a call made twice', () => {
+    resetSeq();
+    expect(detectLoops([call(1, 'grep'), call(2, 'grep')])).toEqual([]);
+  });
+
+  it('finds a two-call cycle going round three times', () => {
+    resetSeq();
+    const found = detectLoops([
+      call(1, 'edit'),
+      call(1, 'test'),
+      call(2, 'edit'),
+      call(2, 'test'),
+      call(3, 'edit'),
+      call(3, 'test'),
+    ]);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.repeats).toBe(3);
+  });
+
+  // Same tool, different arguments, is work — reading three files is not a loop.
+  it('separates calls by their arguments, not only by tool name', () => {
+    resetSeq();
     expect(
       detectLoops([
-        ev({ type: 'fs.snapshot', turn: 0, attrs: {} }),
-        ev({ type: 'fs.snapshot', turn: 1, attrs: {} }),
-        ev({ type: 'fs.snapshot', turn: 2, attrs: {} }),
+        call(1, 'read', { path: 'a' }),
+        call(2, 'read', { path: 'b' }),
+        call(3, 'read', { path: 'c' }),
       ]),
     ).toEqual([]);
   });
 
-  it('is not confused by non-snapshot events between turns', () => {
+  it('finds turns that call the model and do nothing, once something has failed', () => {
+    resetSeq();
+    const found = detectLoops([call(1, 'test'), failure(1), model(2), model(3)]);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.kind).toBe('error-spin');
+    expect(found[0]!.turns).toEqual([2, 3]);
+  });
+
+  /**
+   * The false positive that made the old detector useless, in the shape it actually took: orca
+   * snapshots the workspace before every model request, so a conversation that writes no files
+   * produces a run of turns all carrying the same tree. That is what the tree-based detector
+   * called a loop, and it is what answering a question looks like.
+   */
+  it('does not flag tool-less turns when nothing has failed', () => {
+    resetSeq();
     const events = [
-      snap(0, 'a'),
-      ev({ type: 'tool.call', turn: 0 }),
-      snap(1, 'a'),
-      ev({ type: 'shell.exec', turn: 1 }),
-      snap(2, 'a'),
+      snap(0, 'tree_a'),
+      model(0),
+      snap(1, 'tree_a'),
+      model(1),
+      snap(2, 'tree_a'),
+      model(2),
+      snap(3, 'tree_a'),
+      model(3),
     ];
-    expect(detectLoops(events)).toHaveLength(1);
+    expect(detectLoops(events)).toEqual([]);
+  });
+
+  it('does not flag a turn that did real work, even after a failure', () => {
+    resetSeq();
+    const found = detectLoops([failure(1), call(2, 'edit'), model(3), model(4)]);
+    expect(found.map((l) => l.turns)).toEqual([[3, 4]]);
+  });
+
+  it('reports several independent loops in order', () => {
+    resetSeq();
+    const found = detectLoops([
+      call(1, 'a'),
+      call(2, 'a'),
+      call(3, 'a'),
+      call(4, 'b'),
+      call(5, 'c'),
+      call(6, 'c'),
+      call(7, 'c'),
+    ]);
+    expect(found.map((l) => l.turns)).toEqual([
+      [1, 2, 3],
+      [5, 6, 7],
+    ]);
+  });
+});
+
+describe('buildTimeline depth', () => {
+  /**
+   * A harness that delegates runs the delegate's model and tool calls through the same proxy, so
+   * they land in the same flat sequence as the parent's. Before this, a run that spawned an
+   * Explore agent read as one stream with no line saying whose work it was — six Bash calls the
+   * parent never made, indistinguishable from six the parent did.
+   */
+  const agentCall = (seq: number) =>
+    ev({
+      seq,
+      type: 'tool.call',
+      actor: 'model',
+      attrs: { name: 'Agent', input: { subagent_type: 'Explore' } },
+    });
+  const agentResult = (seq: number, causes: number[]) =>
+    ev({ seq, type: 'tool.result', actor: 'tool', causes, attrs: { name: 'Agent' } });
+  const plain = (seq: number) => ev({ seq, type: 'model.request', actor: 'agent' });
+
+  it('nests the work between a delegation and the result that closes it', () => {
+    const rows = buildTimeline([
+      plain(0),
+      agentCall(1),
+      plain(2),
+      plain(3),
+      agentResult(4, [1]),
+      plain(5),
+    ]);
+    expect(rows.map((r) => r.depth)).toEqual([0, 0, 1, 1, 1, 0]);
+  });
+
+  it('nests a delegation inside a delegation', () => {
+    const rows = buildTimeline([
+      agentCall(0),
+      agentCall(1),
+      plain(2),
+      agentResult(3, [1]),
+      plain(4),
+      agentResult(5, [0]),
+      plain(6),
+    ]);
+    expect(rows.map((r) => r.depth)).toEqual([0, 1, 2, 2, 1, 1, 0]);
+  });
+
+  // An ordinary tool call is not a delegation, however many of them there are.
+  it('leaves a run with no delegation flat', () => {
+    const rows = buildTimeline([
+      plain(0),
+      ev({
+        seq: 1,
+        type: 'tool.call',
+        actor: 'model',
+        attrs: { name: 'Bash', input: { command: 'ls' } },
+      }),
+      ev({ seq: 2, type: 'tool.result', actor: 'tool', causes: [1], attrs: { name: 'Bash' } }),
+    ]);
+    expect(rows.map((r) => r.depth)).toEqual([0, 0, 0]);
+  });
+
+  // A delegation whose result never arrived — the run was killed — must not swallow the rest.
+  it('does not nest forever when the closing result is missing', () => {
+    const rows = buildTimeline([agentCall(0), plain(1), plain(2)]);
+    expect(rows.map((r) => r.depth)).toEqual([0, 0, 0]);
   });
 });

@@ -95,10 +95,13 @@ export async function showCommand(
   // empty cell for everything else — which quietly dropped a shell command's exit code, a tool
   // result's success or failure, and the stop reason, leaving a call and its result looking like
   // the same row printed twice.
-  const rows = buildTimeline(events).map((r) => [
+  // Indented by delegation depth, so a sub-agent's model and tool calls read as its work rather
+  // than as more of the parent's. `└─` on the first nested row marks where the delegation begins.
+  const timeline = buildTimeline(events);
+  const rows = timeline.map((r, i) => [
     String(r.seq),
     r.kind,
-    r.label,
+    `${nestPrefix(r.depth, timeline[i - 1]?.depth ?? 0)}${r.label}`,
     [r.detail, r.meta].filter((part) => part !== undefined && part !== '').join(' · '),
   ]);
   out.table(['SEQ', 'KIND', 'WHAT', 'DETAIL'], rows);
@@ -106,7 +109,15 @@ export async function showCommand(
   const loops = detectLoops(events);
   for (const loop of loops) {
     out.plain('');
-    out.warn('loop.detected', { turns: loop.turns.join(','), tree: loop.tree.slice(0, 8) });
+    // The signature is the point of the warning: "the same grep, four times" is something an
+    // operator can act on, where a list of turn numbers is something they have to go and look up.
+    out.warn('loop.detected', {
+      kind: loop.kind,
+      turns: loop.turns.join(','),
+      repeats: loop.repeats,
+      action: loop.signature,
+      tree: loop.tree?.slice(0, 8),
+    });
   }
 
   const cost = totalCost(events);
@@ -339,4 +350,10 @@ function totalCost(events: { type: string; attrs?: Record<string, unknown> }[]):
     }
   }
   return priced ? total : null;
+}
+
+/** `  `-per-level indent, with `└─` on the row where a delegation's work starts. */
+function nestPrefix(depth: number, previousDepth: number): string {
+  if (depth === 0) return '';
+  return '  '.repeat(depth - 1) + (depth > previousDepth ? '└─ ' : '   ');
 }

@@ -64,8 +64,14 @@ export interface Timeline {
   forkModel?: string;
   usage: { input: number; output: number };
   events: TimelineRow[];
-  /** Turns whose filesystem tree repeated — an agent going in circles. */
-  loops: { turns: number[]; tree: string }[];
+  /** Runs where the agent repeated itself rather than making progress. */
+  loops: {
+    turns: number[];
+    kind: 'repeated-action' | 'error-spin';
+    signature?: string;
+    repeats?: number;
+    tree?: string;
+  }[];
 }
 
 export interface RecordOptions {
@@ -162,7 +168,13 @@ export class Orca {
         detail: row.detail,
         meta: row.meta,
       })),
-      loops: detectLoops(events).map((loop) => ({ turns: loop.turns, tree: loop.tree })),
+      loops: detectLoops(events).map((loop) => ({
+        turns: loop.turns,
+        kind: loop.kind,
+        signature: loop.signature,
+        repeats: loop.repeats,
+        tree: loop.tree,
+      })),
     };
   }
 
