@@ -7,6 +7,7 @@
 
 export { CLIENT_SOURCE } from './client/main.js';
 export * from './bundle.js';
+export * from './credit.js';
 export * from './css.js';
 export * from './export.js';
 export * from './html.js';

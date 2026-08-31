@@ -172,6 +172,45 @@ l'exécution a masqués : le fichier a bien changé (seq 6, `+1 −3`), la véri
 l'agent a **échoué** (seq 12, `exit 1`), et il s'est arrêté quand même. L'exécution est sortie avec
 0 parce que l'*agent* est sorti avec 0.
 
+Ce dernier fait mérite sa propre commande. `orca show` donne l'ordre dans lequel les choses se
+sont produites ; `orca graph` donne ce qui a produit quoi :
+
+```console
+$ orca graph last
+FROM              TO               KIND      WHY
+3 model.response  4 tool.call      recorded  tool_use block in the response
+4 tool.call       6 fs.change      inferred  changed path appears in tool input, same or previous turn
+4 tool.call       7 tool.result    recorded  tool result answers its call
+7 tool.result     8 model.request  recorded  tool_result block in the request
+
+  1 inferred — derived from this trace, not recorded in it
+```
+
+Deux sortes d'arête, et la différence compte. Une arête **recorded** a été écrite au moment du run,
+parce qu'un bloc `tool_use` se trouve physiquement dans la réponse qui l'a émis. Une arête
+**inferred** vient d'être déduite selon la règle qu'elle nomme — un instantané du système de
+fichiers est pris une fois par tour et non une fois par appel d'outil, donc attribuer une
+modification de fichier à un appel *précis* est une bonne supposition et pas un fait. Les arêtes
+inférées ne sont jamais réécrites dans le trace, comme les checkpoints sont dérivés et jamais
+enregistrés.
+
+`orca export last --card bug.svg` dessine cette chaîne comme une image à coller dans une issue, et
+`--graph-card` dessine tout le run avec la chaîne mise en avant.
+
+Le SVG s'affiche dans une issue GitHub et presque nulle part ailleurs qui compte — X ne l'accepte
+pas en envoi, Slack et Discord n'en font pas d'aperçu — alors nommez le fichier `.png` et vous en
+aurez un, ou `.gif` et la chaîne se construit d'un saut à la fois. Ce chemin demande un navigateur,
+et orca n'en dépend pas : `docs/media/README.md` garde les outils de rendu hors de `package.json`
+pour que personne ne paie un téléchargement de Chromium avec `npm ci`. S'ils manquent, orca donne la
+seule ligne qui corrige cela ; `orca doctor` le signale de toute façon, et `.svg` n'a jamais besoin
+de rien.
+
+```console
+orca export last --card bug.png       # the chain, ready to post
+orca export last --card bug.gif       # the same chain, one hop per frame
+npm i --no-save playwright-core pngjs gifenc   # only needed for the two above
+```
+
 Reproduisez-la maintenant autant que vous voulez, gratuitement :
 
 ```console
@@ -412,7 +451,7 @@ $ orca checkpoints last --json | jq '.[-1].seq'
 Un seul document JSON sur stdout, les diagnostics sur stderr — y compris la sortie de l'agent
 enregistré, pour que le document reste analysable pendant qu'une exécution parle. Les échecs
 répondent aussi en JSON, avec un code de sortie non nul. `--json` couvre `list`, `show`, `events`,
-`checkpoints`, `record`, `replay`, `compare` et `doctor`.
+`checkpoints`, `graph`, `record`, `replay`, `compare` et `doctor`.
 
 **Comme outils.** `orca mcp` sert le magasin d'enregistrements à un agent via stdio :
 
@@ -420,7 +459,7 @@ répondent aussi en JSON, avec un code de sortie non nul. `--json` couvre `list`
 { "mcpServers": { "orca": { "command": "orca", "args": ["mcp"] } } }
 ```
 
-`orca_list_runs`, `orca_show_run`, `orca_checkpoints`, `orca_replay` et `orca_compare`. Le rejeu est
+`orca_list_runs`, `orca_show_run`, `orca_checkpoints`, `orca_graph`, `orca_replay` et `orca_compare`. Le rejeu est
 gratuit et hors ligne ; `orca_compare` dit dans sa propre description qu'il dépense de vrais tokens,
 parce qu'un modèle qui choisit un outil lit cette chaîne et rien d'autre.
 
@@ -449,7 +488,9 @@ Précoce. `v0` est le squelette qui marche des trois commandes ci-dessus.
 | Agents qui ne lisent aucune variable de base-URL | fonctionne — `orca record node -- <cmd>` écrit un préchargement dans le répertoire du run et redirige `globalThis.fetch` pour une liste blanche d'hôtes fournisseurs. Node et Bun, puisque Bun ignore `--require` dans `NODE_OPTIONS`. C'est ainsi qu'un agent Vercel AI SDK est capturé |
 | Un appel qu'orca ne sait pas lire | fonctionne — transmis plutôt que refusé, et consigné en `net.request` / `net.response` : une preuve, pas un tour rejouable. Un enregistrement qui n'a rien capturé avertit au lieu de se terminer proprement |
 | Sortie lisible par une machine (`--json`) | fonctionne — un document JSON sur stdout, les diagnostics sur stderr, les échecs aussi en JSON |
-| Serveur MCP (`orca mcp`) | fonctionne — cinq outils sur stdio, pour qu'un agent puisse lire et rejouer ses propres runs |
+| Graphe causal (`orca graph`) | fonctionne — ce qui a produit quoi, en tableau ou en JSON. Chaque arête dit si le trace l'a enregistrée ou si orca vient de la déduire, et nomme la règle dans les deux cas. `--to N` réduit à la chaîne qui a produit un événement |
+| Cartes partageables | fonctionne — `orca export --card` dessine une chaîne causale, `--graph-card` tout le run avec cette chaîne mise en avant, et `compare --share` le tableau des verdicts. Toujours `.svg` ; `.png` et `.gif` avec les outils de rendu optionnels, que `orca doctor` signale et que `npm ci` n'installe jamais |
+| Serveur MCP (`orca mcp`) | fonctionne — six outils sur stdio, pour qu'un agent puisse lire et rejouer ses propres runs |
 | API programmatique (`Orca`) | fonctionne — les commandes affichent ce qu'elle renvoie, le terminal n'est donc qu'une vue sur une seule vérité |
 | Rejeu exact avec rapport de divergence | fonctionne — restaure le système de fichiers enregistré par-dessus votre arbre de travail, puis le remet ; `--worktree` pour une copie jetable, `--in-place` pour ne rien restaurer. Écrit sa propre exécution consignant ce que le rejeu a *découvert* — divergences, requêtes non appariées — et pointe vers le parent pour ce qu'il n'a fait que répéter ; `--no-trace` pour s'en passer |
 | Rejeu bifurqué depuis un point de contrôle | fonctionne — une bifurcation enregistre ses propres instantanés de système de fichiers, c'est donc une exécution que l'on peut bifurquer à son tour |

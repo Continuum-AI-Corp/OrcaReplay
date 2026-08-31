@@ -15,7 +15,7 @@ import { createProxy, defaultDialects, type RecordedExchange } from '@orcareplay
 import { defaultAdapters } from '@orcareplay/adapters';
 import { serveViewer } from '@orcareplay/viewer';
 import { isBlobRef, type TraceEvent } from '@orcareplay/schema';
-import { ExchangeEventDeriver } from '../exchange-events.js';
+import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
 import { SerialQueue } from '../serial.js';
@@ -556,15 +556,7 @@ async function replayFork(
       writes.push(async () => {
         turn += 1;
         turnStartedAt.push({ turn, at: Date.now() });
-        for (const d of deriver.derive(exchange, turn)) {
-          await writer.append({
-            type: d.type,
-            actor: d.actor,
-            turn,
-            attrs: d.attrs,
-            payload: d.payload as never,
-          });
-        }
+        await appendDerivedEvents(writer, deriver, exchange, turn);
         if (forkFs) await appendSnapshot(forkFs, writer, out, turn);
       });
     },

@@ -163,6 +163,44 @@ info usage input=201 output=25 cost=$0.004890
 （seq 6、`+1 −3`）、エージェントが走らせた確認は**失敗していた**（seq 12、`exit 1`）、
 それでも終わりにした。実行が0で終わったのは、*エージェント*が0で終わったからにすぎない。
 
+この最後の事実は、それ専用のコマンドに値します。`orca show` は物事が起きた順序を示し、
+`orca graph` は何が何を生んだかを示します。
+
+```console
+$ orca graph last
+FROM              TO               KIND      WHY
+3 model.response  4 tool.call      recorded  tool_use block in the response
+4 tool.call       6 fs.change      inferred  changed path appears in tool input, same or previous turn
+4 tool.call       7 tool.result    recorded  tool result answers its call
+7 tool.result     8 model.request  recorded  tool_result block in the request
+
+  1 inferred — derived from this trace, not recorded in it
+```
+
+辺には二種類あり、その違いが重要です。**recorded** の辺は実行時に書かれたもので、`tool_use`
+ブロックはそれを発行したレスポンスの中に物理的に入っているからです。**inferred** の辺は、
+名前の付いた規則によって今この場で導出されたものです——ファイルシステムのスナップショットは
+ツール呼び出しごとではなくターンごとに一度取られるので、ファイル変更を*特定の*呼び出しに
+帰属させるのは、良い推測ではあっても事実ではありません。推論された辺が trace に書き戻される
+ことは決してありません。チェックポイントが導出され記録されないのと同じです。
+
+`orca export last --card bug.svg` はその連鎖を issue に貼れる絵として描き、`--graph-card` は
+実行全体をその連鎖を強調して描きます。
+
+SVG は GitHub の issue では表示されますが、それ以外の重要な場所ではほとんど表示されません——
+X はアップロードとして受け付けず、Slack や Discord はプレビューを出しません。ですからファイル名を
+`.png` にすれば PNG が、`.gif` にすれば一ホップずつ組み上がる GIF が得られます。この経路には
+ブラウザが必要ですが、orca はブラウザに依存しません。`docs/media/README.md` は描画ツールを
+`package.json` の外に置いており、`npm ci` を実行する人が Chromium のダウンロードを負担しないため
+です。無い場合、orca はそれを直す一行を提示します。`orca doctor` はいずれにせよ報告し、`.svg`
+は何も必要としません。
+
+```console
+orca export last --card bug.png       # the chain, ready to post
+orca export last --card bug.gif       # the same chain, one hop per frame
+npm i --no-save playwright-core pngjs gifenc   # only needed for the two above
+```
+
 あとは好きなだけ、無料で再現できる:
 
 ```console
@@ -383,7 +421,7 @@ $ orca checkpoints last --json | jq '.[-1].seq'
 
 stdout には JSON ドキュメントがひとつだけ、診断は stderr——記録中のエージェント自身の出力も stderr に
 回すので、実行が喋っている間もドキュメントは壊れません。失敗も JSON で返り、終了コードは非ゼロです。
-`--json` は `list`、`show`、`events`、`checkpoints`、`record`、`replay`、`compare`、`doctor` に対応します。
+`--json` は `list`、`show`、`events`、`checkpoints`、`graph`、`record`、`replay`、`compare`、`doctor` に対応します。
 
 **ツールとして。** `orca mcp` は stdio 経由で trace ストアをエージェントに渡します。
 
@@ -391,7 +429,7 @@ stdout には JSON ドキュメントがひとつだけ、診断は stderr——
 { "mcpServers": { "orca": { "command": "orca", "args": ["mcp"] } } }
 ```
 
-`orca_list_runs`、`orca_show_run`、`orca_checkpoints`、`orca_replay`、`orca_compare`。再生は無料で
+`orca_list_runs`、`orca_show_run`、`orca_checkpoints`、`orca_graph`、`orca_replay`、`orca_compare`。再生は無料で
 オフラインです。`orca_compare` は自分の説明文の中で「実際にトークンを使う」と明言しています。ツールを
 選ぶモデルが読むのはその文字列だけだからです。
 
@@ -420,7 +458,9 @@ const timeline = await orca.show('last');
 | base-URL 変数を読まないエージェント | 動作——`orca record node -- <cmd>` が実行ディレクトリにプリロードを書き、許可リストのプロバイダホストにだけ `globalThis.fetch` を向け替える。Bun は `NODE_OPTIONS` の `--require` を無視するので Node と Bun の両方に対応。Vercel AI SDK のエージェントはこれで捕捉する |
 | orca が読めない呼び出し | 動作——拒否せず転送し、`net.request` / `net.response` として記録する。証拠であって、再生できるターンではない。何も捕捉できなかった記録は、きれいに終了せず警告する |
 | 機械可読な出力（`--json`） | 動作——stdout に JSON ドキュメント一つ、診断は stderr、失敗も JSON |
-| MCP サーバ（`orca mcp`） | 動作——stdio で五つのツール。エージェントが自分の実行記録を読んで再生できる |
+| 因果グラフ（`orca graph`） | 動作——何が何を生んだかを、表または JSON で。各辺は trace が記録したものか orca が今導出したものかを述べ、どちらの場合も規則を名指しする。`--to N` である事象を生んだ連鎖に絞る |
+| 共有できるカード | 動作——`orca export --card` は一本の因果連鎖を、`--graph-card` は実行全体をその連鎖を強調して、`compare --share` は判定表を描く。`.svg` は常に、`.png` と `.gif` は任意の描画ツールがあるとき。`orca doctor` が報告し、`npm ci` は決して入れない |
+| MCP サーバ（`orca mcp`） | 動作——stdio で六つのツール。エージェントが自分の実行記録を読んで再生できる |
 | プログラム API（`Orca`） | 動作——コマンドはこれが返すものを描画するだけなので、端末は唯一の事実のひとつのビュー |
 | 差分報告つきの完全再生 | 動作——記録されたファイルシステムを作業ツリーに復元し、終了後に戻す。`--worktree` で使い捨てコピー、`--in-place` で復元なし。再生が*発見*したこと（差分、未一致リクエスト）を記録する自前の run を書き、単に繰り返しただけの部分は親を指す。`--no-trace` で省略 |
 | チェックポイントからの分岐再生 | 動作——分岐は自身のファイルシステムスナップショットを記録するので、それ自体をさらに分岐できる |

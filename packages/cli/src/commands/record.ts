@@ -6,7 +6,7 @@ import { FsCapture } from '@orcareplay/fs-capture';
 import { createProxy, RunCa, type NetExchange, type RecordedExchange } from '@orcareplay/proxy';
 import { defaultAdapters } from '@orcareplay/adapters';
 import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
-import { ExchangeEventDeriver } from '../exchange-events.js';
+import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
 import { installShellShim, readShellFrames } from '@orcareplay/shell-shim';
 import { drainMcpFrames, pointAtMcpConfig, setupMcpCapture, type McpCapture } from '../mcp.js';
 import { SerialQueue } from '../serial.js';
@@ -189,24 +189,7 @@ async function runRecording(
   async function persist(exchange: RecordedExchange): Promise<void> {
     turn += 1;
     turnStartedAt.push({ turn, at: Date.now() });
-    for (const derived of deriver.derive(exchange, turn)) {
-      const causes: number[] = [];
-      if (derived.causesToolId) {
-        const seq = deriver.seqOf(derived.causesToolId);
-        if (seq !== undefined) causes.push(seq);
-      }
-      const event = await writer.append({
-        type: derived.type,
-        actor: derived.actor,
-        turn,
-        attrs: derived.attrs,
-        payload: derived.payload as never,
-        ...(causes.length > 0 ? { causes } : {}),
-      });
-      if (derived.type === 'tool.call') {
-        deriver.markPending(String(derived.attrs.tool_use_id), event.seq);
-      }
-    }
+    await appendDerivedEvents(writer, deriver, exchange, turn);
 
     if (fs) await appendSnapshot(fs, writer, out, turn);
   }

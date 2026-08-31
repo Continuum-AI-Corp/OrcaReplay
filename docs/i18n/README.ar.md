@@ -162,6 +162,41 @@ info usage input=201 output=25 cost=$0.004890
 `+1 −3`)، والفحص الذي أجراه الوكيل **فشل** (الحدث 12، `exit 1`)، ومع ذلك أنهى عمله. خرج التشغيل
 بالرمز 0 لأن *الوكيل* خرج بالرمز 0.
 
+هذه الحقيقة الأخيرة تستحق أمرًا خاصًا بها. يعطيك `orca show` ترتيب ما حدث، ويعطيك `orca graph` ما
+الذي أنتج ماذا:
+
+```console
+$ orca graph last
+FROM              TO               KIND      WHY
+3 model.response  4 tool.call      recorded  tool_use block in the response
+4 tool.call       6 fs.change      inferred  changed path appears in tool input, same or previous turn
+4 tool.call       7 tool.result    recorded  tool result answers its call
+7 tool.result     8 model.request  recorded  tool_result block in the request
+
+  1 inferred — derived from this trace, not recorded in it
+```
+
+نوعان من الحواف، والفرق بينهما مهم. الحافة **recorded** كُتبت وقت التشغيل نفسه، لأن كتلة
+`tool_use` موجودة فعليًا داخل الاستجابة التي أصدرتها. أما الحافة **inferred** فقد استُنتجت الآن
+بالقاعدة التي تسمّيها — لقطة نظام الملفات تُؤخذ مرة كل دور لا مرة كل استدعاء أداة، فنسب تغيّر ملف
+إلى استدعاء *بعينه* تخمين جيد وليس حقيقة. الحواف المستنتجة لا تُكتب أبدًا في التتبّع، تمامًا كما
+تُشتق نقاط التفتيش ولا تُسجَّل.
+
+يرسم `orca export last --card bug.svg` تلك السلسلة صورةً تلصقها في مسألة، ويرسم `--graph-card`
+التشغيل كله مع إبراز السلسلة.
+
+يظهر SVG داخل مسألة على GitHub وبالكاد في أي مكان آخر مهم — لا تقبله X كملف مرفوع، ولا يعطيه
+Slack ولا Discord معاينة — فسمِّ الملف `.png` لتحصل على صورة، أو `.gif` فتُبنى السلسلة قفزةً
+قفزة. هذا المسار يحتاج متصفحًا، وorca لا تعتمد على واحد: يُبقي `docs/media/README.md` أدوات الرسم
+خارج `package.json` كي لا يدفع أحدٌ يشغّل `npm ci` ثمن تنزيل Chromium. وإن غابت، تذكر orca السطر
+الوحيد الذي يصلح ذلك؛ ويبلّغ `orca doctor` عنها على أي حال، و`.svg` لا يحتاج شيئًا أبدًا.
+
+```console
+orca export last --card bug.png       # the chain, ready to post
+orca export last --card bug.gif       # the same chain, one hop per frame
+npm i --no-save playwright-core pngjs gifenc   # only needed for the two above
+```
+
 والآن أعِد إنتاجه بقدر ما تشاء، ومجانًا:
 
 ```console
@@ -376,7 +411,7 @@ $ orca checkpoints last --json | jq '.[-1].seq'
 
 وثيقة JSON واحدة على stdout والتشخيص على stderr — ومعه مخرجات الوكيل المُسجَّل نفسه، فتبقى الوثيقة
 قابلة للتحليل بينما التشغيل يتكلم. والإخفاقات تجيب بـJSON أيضًا مع رمز خروج غير صفري. ويغطي `--json`
-الأوامر `list` و`show` و`events` و`checkpoints` و`record` و`replay` و`compare` و`doctor`.
+الأوامر `list` و`show` و`events` و`checkpoints` و`graph` و`record` و`replay` و`compare` و`doctor`.
 
 **أدواتٍ.** يقدّم `orca mcp` مخزن التسجيلات إلى وكيل عبر stdio:
 
@@ -384,7 +419,7 @@ $ orca checkpoints last --json | jq '.[-1].seq'
 { "mcpServers": { "orca": { "command": "orca", "args": ["mcp"] } } }
 ```
 
-`orca_list_runs` و`orca_show_run` و`orca_checkpoints` و`orca_replay` و`orca_compare`. إعادة التشغيل
+`orca_list_runs` و`orca_show_run` و`orca_checkpoints` و`orca_graph` و`orca_replay` و`orca_compare`. إعادة التشغيل
 مجانية وبلا شبكة؛ أما `orca_compare` فيقول في وصفه هو أنه ينفق رموزًا حقيقية، لأن النموذج حين يختار
 أداة لا يقرأ سوى ذلك النص.
 
@@ -413,7 +448,9 @@ const timeline = await orca.show('last');
 | وكلاء لا يقرؤون أي متغيّر base-URL | تعمل — `orca record node -- <cmd>` يكتب ملف تحميل مسبق في مجلد التشغيل ويعيد توجيه `globalThis.fetch` لقائمة مسموح بها من مضيفي المزوّدين فقط. Node وBun معًا، لأن Bun يتجاهل `--require` داخل `NODE_OPTIONS`. هكذا يُلتقط وكيل مبني على Vercel AI SDK |
 | نداء لا يستطيع orca قراءته | تعمل — يُمرَّر بدل أن يُرفض، ويُسجَّل بوصفه `net.request` / `net.response`: دليل، لا دورًا قابلًا لإعادة التشغيل. والتسجيل الذي لم يلتقط شيئًا يُحذِّر بدل أن ينتهي بهدوء |
 | مخرجات يقرؤها الحاسوب (`--json`) | تعمل — وثيقة JSON واحدة على stdout، والتشخيص على stderr، والإخفاقات أيضًا JSON |
-| خادم MCP (`orca mcp`) | تعمل — خمس أدوات عبر stdio، ليتمكن وكيل من قراءة تشغيلاته وإعادة تشغيلها |
+| الرسم السببي (`orca graph`) | تعمل — ما الذي أنتج ماذا، كجدول أو كـ JSON. كل حافة تقول إن كان التتبّع قد سجّلها أم أن orca استنتجتها للتو، وتسمّي القاعدة في الحالتين. يضيّق `--to N` الأمر إلى السلسلة التي أنتجت حدثًا بعينه |
+| بطاقات قابلة للمشاركة | تعمل — يرسم `orca export --card` سلسلة سببية واحدة، ويرسم `--graph-card` التشغيل كله مع إبراز تلك السلسلة، ويرسم `compare --share` جدول الأحكام. `.svg` دائمًا، و`.png` و`.gif` عند تثبيت أدوات الرسم الاختيارية التي يبلّغ عنها `orca doctor` ولا يجلبها `npm ci` أبدًا |
+| خادم MCP (`orca mcp`) | تعمل — ست أدوات عبر stdio، ليتمكن وكيل من قراءة تشغيلاته وإعادة تشغيلها |
 | واجهة برمجية (`Orca`) | تعمل — الأوامر تعرض ما تُرجعه، فالطرفية مجرد رؤية واحدة لحقيقة واحدة |
 | إعادة دقيقة مع تقرير تباعد | تعمل — تستعيد نظام الملفات المسجَّل فوق شجرة عملك ثم تعيده كما كان؛ و`--worktree` لنسخة مؤقتة، و`--in-place` لعدم استعادة شيء. وتكتب تشغيلًا خاصًا بها يسجّل ما *اكتشفته* الإعادة — التباعدات والطلبات غير المطابَقة — وتشير إلى الأصل فيما كرّرته فحسب؛ و`--no-trace` لتخطّي ذلك |
 | إعادة متفرّعة من نقطة تحقق | تعمل — التفريع يسجّل لقطات نظام ملفات خاصة به، فهو تشغيل يمكن تفريعه بدوره |

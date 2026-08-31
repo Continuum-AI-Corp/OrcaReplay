@@ -1,6 +1,14 @@
 import type { EventType, TraceEvent } from '@orcareplay/schema';
 import { describe, expect, it } from 'vitest';
-import { causalChain, deriveCheckpoints, snapToCheckpoint, turnsOf } from '../src/graph.js';
+import {
+  causalChain,
+  chainTo,
+  pickChainTarget,
+  deriveCheckpoints,
+  runGraph,
+  snapToCheckpoint,
+  turnsOf,
+} from '../src/graph.js';
 
 function ev(seq: number, type: EventType, over: Partial<TraceEvent> = {}): TraceEvent {
   return {
@@ -261,5 +269,252 @@ describe('causalChain', () => {
 
   it('reports a seq that is not in the trace', () => {
     expect(() => causalChain(events, 42)).toThrow(/42/);
+  });
+});
+
+describe('runGraph', () => {
+  /** One turn: the model calls a tool, the tool edits a file and runs a check that fails. */
+  const turn: TraceEvent[] = [
+    ev(3, 'model.response', { turn: 1, actor: 'model' }),
+    ev(4, 'tool.call', {
+      turn: 1,
+      actor: 'model',
+      attrs: { name: 'bash', input: { command: 'node --check auth.ts' } },
+    }),
+    ev(5, 'fs.change', { turn: 1, attrs: { path: 'auth.ts', status: 'modified' } }),
+    ev(6, 'shell.exec', { turn: 1, attrs: { argv: ['sh', '-c', 'node --check auth.ts'] } }),
+    ev(7, 'shell.result', { turn: 1, causes: [6], attrs: { exit_code: 1 } }),
+  ];
+
+  it('makes one node per event, carrying what a reader needs to label it', () => {
+    const g = runGraph([ev(0, 'run.start'), ev(1, 'note', { turn: 2 })]);
+    expect(g.nodes).toEqual([
+      { seq: 0, turn: 0, type: 'run.start' },
+      { seq: 1, turn: 2, type: 'note' },
+    ]);
+  });
+
+  it('turns every recorded cause into a forward edge, because a reader wants "9 caused 10"', () => {
+    const g = runGraph([ev(0, 'shell.exec'), ev(1, 'shell.result', { causes: [0] })]);
+    expect(g.edges).toEqual([
+      { from: 0, to: 1, kind: 'recorded', rule: 'shell result answers its exec' },
+    ]);
+  });
+
+  it('falls back to naming the field when a recorded pair has no known explanation', () => {
+    const g = runGraph([ev(0, 'note'), ev(1, 'note', { causes: [0] })]);
+    expect(g.edges[0]?.rule).toBe('causes');
+  });
+
+  it('infers a shell command from the tool call whose input carries its argv', () => {
+    const g = runGraph(turn);
+    expect(g.edges).toContainEqual({
+      from: 4,
+      to: 6,
+      kind: 'inferred',
+      rule: 'argv matches tool input, same or previous turn',
+    });
+  });
+
+  it('infers a file change from the tool call whose input names the path', () => {
+    const g = runGraph(turn);
+    expect(g.edges).toContainEqual({
+      from: 4,
+      to: 5,
+      kind: 'inferred',
+      rule: 'changed path appears in tool input, same or previous turn',
+    });
+  });
+
+  /**
+   * The case a fixture would never have produced, and an end-to-end recording did on its second
+   * run: the agent had not finished writing when the turn's snapshot was taken, so the change it
+   * made surfaced in the *next* turn's snapshot. A same-turn rule made the graph differ between
+   * two identical runs, which is worse than a rule that is merely approximate.
+   */
+  it('attributes a change the snapshot only got round to reporting a turn later', () => {
+    const late = [
+      ev(4, 'tool.call', { turn: 1, attrs: { name: 'edit', input: { path: 'auth.ts' } } }),
+      ev(5, 'fs.snapshot', { turn: 1, attrs: { changes: 0 } }),
+      ev(10, 'fs.change', { turn: 2, attrs: { path: 'auth.ts' } }),
+    ];
+    expect(runGraph(late).edges).toContainEqual({
+      from: 4,
+      to: 10,
+      kind: 'inferred',
+      rule: 'changed path appears in tool input, same or previous turn',
+    });
+  });
+
+  it('reaches back one turn and no further, since an earlier snapshot would have reported it', () => {
+    const stale = [
+      ev(4, 'tool.call', { turn: 1, attrs: { name: 'edit', input: { path: 'auth.ts' } } }),
+      ev(20, 'fs.change', { turn: 3, attrs: { path: 'auth.ts' } }),
+    ];
+    expect(runGraph(stale).edges).toEqual([]);
+  });
+
+  it('prefers the nearest turn when an older call also names the path', () => {
+    const twice = [
+      ev(4, 'tool.call', { turn: 1, attrs: { name: 'edit', input: { path: 'auth.ts' } } }),
+      ev(8, 'tool.call', { turn: 2, attrs: { name: 'edit', input: { path: 'auth.ts' } } }),
+      ev(10, 'fs.change', { turn: 2, attrs: { path: 'auth.ts' } }),
+    ];
+    expect(runGraph(twice).edges.filter((e) => e.kind === 'inferred')).toEqual([
+      {
+        from: 8,
+        to: 10,
+        kind: 'inferred',
+        rule: 'changed path appears in tool input, same or previous turn',
+      },
+    ]);
+  });
+
+  // Refusing beats guessing: a wrong edge is worse than a missing one, because the missing one
+  // is visible and the wrong one is not.
+  it('refuses to infer when two tool calls in the nearest turn both match', () => {
+    const ambiguous = [
+      ev(4, 'tool.call', { turn: 1, attrs: { name: 'bash', input: { command: 'npm test' } } }),
+      ev(5, 'tool.call', { turn: 1, attrs: { name: 'bash', input: { command: 'npm test' } } }),
+      ev(6, 'shell.exec', { turn: 1, attrs: { argv: ['sh', '-c', 'npm test'] } }),
+    ];
+    expect(runGraph(ambiguous).edges.filter((e) => e.kind === 'inferred')).toEqual([]);
+  });
+
+  it('never points an edge backwards in time, which the spec forbids of causes', () => {
+    const backwards = [
+      ev(6, 'shell.exec', { turn: 1, attrs: { argv: ['sh', '-c', 'npm test'] } }),
+      ev(9, 'tool.call', { turn: 1, attrs: { name: 'bash', input: { command: 'npm test' } } }),
+    ];
+    expect(runGraph(backwards).edges).toEqual([]);
+  });
+
+  it('handles an empty trace', () => {
+    expect(runGraph([])).toEqual({ nodes: [], edges: [] });
+  });
+});
+
+describe('chainTo', () => {
+  /** The README's bug: the check failed and the run exited 0 anyway. */
+  const run: TraceEvent[] = [
+    ev(9, 'model.response', { turn: 2, attrs: { stop_reason: 'tool_use' } }),
+    ev(10, 'tool.call', {
+      turn: 2,
+      causes: [9],
+      attrs: { name: 'bash', input: { command: 'node --check x.ts' } },
+    }),
+    ev(11, 'shell.exec', { turn: 2, attrs: { argv: ['sh', '-c', 'node --check x.ts'] } }),
+    ev(12, 'shell.result', { turn: 2, causes: [11], attrs: { exit_code: 1 } }),
+    ev(13, 'note', { turn: 2 }),
+  ];
+
+  it('walks recorded and inferred edges alike, which is the point of deriving the graph', () => {
+    expect(chainTo(runGraph(run), 12).nodes.map((n) => n.seq)).toEqual([9, 10, 11, 12]);
+  });
+
+  it('drops events that did not contribute, so the chain is the claim', () => {
+    expect(chainTo(runGraph(run), 12).nodes.map((n) => n.seq)).not.toContain(13);
+  });
+
+  it('keeps the edges between the events it kept, and no others', () => {
+    expect(chainTo(runGraph(run), 12).edges.map((e) => [e.from, e.to])).toEqual([
+      [9, 10],
+      [10, 11],
+      [11, 12],
+    ]);
+  });
+
+  it('returns just the event when nothing caused it', () => {
+    expect(chainTo(runGraph(run), 9).nodes.map((n) => n.seq)).toEqual([9]);
+  });
+
+  it('reports a seq that is not in the trace', () => {
+    expect(() => chainTo(runGraph(run), 42)).toThrow(/42/);
+  });
+});
+
+describe('pickChainTarget', () => {
+  it('picks a shell command that exited non-zero, which is usually the story', () => {
+    const events = [
+      ev(1, 'fs.change', { attrs: { path: 'a.ts' } }),
+      ev(2, 'shell.result', { attrs: { exit_code: 1 } }),
+    ];
+    expect(pickChainTarget(events)).toBe(2);
+  });
+
+  it('ignores a shell command that succeeded', () => {
+    const events = [ev(1, 'shell.result', { attrs: { exit_code: 0 } })];
+    expect(pickChainTarget(events)).toBeUndefined();
+  });
+
+  it('takes the last failure when several failed, since that is where the run ended up', () => {
+    const events = [
+      ev(1, 'shell.result', { attrs: { exit_code: 1 } }),
+      ev(5, 'shell.result', { attrs: { exit_code: 2 } }),
+    ];
+    expect(pickChainTarget(events)).toBe(5);
+  });
+
+  it('falls back to a tool that reported an error', () => {
+    const events = [
+      ev(1, 'fs.change', { attrs: { path: 'a.ts' } }),
+      ev(2, 'tool.result', { attrs: { is_error: true } }),
+    ];
+    expect(pickChainTarget(events)).toBe(2);
+  });
+
+  it('falls back to the last file the run changed when nothing failed', () => {
+    const events = [
+      ev(1, 'fs.change', { attrs: { path: 'a.ts' } }),
+      ev(4, 'fs.change', { attrs: { path: 'b.ts' } }),
+      ev(5, 'model.response'),
+    ];
+    expect(pickChainTarget(events)).toBe(4);
+  });
+
+  // Refusing beats drawing something arbitrary: a card gets screenshotted whether or not it is
+  // the interesting one, so a bad pick travels further than no card at all.
+  it('picks nothing from a run where nothing stands out', () => {
+    expect(
+      pickChainTarget([ev(0, 'run.start'), ev(1, 'model.request'), ev(2, 'run.end')]),
+    ).toBeUndefined();
+  });
+});
+
+/**
+ * Found in review. A graph is about structure, and `orca_graph` answers an agent whose context the
+ * answer lands in — so copying `attrs` whole put every `tool.call`'s complete `input`, file bodies
+ * and all, into the reply. `orca show` clamps every field for the same reason; the full value is a
+ * `orca events` away.
+ */
+describe('runGraph node attrs', () => {
+  const body = 'x'.repeat(5000);
+
+  it('clamps a long value rather than carrying a whole file into an answer', () => {
+    const g = runGraph([
+      ev(1, 'tool.call', { attrs: { name: 'edit', input: { path: 'a.ts', content: body } } }),
+    ]);
+    expect(JSON.stringify(g.nodes).length).toBeLessThan(1000);
+  });
+
+  it('says a value was clamped instead of quietly truncating it', () => {
+    const g = runGraph([ev(1, 'tool.call', { attrs: { input: { content: body } } })]);
+    expect(JSON.stringify(g.nodes[0]?.attrs)).toContain('…');
+  });
+
+  it('leaves the short values a reader actually labels nodes with alone', () => {
+    const g = runGraph([
+      ev(1, 'shell.result', { attrs: { exit_code: 1, duration_ms: 43 } }),
+      ev(2, 'fs.change', { attrs: { path: 'src/auth.ts', status: 'modified' } }),
+    ]);
+    expect(g.nodes[0]?.attrs).toEqual({ exit_code: 1, duration_ms: 43 });
+    expect(g.nodes[1]?.attrs).toEqual({ path: 'src/auth.ts', status: 'modified' });
+  });
+
+  it('keeps the shape of a nested value, since a label may read a key inside it', () => {
+    const g = runGraph([ev(1, 'tool.call', { attrs: { input: { path: 'a.ts', content: body } } })]);
+    const input = (g.nodes[0]?.attrs?.['input'] ?? {}) as Record<string, unknown>;
+    expect(input['path']).toBe('a.ts');
+    expect(String(input['content']).length).toBeLessThan(300);
   });
 });

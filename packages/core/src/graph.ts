@@ -137,3 +137,267 @@ export function causalChain(events: TraceEvent[], seq: number): TraceEvent[] {
   }
   return chain.sort((a, b) => a.seq - b.seq);
 }
+
+/** Where an edge came from. The distinction is the whole honesty mechanism — see `runGraph`. */
+export type EdgeKind = 'recorded' | 'inferred';
+
+export interface GraphNode {
+  seq: number;
+  turn: number;
+  type: TraceEvent['type'];
+  attrs?: Record<string, unknown>;
+}
+
+export interface GraphEdge {
+  /** The cause. Always less than `to`, as spec §2.1 requires of `causes`. */
+  from: number;
+  to: number;
+  kind: EdgeKind;
+  /** Why this edge exists. For an inferred edge, the rule that produced it. */
+  rule: string;
+}
+
+export interface RunGraph {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+/**
+ * What a recorded pair means, when the pair is one orca itself writes.
+ *
+ * `causes` says *that* one event caused another and never *why*, so this is a post-hoc reading of
+ * the type pair rather than anything the trace claims. An unrecognised pair says `causes` and
+ * stops there, which is the honest answer for an edge written by a reader we do not know.
+ */
+const RECORDED_RULES: Record<string, string> = {
+  'tool.call→tool.result': 'tool result answers its call',
+  'shell.exec→shell.result': 'shell result answers its exec',
+  'net.request→net.response': 'network response answers its request',
+  'model.response→tool.call': 'tool_use block in the response',
+  'tool.result→model.request': 'tool_result block in the request',
+};
+
+const ARGV_RULE = 'argv matches tool input, same or previous turn';
+const PATH_RULE = 'changed path appears in tool input, same or previous turn';
+
+/**
+ * How many turns back an effect may reach for the call that caused it.
+ *
+ * One, not zero. A snapshot is taken when the turn's exchange is persisted, which races the agent
+ * actually running the tool — an end-to-end recording produced the edit in the turn's own snapshot
+ * on one run and in the next turn's on another. A same-turn rule therefore made the graph differ
+ * between two identical runs. Not more than one either: an effect two turns later would have been
+ * reported by the snapshot in between.
+ */
+const TURN_REACH = 1;
+
+/** The longest string in an argv array — in practice the command, not the shell that ran it. */
+function commandOf(argv: unknown): string {
+  if (!Array.isArray(argv)) return '';
+  let longest = '';
+  for (const part of argv) {
+    if (typeof part === 'string' && part.length > longest.length) longest = part;
+  }
+  return longest;
+}
+
+function inputText(call: TraceEvent): string {
+  const input = (call.attrs ?? {})['input'];
+  if (input === undefined) return '';
+  try {
+    return typeof input === 'string' ? input : (JSON.stringify(input) ?? '');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * The one tool call that can be said to have caused `effect`, or undefined when that is not
+ * exactly one call.
+ *
+ * Candidates are calls whose input names `needle`, that happened first, and that are within
+ * `TURN_REACH` turns. Of those, only the nearest turn is considered: a later call supersedes an
+ * earlier one, since a file edited twice was last edited by the most recent call to name it.
+ *
+ * Two calls in that nearest turn is the case worth dwelling on. Picking either would produce an
+ * edge indistinguishable from a true one and wrong half the time, and a wrong edge is worse than
+ * a missing one because the missing one is visible. So ambiguity yields nothing.
+ */
+function soleMatchingCall(
+  calls: TraceEvent[],
+  effect: TraceEvent,
+  needle: string,
+): TraceEvent | undefined {
+  if (needle === '') return undefined;
+  const candidates = calls.filter(
+    (call) =>
+      call.seq < effect.seq &&
+      effect.turn - call.turn >= 0 &&
+      effect.turn - call.turn <= TURN_REACH &&
+      inputText(call).includes(needle),
+  );
+  if (candidates.length === 0) return undefined;
+  const nearest = Math.max(...candidates.map((c) => c.turn));
+  const inNearest = candidates.filter((c) => c.turn === nearest);
+  return inNearest.length === 1 ? inNearest[0] : undefined;
+}
+
+/**
+ * The longest string a graph node carries. A graph is about structure, not payloads.
+ *
+ * `orca_graph` answers an agent, and the answer lands in its context — so a `tool.call` whose
+ * `input` holds a whole file body would spend that context on something the graph never uses. The
+ * shape survives so a label can still read `input.path`; the bulk does not. `orca events` is one
+ * command away when the full value is what you want.
+ */
+const ATTR_MAX = 200;
+
+function clampValue(value: unknown, depth = 0): unknown {
+  if (typeof value === 'string') {
+    return value.length <= ATTR_MAX ? value : `${value.slice(0, ATTR_MAX)}…`;
+  }
+  if (depth >= 4 || value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.slice(0, 20).map((v) => clampValue(v, depth + 1));
+  const out: Record<string, unknown> = {};
+  for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = clampValue(v, depth + 1);
+  }
+  return out;
+}
+
+function clampAttrs(attrs: Record<string, unknown>): Record<string, unknown> {
+  return clampValue(attrs) as Record<string, unknown>;
+}
+
+/**
+ * A run as nodes and edges, with every edge saying whether the trace vouches for it.
+ *
+ * Two kinds, and they are not interchangeable. A `recorded` edge came out of `causes`, which the
+ * recorder wrote because it watched the relationship happen. An `inferred` edge was derived here,
+ * just now, by the named rule — a filesystem snapshot is taken once per turn rather than once per
+ * tool call, and shell frames are bucketed into turns by wall clock, so attributing an effect to a
+ * *particular* call is a guess however good the heuristic is.
+ *
+ * Inferred edges are therefore never written back to the trace. That is the same discipline spec
+ * §3 applies to checkpoints, which are derived and never recorded, and it exists so that a field
+ * a third-party reader trusts never contains something orca made up.
+ */
+export function runGraph(events: TraceEvent[]): RunGraph {
+  const ordered = bySeq(events);
+  const present = new Set(ordered.map((e) => e.seq));
+  const nodes: GraphNode[] = ordered.map((e) => ({
+    seq: e.seq,
+    turn: e.turn,
+    type: e.type,
+    ...(e.attrs === undefined ? {} : { attrs: clampAttrs(e.attrs) }),
+  }));
+
+  const byType = new Map(ordered.map((e) => [e.seq, e.type]));
+  const edges: GraphEdge[] = [];
+
+  for (const event of ordered) {
+    for (const cause of event.causes ?? []) {
+      // A reader may have dropped an event type it did not know (spec §2.3), so an edge can name
+      // an ancestor that is not here. Naming a node that does not exist is worse than no edge.
+      if (!present.has(cause)) continue;
+      const pair = `${byType.get(cause)}→${event.type}`;
+      edges.push({
+        from: cause,
+        to: event.seq,
+        kind: 'recorded',
+        rule: RECORDED_RULES[pair] ?? 'causes',
+      });
+    }
+  }
+
+  const calls = ordered.filter((e) => e.type === 'tool.call');
+  if (calls.length > 0) {
+    for (const event of ordered) {
+      const attrs = event.attrs ?? {};
+      let match: TraceEvent | undefined;
+      let rule = '';
+      if (event.type === 'shell.exec') {
+        match = soleMatchingCall(calls, event, commandOf(attrs['argv']));
+        rule = ARGV_RULE;
+      } else if (event.type === 'fs.change') {
+        const path = attrs['path'];
+        match = soleMatchingCall(calls, event, typeof path === 'string' ? path : '');
+        rule = PATH_RULE;
+      }
+      if (match) edges.push({ from: match.seq, to: event.seq, kind: 'inferred', rule });
+    }
+  }
+
+  edges.sort((a, b) => a.to - b.to || a.from - b.from);
+  return { nodes, edges };
+}
+
+/**
+ * The sub-graph that produced `seq`: that event and everything transitively behind it.
+ *
+ * `causalChain` walks `causes` alone and so stops at the first inferred hop, which in a real run
+ * is the hop from a tool call to the shell command it ran — exactly the one a person following a
+ * failure backwards needs. This walks the derived graph instead, so it crosses both kinds.
+ */
+export function chainTo(graph: RunGraph, seq: number): RunGraph {
+  if (!graph.nodes.some((n) => n.seq === seq)) {
+    throw new Error(`no event with seq ${seq} in this graph`);
+  }
+  const incoming = new Map<number, GraphEdge[]>();
+  for (const edge of graph.edges) {
+    const bucket = incoming.get(edge.to);
+    if (bucket) bucket.push(edge);
+    else incoming.set(edge.to, [edge]);
+  }
+
+  const kept = new Set<number>([seq]);
+  const edges: GraphEdge[] = [];
+  const queue = [seq];
+  while (queue.length > 0) {
+    const at = queue.shift();
+    if (at === undefined) break;
+    for (const edge of incoming.get(at) ?? []) {
+      edges.push(edge);
+      // A cycle is malformed rather than impossible, and it must not hang the walk.
+      if (kept.has(edge.from)) continue;
+      kept.add(edge.from);
+      queue.push(edge.from);
+    }
+  }
+
+  return {
+    nodes: graph.nodes.filter((n) => kept.has(n.seq)),
+    edges: edges.sort((a, b) => a.to - b.to || a.from - b.from),
+  };
+}
+
+/**
+ * The event a card about this run should be about, or undefined when nothing stands out.
+ *
+ * Which chain to draw *is* the feature. A card gets screenshotted whether or not it happens to be
+ * the interesting one, so an arbitrary pick travels further than no card at all — hence a run with
+ * nothing notable returns undefined and the caller refuses rather than drawing something.
+ *
+ * The order is failure first, then the largest visible effect: a command that exited non-zero, a
+ * tool that reported an error, an error orca itself recorded, a replay divergence, and only then
+ * the last file the run changed. Within a kind the last one wins, since that is where the run
+ * ended up.
+ */
+export function pickChainTarget(events: TraceEvent[]): number | undefined {
+  const ordered = bySeq(events);
+  const last = (match: (e: TraceEvent) => boolean): number | undefined => {
+    for (let i = ordered.length - 1; i >= 0; i--) {
+      const event = ordered[i];
+      if (event && match(event)) return event.seq;
+    }
+    return undefined;
+  };
+
+  return (
+    last((e) => e.type === 'shell.result' && (e.attrs?.['exit_code'] ?? 0) !== 0) ??
+    last((e) => e.type === 'tool.result' && e.attrs?.['is_error'] === true) ??
+    last((e) => e.type === 'error') ??
+    last((e) => e.type === 'divergence') ??
+    last((e) => e.type === 'fs.change')
+  );
+}

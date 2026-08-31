@@ -13,6 +13,7 @@ import { listRuns, orcaDir } from '@orcareplay/core';
 import { runGit } from '@orcareplay/fs-capture';
 import { installShellShim, readShellFrames } from '@orcareplay/shell-shim';
 import type { ParsedArgs } from '../args.js';
+import { RENDER_DEPS, missingRenderDeps } from '../rasterize.js';
 import type { Output } from '../out.js';
 import { formatBytes, runDirBytes } from './gc.js';
 import { shimIsRunnable } from '../mcp.js';
@@ -62,6 +63,7 @@ export async function doctorCommand(
     await checkPort(),
     await checkShellShim(),
     await checkMcpShim(),
+    await checkRasteriser(),
     await checkDisk(writable.probeDir),
     await checkRuns(cwd),
   ];
@@ -177,6 +179,27 @@ async function checkMcpShim(): Promise<DoctorCheck> {
 }
 
 /** Through fs-capture's own runner, so this tests the git invocation recording will really make. */
+/**
+ * Whether a card can be written as a PNG or a GIF.
+ *
+ * Never a failure. The raster toolchain is optional by design — `docs/media/README.md` keeps it
+ * out of `package.json` so `npm ci` stays lean — and recording, replaying and SVG cards all work
+ * without it. Reporting it is how someone finds out before they need it rather than at the moment
+ * they ask for a `.png`.
+ */
+async function checkRasteriser(): Promise<DoctorCheck> {
+  const name = 'card rasteriser';
+  const missing = await missingRenderDeps();
+  return missing.length === 0
+    ? { name, status: 'ok', detail: 'installed — cards can be written as .svg, .png or .gif' }
+    : {
+        name,
+        status: 'ok',
+        detail: 'not installed — cards can be written as .svg',
+        fix: `npm i --no-save ${RENDER_DEPS.join(' ')} to also write .png and .gif`,
+      };
+}
+
 async function checkGit(): Promise<{ check: DoctorCheck; available: boolean }> {
   const name = 'git';
   const res = await runGit(['--version']);

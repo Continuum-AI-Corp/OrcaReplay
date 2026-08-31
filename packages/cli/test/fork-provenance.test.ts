@@ -134,3 +134,91 @@ describe('fork provenance in the manifest', () => {
     expect(forkEvent.attrs?.fork_point).toBe(from);
   });
 });
+
+/**
+ * A fork records its own conversation, so it is a run you can read, fork again and graph — and it
+ * was writing every model exchange with no `causes` at all. The recorder resolved them and the
+ * fork path, a second call site of the same deriver, silently did not.
+ */
+describe('a fork carries the same causal edges a recording does', () => {
+  let workspace: string;
+  let model: Awaited<ReturnType<typeof startFakeModel>>;
+  let out: Output;
+
+  beforeEach(async () => {
+    workspace = await mkdtemp(join(tmpdir(), 'orca-fork-edges-'));
+    model = await startFakeModel();
+    out = new Output({ write: () => {}, isTTY: false });
+    await run('git', ['init', '-q'], { cwd: workspace });
+    await run('git', ['config', 'user.email', 't@e.com'], { cwd: workspace });
+    await run('git', ['config', 'user.name', 'T'], { cwd: workspace });
+    await writeFile(join(workspace, 'auth.ts'), 'export const fixed = false;\n');
+    process.env.FAKE_AGENT_TURNS = '3';
+    process.env.FAKE_AGENT_CWD = workspace;
+  });
+
+  afterEach(async () => {
+    await model.close();
+    await rm(workspace, { recursive: true, force: true });
+  });
+
+  async function forkEvents() {
+    const parent = await recordCommand(
+      parseArgs([
+        'record',
+        'generic-openai',
+        '--upstream-anthropic',
+        model.url,
+        '--',
+        'node',
+        FAKE_AGENT,
+      ]),
+      out,
+      workspace,
+    );
+    const events = await (await TraceReader.open(parent.runDir)).events();
+    const from = deriveCheckpoints(events)[0]!.seq;
+    const fork = await replayCommand(
+      parseArgs([
+        'replay',
+        parent.runId,
+        '--from',
+        String(from),
+        '--upstream-anthropic',
+        model.url,
+      ]),
+      out,
+      workspace,
+    );
+    const dir = (await resolveRunSelector(workspace, fork.forkRunId!)).dir;
+    return (await TraceReader.open(dir)).events();
+  }
+
+  it('points a tool.call at the model.response that emitted it', async () => {
+    const events = await forkEvents();
+    const bySeq = new Map(events.map((e) => [e.seq, e]));
+    const calls = events.filter((e) => e.type === 'tool.call');
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) {
+      expect(call.causes, `tool.call seq ${call.seq} names no cause`).toHaveLength(1);
+      expect(bySeq.get(call.causes![0]!)?.type).toBe('model.response');
+    }
+  });
+
+  it('points a tool.result back at its call, which it never did either', async () => {
+    const events = await forkEvents();
+    const bySeq = new Map(events.map((e) => [e.seq, e]));
+    const results = events.filter((e) => e.type === 'tool.result');
+    expect(results.length).toBeGreaterThan(0);
+    for (const result of results) {
+      expect(result.causes).toHaveLength(1);
+      expect(bySeq.get(result.causes![0]!)?.type).toBe('tool.call');
+    }
+  });
+
+  it('keeps every edge pointing backwards, as spec §2.1 requires', async () => {
+    for (const event of await forkEvents()) {
+      for (const cause of event.causes ?? []) expect(cause).toBeLessThan(event.seq);
+    }
+  });
+});

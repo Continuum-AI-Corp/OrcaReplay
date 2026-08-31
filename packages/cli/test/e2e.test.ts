@@ -5,7 +5,14 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { TraceReader, deriveCheckpoints, listRuns, resolveRunSelector } from '@orcareplay/core';
+import {
+  TraceReader,
+  deriveCheckpoints,
+  listRuns,
+  resolveRunSelector,
+  runGraph,
+  chainTo,
+} from '@orcareplay/core';
 import { isBlobRef, validateEvent, validateManifest } from '@orcareplay/schema';
 import { parseArgs } from '../src/args.js';
 import { Output } from '../src/out.js';
@@ -509,5 +516,77 @@ describe('end to end: record → replay → fork', () => {
     } finally {
       delete process.env.ANTHROPIC_API_KEY;
     }
+  });
+
+  /**
+   * The edges that make a run answerable in one hop rather than by reading every line. Asserted
+   * against a real recording rather than a fixture, because the seq resolution happens in the
+   * recorder and a unit test of the deriver cannot see it.
+   */
+  describe('causal edges', () => {
+    it('points each tool.call at the model.response that emitted it', async () => {
+      const result = await record();
+      const events = await (await TraceReader.open(result.runDir)).events();
+      const bySeq = new Map(events.map((e) => [e.seq, e]));
+      const calls = events.filter((e) => e.type === 'tool.call');
+
+      expect(calls.length).toBeGreaterThan(0);
+      for (const call of calls) {
+        expect(call.causes, `tool.call seq ${call.seq} names no cause`).toHaveLength(1);
+        expect(bySeq.get(call.causes![0]!)?.type).toBe('model.response');
+      }
+    });
+
+    it('points a model.request at the tool.result it carried back', async () => {
+      const result = await record();
+      const events = await (await TraceReader.open(result.runDir)).events();
+      const bySeq = new Map(events.map((e) => [e.seq, e]));
+      const carrying = events.filter((e) => e.type === 'model.request' && e.causes?.length);
+
+      expect(carrying.length).toBeGreaterThan(0);
+      for (const request of carrying) {
+        for (const cause of request.causes ?? []) {
+          expect(bySeq.get(cause)?.type).toBe('tool.result');
+        }
+      }
+    });
+
+    it('keeps every edge pointing backwards, as spec §2.1 requires of causes', async () => {
+      const result = await record();
+      const events = await (await TraceReader.open(result.runDir)).events();
+      for (const event of events) {
+        for (const cause of event.causes ?? []) expect(cause).toBeLessThan(event.seq);
+      }
+    });
+
+    it('derives the tool call behind a file change without writing that edge to the trace', async () => {
+      const result = await record();
+      const events = await (await TraceReader.open(result.runDir)).events();
+
+      // The recorder must not have written it: a snapshot is per turn, so this is a guess.
+      for (const change of events.filter((e) => e.type === 'fs.change')) {
+        expect(change.causes).toBeUndefined();
+      }
+
+      // The reader derives it anyway, and says that it did.
+      const inferred = runGraph(events).edges.filter((e) => e.kind === 'inferred');
+      expect(inferred.length).toBeGreaterThan(0);
+      const bySeq = new Map(events.map((e) => [e.seq, e]));
+      for (const edge of inferred) {
+        expect(bySeq.get(edge.from)?.type).toBe('tool.call');
+        expect(edge.rule).not.toBe('');
+      }
+    });
+
+    it('walks from a file change back to the model turn that caused it', async () => {
+      const result = await record();
+      const events = await (await TraceReader.open(result.runDir)).events();
+      const change = events.find((e) => e.type === 'fs.change');
+      expect(change).toBeDefined();
+
+      const chain = chainTo(runGraph(events), change!.seq).nodes.map((n) => n.type);
+      expect(chain).toContain('tool.call');
+      expect(chain).toContain('model.response');
+    });
   });
 });

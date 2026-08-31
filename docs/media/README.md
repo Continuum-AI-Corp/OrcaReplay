@@ -42,6 +42,23 @@ uses, because 100 near-identical frames cost megabytes and say nothing extra.
 
 `compare-card.png` is `orca compare --share`, rendered from its SVG.
 
+## graph-card.png, chain-card.png
+
+```console
+npm i --no-save playwright-core pngjs gifenc
+npm run build && node scripts/render-cards.mjs
+```
+
+Both come out of a real recording rather than a drawing. The script stands up a model stub, records
+a real child process through the real proxy and the real PATH shim, and then runs exactly the two
+commands the README tells everyone else to run — `orca export last --graph-card` and `--card`. The
+agent edits a file, runs a check through a tool call, and finishes although the check exited 1,
+which is the bug hunt the README describes.
+
+The model stub lives in the script, not in `packages/cli/test/fixtures`, so README art never
+constrains a test fixture or the other way round. The three render packages are the same optional
+ones `demo-cli.gif` needs, for the same reason.
+
 ## Keeping them honest
 
 If output format changes, these go stale silently — a GIF has no test. When you change what a

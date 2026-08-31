@@ -167,6 +167,61 @@ Three facts the model's own transcript could not have told you, and the run's ex
 file really changed (seq 6, `+1 −3`), the check the agent ran **failed** (seq 12, `exit 1`), and it
 finished anyway. The run exited 0 because the *agent* exited 0.
 
+That last fact is the one worth a command of its own. `orca show` gives you the order things
+happened in; `orca graph` gives you what produced what:
+
+```console
+$ orca graph last
+FROM              TO               KIND      WHY
+3 model.response  4 tool.call      recorded  tool_use block in the response
+4 tool.call       6 fs.change      inferred  changed path appears in tool input, same or previous turn
+4 tool.call       7 tool.result    recorded  tool result answers its call
+7 tool.result     8 model.request  recorded  tool_result block in the request
+11 shell.exec     12 shell.result  recorded  shell result answers its exec
+
+  1 inferred — derived from this trace, not recorded in it
+```
+
+Two kinds of edge, and the difference matters. A **recorded** edge was written when the run
+happened, because a `tool_use` block is physically inside the response that emitted it. An
+**inferred** edge was worked out just now by the rule it names — a filesystem snapshot is taken
+once per turn rather than once per tool call, so attributing a file change to a *particular* call
+is a good guess and not a fact. Inferred edges are never written back into the trace, the same way
+checkpoints are derived and never recorded, so a field a third-party reader trusts never contains
+something orca made up.
+
+`--graph-card` draws the whole run that way — time left to right, kind of thing top to bottom, with
+the chain that produced the failure lit against everything else:
+
+![The same run as a causal graph: model, tool and effect lanes across three turns, with the chain to the failing check lit and the inferred hops dashed](docs/graph-card.png)
+
+The shape is the point. A run is one motif repeated — request, response, call, effect, result — so
+anything that breaks it is worth a look, and an event with **no edge leaving it** is an absence a
+list cannot show at all.
+
+`orca export last --card bug.svg` draws just that chain, which is the version that fits in an issue
+or a message:
+
+![One causal chain: a model response, the bash tool call it emitted, the shell command, and its exit 1](docs/chain-card.png)
+
+Nothing picked the subject by hand — `--to` was not passed. The card carries its own legend because
+a dashed line travelling without its trace would otherwise launder a guess into a fact, and it
+prints the command that reproduces it.
+
+SVG renders in a GitHub issue and almost nowhere else that matters — X will not take it as an
+upload, and Slack and Discord give it no preview — so name the file `.png` and you get one, or
+`.gif` and the chain builds a hop at a time. That path needs a browser, and orca does not depend on
+one: `docs/media/README.md` keeps the render toolchain out of `package.json` so nobody running
+`npm ci` pays for a Chromium download, and a picture command is not a reason to reverse that. Ask
+for a raster without it and orca says the one line that fixes it; `orca doctor` reports it either
+way, and `.svg` never needs anything.
+
+```console
+orca export last --card bug.png       # the chain, ready to post
+orca export last --card bug.gif       # the same chain, one hop per frame
+npm i --no-save playwright-core pngjs gifenc   # only needed for the two above
+```
+
 Now reproduce it as often as you like, for nothing:
 
 ```console
@@ -380,8 +435,8 @@ $ orca checkpoints last --json | jq '.[-1].seq'
 
 One JSON document on stdout, diagnostics on stderr — including the recorded agent's own output, so
 the document stays parseable while a run is talking. Failures answer in JSON too, with a non-zero
-exit. `--json` covers `list`, `show`, `events`, `checkpoints`, `record`, `replay`, `compare` and
-`doctor`.
+exit. `--json` covers `list`, `show`, `events`, `checkpoints`, `graph`, `record`, `replay`,
+`compare` and `doctor`.
 
 **As tools.** `orca mcp` serves the trace store to an agent over stdio:
 
@@ -389,9 +444,11 @@ exit. `--json` covers `list`, `show`, `events`, `checkpoints`, `record`, `replay
 { "mcpServers": { "orca": { "command": "orca", "args": ["mcp"] } } }
 ```
 
-`orca_list_runs`, `orca_show_run`, `orca_checkpoints`, `orca_replay` and `orca_compare`. Replay is
-free and offline; `orca_compare` says in its own description that it spends real tokens, because a
-model choosing a tool reads that string and nothing else.
+`orca_list_runs`, `orca_show_run`, `orca_checkpoints`, `orca_graph`, `orca_replay` and
+`orca_compare`. Replay is free and offline; `orca_compare` says in its own description that it
+spends real tokens, because a model choosing a tool reads that string and nothing else — and
+`orca_graph` spends its description saying what `recorded` and `inferred` mean, for the same
+reason.
 
 **From code**, if you would rather not shell out:
 
@@ -409,7 +466,7 @@ that does either cannot be built on.
 ## Status
 
 Early. `v0` is the walking skeleton of the three commands above. Everything below is exercised by
-1,243 tests, the trace-format conformance check and a plugin-API neutrality check, on Node 20 and 22.
+1,393 tests, the trace-format conformance check and a plugin-API neutrality check, on Node 20 and 22.
 
 | Capability | State |
 |---|---|
@@ -419,7 +476,9 @@ Early. `v0` is the walking skeleton of the three commands above. Everything belo
 | Agents that read no base-URL variable | working — `orca record node -- <cmd>` writes a preload into the run directory and redirects `globalThis.fetch` for an allowlist of provider hosts. Node and Bun both, since Bun ignores `--require` in `NODE_OPTIONS`. This is how a Vercel AI SDK agent is captured |
 | A call orca cannot read | working — forwarded rather than refused, and recorded as `net.request` / `net.response`: evidence, not a replayable turn. A recording that captured nothing warns instead of exiting clean |
 | Machine-readable output (`--json`) | working — one JSON document on stdout, diagnostics on stderr, failures as JSON |
-| MCP server (`orca mcp`) | working — five tools over stdio, so an agent can read and replay its own runs |
+| Causal graph (`orca graph`) | working — what caused what, as a table or as JSON. Every edge says whether the trace recorded it or orca derived it just now, and names the rule either way. `--to N` narrows to the chain that produced one event |
+| Shareable cards | working — `orca export --card` draws one causal chain, `--graph-card` draws the whole run with that chain lit, and `compare --share` draws the verdict table. `.svg` always; `.png` and `.gif` when the optional render toolchain is installed, which `orca doctor` reports and `npm ci` never pulls in |
+| MCP server (`orca mcp`) | working — six tools over stdio, so an agent can read, explain and replay its own runs |
 | Programmatic API (`Orca`) | working — the commands render what it returns, so the terminal is a view of one source of truth |
 | Exact replay with divergence reporting | working — restores the recorded filesystem over your working tree, then puts it back; `--worktree` for a scratch copy, `--in-place` to restore nothing. Writes a run of its own recording what the replay *discovered* — divergences, unmatched requests — and points at the parent for what it merely repeated; `--no-trace` to skip |
 | Fork replay from a checkpoint | working — a fork records its own filesystem snapshots, so it is a run you can fork again |
@@ -520,10 +579,13 @@ Always open, under Apache-2.0: the trace format, the core, the CLI, the viewer, 
 the provider interface.
 
 OrcaReplay is built by the people who build [OrcaRouter](https://www.orcarouter.ai), and that shows
-up in exactly one place: `orca setup` suggests it when you do not name a gateway. That is a default
-you can see and overtype, on a question you chose to answer — not a route anything takes on its own.
-Every model path stays a plain URL you can point anywhere, and there is no code path that treats
-that origin differently from any other.
+up in two places, both of them things you asked for. `orca setup` suggests it when you do not name a
+gateway — a default you can see and overtype, on a question you chose to answer, not a route
+anything takes on its own. And an artefact you explicitly generate — an export, a `--share` card —
+signs itself "built by the OrcaRouter.ai team", the way a chart carries its source.
+
+Every model path stays a plain URL you can point anywhere, there is no code path that treats that
+origin differently from any other, and a credit line routes nothing anywhere.
 
 What the vendor does *not* get is privilege. A plugin — OrcaRouter's included — may use only the
 public `Provider` interface in `@orcareplay/plugin-api`, with no private API behind it. No vendor

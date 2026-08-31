@@ -6,6 +6,7 @@ import { recordCommand } from './commands/record.js';
 import { replayCommand } from './commands/replay.js';
 import {
   checkpointsCommand,
+  graphCommand,
   exportCommand,
   listCommand,
   showCommand,
@@ -29,10 +30,15 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
                                  fork the same checkpoint onto several models
         --from N                 checkpoint to fork every model from
         --verify <cmd>           run this in each fork; its exit code is the verdict
-        --share [file.svg]       write the verdict table as a shareable card
+        --share [f.svg|png]      write the verdict table as a shareable card
   orca show [run]                the timeline, in the terminal
   orca checkpoints [run]         where you can fork from
+  orca graph [run]               what caused what — recorded edges and derived ones
+        --to N                   just the chain that produced event N
   orca export [run] -o file.html a single self-contained file you can attach
+        --card [f.svg|png|gif]   one causal chain as a picture, ready to paste
+        --graph-card [f.svg|png] the whole run as a graph, with the chain lit
+        --to N                   which event the card is about (default: the failure)
   orca scrub [run] --match X     remove something from a recorded trace
         --dry-run                say what would go, and write nothing
         --drop-fs                delete the filesystem snapshots, which cannot be scrubbed
@@ -86,7 +92,8 @@ Everything after -- goes to the agent:
 For a script, an agent, or CI — every command below also answers as data:
 
   --json         one JSON document on stdout, diagnostics on stderr
-                 list · show · events · checkpoints · record · replay · compare · doctor
+                 list · show · events · checkpoints · graph · record · replay · compare
+                 · doctor
 
   orca mcp       serve orca to an agent over MCP on stdio, so it can read its own runs:
                  {"command": "orca", "args": ["mcp"]}
@@ -135,6 +142,9 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
         return 0;
       case 'checkpoints':
         await checkpointsCommand(args, out, cwd);
+        return 0;
+      case 'graph':
+        await graphCommand(args, out, cwd);
         return 0;
       case 'export':
         await exportCommand(args, out, cwd);
@@ -225,6 +235,13 @@ async function jsonMain(args: ParsedArgs, cwd: string): Promise<number> {
       case 'checkpoints':
         emit(await orca.checkpoints(selector));
         return 0;
+      case 'graph':
+        emit(
+          await orca.graph(selector, {
+            ...(args.num('to') === undefined ? {} : { to: args.num('to')! }),
+          }),
+        );
+        return 0;
       case 'record': {
         const result = await recordCommand(args, out, cwd);
         emit(result);
@@ -253,6 +270,7 @@ async function jsonMain(args: ParsedArgs, cwd: string): Promise<number> {
               'show',
               'events',
               'checkpoints',
+              'graph',
               'record',
               'replay',
               'compare',
