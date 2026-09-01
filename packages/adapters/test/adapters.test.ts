@@ -376,8 +376,9 @@ describe('genericOpenAiAdapter', () => {
 
 describe('AdapterRegistry', () => {
   it('registers every adapter by default, with the escape hatches last', () => {
-    // Order is the detection order, and `node` and `generic-openai` both decline to detect — so
-    // they sit at the end where they cannot shadow an adapter that can recognise its own harness.
+    // Order is the detection order, and `node`, `generic-openai` and `exec` all decline to detect
+    // — so they sit at the end where they cannot shadow an adapter that can recognise its own
+    // harness. `exec` is last of all: it is the one that knows the least about what it launches.
     expect(defaultAdapters().ids()).toEqual([
       'claude-code',
       'codex',
@@ -386,6 +387,7 @@ describe('AdapterRegistry', () => {
       'openclaw',
       'node',
       'generic-openai',
+      'exec',
     ]);
   });
 

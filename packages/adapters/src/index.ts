@@ -3,6 +3,7 @@ export * from './codex.js';
 export * from './contract.js';
 export * from './detect.js';
 export * from './env.js';
+export * from './exec.js';
 export * from './generic-openai.js';
 export * from './grok.js';
 export * from './node.js';
