@@ -40,7 +40,9 @@ orca replay last --from 4 --model claude-haiku-4-5 --ui
 第三行才是让人留下来的那条：同样的文件、同样的对话前缀，从第 4 步起换一个模型。模型是唯一的变量，
 这正是答案有意义的原因。
 
-还没发到 npm——请[从源码安装](#安装)，大约一分钟。
+```console
+npm i -g orcareplay
+```
 
 ## 为什么会有这个东西
 

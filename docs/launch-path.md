@@ -53,10 +53,12 @@ traffic is captured too, through the runtime hook in W3.4.
 
 ## 1. One-command install
 
-The cheapest blocker on the list. What is missing is the npm name, a token and a tag.
+The cheapest blocker on the list. **W1.1 is done**: `orcareplay` and the `@orcareplay` scope are
+claimed, `NPM_TOKEN` is in place, and 0.1.1 was published by the tagged workflow with a provenance
+attestation. `npm i -g orcareplay` is the install.
 
-The README says "Not on npm yet" twice in the first screen. For a tool asking to sit inside an
-agent loop, that line costs more trust than the install friction it explains.
+The README used to say "Not on npm yet" twice in the first screen, and the seven translations said
+it too. Those lines are gone. What is left of this section is W1.2 to W1.4.
 
 | | Work | Done when |
 |---|---|---|

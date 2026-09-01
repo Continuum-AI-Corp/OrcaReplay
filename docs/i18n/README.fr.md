@@ -44,7 +44,9 @@ C'est la troisième ligne qui retient les gens : mêmes fichiers, même préfixe
 modèle différent à partir de l'étape 4. Le modèle est la seule variable, et c'est ce qui donne un
 sens à la réponse.
 
-Pas encore sur npm — [installez depuis les sources](#installation), il faut une minute environ.
+```console
+npm i -g orcareplay
+```
 
 ## Pourquoi cet outil existe
 
@@ -506,8 +508,10 @@ Précoce. `v0` est le squelette qui marche des trois commandes ci-dessus.
 
 ## Installation
 
-Pas encore sur npm — les paquets sont construits et vérifiés pour, mais rien n'est publié ;
-aujourd'hui c'est donc depuis les sources :
+```console
+npm i -g orcareplay
+orca doctor
+```
 
 ```console
 git clone https://github.com/Continuum-AI-Corp/OrcaReplay && cd OrcaReplay

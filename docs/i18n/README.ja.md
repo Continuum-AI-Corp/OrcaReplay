@@ -41,7 +41,9 @@ orca replay last --from 4 --model claude-haiku-4-5 --ui
 人が留まる理由は3行目にある。同じファイル、同じ会話の前半、ステップ4から先だけ別のモデル。
 変数はモデルだけ——だからこそ答えに意味が出る。
 
-npm 未公開——[ソースからインストール](#インストール)、1分ほど。
+```console
+npm i -g orcareplay
+```
 
 ## なぜ作ったのか
 
@@ -476,7 +478,10 @@ const timeline = await orca.show('last');
 
 ## インストール
 
-npm 未公開——パッケージはビルドも検証も済んでいるが公開はしていないので、今日のところはソースから:
+```console
+npm i -g orcareplay
+orca doctor
+```
 
 ```console
 git clone https://github.com/Continuum-AI-Corp/OrcaReplay && cd OrcaReplay

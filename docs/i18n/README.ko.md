@@ -41,7 +41,9 @@ orca replay last --from 4 --model claude-haiku-4-5 --ui
 사람들이 머무는 이유는 세 번째 줄이다. 같은 파일, 같은 대화 앞부분, 4단계부터만 다른 모델.
 변수는 모델 하나뿐이고, 그래서 답에 의미가 생긴다.
 
-아직 npm에 없다 — [소스에서 설치](#설치), 1분쯤 걸린다.
+```console
+npm i -g orcareplay
+```
 
 ## 왜 만들었나
 
@@ -469,7 +471,10 @@ const timeline = await orca.show('last');
 
 ## 설치
 
-아직 npm에 없다 — 패키지는 빌드와 검증까지 끝났지만 게시하지 않았으므로 오늘은 소스에서:
+```console
+npm i -g orcareplay
+orca doctor
+```
 
 ```console
 git clone https://github.com/Continuum-AI-Corp/OrcaReplay && cd OrcaReplay

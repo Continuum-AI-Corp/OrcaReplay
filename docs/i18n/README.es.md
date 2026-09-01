@@ -44,7 +44,9 @@ La tercera línea es por la que la gente se queda: los mismos archivos, el mismo
 conversación, otro modelo a partir del paso 4. El modelo es la única variable, y eso es lo que hace
 que la respuesta signifique algo.
 
-Todavía no está en npm — [instálalo desde el código](#instalación), tarda cosa de un minuto.
+```console
+npm i -g orcareplay
+```
 
 ## Por qué existe
 
@@ -500,8 +502,10 @@ Temprano. `v0` es el esqueleto que camina de los tres comandos de arriba.
 
 ## Instalación
 
-Todavía no está en npm — los paquetes están construidos y verificados para ello, pero no se ha
-publicado nada, así que hoy es desde el código:
+```console
+npm i -g orcareplay
+orca doctor
+```
 
 ```console
 git clone https://github.com/Continuum-AI-Corp/OrcaReplay && cd OrcaReplay
