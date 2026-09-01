@@ -7,9 +7,22 @@ import type { AddressInfo, Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { connect as tlsConnect } from 'node:tls';
-import { zstdCompressSync } from 'node:zlib';
+import zlib from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunCa } from '../src/ca.js';
+
+/**
+ * zstd landed in Node's `zlib` after the oldest runtime this CLI supports, so on Node 20 the named
+ * import was simply `undefined` and the test below died on `zstdCompressSync is not a function` —
+ * a red build on every pull request, saying nothing about the change that triggered it.
+ *
+ * Looked up dynamically, the same way `decodeRequestBody` looks up the other half of the pair, so
+ * the module still loads. Skipped rather than deleted: the behaviour is real on the runtimes that
+ * have zstd, and a skipped test names the runtime that is missing something where a deleted one
+ * would just be gone.
+ */
+const zstdCompressSync = (zlib as typeof zlib & { zstdCompressSync?: (input: Buffer) => Buffer })
+  .zstdCompressSync;
 import {
   createProxy,
   type NetExchange,
@@ -362,83 +375,86 @@ describe('TLS interception', () => {
     expect(netExchanges).toHaveLength(0);
   });
 
-  it('replays a zstd-compressed Codex request inside intercepted TLS', async () => {
-    const dialect = defaultDialects().find((candidate) => candidate.id === 'codex')!;
-    const request = {
-      model: 'gpt-5.6-luna',
-      instructions: 'Answer briefly.',
-      input: [
-        {
-          type: 'message',
-          role: 'user',
-          content: [{ type: 'input_text', text: 'say hello' }],
+  it.skipIf(zstdCompressSync === undefined)(
+    'replays a zstd-compressed Codex request inside intercepted TLS',
+    async () => {
+      const dialect = defaultDialects().find((candidate) => candidate.id === 'codex')!;
+      const request = {
+        model: 'gpt-5.6-luna',
+        instructions: 'Answer briefly.',
+        input: [
+          {
+            type: 'message',
+            role: 'user',
+            content: [{ type: 'input_text', text: 'say hello' }],
+          },
+        ],
+        stream: true,
+      };
+      const response =
+        'event: response.created\n' +
+        'data: ' +
+        JSON.stringify({
+          type: 'response.created',
+          response: { id: 'resp_test', model: 'gpt-5.6-luna', status: 'in_progress' },
+        }) +
+        '\n\n' +
+        'event: response.output_text.delta\n' +
+        'data: ' +
+        JSON.stringify({ type: 'response.output_text.delta', delta: 'CODEX_REPLAY_OK' }) +
+        '\n\n' +
+        'event: response.completed\n' +
+        'data: ' +
+        JSON.stringify({
+          type: 'response.completed',
+          response: {
+            id: 'resp_test',
+            model: 'gpt-5.6-luna',
+            status: 'completed',
+            usage: { input_tokens: 3, output_tokens: 1 },
+          },
+        }) +
+        '\n\n';
+      proxy = await createProxy({
+        mode: 'replay',
+        exchanges: [
+          {
+            seq: 0,
+            dialect: 'codex',
+            path: '/backend-api/codex/responses',
+            rawRequest: JSON.stringify(request),
+            rawResponse: response,
+            status: 200,
+            streamed: true,
+            canonicalRequest: dialect.toCanonicalRequest(request),
+            canonicalResponse: dialect.parseStream(response),
+          },
+        ],
+        tls: {
+          ca: runCa,
+          hosts: [`127.0.0.1:${model.port}`],
+          trustedOriginCerts: [originCa.certPem],
         },
-      ],
-      stream: true,
-    };
-    const response =
-      'event: response.created\n' +
-      'data: ' +
-      JSON.stringify({
-        type: 'response.created',
-        response: { id: 'resp_test', model: 'gpt-5.6-luna', status: 'in_progress' },
-      }) +
-      '\n\n' +
-      'event: response.output_text.delta\n' +
-      'data: ' +
-      JSON.stringify({ type: 'response.output_text.delta', delta: 'CODEX_REPLAY_OK' }) +
-      '\n\n' +
-      'event: response.completed\n' +
-      'data: ' +
-      JSON.stringify({
-        type: 'response.completed',
-        response: {
-          id: 'resp_test',
-          model: 'gpt-5.6-luna',
-          status: 'completed',
-          usage: { input_tokens: 3, output_tokens: 1 },
-        },
-      }) +
-      '\n\n';
-    proxy = await createProxy({
-      mode: 'replay',
-      exchanges: [
-        {
-          seq: 0,
-          dialect: 'codex',
-          path: '/backend-api/codex/responses',
-          rawRequest: JSON.stringify(request),
-          rawResponse: response,
-          status: 200,
-          streamed: true,
-          canonicalRequest: dialect.toCanonicalRequest(request),
-          canonicalResponse: dialect.parseStream(response),
-        },
-      ],
-      tls: {
-        ca: runCa,
-        hosts: [`127.0.0.1:${model.port}`],
-        trustedOriginCerts: [originCa.certPem],
-      },
-    });
+      });
 
-    const replayed = await through({
-      proxyPort: proxy.port,
-      host: '127.0.0.1',
-      port: model.port,
-      trust: [runCa.certPem],
-      method: 'POST',
-      path: '/backend-api/codex/responses',
-      body: zstdCompressSync(Buffer.from(JSON.stringify(request))),
-      headers: { 'content-type': 'application/json', 'content-encoding': 'zstd' },
-    });
+      const replayed = await through({
+        proxyPort: proxy.port,
+        host: '127.0.0.1',
+        port: model.port,
+        trust: [runCa.certPem],
+        method: 'POST',
+        path: '/backend-api/codex/responses',
+        body: zstdCompressSync(Buffer.from(JSON.stringify(request))),
+        headers: { 'content-type': 'application/json', 'content-encoding': 'zstd' },
+      });
 
-    expect(replayed.status).toBe(200);
-    expect(replayed.body).toBe(response);
-    expect(proxy.stats().matchedExact).toBe(1);
-    expect(proxy.stats().unmatched).toBe(0);
-    expect(netExchanges).toHaveLength(0);
-  });
+      expect(replayed.status).toBe(200);
+      expect(replayed.body).toBe(response);
+      expect(proxy.stats().matchedExact).toBe(1);
+      expect(proxy.stats().unmatched).toBe(0);
+      expect(netExchanges).toHaveLength(0);
+    },
+  );
 
   it('never records the credentials it forwards', async () => {
     const handle = await startProxy([`127.0.0.1:${model.port}`]);
