@@ -12,8 +12,12 @@ const order = (): string[] =>
 
 const manifest = (
   dir: string,
-): { name: string; version: string; dependencies?: Record<string, string> } =>
-  JSON.parse(readFileSync(join(repoRoot, dir, 'package.json'), 'utf8'));
+): {
+  name: string;
+  version: string;
+  dependencies?: Record<string, string>;
+  repository?: { url?: string; directory?: string };
+} => JSON.parse(readFileSync(join(repoRoot, dir, 'package.json'), 'utf8'));
 
 /**
  * The release workflow publishes in this order and only ever runs on a tag, so a mistake here is
@@ -39,6 +43,25 @@ describe('publish order', () => {
     expect(listed).toContain('orcareplay');
     expect(listed).toContain('@orcareplay/core');
     expect(listed).not.toContain('orcareplay-monorepo');
+  });
+
+  /**
+   * `--provenance` refuses to sign a package whose `package.json` does not name the repository the
+   * build claims to come from, and the registry rejects the upload with a 422. Eleven of the twelve
+   * packages had no `repository` field at all, which nothing noticed until a tag was pushed and the
+   * release died on the first package — the exact moment this file exists to protect.
+   */
+  it('names the repository in every package, which provenance signing requires', () => {
+    const expected = 'https://github.com/Continuum-AI-Corp/OrcaReplay.git';
+    for (const dir of order()) {
+      const pkg = manifest(dir);
+      expect(pkg.repository?.url, `${pkg.name} declares no repository.url`).toBe(expected);
+      // The directory too, so npm links at the package rather than the monorepo root. The
+      // script prints native separators; a `package.json` path is always forward slashes.
+      expect(pkg.repository?.directory, `${pkg.name} declares no repository.directory`).toBe(
+        dir.split(/[\\\\/]/).join('/'),
+      );
+    }
   });
 
   it('pins internal dependencies to an exact version, never a range', () => {
