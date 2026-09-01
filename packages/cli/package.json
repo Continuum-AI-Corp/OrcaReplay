@@ -32,7 +32,8 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/Continuum-AI-Corp/OrcaReplay.git"
+    "url": "https://github.com/Continuum-AI-Corp/OrcaReplay.git",
+    "directory": "packages/cli"
   },
   "dependencies": {
     "@orcareplay/schema": "0.1.1",
