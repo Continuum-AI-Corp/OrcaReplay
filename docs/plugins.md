@@ -35,12 +35,25 @@ your harness exposes internal state a fork would otherwise lose (context compact
 lists, memory files).
 
 **Before you write one**, check whether the agent respects a base-URL environment variable. That
-single fact decides whether an adapter is an afternoon or a week — or whether one can be written at
-all. Base-URL injection is the only capture mechanism there is; there is no CA mode to fall back on
-(see [SECURITY.md](../SECURITY.md)), so a harness that reads no base-URL variable cannot be
-recorded today. If it reads an unusual one, the generic OpenAI adapter probably already covers you:
-it sets `OPENAI_BASE_URL`, `OPENAI_API_BASE` and `ANTHROPIC_BASE_URL` at once and takes the command
-from argv.
+single fact decides how much work an adapter is — not, any longer, whether one is possible. There
+are three capture mechanisms, and an adapter picks whichever the harness allows:
+
+| The harness… | Capture by | Adapter looks like |
+|---|---|---|
+| reads a base-URL variable | pointing it at `ctx.proxyUrl` | one or two lines, as below |
+| is JavaScript and reads none | the fetch hook — see `node.ts` | a preload plus `NODE_OPTIONS` |
+| is neither | `--tls-intercept`, at the socket | nothing at all — see `exec.ts` |
+
+If it reads an unusual variable, the generic OpenAI adapter probably already covers you: it sets
+`OPENAI_BASE_URL`, `OPENAI_API_BASE` and `ANTHROPIC_BASE_URL` at once and takes the command from
+argv. If it reads none and is not JavaScript — a bot with its origin typed into its source, a Go
+binary, an editor that spawns the agent as a child — `orca record exec --tls-intercept -- <cmd>`
+records it with no adapter at all, and an adapter is only worth writing if you want a name for it.
+
+An adapter that relies on interception must say so with `capture: 'transport'`. It redirects
+nothing, which is otherwise indistinguishable from the broken adapter the contract's
+`redirects-model-traffic` check exists to catch; declaring it takes that one check's exemption and
+no other. See [SECURITY.md](../SECURITY.md) for what interception does and does not decrypt.
 
 ## The adapter contract
 

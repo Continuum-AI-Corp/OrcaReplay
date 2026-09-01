@@ -59,10 +59,18 @@ describe('every registered adapter', () => {
   });
 
   it.each(registry.ids())('%s is checked by every contract check, not a subset', async (id) => {
-    const result = await checkAdapterContract(registry.get(id));
+    const adapter = registry.get(id);
+    const result = await checkAdapterContract(adapter);
     // harness-versions only applies to adapters that declare a range; everything else is universal.
     const universal = CONTRACT_CHECKS.filter((c) => c !== 'harness-versions');
-    expect(result.passed).toEqual(expect.arrayContaining([...universal]));
+    // An adapter that captures at the transport redirects nothing on purpose, so the one check
+    // that asks "where does this point the harness" cannot apply to it. The exemption is narrow
+    // by construction: it is subtracted here by name, so a transport adapter that stopped passing
+    // any *other* check would still fail this test rather than quietly opt out of the contract.
+    const exempt = adapter.capture === 'transport' ? ['redirects-model-traffic'] : [];
+    const required = universal.filter((c) => !exempt.includes(c));
+    expect(result.passed).toEqual(expect.arrayContaining([...required]));
+    for (const check of exempt) expect(result.passed).not.toContain(check);
   });
 
   it('covers the registry as a whole, so a new adapter cannot skip the guard', async () => {

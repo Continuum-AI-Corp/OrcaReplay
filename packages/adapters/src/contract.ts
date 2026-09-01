@@ -94,7 +94,10 @@ export async function checkAdapterContract(
       ['id-format', async () => idFormat(adapter)],
       ['detect-resolves', () => detectResolves(adapter, base, join(root, 'missing-workspace'))],
       ['prepare-shape', async () => prepareShape(primary)],
-      ['redirects-model-traffic', async () => redirectsModelTraffic(primary, base)],
+      [
+        'redirects-model-traffic',
+        async () => redirectsModelTraffic(primary, base, adapter.capture ?? 'env'),
+      ],
       ['no-invented-keys', () => noInventedKeys(adapter, base)],
       ['no-ctx-mutation', () => noCtxMutation(adapter, base)],
       ['deterministic', () => deterministic(adapter, base)],
@@ -225,10 +228,30 @@ function prepareShape(primary: Attempt): CheckOutcome {
  * the adapter, capture returns nothing while every other signal — exit code, output, the agent's
  * own answers — still says the run worked.
  */
-function redirectsModelTraffic(primary: Attempt, base: RecordContext): CheckOutcome {
+function redirectsModelTraffic(
+  primary: Attempt,
+  base: RecordContext,
+  capture: 'env' | 'transport',
+): CheckOutcome {
   if ('error' in primary) return notVerified('prepare-shape');
   const env = primary.launch.env;
   if (!isStringRecord(env)) return notVerified('prepare-shape');
+
+  // An adapter that captures at the transport redirects nothing on purpose: `--tls-intercept`
+  // terminates the agent's own TLS, and the run — not the adapter — puts `HTTPS_PROXY` and the run
+  // CA into the child's environment. Failing it for "points the harness nowhere" would be scoring
+  // it against a mechanism it does not use. It is still held to every other check, including the
+  // one below that any origin it *does* set must point at the proxy.
+  if (capture === 'transport') {
+    const stray = Object.entries(env)
+      .filter(([name]) => BASE_URL_LIKE.test(name))
+      .filter(([, value]) => !pointsAtHost(value, hostOf(base.proxyUrl) ?? base.proxyUrl));
+    if (stray.length > 0) {
+      const names = stray.map(([name, value]) => `${name}=${value}`).join(', ');
+      return `${names} does not point at the proxy (${base.proxyUrl}); traffic on that origin goes straight to the provider and never reaches the trace`;
+    }
+    return SKIP;
+  }
 
   // Any base-URL-shaped variable counts, not only the three orca happens to know: a harness with
   // its own spelling — grok-cli reads `GROK_BASE_URL` — is redirected just as effectively. So is

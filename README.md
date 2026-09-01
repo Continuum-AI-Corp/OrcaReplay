@@ -349,6 +349,9 @@ whether orca understands the wire format it speaks once it arrives.
 | **opencode** | `orca record opencode` | adapter shipped, both origins redirected |
 | **LangGraph / LangChain** | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | should work — it goes through the official clients, but nothing here tests it yet |
 | **Hermes** (Nous Research) | `ORCA_BASE_URL_VARS=… orca record generic-openai -- hermes …` | should work — it overrides per provider; [name the variable](#a-base-url-variable-orca-has-never-heard-of) |
+| **Codex-in-the-IDE** | `orca record exec --tls-intercept -- code .` | works — the extension spawns the agent, and it inherits the capture |
+| **a bot with a hardcoded origin** | `orca record exec --tls-intercept -- <cmd>` | works — a Grok bot posting to a URL in its own source, [in detail](#an-agent-that-reads-nothing-at-all) |
+| **an agent in a sandbox or on another machine** | `orca attach` | works — orca is reachable and prints what to export, [in detail](#an-agent-that-is-not-on-this-machine) |
 | **anything else** | `orca record generic-openai -- <cmd>` | works if it reads a base-URL variable; `orca record node -- <cmd>` if it does not |
 
 Only Claude Code has been driven end to end against the real harness, and
@@ -372,6 +375,78 @@ That inheritance is a property of the operating system rather than of orca, whic
 thing that stays obviously true right up until some layer in between sanitises the environment. So
 it has a test: a gateway fixture that makes no model call of its own, spawns an agent that does, and
 is recorded and replayed offline through the grandchild's traffic.
+
+### An agent that reads nothing at all
+
+A bot with `https://api.x.ai/v1` typed into its source reads no variable, so nothing can be
+redirected. It is also, by some distance, the most common shape of agent people write. Capture it
+below the agent instead, at the socket:
+
+```console
+orca record exec --tls-intercept -- python bot.py
+orca record exec --tls-intercept -- ./my-agent --task "fix the test"
+```
+
+`exec` (or `any`) launches your command and sets nothing — no origin and no credential — so the bot
+still talks to whoever it was already talking to, and orca reads the conversation on the way past.
+`api.x.ai` is on the default decrypt list, so a Grok bot needs no host named.
+
+The same command reaches an agent orca did not launch, as long as something orca *did* launch is
+its ancestor. That is the shape of Codex-in-the-IDE: the extension spawns the agent as a child, so
+recording the editor captures the agent underneath it.
+
+```console
+orca record exec --tls-intercept -- code .
+orca record exec --tls-intercept -- cursor .
+```
+
+Replay needs no flags repeated. A run recorded through interception writes down which hosts it
+decrypted, and `orca replay` reads that back and re-establishes the same policy — `--no-tls-intercept`
+if you would rather it did not.
+
+To decrypt an endpoint the default list does not cover, add it rather than replacing the list:
+
+```console
+orca record exec --tls-intercept --tls-hosts '+my-gateway.internal' -- ./my-agent
+```
+
+A plain `--tls-hosts a,b` still means "decrypt exactly these", as it always has. Mixing the two
+forms is refused rather than guessed at.
+
+### An agent that is not on this machine
+
+An agent in a dev container, on a VPS, or in someone's CI cannot be launched by orca, so there is
+no environment for it to build. `orca attach` turns it around: orca holds the proxy open, prints
+the block to paste on the far side, and records whatever arrives until you stop it.
+
+```console
+orca attach --for claude
+orca attach --for claude --bind 0.0.0.0 --advertise host.docker.internal
+orca attach --tls-intercept          # for an agent over there that reads no variable either
+```
+
+```
+info attached run=run_e3d64e15ee8f proxy=http://127.0.0.1:33437 for=claude-code
+
+  # in the sandbox, before starting your agent:
+  export ANTHROPIC_BASE_URL='http://127.0.0.1:33437'
+
+  Recording. Press ctrl-C when the agent is done.
+```
+
+The variables come from the same adapters `orca record` uses, so a sandbox recording cannot drift
+from a local one. `--advertise` is required when you bind a wildcard: `0.0.0.0` is a statement about
+listening, not an address anything can dial, and orca refuses to print a URL that cannot work.
+
+Replaying such a run has the same problem in reverse — the agent may not exist on this machine — so
+replay attaches too:
+
+```console
+orca attach --replay <run>
+```
+
+It serves the recording with egress blocked and takes the harness from the recording itself. Point
+the same remote agent at it and the run happens again, offline, with no model called.
 
 ### A base-URL variable orca has never heard of
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_TLS_HOSTS, HostPolicy } from '../src/tls-hosts.js';
+import { DEFAULT_TLS_HOSTS, HostPolicy, resolveTlsHosts } from '../src/tls-hosts.js';
 
 /**
  * Which hosts a `--tls-intercept` run is allowed to decrypt.
@@ -72,5 +72,93 @@ describe('TLS interception host policy', () => {
     expect(HostPolicy.from(['api.openai.com', '*.chatgpt.com']).describe()).toBe(
       'api.openai.com, *.chatgpt.com',
     );
+  });
+});
+
+/**
+ * Adding to the default list instead of replacing it.
+ *
+ * `--tls-hosts` replaced the defaults outright, which is the right shape for "decrypt exactly
+ * these and nothing else" and the wrong one for the far more common "decrypt the usual model APIs,
+ * plus this one endpoint my agent talks to". Someone reaching for the second got the first: naming
+ * one host silently dropped the other twelve, and the run under-captured without saying so.
+ *
+ * A leading `+` is the difference, and the mistake it prevents is the reason the resolution lives
+ * here rather than in the CLI — the policy and the meaning of the flag that builds it are one
+ * decision.
+ */
+describe('resolving the requested host list', () => {
+  it('falls back to the defaults when nothing is asked for', () => {
+    expect(resolveTlsHosts([])).toEqual([...DEFAULT_TLS_HOSTS]);
+  });
+
+  it('replaces the defaults for a plain list, which is what naming hosts has always meant', () => {
+    expect(resolveTlsHosts(['api.openai.com', 'api.x.ai'])).toEqual(['api.openai.com', 'api.x.ai']);
+  });
+
+  it('adds to the defaults when an entry is marked with +', () => {
+    const hosts = resolveTlsHosts(['+grok.com']);
+    expect(hosts).toEqual([...DEFAULT_TLS_HOSTS, 'grok.com']);
+    // The point of the feature: the defaults survive.
+    expect(HostPolicy.from(hosts).allows('api.anthropic.com', 443)).toBe(true);
+    expect(HostPolicy.from(hosts).allows('grok.com', 443)).toBe(true);
+  });
+
+  it('adds several, and keeps them in the order they were named', () => {
+    expect(resolveTlsHosts(['+grok.com', '+*.grok.com'])).toEqual([
+      ...DEFAULT_TLS_HOSTS,
+      'grok.com',
+      '*.grok.com',
+    ]);
+  });
+
+  it('never lists a default twice when one is added back explicitly', () => {
+    const hosts = resolveTlsHosts(['+api.x.ai', '+grok.com']);
+    expect(hosts.filter((h) => h === 'api.x.ai')).toHaveLength(1);
+    expect(hosts).toContain('grok.com');
+  });
+
+  /**
+   * Mixing the two is a contradiction — "use only these" and "keep the defaults too" in one flag —
+   * and guessing which was meant would produce a policy the operator did not ask for. In a feature
+   * whose entire safety argument is the host list, that is the one thing not to be clever about.
+   */
+  it('refuses a list that both replaces and adds, rather than picking one', () => {
+    expect(() => resolveTlsHosts(['api.openai.com', '+grok.com'])).toThrow(/\+/);
+    expect(() => resolveTlsHosts(['api.openai.com', '+grok.com'])).toThrow(
+      /every host|all of them|mix/i,
+    );
+  });
+
+  /**
+   * A replay adds to what its recording decrypted, not to the defaults.
+   *
+   * Resolving `+extra` against `DEFAULT_TLS_HOSTS` on a run recorded with a custom list swaps that
+   * list for the defaults, so the host the recording actually needs stops being decrypted and the
+   * replay reports `reused=0/n` — the same confusing failure the inheritance was added to remove.
+   */
+  it('adds to the list a recording used, when one is given', () => {
+    const recorded = ['127.0.0.1:8443'];
+    expect(resolveTlsHosts(['+grok.example'], recorded)).toEqual([
+      '127.0.0.1:8443',
+      'grok.example',
+    ]);
+  });
+
+  it('falls back to the recorded list when nothing is asked for', () => {
+    expect(resolveTlsHosts([], ['127.0.0.1:8443'])).toEqual(['127.0.0.1:8443']);
+  });
+
+  it('still lets a plain list replace the recorded one, for narrowing by hand', () => {
+    expect(resolveTlsHosts(['api.openai.com'], ['127.0.0.1:8443'])).toEqual(['api.openai.com']);
+  });
+
+  it('still refuses a wildcard that asks for everything, marked or not', () => {
+    expect(() => HostPolicy.from(resolveTlsHosts(['+*']))).toThrow(/every host/);
+    expect(() => HostPolicy.from(resolveTlsHosts(['*']))).toThrow(/every host/);
+  });
+
+  it('ignores a bare + with no host after it rather than adding an empty pattern', () => {
+    expect(resolveTlsHosts(['+grok.com', '+'])).toEqual([...DEFAULT_TLS_HOSTS, 'grok.com']);
   });
 });

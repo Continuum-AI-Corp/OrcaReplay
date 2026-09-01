@@ -1,11 +1,12 @@
 import { readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { TraceWriter } from '@orcareplay/core';
+import type { TraceEvent } from '@orcareplay/schema';
 import {
-  DEFAULT_TLS_HOSTS,
   HostPolicy,
   RunCa,
   type InterceptFailure,
+  resolveTlsHosts,
   type NetExchange,
   type TlsInterceptInfo,
   type TunnelRecord,
@@ -31,6 +32,12 @@ import type { SerialQueue } from './serial.js';
 export interface TlsCaptureRequest {
   args: ParsedArgs;
   out: Output;
+  /**
+   * Hosts the run being reproduced decrypted, recovered from its own trace.
+   *
+   * Present for replay and fork, absent for a fresh recording. See `recordedTlsHosts`.
+   */
+  recordedHosts?: readonly string[];
   writer?: TraceWriter;
   /** Used by an exact replay running with --no-trace, where there is no writer to own the CA. */
   runDir?: string;
@@ -50,11 +57,46 @@ export interface TlsCapture {
   proxyOptions: Record<string, unknown>;
 }
 
-export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCapture> {
-  const { args, out, writer, writes } = req;
+/**
+ * Everything `setupTlsCapture` can refuse, without creating anything.
+ *
+ * A caller that has a trace directory to lose needs the refusal to happen first: a run abandoned
+ * by a throw leaves an unsealed directory behind, and an unsealed directory wins `last`.
+ */
+export function planTlsCapture(args: ParsedArgs, recordedHosts?: readonly string[]): void {
+  if (!interceptionRequested(args, recordedHosts)) return;
+  HostPolicy.from([...resolveTlsHosts(args.list('tls-hosts'), recordedHosts)]);
+}
 
-  const interceptTls = args.bool('tls-intercept');
+/**
+ * Is this run intercepting?
+ *
+ * A run recorded through interception has to be replayed through it. The agent this exists for
+ * talks to its own backend over TLS it establishes itself, so without interception the replay
+ * proxy never sees the request at all: it tunnels the CONNECT to an origin that is offline or,
+ * worse, live. That failed as `reused=0/n` — which reads as a broken recording rather than as a
+ * missing flag, and the flag is one nobody thinks to repeat when the command they type is
+ * `orca replay last`.
+ *
+ * So the recording decides. It already knows: every intercepted run writes a `tls_intercept` note
+ * naming the hosts it decrypted. Nothing is inferred and nothing is widened — an operator who
+ * never turned interception on gets a replay that never turns it on either, and
+ * `--no-tls-intercept` refuses outright.
+ */
+function interceptionRequested(args: ParsedArgs, recordedHosts?: readonly string[]): boolean {
+  const askedFor = args.bool('tls-intercept');
+  // `--no-tls-intercept` is the only way to tell "left unset" apart from "explicitly refused", and
+  // the difference matters: absence means orca may decide, refusal means it may not.
+  const refused = args.has('tls-intercept') && !askedFor;
+  return askedFor || (!refused && recordedHosts !== undefined);
+}
+
+export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCapture> {
+  const { args, out, writer, writes, recordedHosts } = req;
+
   const tlsHosts = args.list('tls-hosts');
+  const interceptTls = interceptionRequested(args, recordedHosts);
+
   // Naming hosts without asking for interception captures nothing and says nothing, which reads
   // as "orca ignored my traffic" rather than as "orca ignored my flag".
   if (!interceptTls && tlsHosts.length > 0) {
@@ -62,27 +104,30 @@ export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCaptur
   }
   if (!interceptTls) return { proxyOptions: {} };
 
-  const hosts = tlsHosts.length > 0 ? tlsHosts : DEFAULT_TLS_HOSTS;
-  HostPolicy.from(hosts);
+  // Resolved before anything is minted, so a contradictory list — one that both replaces the
+  // defaults and adds to them — fails while the run directory still holds no private key.
+  const hosts = resolveTlsHosts(tlsHosts, recordedHosts);
+  HostPolicy.from([...hosts]);
   const trustedOriginCerts = await extraOriginRoots();
   const runDir = writer?.runDir ?? req.runDir;
   if (!runDir) throw new Error('TLS interception needs a run directory');
   const ca = await RunCa.create({ runDir });
+
+  // One line per path, not per call: an agent that posts to the same endpoint every turn would
+  // otherwise bury the run in a warning the operator already read.
+  const reported = new Set<string>();
 
   return {
     ca,
     proxyOptions: {
       tls: {
         ca,
-        hosts,
+        hosts: [...hosts],
         trustedOriginCerts,
-        ...(writer
-          ? {
-              onNetExchange: (exchange: NetExchange) => {
-                writes.push(() => persistNetExchange(writer, req.turn(), exchange));
-              },
-            }
-          : {}),
+        onNetExchange: (exchange: NetExchange) => {
+          warnUnclaimed(out, reported, exchange);
+          if (writer) writes.push(() => persistNetExchange(writer, req.turn(), exchange));
+        },
         onTunnel: (tunnel: TunnelRecord) => {
           if (writer) writes.push(() => persistTunnel(writer, req.turn(), tunnel));
         },
@@ -90,6 +135,71 @@ export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCaptur
       },
     },
   };
+}
+
+/**
+ * An intercepted call that looked like a model request and was not understood.
+ *
+ * Traffic on a path no dialect claims is recorded as `net.*`: orca holds the bytes but not their
+ * meaning, so it can neither match the request on replay nor rewrite its model on a fork. Strict
+ * replay says so plainly — and says it one command too late, after the agent has finished and the
+ * chance to record the run properly has gone. This is the same fact, delivered while it is still
+ * actionable.
+ *
+ * Deliberately narrow. A GET, or a POST whose body is not JSON, is ordinary traffic that was never
+ * a model call, and warning about it would teach the operator to ignore the warning that matters.
+ */
+function warnUnclaimed(out: Output, reported: Set<string>, exchange: NetExchange): void {
+  if (exchange.method !== 'POST') return;
+  const body = exchange.requestBody.trim();
+  if (!body.startsWith('{')) return;
+  // A truncated body cannot parse — it was cut mid-JSON at the capture limit. Requiring a parse
+  // would suppress the warning for exactly the requests it exists for, since a long conversation
+  // is the one most likely to exceed the limit and the most expensive to have to record again.
+  if (!exchange.requestTruncated) {
+    try {
+      const parsed: unknown = JSON.parse(body);
+      if (typeof parsed !== 'object' || parsed === null) return;
+    } catch {
+      // A body orca could not even parse is not a model call it failed to recognise.
+      return;
+    }
+  }
+
+  const path = exchange.path.split('?')[0] ?? exchange.path;
+  const key = `${exchange.host}:${exchange.port}${path}`;
+  if (reported.has(key)) return;
+  reported.add(key);
+
+  out.warn('tls.unclaimed_path', {
+    host: exchange.host,
+    path: exchange.path,
+    detail: 'decrypted and recorded, but no wire dialect claims this path',
+    consequence: 'it replays as opaque network traffic and cannot be forked to another model',
+    next: 'docs/plugins.md to add a dialect for it',
+  });
+}
+
+/**
+ * The hosts a recorded run decrypted, read back out of its own trace.
+ *
+ * `trustRunCa` writes this note on every intercepted run — a digest and a host list, never the
+ * certificate and never the key — so the trace is self-describing about the one thing a faithful
+ * replay cannot guess. Returns undefined for a run recorded without interception, which is the
+ * signal that the replay must not turn it on either.
+ */
+export function recordedTlsHosts(events: readonly TraceEvent[]): readonly string[] | undefined {
+  for (const event of events) {
+    if (event.type !== 'note' || event.attrs?.['rule'] !== 'tls_intercept') continue;
+    const hosts = event.attrs['hosts'];
+    if (typeof hosts !== 'string') continue;
+    const parsed = hosts
+      .split(',')
+      .map((h) => h.trim())
+      .filter((h) => h !== '');
+    if (parsed.length > 0) return parsed;
+  }
+  return undefined;
 }
 
 /**

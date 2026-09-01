@@ -38,6 +38,19 @@ export interface Adapter {
   aliases?: readonly string[];
   /** Semver range of harness versions this adapter is tested against. */
   harnessVersions?: string;
+  /**
+   * How this adapter gets the agent's traffic to orca.
+   *
+   * `env` — the default, and what every harness-specific adapter does: point a base-URL variable
+   * at the proxy, or install the fetch hook, so the agent connects to a local origin in plaintext.
+   *
+   * `transport` — the adapter redirects nothing and relies on `--tls-intercept`, which is applied
+   * to the launched child by the run rather than by the adapter. Declared rather than inferred,
+   * because "sets no base-URL variable" is otherwise indistinguishable from the broken adapter the
+   * contract's `redirects-model-traffic` check exists to catch. An adapter that says `transport`
+   * is asserting that pointing nowhere is the intent, and takes the check's exemption in exchange.
+   */
+  capture?: 'env' | 'transport';
   detect(cwd: string): Promise<boolean>;
   prepare(ctx: RecordContext): Promise<Launch>;
   /**

@@ -3,6 +3,7 @@ import { parseArgs, type ParsedArgs } from './args.js';
 import { Orca } from './api.js';
 import { serveMcp } from './mcp-server.js';
 import { Output } from './out.js';
+import { attachCommand } from './commands/attach.js';
 import { recordCommand } from './commands/record.js';
 import { replayCommand } from './commands/replay.js';
 import {
@@ -23,6 +24,14 @@ import { ORCA_VERSION } from './version.js';
 const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI agents
 
   orca record <agent>            run an agent and capture everything
+  orca attach                    record an agent orca does not launch — one in a sandbox,
+                                 a container, or on another machine
+        --for <agent>            print the variables that agent reads (default: exec)
+        --bind <addr>            address to listen on (default: 127.0.0.1)
+        --advertise <host>       how the sandbox reaches this machine, when they differ
+        --remote-ca-path <p>     where the CA will live over there (default: /tmp/orca-ca.crt)
+        --replay <run>           serve a recording back to that agent instead of recording,
+                                 for a run whose agent is not on this machine
   orca replay [run]              reproduce a run exactly, network off
         --ui                     open the timeline when it finishes
   orca replay [run] --from N     fork from a checkpoint and continue live
@@ -71,10 +80,21 @@ Flags
   --port <n>     port for --ui and orca ui (default: any free port)
 
 A harness that reads no base-URL variable cannot be captured that way at all — a Codex CLI signed
-in with a ChatGPT subscription is the case. For that, and only for that:
+in with a ChatGPT subscription, a bot with its origin hardcoded, an agent in a language the fetch
+hook cannot reach. Capture those below the agent instead, at the socket:
+
+  orca record exec --tls-intercept -- <command> [args...]
+
+exec (or "any") launches your command and redirects nothing: no origin and no credential are
+invented, so an agent recorded this way still talks to whoever it was already talking to. It also
+reaches an agent orca did not launch — record the editor, and the agent it spawns inherits the
+capture.
 
   --tls-intercept              decrypt HTTPS for the hosts below, for this run only
-  --tls-hosts a,b,c            which hosts to decrypt (default: model API hosts)
+                               replay and fork turn this back on by themselves, using the
+                               hosts the recording names; --no-tls-intercept refuses
+  --tls-hosts a,b,c            decrypt exactly these, replacing the default list
+  --tls-hosts +a,+b            decrypt these *as well as* the default model API hosts
                                everything else is tunnelled unread; "*" is refused
 
   It mints a certificate authority in the run directory, trusts it to the agent through that
@@ -138,6 +158,8 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
     switch (args.command) {
       case 'record':
         return (await recordCommand(args, out, cwd)).exitCode;
+      case 'attach':
+        return (await attachCommand(args, out, cwd)).exitCode;
       case 'replay':
         return (await replayCommand(args, out, cwd)).exitCode;
       case 'compare':
@@ -248,6 +270,11 @@ async function jsonMain(args: ParsedArgs, cwd: string): Promise<number> {
           }),
         );
         return 0;
+      case 'attach': {
+        const result = await attachCommand(args, out, cwd);
+        emit(result);
+        return result.exitCode;
+      }
       case 'record': {
         const result = await recordCommand(args, out, cwd);
         emit(result);

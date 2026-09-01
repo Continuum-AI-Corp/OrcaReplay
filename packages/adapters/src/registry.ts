@@ -1,6 +1,7 @@
 import type { Adapter } from '@orcareplay/plugin-api';
 import { claudeCodeAdapter } from './claude-code.js';
 import { codexAdapter } from './codex.js';
+import { execAdapter } from './exec.js';
 import { genericOpenAiAdapter } from './generic-openai.js';
 import { grokAdapter } from './grok.js';
 import { openClawAdapter } from './openclaw.js';
@@ -89,5 +90,7 @@ export function defaultAdapters(): AdapterRegistry {
   registry.register(openClawAdapter);
   registry.register(nodeAdapter);
   registry.register(genericOpenAiAdapter);
+  // Last: it detects nothing, and it is the fallback someone reaches for by name.
+  registry.register(execAdapter);
   return registry;
 }

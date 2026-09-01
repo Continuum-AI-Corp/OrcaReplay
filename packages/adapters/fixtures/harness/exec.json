@@ -1,0 +1,10 @@
+{
+  "adapter": "exec",
+  "harness_versions": null,
+  "verified_at": "2026-09-01",
+  "command": "my-agent",
+  "env_vars": [],
+  "base_urls": {},
+  "optional_env_vars": [],
+  "note": "Captures at the transport, so it sets nothing at all: no origin and no credential. The empty env_vars list is the assertion — an agent recorded through --tls-intercept must not be silently repointed at a provider it never asked for, and this fixture fails the moment something starts injecting one. The command is the first user arg, so my-agent here is the test's argv rather than a fixed binary."
+}
