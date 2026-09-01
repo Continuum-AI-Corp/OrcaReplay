@@ -109,6 +109,47 @@ describe('orca attach', () => {
     expect(lines.join('')).toContain('attach.local_path');
   });
 
+  it('never prints the operator’s own credential', async () => {
+    const before = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-REAL-SECRET';
+    try {
+      await session(['--for', 'claude'], async () => {});
+    } finally {
+      if (before === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = before;
+    }
+    expect(lines.join('')).not.toContain('sk-ant-REAL-SECRET');
+  });
+
+  /**
+   * The result is what `--json` prints and what a script reads. Returning the bind address there
+   * hands a caller the exact unusable URL `advertisedUrl` throws to prevent.
+   */
+  it('reports the address the agent should use, not the one it bound', async () => {
+    const result = await session(
+      ['--for', 'claude', '--bind', '0.0.0.0', '--advertise', 'host.docker.internal'],
+      async () => {},
+    );
+    expect(result.proxyUrl).toMatch(/^http:\/\/host\.docker\.internal:\d+$/);
+  });
+
+  /**
+   * `--replay` takes a run, and the parser turns a valueless flag into `true` — so a bare
+   * `orca attach --replay`, or `--replay --tls-intercept`, silently became a fresh *recording*
+   * session pointed at the live provider. Exactly the wrong direction to fail in.
+   */
+  it('refuses --replay with no run rather than recording instead', async () => {
+    await expect(session(['--replay'], async () => {})).rejects.toThrow(/--replay/);
+  });
+
+  it('leaves no half-made run behind when the session cannot start', async () => {
+    await expect(
+      session(['--tls-intercept', '--tls-hosts', 'api.openai.com,+grok.example'], async () => {}),
+    ).rejects.toThrow(/\+/);
+    const runs = await readdir(join(workspace, '.orca', 'runs')).catch(() => []);
+    expect(runs).toEqual([]);
+  });
+
   it('advertises the host the operator names, not the one it bound', async () => {
     await session(
       ['--for', 'claude', '--bind', '0.0.0.0', '--advertise', 'host.docker.internal'],

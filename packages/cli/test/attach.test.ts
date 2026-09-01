@@ -99,6 +99,41 @@ describe('what a remote agent has to be told', () => {
   });
 
   /**
+   * The block is printed to a terminal, and a terminal is scrollback, a screen share, a pasted
+   * ticket and a CI log. The operator's own credential must never appear in it.
+   *
+   * Nor should a placeholder: adapters substitute `orca-recorded` for a key the local environment
+   * does not have, and exporting that in a sandbox would *overwrite* a real key the agent already
+   * had, turning a working setup into a 401. The agent over there keeps whatever credential it
+   * has, and orca forwards it upstream — so the right number of credential lines is none.
+   */
+  it('exports no credential, neither a real one nor a placeholder', () => {
+    const env = attachExports({
+      proxyUrl,
+      adapterEnv: {
+        ANTHROPIC_BASE_URL: proxyUrl,
+        ANTHROPIC_API_KEY: 'sk-ant-REAL-SECRET',
+        OPENAI_API_KEY: 'orca-recorded',
+        GITHUB_TOKEN: 'ghp_secret',
+      },
+    });
+    expect(env.ANTHROPIC_BASE_URL).toBe(proxyUrl);
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.OPENAI_API_KEY).toBeUndefined();
+    expect(env.GITHUB_TOKEN).toBeUndefined();
+  });
+
+  it('leaves no trace of a secret in the printed block', () => {
+    const text = attachInstructions({
+      proxyUrl,
+      adapterEnv: { ANTHROPIC_BASE_URL: proxyUrl, ANTHROPIC_API_KEY: 'sk-ant-REAL-SECRET' },
+    }).join('\n');
+    expect(text).not.toContain('sk-ant-REAL-SECRET');
+    // And says why a key is missing, so nobody concludes the block is incomplete.
+    expect(text).toMatch(/credential/i);
+  });
+
+  /**
    * A sandbox that cannot reach the proxy is the failure this whole command exists to avoid, and
    * `NO_PROXY` inherited from the operator's shell is a good way to cause it silently.
    */

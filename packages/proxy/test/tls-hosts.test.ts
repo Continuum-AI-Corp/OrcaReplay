@@ -130,6 +130,29 @@ describe('resolving the requested host list', () => {
     );
   });
 
+  /**
+   * A replay adds to what its recording decrypted, not to the defaults.
+   *
+   * Resolving `+extra` against `DEFAULT_TLS_HOSTS` on a run recorded with a custom list swaps that
+   * list for the defaults, so the host the recording actually needs stops being decrypted and the
+   * replay reports `reused=0/n` — the same confusing failure the inheritance was added to remove.
+   */
+  it('adds to the list a recording used, when one is given', () => {
+    const recorded = ['127.0.0.1:8443'];
+    expect(resolveTlsHosts(['+grok.example'], recorded)).toEqual([
+      '127.0.0.1:8443',
+      'grok.example',
+    ]);
+  });
+
+  it('falls back to the recorded list when nothing is asked for', () => {
+    expect(resolveTlsHosts([], ['127.0.0.1:8443'])).toEqual(['127.0.0.1:8443']);
+  });
+
+  it('still lets a plain list replace the recorded one, for narrowing by hand', () => {
+    expect(resolveTlsHosts(['api.openai.com'], ['127.0.0.1:8443'])).toEqual(['api.openai.com']);
+  });
+
   it('still refuses a wildcard that asks for everything, marked or not', () => {
     expect(() => HostPolicy.from(resolveTlsHosts(['+*']))).toThrow(/every host/);
     expect(() => HostPolicy.from(resolveTlsHosts(['*']))).toThrow(/every host/);

@@ -51,9 +51,20 @@ export const DEFAULT_TLS_HOSTS: readonly string[] = [
  * because the two readings disagree about every host the operator did not name, and guessing would
  * produce a policy nobody asked for.
  */
-export function resolveTlsHosts(requested: readonly string[]): string[] {
+export function resolveTlsHosts(
+  requested: readonly string[],
+  /**
+   * What `+host` adds to, and what an empty request falls back to.
+   *
+   * Defaults to the model API hosts. A replay passes the list its recording decrypted instead, so
+   * `--tls-hosts '+extra'` on a run recorded with a custom list adds to *that* list rather than
+   * silently swapping it for the defaults — which would stop decrypting the host the recording
+   * needs and report `reused=0/n`.
+   */
+  base: readonly string[] = DEFAULT_TLS_HOSTS,
+): string[] {
   const entries = requested.map((h) => h.trim()).filter((h) => h !== '');
-  if (entries.length === 0) return [...DEFAULT_TLS_HOSTS];
+  if (entries.length === 0) return [...base];
 
   const additive = entries.filter((h) => h.startsWith('+'));
   if (additive.length === 0) return entries;
@@ -69,7 +80,7 @@ export function resolveTlsHosts(requested: readonly string[]): string[] {
   // A bare `+` names nothing; dropping it beats minting an empty pattern that `HostPolicy` would
   // then reject with an error about a list the operator never typed.
   const added = additive.map((h) => h.slice(1).trim()).filter((h) => h !== '');
-  const seen = new Set(DEFAULT_TLS_HOSTS.map((h) => h.toLowerCase()));
+  const seen = new Set(base.map((h) => h.toLowerCase()));
   const extra: string[] = [];
   for (const host of added) {
     const key = host.toLowerCase();
@@ -77,7 +88,7 @@ export function resolveTlsHosts(requested: readonly string[]): string[] {
     seen.add(key);
     extra.push(host);
   }
-  return [...DEFAULT_TLS_HOSTS, ...extra];
+  return [...base, ...extra];
 }
 
 interface Pattern {

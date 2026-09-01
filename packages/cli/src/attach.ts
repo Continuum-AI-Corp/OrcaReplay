@@ -18,6 +18,21 @@ import { isIP } from 'node:net';
  * address nothing can dial — and those are only testable if the strings are values.
  */
 
+/**
+ * Variable names whose values must never be printed.
+ *
+ * The block goes to a terminal, and a terminal is scrollback, a screen share, a pasted ticket and
+ * a CI log. Over-matching here costs a line the operator did not need; under-matching prints
+ * somebody's API key, so the pattern is deliberately broad.
+ *
+ * Omitting them is also simply correct. The agent in the sandbox already holds whatever credential
+ * it authenticates with, and orca forwards it upstream untouched. Exporting the local machine's
+ * key would leak it; exporting the `orca-recorded` placeholder an adapter substitutes when the
+ * local environment has none would be worse — it would overwrite a working key over there and turn
+ * a functioning setup into a 401.
+ */
+const CREDENTIAL_LIKE = /(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIALS?)$/;
+
 /** Bind addresses that mean "every interface", and so mean nothing as a destination. */
 const WILDCARD_BINDS = new Set(['0.0.0.0', '::', '[::]', '*']);
 
@@ -103,7 +118,11 @@ export interface AttachRequest {
  * trusts nothing — because the file those variables name is not there.
  */
 export function attachExports(req: AttachRequest): Record<string, string> {
-  const env: Record<string, string> = { ...req.adapterEnv };
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(req.adapterEnv)) {
+    if (CREDENTIAL_LIKE.test(name)) continue;
+    env[name] = value;
+  }
   if (!req.ca || !req.remoteCaPath) return env;
 
   env.HTTPS_PROXY = req.proxyUrl;
@@ -153,5 +172,7 @@ export function attachInstructions(req: AttachRequest): string[] {
   for (const [name, value] of Object.entries(attachExports(req))) {
     lines.push(`export ${name}=${shellQuote(value)}`);
   }
+  // Said out loud, because a block with no key in it reads as an incomplete one.
+  lines.push(`# your agent's own credential is unchanged — orca forwards it upstream`);
   return lines;
 }

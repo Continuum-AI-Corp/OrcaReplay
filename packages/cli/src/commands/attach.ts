@@ -7,7 +7,7 @@ import type { Output } from '../out.js';
 import { advertisedUrl, attachExports, attachInstructions } from '../attach.js';
 import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
 import { SerialQueue } from '../serial.js';
-import { recordedTlsHosts, setupTlsCapture } from '../tls-capture.js';
+import { planTlsCapture, recordedTlsHosts, setupTlsCapture } from '../tls-capture.js';
 import { loadExchanges } from './replay.js';
 import { upstreamPlan } from '../upstream.js';
 import { ORCA_VERSION } from '../version.js';
@@ -104,6 +104,14 @@ async function runAttached(
    * So replay attaches too: same proxy, same matcher, same blocked egress, and the operator points
    * the same remote agent at it.
    */
+  // The parser turns a flag with no value into `true`, so a bare `--replay` — or `--replay
+  // --tls-intercept`, where the next token is itself a flag — would read as absent and start a
+  // *recording* session against the live provider. That is the worst direction to fail in.
+  if (args.has('replay') && args.str('replay') === undefined) {
+    throw new Error(
+      '--replay needs the run to serve: orca attach --replay <run>, or --replay last',
+    );
+  }
   const replaySelector = args.str('replay');
   const replaying = replaySelector
     ? await (async () => {
@@ -128,6 +136,11 @@ async function runAttached(
   const adapterName = args.str('for') ?? replaying?.adapter ?? 'exec';
   const adapter = registry.get(adapterName);
 
+  // The last thing that can refuse the run, and it runs before the trace exists: a writer created
+  // first and abandoned by a throw leaves an unsealed run directory behind, which then wins `last`
+  // — so the next command someone types operates on the session that never happened.
+  planTlsCapture(args, replaying?.hosts);
+
   const dir = await ensureRunsDir(cwd);
   const writer = await TraceWriter.create(dir, {
     adapter: { id: adapter.id, version: ORCA_VERSION, harness_version: adapter.harnessVersions },
@@ -135,6 +148,10 @@ async function runAttached(
     cwd,
     orcaVersion: ORCA_VERSION,
   });
+
+  let modelExchanges = 0;
+  let turn = 0;
+  let unmatched = 0;
 
   const writes = new SerialQueue();
   const plan = await upstreamPlan(args);
@@ -144,13 +161,11 @@ async function runAttached(
     ...(replaying ? { recordedHosts: replaying.hosts } : {}),
     writer,
     writes,
-    turn: () => 0,
+    // Out-of-band traffic belongs to whichever turn was in progress when it happened, exactly as in
+    // a launched recording. A fixed 0 filed every net.* event against the start of the session.
+    turn: () => turn,
   });
   if (tls.ca) minted.push(tls.ca);
-
-  let modelExchanges = 0;
-  let turn = 0;
-  let unmatched = 0;
   // Read before the proxy closes: `stats()` is a snapshot of a live object, and the teardown in
   // `finally` is the last moment it is still meaningful.
   let stats = {
@@ -180,12 +195,14 @@ async function runAttached(
     },
   });
 
+  const advertised = advertisedUrl({
+    bind,
+    port: proxy.port,
+    ...(advertise === undefined ? {} : { advertise }),
+  });
+
   try {
-    const proxyUrl = advertisedUrl({
-      bind,
-      port: proxy.port,
-      ...(advertise === undefined ? {} : { advertise }),
-    });
+    const proxyUrl = advertised;
 
     // What the adapter would have put into a child's environment, pointed at the reachable
     // address rather than a loopback one. `runDir` is this machine's, and is only ever used by
@@ -329,7 +346,9 @@ async function runAttached(
     runDir: writer.runDir,
     modelExchanges,
     events: manifest.counts?.events ?? 0,
-    proxyUrl: proxy.url,
+    // The address the agent should use, not the one orca bound — a caller reading this from
+    // `--json` needs something it can connect to, which a wildcard bind is not.
+    proxyUrl: advertised,
     // Exact plus inexact: both were served from the recording, which is what "reused" means here.
     // The distinction between them is a divergence, and divergences are reported on their own.
     reused: replaying ? stats.matchedExact + stats.matchedInexact : 0,

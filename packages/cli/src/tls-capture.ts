@@ -57,31 +57,45 @@ export interface TlsCapture {
   proxyOptions: Record<string, unknown>;
 }
 
+/**
+ * Everything `setupTlsCapture` can refuse, without creating anything.
+ *
+ * A caller that has a trace directory to lose needs the refusal to happen first: a run abandoned
+ * by a throw leaves an unsealed directory behind, and an unsealed directory wins `last`.
+ */
+export function planTlsCapture(args: ParsedArgs, recordedHosts?: readonly string[]): void {
+  if (!interceptionRequested(args, recordedHosts)) return;
+  HostPolicy.from([...resolveTlsHosts(args.list('tls-hosts'), recordedHosts)]);
+}
+
+/**
+ * Is this run intercepting?
+ *
+ * A run recorded through interception has to be replayed through it. The agent this exists for
+ * talks to its own backend over TLS it establishes itself, so without interception the replay
+ * proxy never sees the request at all: it tunnels the CONNECT to an origin that is offline or,
+ * worse, live. That failed as `reused=0/n` — which reads as a broken recording rather than as a
+ * missing flag, and the flag is one nobody thinks to repeat when the command they type is
+ * `orca replay last`.
+ *
+ * So the recording decides. It already knows: every intercepted run writes a `tls_intercept` note
+ * naming the hosts it decrypted. Nothing is inferred and nothing is widened — an operator who
+ * never turned interception on gets a replay that never turns it on either, and
+ * `--no-tls-intercept` refuses outright.
+ */
+function interceptionRequested(args: ParsedArgs, recordedHosts?: readonly string[]): boolean {
+  const askedFor = args.bool('tls-intercept');
+  // `--no-tls-intercept` is the only way to tell "left unset" apart from "explicitly refused", and
+  // the difference matters: absence means orca may decide, refusal means it may not.
+  const refused = args.has('tls-intercept') && !askedFor;
+  return askedFor || (!refused && recordedHosts !== undefined);
+}
+
 export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCapture> {
   const { args, out, writer, writes, recordedHosts } = req;
 
-  const askedFor = args.bool('tls-intercept');
-  // `--no-tls-intercept` is the only way to tell "left unset" apart from "explicitly refused", and
-  // the difference matters below: absence means orca may decide, refusal means it may not.
-  const refused = args.has('tls-intercept') && !askedFor;
   const tlsHosts = args.list('tls-hosts');
-
-  /**
-   * A run that was recorded through interception has to be replayed through it.
-   *
-   * The agent this exists for talks to its own backend over TLS it establishes itself, so without
-   * interception the replay proxy never sees the request at all: it tunnels the CONNECT to an
-   * origin that is offline or, worse, live. That failed as `reused=0/n` — which reads as a broken
-   * recording rather than as a missing flag, and the flag is one nobody thinks to repeat when the
-   * command they type is `orca replay last`.
-   *
-   * So the recording decides. It already knows: every intercepted run writes a `tls_intercept`
-   * note naming the hosts it decrypted, and that list is exactly the one the replay needs. Nothing
-   * is inferred and nothing is widened — an operator who never turned interception on gets a
-   * replay that never turns it on either.
-   */
-  const inherited = !askedFor && !refused && recordedHosts !== undefined;
-  const interceptTls = askedFor || inherited;
+  const interceptTls = interceptionRequested(args, recordedHosts);
 
   // Naming hosts without asking for interception captures nothing and says nothing, which reads
   // as "orca ignored my traffic" rather than as "orca ignored my flag".
@@ -90,13 +104,9 @@ export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCaptur
   }
   if (!interceptTls) return { proxyOptions: {} };
 
-  // An explicit list always wins, so a replay can be narrowed or widened by hand. Falling back to
-  // the recorded list rather than to the defaults keeps the reproduction faithful: replaying with
-  // a *different* policy than the recording used is how a run stops reproducing itself.
   // Resolved before anything is minted, so a contradictory list — one that both replaces the
   // defaults and adds to them — fails while the run directory still holds no private key.
-  const hosts =
-    tlsHosts.length > 0 ? resolveTlsHosts(tlsHosts) : (recordedHosts ?? resolveTlsHosts([]));
+  const hosts = resolveTlsHosts(tlsHosts, recordedHosts);
   HostPolicy.from([...hosts]);
   const trustedOriginCerts = await extraOriginRoots();
   const runDir = writer?.runDir ?? req.runDir;
@@ -143,12 +153,17 @@ function warnUnclaimed(out: Output, reported: Set<string>, exchange: NetExchange
   if (exchange.method !== 'POST') return;
   const body = exchange.requestBody.trim();
   if (!body.startsWith('{')) return;
-  try {
-    const parsed: unknown = JSON.parse(body);
-    if (typeof parsed !== 'object' || parsed === null) return;
-  } catch {
-    // A body orca could not even parse is not a model call it failed to recognise.
-    return;
+  // A truncated body cannot parse — it was cut mid-JSON at the capture limit. Requiring a parse
+  // would suppress the warning for exactly the requests it exists for, since a long conversation
+  // is the one most likely to exceed the limit and the most expensive to have to record again.
+  if (!exchange.requestTruncated) {
+    try {
+      const parsed: unknown = JSON.parse(body);
+      if (typeof parsed !== 'object' || parsed === null) return;
+    } catch {
+      // A body orca could not even parse is not a model call it failed to recognise.
+      return;
+    }
   }
 
   const path = exchange.path.split('?')[0] ?? exchange.path;
