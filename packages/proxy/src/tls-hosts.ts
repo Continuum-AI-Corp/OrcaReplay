@@ -38,6 +38,48 @@ export const DEFAULT_TLS_HOSTS: readonly string[] = [
   'openrouter.ai',
 ];
 
+/**
+ * What the operator asked for, resolved against the defaults.
+ *
+ * `--tls-hosts a,b` has always meant "decrypt exactly these", which is the right default for a
+ * feature whose safety argument is the list itself. It is the wrong shape for the commonest real
+ * request — "the usual model APIs, plus the one endpoint my agent talks to" — and someone who
+ * reached for that got the strict reading instead: naming one host dropped the other twelve, and
+ * the run under-captured in silence.
+ *
+ * A leading `+` asks for the other meaning. Mixing the two forms is refused rather than resolved,
+ * because the two readings disagree about every host the operator did not name, and guessing would
+ * produce a policy nobody asked for.
+ */
+export function resolveTlsHosts(requested: readonly string[]): string[] {
+  const entries = requested.map((h) => h.trim()).filter((h) => h !== '');
+  if (entries.length === 0) return [...DEFAULT_TLS_HOSTS];
+
+  const additive = entries.filter((h) => h.startsWith('+'));
+  if (additive.length === 0) return entries;
+  if (additive.length !== entries.length) {
+    const plain = entries.filter((h) => !h.startsWith('+'));
+    throw new Error(
+      `--tls-hosts mixes "${plain[0]}" with "${additive[0]}": a bare host replaces the default ` +
+        'list and a "+host" adds to it, so together they disagree about every host you did not ' +
+        'name. Mark all of them with + to add, or none to replace.',
+    );
+  }
+
+  // A bare `+` names nothing; dropping it beats minting an empty pattern that `HostPolicy` would
+  // then reject with an error about a list the operator never typed.
+  const added = additive.map((h) => h.slice(1).trim()).filter((h) => h !== '');
+  const seen = new Set(DEFAULT_TLS_HOSTS.map((h) => h.toLowerCase()));
+  const extra: string[] = [];
+  for (const host of added) {
+    const key = host.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    extra.push(host);
+  }
+  return [...DEFAULT_TLS_HOSTS, ...extra];
+}
+
 interface Pattern {
   /** Lower-case host, or the suffix after `*.` for a wildcard. */
   host: string;

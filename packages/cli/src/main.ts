@@ -71,10 +71,19 @@ Flags
   --port <n>     port for --ui and orca ui (default: any free port)
 
 A harness that reads no base-URL variable cannot be captured that way at all — a Codex CLI signed
-in with a ChatGPT subscription is the case. For that, and only for that:
+in with a ChatGPT subscription, a bot with its origin hardcoded, an agent in a language the fetch
+hook cannot reach. Capture those below the agent instead, at the socket:
+
+  orca record exec --tls-intercept -- <command> [args...]
+
+exec (or "any") launches your command and redirects nothing: no origin and no credential are
+invented, so an agent recorded this way still talks to whoever it was already talking to. It also
+reaches an agent orca did not launch — record the editor, and the agent it spawns inherits the
+capture.
 
   --tls-intercept              decrypt HTTPS for the hosts below, for this run only
-  --tls-hosts a,b,c            which hosts to decrypt (default: model API hosts)
+  --tls-hosts a,b,c            decrypt exactly these, replacing the default list
+  --tls-hosts +a,+b            decrypt these *as well as* the default model API hosts
                                everything else is tunnelled unread; "*" is refused
 
   It mints a certificate authority in the run directory, trusts it to the agent through that

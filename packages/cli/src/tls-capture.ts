@@ -2,10 +2,10 @@ import { readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { TraceWriter } from '@orcareplay/core';
 import {
-  DEFAULT_TLS_HOSTS,
   HostPolicy,
   RunCa,
   type InterceptFailure,
+  resolveTlsHosts,
   type NetExchange,
   type TlsInterceptInfo,
   type TunnelRecord,
@@ -62,7 +62,9 @@ export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCaptur
   }
   if (!interceptTls) return { proxyOptions: {} };
 
-  const hosts = tlsHosts.length > 0 ? tlsHosts : DEFAULT_TLS_HOSTS;
+  // Resolved before anything is minted, so a contradictory list — one that both replaces the
+  // defaults and adds to them — fails while the run directory still holds no private key.
+  const hosts = resolveTlsHosts(tlsHosts);
   HostPolicy.from(hosts);
   const trustedOriginCerts = await extraOriginRoots();
   const runDir = writer?.runDir ?? req.runDir;

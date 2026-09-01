@@ -198,6 +198,35 @@ describe('orca record --tls-intercept', () => {
     expect(await grepRunDir(result.runDir, 'BANK-BODY-MARKER')).toEqual([]);
   });
 
+  /**
+   * The additive form, end to end. The unit tests in @orcareplay/proxy cover the resolution; this
+   * one exists because the flag is where the mistake was actually made — someone naming the one
+   * endpoint their agent talks to, and losing the twelve model APIs they still needed.
+   */
+  it('keeps the default hosts when a named host is marked with +', async () => {
+    await record(['--tls-intercept', '--tls-hosts', '+grok.example']);
+    const printed = lines.join('');
+    expect(printed).toContain('grok.example');
+    expect(printed).toContain('api.anthropic.com');
+    expect(printed).toContain('api.x.ai');
+  });
+
+  it('still replaces the defaults for a plain list, as it always has', async () => {
+    await record(['--tls-intercept', '--tls-hosts', 'api.openai.com']);
+    const printed = lines.join('');
+    expect(printed).toContain('api.openai.com');
+    expect(printed).not.toContain('api.anthropic.com');
+  });
+
+  it('refuses a list that both replaces and adds, before minting anything', async () => {
+    await expect(
+      record(['--tls-intercept', '--tls-hosts', 'api.openai.com,+grok.example']),
+    ).rejects.toThrow(/api\.openai\.com.*\+grok\.example/s);
+    // Rejected before `RunCa.create`, so the run that is not going to happen leaves no private key
+    // anywhere under the runs root — the same guarantee `--tls-hosts '*'` already has.
+    expect(await grepRunDir(join(workspace, '.orca'), 'PRIVATE KEY')).toEqual([]);
+  });
+
   it('warns rather than silently ignoring hosts named without the flag', async () => {
     await record(['--tls-hosts', 'api.openai.com']);
     expect(lines.join('')).toContain('tls.hosts_ignored');
