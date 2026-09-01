@@ -43,7 +43,9 @@ orca replay last --from 4 --model claude-haiku-4-5 --ui
 السطر الثالث هو ما يجعل الناس يبقون: الملفات نفسها، وبادئة المحادثة نفسها، ونموذج مختلف ابتداءً من
 الخطوة 4. النموذج هو المتغيّر الوحيد، وهذا ما يجعل للإجابة معنى.
 
-ليس على npm بعد — [ثبّته من المصدر](#التثبيت)، يستغرق نحو دقيقة.
+```console
+npm i -g orcareplay
+```
 
 ## لماذا وُجد هذا
 
@@ -466,7 +468,10 @@ const timeline = await orca.show('last');
 
 ## التثبيت
 
-ليس على npm بعد — الحزم مبنيّة ومُتحقَّق منها لذلك، لكن لم يُنشر شيء، فاليوم يكون التثبيت من المصدر:
+```console
+npm i -g orcareplay
+orca doctor
+```
 
 ```console
 git clone https://github.com/Continuum-AI-Corp/OrcaReplay && cd OrcaReplay

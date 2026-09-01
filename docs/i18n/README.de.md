@@ -43,7 +43,9 @@ Die dritte Zeile ist die, wegen der man bleibt: dieselben Dateien, dasselbe Gesp
 Schritt 4 ein anderes Modell. Das Modell ist die einzige Variable — und genau das gibt der Antwort
 ihre Bedeutung.
 
-Noch nicht auf npm — [aus dem Quellcode installieren](#installation), dauert etwa eine Minute.
+```console
+npm i -g orcareplay
+```
 
 ## Warum es das gibt
 
@@ -505,8 +507,10 @@ Früh. `v0` ist das lauffähige Gerüst der drei Befehle oben.
 
 ## Installation
 
-Noch nicht auf npm — die Pakete sind gebaut und dafür geprüft, aber nichts ist veröffentlicht, also
-heute aus dem Quellcode:
+```console
+npm i -g orcareplay
+orca doctor
+```
 
 ```console
 git clone https://github.com/Continuum-AI-Corp/OrcaReplay && cd OrcaReplay

@@ -41,7 +41,9 @@ orca replay last --from 4 --model claude-haiku-4-5 --ui
 The third line is the one people stay for: same files, same conversation prefix, different model
 from step 4 onward. The model is the only variable, which is what makes the answer mean anything.
 
-Not on npm yet — [install from source](#install), it takes about a minute.
+```console
+npm i -g orcareplay
+```
 
 ## Why this exists
 
@@ -592,21 +594,28 @@ exactly. Reading a run is unaffected either way: `orca show` and the viewer are 
 
 ## Install
 
-Not on npm yet — the packages are built and verified for it, but nothing has been published, so
-today it is from source:
+```console
+npm i -g orcareplay
+orca doctor                       # checks node, git, and which agents it can find
+```
+
+Node 20 or newer. No native dependencies, so there is nothing to compile and nothing fetched at
+install time beyond the tarballs themselves.
+
+Every release from 0.1.1 onward is published by the tagged workflow in
+[`RELEASING.md`](RELEASING.md), with a provenance attestation naming the commit and the run that
+built it — npm shows it on the package page, and `npm audit signatures` checks it.
+
+**From source**, to work on it or to run an unreleased commit:
 
 ```console
 git clone https://github.com/Continuum-AI-Corp/OrcaReplay && cd OrcaReplay
 npm ci && npm run build
 npm install -g ./packages/cli     # puts `orca` (and `orcareplay`) on PATH
-orca doctor                       # checks node, git, and which agents it can find
 ```
 
 `npm install -g .` from the repository root installs nothing: the root is a workspace with no
 binary of its own, and `orca` lives in `packages/cli`.
-
-The moment `v0` is published, `npx orcareplay doctor` is the whole install and this section will say
-so instead. The release is a tagged, gated workflow — see [`RELEASING.md`](RELEASING.md).
 
 **Node 20+ to run it** (the CLI's own `engines` says `>=20.0.0`). Contributing needs `^20.19.0 ||
 >=22.12.0`, because the test toolchain does; the root `package.json` declares that separately so
