@@ -103,6 +103,10 @@ export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCaptur
   if (!runDir) throw new Error('TLS interception needs a run directory');
   const ca = await RunCa.create({ runDir });
 
+  // One line per path, not per call: an agent that posts to the same endpoint every turn would
+  // otherwise bury the run in a warning the operator already read.
+  const reported = new Set<string>();
+
   return {
     ca,
     proxyOptions: {
@@ -110,13 +114,10 @@ export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCaptur
         ca,
         hosts: [...hosts],
         trustedOriginCerts,
-        ...(writer
-          ? {
-              onNetExchange: (exchange: NetExchange) => {
-                writes.push(() => persistNetExchange(writer, req.turn(), exchange));
-              },
-            }
-          : {}),
+        onNetExchange: (exchange: NetExchange) => {
+          warnUnclaimed(out, reported, exchange);
+          if (writer) writes.push(() => persistNetExchange(writer, req.turn(), exchange));
+        },
         onTunnel: (tunnel: TunnelRecord) => {
           if (writer) writes.push(() => persistTunnel(writer, req.turn(), tunnel));
         },
@@ -124,6 +125,44 @@ export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCaptur
       },
     },
   };
+}
+
+/**
+ * An intercepted call that looked like a model request and was not understood.
+ *
+ * Traffic on a path no dialect claims is recorded as `net.*`: orca holds the bytes but not their
+ * meaning, so it can neither match the request on replay nor rewrite its model on a fork. Strict
+ * replay says so plainly — and says it one command too late, after the agent has finished and the
+ * chance to record the run properly has gone. This is the same fact, delivered while it is still
+ * actionable.
+ *
+ * Deliberately narrow. A GET, or a POST whose body is not JSON, is ordinary traffic that was never
+ * a model call, and warning about it would teach the operator to ignore the warning that matters.
+ */
+function warnUnclaimed(out: Output, reported: Set<string>, exchange: NetExchange): void {
+  if (exchange.method !== 'POST') return;
+  const body = exchange.requestBody.trim();
+  if (!body.startsWith('{')) return;
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (typeof parsed !== 'object' || parsed === null) return;
+  } catch {
+    // A body orca could not even parse is not a model call it failed to recognise.
+    return;
+  }
+
+  const path = exchange.path.split('?')[0] ?? exchange.path;
+  const key = `${exchange.host}:${exchange.port}${path}`;
+  if (reported.has(key)) return;
+  reported.add(key);
+
+  out.warn('tls.unclaimed_path', {
+    host: exchange.host,
+    path: exchange.path,
+    detail: 'decrypted and recorded, but no wire dialect claims this path',
+    consequence: 'it replays as opaque network traffic and cannot be forked to another model',
+    next: 'docs/plugins.md to add a dialect for it',
+  });
 }
 
 /**

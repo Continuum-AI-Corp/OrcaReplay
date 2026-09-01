@@ -227,6 +227,59 @@ describe('orca record --tls-intercept', () => {
     expect(await grepRunDir(join(workspace, '.orca'), 'PRIVATE KEY')).toEqual([]);
   });
 
+  /**
+   * Telling the operator at record time that a capture is meaningless.
+   *
+   * Intercepted bytes on a path no dialect claims are written as `net.*` — orca holds them but not
+   * their meaning, so they can never be matched on replay or forked to another model. That was
+   * only discoverable one command later, from the 502 that strict replay raises, by which point
+   * the agent has finished and the opportunity to record it properly is gone.
+   */
+  it('says at record time when intercepted traffic was not a model call it understands', async () => {
+    process.env.ORCA_TEST_TARGETS = JSON.stringify([
+      {
+        host: '127.0.0.1',
+        port: bank.port,
+        path: '/v3/converse',
+        method: 'POST',
+        body: JSON.stringify({ prompt: 'hello' }),
+      },
+    ]);
+    await record(['--tls-intercept', '--tls-hosts', `127.0.0.1:${bank.port}`]);
+
+    const printed = lines.join('');
+    expect(printed).toContain('tls.unclaimed_path');
+    expect(printed).toContain('/v3/converse');
+    // The operator needs to know what to do about it, not merely that it happened.
+    expect(printed).toContain('plugins.md');
+  });
+
+  it('says it once for a path an agent calls repeatedly, not once per turn', async () => {
+    const call = {
+      host: '127.0.0.1',
+      port: bank.port,
+      path: '/v3/converse',
+      method: 'POST',
+      body: JSON.stringify({ prompt: 'hello' }),
+    };
+    process.env.ORCA_TEST_TARGETS = JSON.stringify([call, call, call]);
+    await record(['--tls-intercept', '--tls-hosts', `127.0.0.1:${bank.port}`]);
+
+    const warnings = lines.join('').match(/tls\.unclaimed_path/g) ?? [];
+    expect(warnings).toHaveLength(1);
+  });
+
+  it('stays quiet about traffic that was never a model call to begin with', async () => {
+    // A GET, and a body that is not JSON. Warning here would train the operator to ignore the
+    // warning that matters, which is worse than not printing one.
+    process.env.ORCA_TEST_TARGETS = JSON.stringify([
+      { host: '127.0.0.1', port: bank.port, path: '/accounts' },
+    ]);
+    await record(['--tls-intercept', '--tls-hosts', `127.0.0.1:${bank.port}`]);
+
+    expect(lines.join('')).not.toContain('tls.unclaimed_path');
+  });
+
   it('warns rather than silently ignoring hosts named without the flag', async () => {
     await record(['--tls-hosts', 'api.openai.com']);
     expect(lines.join('')).toContain('tls.hosts_ignored');
