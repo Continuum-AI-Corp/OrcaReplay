@@ -350,13 +350,22 @@ footer {
 
 /* One-shot wash when playback lands on something that needs attention. No shadow — the design
    system uses hairlines and weight, never depth — and no hue, since state here is carried by
-   form. An overlay whose opacity animates stays on the compositor and never repaints the row. */
+   form. An overlay whose opacity animates stays on the compositor and never repaints the row.
+
+   opacity:0 is the base, and it is load-bearing rather than decorative. The overlay covers the
+   whole row in solid --ink; without a base it inherits the default of 1, and the only thing
+   holding it invisible is an animation that has not finished. When the animation ends the
+   opacity falls back to 1 and the row becomes a solid black bar with its text underneath —
+   permanently, because data-pulse is never taken off again. The rows this lands on are the
+   failures, which are the ones worth reading, so the wash meant to draw the eye to them hid
+   them instead. */
 .row { position: relative; }
 .row[data-pulse='true']::after {
   content: '';
   position: absolute;
   inset: 0;
   background: var(--ink);
+  opacity: 0;
   pointer-events: none;
   animation: orca-attention 420ms ease-out;
 }

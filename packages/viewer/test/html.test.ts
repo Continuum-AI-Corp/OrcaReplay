@@ -419,3 +419,33 @@ describe('detail panes', () => {
     expect(html).toContain('class="del"');
   });
 });
+
+/**
+ * A full-bleed overlay is invisible only while something holds it down. If that something is an
+ * animation, the element is opaque before the animation starts and again after it ends, because
+ * opacity falls back to its default of 1.
+ *
+ * That is not hypothetical. The attention wash on a timeline row covered the whole row in solid
+ * `--ink` and set its opacity only in `@keyframes`. Once playback landed on a row the animation
+ * ran for 420ms and then the row stayed a solid black bar with its text underneath — and
+ * `data-pulse` is never removed, so it never recovered. The rows it lands on are the failures,
+ * which are the ones worth reading.
+ */
+describe('full-bleed overlays', () => {
+  /** Every rule body in the stylesheet, paired with its selector. */
+  const rules = (): { selector: string; body: string }[] => {
+    const found: { selector: string; body: string }[] = [];
+    for (const m of VIEWER_CSS.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      found.push({ selector: m[1]!.trim(), body: m[2]! });
+    }
+    return found;
+  };
+
+  it('gives every one an explicit opacity, not one an animation happens to supply', () => {
+    const bare = rules()
+      .filter((r) => /inset:\s*0/.test(r.body) && /background:/.test(r.body))
+      .filter((r) => !/(^|[;\s])opacity\s*:/.test(r.body))
+      .map((r) => r.selector);
+    expect(bare).toEqual([]);
+  });
+});
