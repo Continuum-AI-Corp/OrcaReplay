@@ -3,6 +3,7 @@ import { parseArgs, type ParsedArgs } from './args.js';
 import { Orca } from './api.js';
 import { serveMcp } from './mcp-server.js';
 import { Output } from './out.js';
+import { attachCommand } from './commands/attach.js';
 import { recordCommand } from './commands/record.js';
 import { replayCommand } from './commands/replay.js';
 import {
@@ -23,6 +24,14 @@ import { ORCA_VERSION } from './version.js';
 const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI agents
 
   orca record <agent>            run an agent and capture everything
+  orca attach                    record an agent orca does not launch — one in a sandbox,
+                                 a container, or on another machine
+        --for <agent>            print the variables that agent reads (default: exec)
+        --bind <addr>            address to listen on (default: 127.0.0.1)
+        --advertise <host>       how the sandbox reaches this machine, when they differ
+        --remote-ca-path <p>     where the CA will live over there (default: /tmp/orca-ca.crt)
+        --replay <run>           serve a recording back to that agent instead of recording,
+                                 for a run whose agent is not on this machine
   orca replay [run]              reproduce a run exactly, network off
         --ui                     open the timeline when it finishes
   orca replay [run] --from N     fork from a checkpoint and continue live
@@ -149,6 +158,11 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
     switch (args.command) {
       case 'record':
         return (await recordCommand(args, out, cwd)).exitCode;
+      case 'attach':
+        // Always 0: the session ended because the operator stopped it, which is not a failure.
+        // Whether anything was captured is reported by `capture.empty`, not by an exit code.
+        await attachCommand(args, out, cwd);
+        return 0;
       case 'replay':
         return (await replayCommand(args, out, cwd)).exitCode;
       case 'compare':
@@ -259,6 +273,11 @@ async function jsonMain(args: ParsedArgs, cwd: string): Promise<number> {
           }),
         );
         return 0;
+      case 'attach': {
+        const result = await attachCommand(args, out, cwd);
+        emit(result);
+        return 0;
+      }
       case 'record': {
         const result = await recordCommand(args, out, cwd);
         emit(result);
