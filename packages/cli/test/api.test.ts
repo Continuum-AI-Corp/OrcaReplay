@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Orca } from '../src/api.js';
+import { ORCA_VERSION } from '../src/version.js';
 import { startResponsesModel } from './fixtures/responses-model.mjs';
 
 const run = promisify(execFile);
@@ -88,7 +89,11 @@ describe('Orca — the programmatic API', () => {
     expect(timeline.runId).toBe(recorded.runId);
     // Versioned, as the manifest records it: which adapter *version* produced a trace is the
     // fact that matters when an adapter has rotted and a recording no longer replays.
-    expect(timeline.adapter).toBe('generic-openai@0.1.0');
+    //
+    // Against the constant rather than a literal. A hardcoded version here asserts nothing about
+    // the shape being tested and turns every release into a failing build — which is exactly what
+    // it did on the 0.1.1 bump, where the only change in the diff was the version itself.
+    expect(timeline.adapter).toBe(`generic-openai@${ORCA_VERSION}`);
     expect(timeline.exitCode).toBe(0);
     expect(timeline.events.length).toBeGreaterThan(4);
     // The rows a caller actually wants to filter on.
