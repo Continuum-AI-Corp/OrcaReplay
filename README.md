@@ -1,5 +1,4 @@
 # OrcaReplay
-
 <sub>**English** · [简体中文](docs/i18n/README.zh-CN.md) · [日本語](docs/i18n/README.ja.md) · [한국어](docs/i18n/README.ko.md) · [Deutsch](docs/i18n/README.de.md) · [Français](docs/i18n/README.fr.md) · [Español](docs/i18n/README.es.md) · [العربية](docs/i18n/README.ar.md)</sub>
 
 ### Your agent broke something at 2am. Replay it at 9am — exactly, offline, as many times as you like.
@@ -746,6 +745,7 @@ Apache-2.0 for the code. The trace specification is CC BY 4.0, so anyone may rei
 
 ---
 
+<img src="ORCAREPLAYLOGO.png?raw=true" alt="OrcaReplay" height="383" width="320">
 <sub>
 Built by the OrcaRouter team ·
 <a href="https://www.orcarouter.ai">orcarouter.ai</a> ·
