@@ -1,9 +1,15 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parseArgs } from '../src/args.js';
-import { BY_COMMAND, GLOBAL, assertKnownFlags } from '../src/flags.js';
+import {
+  BY_COMMAND,
+  GLOBAL,
+  POSITIONAL_COUNTS,
+  assertKnownFlags,
+  assertNoStrayPositionals,
+} from '../src/flags.js';
 
 /**
  * A flag is an instruction. The parser takes any it is given, which is right for parsing and wrong
@@ -107,5 +113,119 @@ describe('the allowlist against the source it mirrors', () => {
     // silently, which is the failure this whole file exists to prevent.
     const unvalidated = dispatched.filter((c) => BY_COMMAND[c] === undefined).sort();
     expect(unvalidated).toEqual([]);
+  });
+});
+
+/**
+ * The other half of the command line. `orca record codex exec "fix auth.ts"` recorded
+ * `argv: ["codex"]` — the agent started with no arguments at all, did nothing it was asked, and
+ * the run was reported as a success. Nothing in the output said the words had been dropped.
+ */
+describe('assertNoStrayPositionals', () => {
+  const check = (argv: string[]) => () => assertNoStrayPositionals(parseArgs(argv));
+
+  it('rejects the agent arguments that were silently dropped, and shows where they go', () => {
+    expect(check(['record', 'codex', 'exec', 'fix auth.ts'])).toThrow(
+      /unexpected arguments for "orca record": exec "fix auth\.ts"/,
+    );
+    expect(check(['record', 'codex', 'exec', 'fix auth.ts'])).toThrow(
+      /orca record codex -- exec "fix auth\.ts"/,
+    );
+  });
+
+  it('leaves the correct form alone, because that is where the agent arguments belong', () => {
+    expect(check(['record', 'codex', '--', 'exec', 'fix auth.ts'])).not.toThrow();
+    expect(check(['record', 'claude'])).not.toThrow();
+    expect(check(['record'])).not.toThrow();
+  });
+
+  it('rejects a stray on a read command too, without offering the -- advice', () => {
+    expect(check(['show', 'last', 'extra'])).toThrow(/unexpected argument for "orca show": extra/);
+    expect(check(['show', 'last', 'extra'])).not.toThrow(/--/);
+  });
+
+  /**
+   * Seven commands read no positional at all, so allowing one everywhere would have left the same
+   * silence in place for them. `orca attach claude` reads as naming the agent and does not: the
+   * flag that names it is `--for`.
+   */
+  it('rejects the first argument on a command that reads none', () => {
+    expect(check(['attach', 'claude'])).toThrow(/unexpected argument for "orca attach": claude/);
+    expect(check(['attach', 'claude'])).toThrow(
+      /takes no arguments; everything it needs is a flag/,
+    );
+    expect(check(['list', 'foo'])).toThrow(/unexpected argument for "orca list": foo/);
+    expect(check(['doctor', 'foo'])).toThrow(/unexpected argument/);
+  });
+
+  it('leaves those commands alone when they are given none', () => {
+    expect(check(['attach', '--for', 'claude'])).not.toThrow();
+    expect(check(['list'])).not.toThrow();
+    expect(check(['gc', '--older-than', '7d'])).not.toThrow();
+  });
+
+  it('says nothing about an unknown command, which the dispatcher reports better', () => {
+    expect(check(['bogus', 'a', 'b'])).not.toThrow();
+  });
+
+  /**
+   * The rule is "one positional", and it holds only while no command reads further. Asserted
+   * against the source rather than trusted, so a command that starts taking two arguments fails
+   * here instead of having them rejected at the door.
+   */
+  it('holds because no command reads past the first positional', () => {
+    const src = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
+    const beyondFirst: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) walk(path);
+        else if (entry.name.endsWith('.ts')) {
+          for (const m of readFileSync(path, 'utf8').matchAll(/positionals\[(\d+)\]/g)) {
+            if (Number(m[1]) > 0) beyondFirst.push(`${entry.name}: positionals[${m[1]}]`);
+          }
+        }
+      }
+    };
+    walk(src);
+    expect(beyondFirst).toEqual([]);
+  });
+});
+
+/**
+ * The counts are hand-written and the code they describe is not. These hold one against the other
+ * so a command that starts or stops reading a positional fails here rather than silently dropping
+ * an argument again.
+ */
+describe('the positional counts against the source they mirror', () => {
+  const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
+
+  it('gives a count to every command the flag list knows', () => {
+    const missing = Object.keys(BY_COMMAND)
+      .filter((c) => POSITIONAL_COUNTS[c] === undefined)
+      .sort();
+    expect(missing).toEqual([]);
+  });
+
+  it('never claims a command reads more than the source does', () => {
+    // A count above 1 would mean somewhere reads `positionals[1]`, and nothing does.
+    const overclaimed = Object.entries(POSITIONAL_COUNTS)
+      .filter(([, n]) => n > 1)
+      .map(([c]) => c);
+    expect(overclaimed).toEqual([]);
+  });
+
+  it('claims zero only for commands whose implementation reads none', () => {
+    // One file per command where the mapping is one to one; inspect.ts and main.ts serve several,
+    // so they are excluded rather than guessed at.
+    const wrong: string[] = [];
+    for (const [command, n] of Object.entries(POSITIONAL_COUNTS)) {
+      const file = join(SRC, 'commands', `${command}.ts`);
+      if (!existsSync(file)) continue;
+      const reads = readFileSync(file, 'utf8').includes('positionals[0]');
+      if (reads !== (n === 1))
+        wrong.push(`${command}: table says ${n}, source ${reads ? 'reads' : 'does not read'} one`);
+    }
+    expect(wrong).toEqual([]);
   });
 });
