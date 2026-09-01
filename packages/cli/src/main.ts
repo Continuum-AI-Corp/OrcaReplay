@@ -82,6 +82,8 @@ reaches an agent orca did not launch — record the editor, and the agent it spa
 capture.
 
   --tls-intercept              decrypt HTTPS for the hosts below, for this run only
+                               replay and fork turn this back on by themselves, using the
+                               hosts the recording names; --no-tls-intercept refuses
   --tls-hosts a,b,c            decrypt exactly these, replacing the default list
   --tls-hosts +a,+b            decrypt these *as well as* the default model API hosts
                                everything else is tunnelled unread; "*" is refused

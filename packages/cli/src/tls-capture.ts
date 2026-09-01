@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { TraceWriter } from '@orcareplay/core';
+import type { TraceEvent } from '@orcareplay/schema';
 import {
   HostPolicy,
   RunCa,
@@ -31,6 +32,12 @@ import type { SerialQueue } from './serial.js';
 export interface TlsCaptureRequest {
   args: ParsedArgs;
   out: Output;
+  /**
+   * Hosts the run being reproduced decrypted, recovered from its own trace.
+   *
+   * Present for replay and fork, absent for a fresh recording. See `recordedTlsHosts`.
+   */
+  recordedHosts?: readonly string[];
   writer?: TraceWriter;
   /** Used by an exact replay running with --no-trace, where there is no writer to own the CA. */
   runDir?: string;
@@ -51,10 +58,31 @@ export interface TlsCapture {
 }
 
 export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCapture> {
-  const { args, out, writer, writes } = req;
+  const { args, out, writer, writes, recordedHosts } = req;
 
-  const interceptTls = args.bool('tls-intercept');
+  const askedFor = args.bool('tls-intercept');
+  // `--no-tls-intercept` is the only way to tell "left unset" apart from "explicitly refused", and
+  // the difference matters below: absence means orca may decide, refusal means it may not.
+  const refused = args.has('tls-intercept') && !askedFor;
   const tlsHosts = args.list('tls-hosts');
+
+  /**
+   * A run that was recorded through interception has to be replayed through it.
+   *
+   * The agent this exists for talks to its own backend over TLS it establishes itself, so without
+   * interception the replay proxy never sees the request at all: it tunnels the CONNECT to an
+   * origin that is offline or, worse, live. That failed as `reused=0/n` — which reads as a broken
+   * recording rather than as a missing flag, and the flag is one nobody thinks to repeat when the
+   * command they type is `orca replay last`.
+   *
+   * So the recording decides. It already knows: every intercepted run writes a `tls_intercept`
+   * note naming the hosts it decrypted, and that list is exactly the one the replay needs. Nothing
+   * is inferred and nothing is widened — an operator who never turned interception on gets a
+   * replay that never turns it on either.
+   */
+  const inherited = !askedFor && !refused && recordedHosts !== undefined;
+  const interceptTls = askedFor || inherited;
+
   // Naming hosts without asking for interception captures nothing and says nothing, which reads
   // as "orca ignored my traffic" rather than as "orca ignored my flag".
   if (!interceptTls && tlsHosts.length > 0) {
@@ -62,10 +90,14 @@ export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCaptur
   }
   if (!interceptTls) return { proxyOptions: {} };
 
+  // An explicit list always wins, so a replay can be narrowed or widened by hand. Falling back to
+  // the recorded list rather than to the defaults keeps the reproduction faithful: replaying with
+  // a *different* policy than the recording used is how a run stops reproducing itself.
   // Resolved before anything is minted, so a contradictory list — one that both replaces the
   // defaults and adds to them — fails while the run directory still holds no private key.
-  const hosts = resolveTlsHosts(tlsHosts);
-  HostPolicy.from(hosts);
+  const hosts =
+    tlsHosts.length > 0 ? resolveTlsHosts(tlsHosts) : (recordedHosts ?? resolveTlsHosts([]));
+  HostPolicy.from([...hosts]);
   const trustedOriginCerts = await extraOriginRoots();
   const runDir = writer?.runDir ?? req.runDir;
   if (!runDir) throw new Error('TLS interception needs a run directory');
@@ -76,7 +108,7 @@ export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCaptur
     proxyOptions: {
       tls: {
         ca,
-        hosts,
+        hosts: [...hosts],
         trustedOriginCerts,
         ...(writer
           ? {
@@ -92,6 +124,28 @@ export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCaptur
       },
     },
   };
+}
+
+/**
+ * The hosts a recorded run decrypted, read back out of its own trace.
+ *
+ * `trustRunCa` writes this note on every intercepted run — a digest and a host list, never the
+ * certificate and never the key — so the trace is self-describing about the one thing a faithful
+ * replay cannot guess. Returns undefined for a run recorded without interception, which is the
+ * signal that the replay must not turn it on either.
+ */
+export function recordedTlsHosts(events: readonly TraceEvent[]): readonly string[] | undefined {
+  for (const event of events) {
+    if (event.type !== 'note' || event.attrs?.['rule'] !== 'tls_intercept') continue;
+    const hosts = event.attrs['hosts'];
+    if (typeof hosts !== 'string') continue;
+    const parsed = hosts
+      .split(',')
+      .map((h) => h.trim())
+      .filter((h) => h !== '');
+    if (parsed.length > 0) return parsed;
+  }
+  return undefined;
 }
 
 /**
