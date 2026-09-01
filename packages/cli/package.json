@@ -1,6 +1,6 @@
 {
   "name": "orcareplay",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "license": "Apache-2.0",
   "description": "Record, replay and fork debugger for AI agents",
@@ -36,15 +36,15 @@
     "directory": "packages/cli"
   },
   "dependencies": {
-    "@orcareplay/schema": "0.1.1",
-    "@orcareplay/plugin-api": "0.1.1",
-    "@orcareplay/core": "0.1.1",
-    "@orcareplay/proxy": "0.1.1",
-    "@orcareplay/providers": "0.1.1",
-    "@orcareplay/adapters": "0.1.1",
-    "@orcareplay/fs-capture": "0.1.1",
-    "@orcareplay/viewer": "0.1.1",
-    "@orcareplay/mcp-shim": "0.1.1",
-    "@orcareplay/shell-shim": "0.1.1"
+    "@orcareplay/schema": "0.1.2",
+    "@orcareplay/plugin-api": "0.1.2",
+    "@orcareplay/core": "0.1.2",
+    "@orcareplay/proxy": "0.1.2",
+    "@orcareplay/providers": "0.1.2",
+    "@orcareplay/adapters": "0.1.2",
+    "@orcareplay/fs-capture": "0.1.2",
+    "@orcareplay/viewer": "0.1.2",
+    "@orcareplay/mcp-shim": "0.1.2",
+    "@orcareplay/shell-shim": "0.1.2"
   }
 }

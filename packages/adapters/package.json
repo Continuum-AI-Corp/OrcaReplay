@@ -1,6 +1,6 @@
 {
   "name": "@orcareplay/adapters",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "license": "Apache-2.0",
   "repository": {
@@ -17,7 +17,7 @@
     "dist"
   ],
   "dependencies": {
-    "@orcareplay/node-instrument": "0.1.1",
-    "@orcareplay/plugin-api": "0.1.1"
+    "@orcareplay/node-instrument": "0.1.2",
+    "@orcareplay/plugin-api": "0.1.2"
   }
 }
