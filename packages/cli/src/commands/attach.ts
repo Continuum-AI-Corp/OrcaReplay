@@ -4,7 +4,7 @@ import { createProxy, type RecordedExchange, type RunCa } from '@orcareplay/prox
 import { defaultAdapters } from '@orcareplay/adapters';
 import type { ParsedArgs } from '../args.js';
 import type { Output } from '../out.js';
-import { advertisedUrl, attachInstructions } from '../attach.js';
+import { advertisedUrl, attachExports, attachInstructions } from '../attach.js';
 import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
 import { SerialQueue } from '../serial.js';
 import { recordedTlsHosts, setupTlsCapture } from '../tls-capture.js';
@@ -40,6 +40,14 @@ export interface AttachResult {
   /** Replay sessions only: recorded exchanges served back, and requests nothing matched. */
   reused: number;
   unmatched: number;
+  /**
+   * Non-zero only when a replay session could not answer something the agent asked for.
+   *
+   * A recording session cannot fail this way: it ends because the operator stopped it, which is
+   * how it is meant to end. Whether it captured anything is reported by `capture.empty`, because
+   * an empty capture is a mistake to point at rather than an error to exit on.
+   */
+  exitCode: number;
 }
 
 export interface AttachOptions {
@@ -80,10 +88,13 @@ async function runAttached(
   const requestedPort = args.num('port') ?? 0;
 
   // Resolved before the run directory is made, so an invocation that cannot work — a wildcard bind
-  // with nothing to advertise — leaves nothing behind to clean up.
-  if (requestedPort === 0) {
-    advertisedUrl({ bind, port: 1, ...(advertise === undefined ? {} : { advertise }) });
-  }
+  // with nothing to advertise — leaves nothing behind to clean up. The port is not known yet when
+  // orca is choosing one, and does not need to be: only the host can make this fail.
+  advertisedUrl({
+    bind,
+    port: requestedPort === 0 ? 1 : requestedPort,
+    ...(advertise === undefined ? {} : { advertise }),
+  });
 
   /**
    * Serving a recording back instead of recording a new one.
@@ -225,6 +236,42 @@ async function runAttached(
         },
       });
     }
+    /**
+     * An instruction the operator cannot act on is worse than none: the block pastes cleanly, the
+     * session waits, and nothing ever connects. Both shapes of that are visible from here.
+     */
+    const exported = attachExports({
+      proxyUrl,
+      adapterEnv: launch.env,
+      ...(proxy.tls
+        ? {
+            ca: { certPath: proxy.tls.caCertPath, bundlePath: proxy.tls.caBundlePath },
+            remoteCaPath,
+          }
+        : {}),
+    });
+    if (Object.keys(exported).length === 0) {
+      out.warn('attach.nothing_to_set', {
+        for: adapter.id,
+        cause: `${adapter.id} redirects nothing, and this session is not intercepting`,
+        next: 'name the harness with --for <agent>, or add --tls-intercept',
+      });
+    }
+    // A path under the run directory exists on this machine and nowhere else. The fetch hook is
+    // the live example: `--for node` names a preload orca just wrote here, so the block would
+    // instrument nothing over there while looking exactly as though it had.
+    const local = Object.entries(exported)
+      .filter(([, value]) => value.includes(writer.runDir))
+      .map(([name]) => name);
+    if (local.length > 0) {
+      out.warn('attach.local_path', {
+        vars: local.join(','),
+        cause: `${adapter.id} instruments by writing a file here and naming it in the environment`,
+        effect: 'those paths do not exist in the sandbox, so that half of the capture will not run',
+        next: 'copy the named files across, or use --tls-intercept instead',
+      });
+    }
+
     out.plain('');
     for (const line of instructions) out.plain(`  ${line}`);
     out.plain('');
@@ -287,6 +334,7 @@ async function runAttached(
     // The distinction between them is a divergence, and divergences are reported on their own.
     reused: replaying ? stats.matchedExact + stats.matchedInexact : 0,
     unmatched: replaying ? stats.unmatched : unmatched,
+    exitCode: replaying && stats.unmatched > 0 ? 1 : 0,
   };
 }
 

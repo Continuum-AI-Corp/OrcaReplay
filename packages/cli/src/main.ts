@@ -159,10 +159,7 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
       case 'record':
         return (await recordCommand(args, out, cwd)).exitCode;
       case 'attach':
-        // Always 0: the session ended because the operator stopped it, which is not a failure.
-        // Whether anything was captured is reported by `capture.empty`, not by an exit code.
-        await attachCommand(args, out, cwd);
-        return 0;
+        return (await attachCommand(args, out, cwd)).exitCode;
       case 'replay':
         return (await replayCommand(args, out, cwd)).exitCode;
       case 'compare':
@@ -276,7 +273,7 @@ async function jsonMain(args: ParsedArgs, cwd: string): Promise<number> {
       case 'attach': {
         const result = await attachCommand(args, out, cwd);
         emit(result);
-        return 0;
+        return result.exitCode;
       }
       case 'record': {
         const result = await recordCommand(args, out, cwd);

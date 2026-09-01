@@ -65,11 +65,23 @@ function bracketed(host: string): string {
   return isIP(host) === 6 ? `[${host}]` : host;
 }
 
-/** Does this host already carry its own port? Written to survive an IPv6 literal. */
+/**
+ * Does this host already carry its own port?
+ *
+ * An IPv6 literal is mostly colons, so the last one says nothing on its own: `fd00::1` ends in
+ * `:1`, which reads as a port and is not one. Answering wrongly drops the real port and hands the
+ * sandbox `http://fd00::1`, which means port 80 and connects to nothing.
+ *
+ * A bracketed host is unambiguous — anything after the `]` is a port. An unbracketed one carries a
+ * port only if it has exactly one colon, because more than one makes it an address rather than a
+ * host-and-port.
+ */
 function hasPort(host: string): boolean {
-  const colon = host.lastIndexOf(':');
-  if (colon === -1 || colon < host.lastIndexOf(']')) return false;
-  return /^\d+$/.test(host.slice(colon + 1));
+  const close = host.lastIndexOf(']');
+  if (close !== -1) return /^:\d+$/.test(host.slice(close + 1));
+  const first = host.indexOf(':');
+  if (first === -1 || first !== host.lastIndexOf(':')) return false;
+  return /^\d+$/.test(host.slice(first + 1));
 }
 
 export interface AttachRequest {

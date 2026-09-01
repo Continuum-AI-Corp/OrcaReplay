@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -73,6 +73,40 @@ describe('orca attach', () => {
 
   it('refuses a wildcard bind with no advertised host, rather than printing an unusable url', async () => {
     await expect(session(['--bind', '0.0.0.0'], async () => {})).rejects.toThrow(/--advertise/);
+  });
+
+  /**
+   * The refusal has to happen before anything is created, not merely before anything is printed.
+   * Validating only in the default-port path meant `--port` skipped the check entirely: the run
+   * directory, the trace and (with --tls-intercept) a private key were all created for a session
+   * that was about to throw.
+   */
+  it('refuses a wildcard bind before it creates a run, whatever the port', async () => {
+    await expect(session(['--bind', '0.0.0.0', '--port', '18771'], async () => {})).rejects.toThrow(
+      /--advertise/,
+    );
+    const runs = await readdir(join(workspace, '.orca', 'runs')).catch(() => []);
+    expect(runs).toEqual([]);
+  });
+
+  /**
+   * A session nobody can connect to is the failure this command exists to prevent, and the empty
+   * block is the one form of it orca can see coming: `exec` sets no variables, so with no
+   * interception either there is literally nothing for the operator to paste.
+   */
+  it('says so when there is nothing to paste, instead of printing an empty block', async () => {
+    await session([], async () => {});
+    expect(lines.join('')).toContain('attach.nothing_to_set');
+  });
+
+  /**
+   * Some adapters instrument by writing a file into the run directory and naming it in the
+   * environment — the fetch hook is the live example. Those paths exist on this machine and not in
+   * the sandbox, so printing them yields a block that runs cleanly and instruments nothing.
+   */
+  it('flags an instruction that names a file only this machine has', async () => {
+    await session(['--for', 'node'], async () => {});
+    expect(lines.join('')).toContain('attach.local_path');
   });
 
   it('advertises the host the operator names, not the one it bound', async () => {
@@ -187,6 +221,67 @@ describe('orca attach', () => {
     await session(['--replay', recorded.runId, '--for', 'generic-openai'], async () => {});
 
     expect(lines.join('')).toContain('export OPENAI_BASE_URL=');
+  });
+
+  /**
+   * A replay session that could not answer the agent has to be detectable by a script, not only
+   * by a human reading the log — CI is exactly where a sandbox replay runs.
+   */
+  it('reports a request the recording could not answer', async () => {
+    const recorded = await session(['--for', 'claude'], async (proxyUrl) => {
+      await fetch(`${proxyUrl}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-opus-5',
+          messages: [{ role: 'user', content: 'x' }],
+        }),
+      });
+    });
+
+    const replayed = await session(['--replay', recorded.runId], async (proxyUrl) => {
+      // A question the recording never held an answer for.
+      await fetch(`${proxyUrl}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-opus-5',
+          messages: [{ role: 'user', content: 'something else entirely' }],
+        }),
+      });
+    });
+
+    expect(replayed.unmatched).toBeGreaterThan(0);
+    expect(replayed.exitCode).toBe(1);
+  });
+
+  it('exits zero for a session that served everything it was asked for', async () => {
+    const recorded = await session(['--for', 'claude'], async (proxyUrl) => {
+      await fetch(`${proxyUrl}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-opus-5',
+          messages: [{ role: 'user', content: 'x' }],
+        }),
+      });
+    });
+    const replayed = await session(['--replay', recorded.runId], async (proxyUrl) => {
+      await fetch(`${proxyUrl}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'claude-opus-5',
+          messages: [{ role: 'user', content: 'x' }],
+        }),
+      });
+    });
+    expect(replayed.exitCode).toBe(0);
+  });
+
+  it('exits zero for a recording session, which cannot fail by being stopped', async () => {
+    const result = await session(['--for', 'claude'], async () => {});
+    expect(result.exitCode).toBe(0);
   });
 
   it('says the recording is being served, not recorded, so nothing looks like a fresh run', async () => {

@@ -45,6 +45,26 @@ describe('the address a remote agent is told to use', () => {
   it('brackets a bare IPv6 literal, which is not a URL host without them', () => {
     expect(advertisedUrl({ bind: 'fd00::1', port: 8080 })).toBe('http://[fd00::1]:8080');
   });
+
+  /**
+   * An IPv6 literal is mostly colons, so "does this host already carry a port" cannot be answered
+   * by looking for the last one. Getting it wrong drops the port entirely and hands the sandbox
+   * `http://fd00::1`, which resolves to port 80 and connects to nothing.
+   */
+  it('does not mistake the tail of a bare IPv6 address for a port', () => {
+    expect(advertisedUrl({ bind: '0.0.0.0', port: 8080, advertise: 'fd00::1' })).toBe(
+      'http://[fd00::1]:8080',
+    );
+    expect(advertisedUrl({ bind: '0.0.0.0', port: 8080, advertise: '::1' })).toBe(
+      'http://[::1]:8080',
+    );
+  });
+
+  it('keeps a port written after a bracketed IPv6 host', () => {
+    expect(advertisedUrl({ bind: '0.0.0.0', port: 8080, advertise: '[fd00::1]:19000' })).toBe(
+      'http://[fd00::1]:19000',
+    );
+  });
 });
 
 describe('what a remote agent has to be told', () => {

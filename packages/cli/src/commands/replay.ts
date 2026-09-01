@@ -308,12 +308,13 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
   // A subscription-backed harness does not use the ordinary base URL, so exact replay needs the
   // same per-run CA and HTTPS proxy as recording. The proxy's TLS hook then answers Codex's model
   // request from the trace before it can open an origin connection.
+  // A run recorded through interception is reproduced through it, without the operator having to
+  // remember which hosts they named. See `setupTlsCapture`.
+  const interceptedHosts = recordedTlsHosts(ctx.events);
   const tls = await setupTlsCapture({
     args,
     out,
-    // A run recorded through interception is reproduced through it, without the operator having to
-    // remember which hosts they named. See `setupTlsCapture`.
-    ...(recordedTlsHosts(ctx.events) ? { recordedHosts: recordedTlsHosts(ctx.events)! } : {}),
+    ...(interceptedHosts ? { recordedHosts: interceptedHosts } : {}),
     writer: trace,
     runDir: ctx.runDir,
     writes,
@@ -667,12 +668,13 @@ async function replayFork(
   // harness that talks to its own backend over TLS reads no base-URL variable and is invisible
   // without interception. The flag was parsed here and silently discarded, which is the worse
   // half — the operator believes they captured that traffic.
+  // Same for a fork: it continues a recorded conversation, so its prefix is replayed and the
+  // requests carrying it arrive by the same intercepted transport they were recorded on.
+  const forkInterceptedHosts = recordedTlsHosts(ctx.events);
   const tls = await setupTlsCapture({
     args,
     out,
-    // Same for a fork: it continues a recorded conversation, so its prefix is replayed and the
-    // requests carrying it arrive by the same intercepted transport they were recorded on.
-    ...(recordedTlsHosts(ctx.events) ? { recordedHosts: recordedTlsHosts(ctx.events)! } : {}),
+    ...(forkInterceptedHosts ? { recordedHosts: forkInterceptedHosts } : {}),
     writer,
     writes,
     turn: () => turn,
