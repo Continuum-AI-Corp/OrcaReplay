@@ -1,6 +1,6 @@
 {
   "name": "@orcareplay/node-instrument",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "license": "Apache-2.0",
   "description": "Capture model traffic from a JS agent that reads no base-URL variable",

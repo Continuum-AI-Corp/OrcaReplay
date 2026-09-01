@@ -1,6 +1,6 @@
 {
   "name": "@orcareplay/proxy",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "license": "Apache-2.0",
   "main": "./dist/index.js",
@@ -12,9 +12,9 @@
     "dist"
   ],
   "dependencies": {
-    "@orcareplay/plugin-api": "0.1.0",
-    "@orcareplay/schema": "0.1.0",
-    "@orcareplay/core": "0.1.0",
-    "@orcareplay/providers": "0.1.0"
+    "@orcareplay/plugin-api": "0.1.1",
+    "@orcareplay/schema": "0.1.1",
+    "@orcareplay/core": "0.1.1",
+    "@orcareplay/providers": "0.1.1"
   }
 }
