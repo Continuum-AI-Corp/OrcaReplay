@@ -222,6 +222,25 @@ const PROFILES = {
     adapter: 'opencode',
     promptDir: 'OPENCODE',
     recordVia: 'attach',
+
+    /**
+     * Not working yet, and the two-step below is the way to capture OpenCode today.
+     *
+     * What is known: the project config is written to the right path with the right proxy origin,
+     * the child sees that directory as its working directory and can read the file, and the proxy
+     * records nothing at all — zero events, so the request never reached it. The same file and the
+     * same command run from a shell do redirect, and a deliberately dead port in that file makes
+     * OpenCode fail to connect, which proves the project config is normally honoured. Something
+     * about being launched through the `.cmd` shim makes OpenCode skip it. Neither the working
+     * directory, the environment plumbing, nor `{env:...}` versus a literal origin explains it.
+     */
+    failureHint: [
+      '  the opencode path does not work yet. capture it in two steps instead:',
+      '    orca attach --for opencode --port 46001',
+      '    # then, in the capture directory, an opencode.json whose provider baseURL is',
+      '    # http://127.0.0.1:46001/v1, and: opencode run "say ok"',
+      '  then file the run with --from-run <the run directory> --dir opencode-<model>',
+    ].join('\n'),
     exe: () => join(npmPrefix(), 'opencode.cmd'),
     defaultInteractive: false,
     recordArgs: (model, prompt) => ['--', 'run', ...(model ? ['--model', model] : []), prompt],
@@ -667,11 +686,10 @@ async function captureWithProxy(profile, cwd, model, prompt, launch) {
         const said = running.output?.length
           ? `\n  the agent said:\n${running.output.map((l) => `    ${l.slice(0, 120)}`).join('\n')}`
           : '';
-        throw new Error(
-          'no prompt-carrying request arrived within the timeout.\n' +
-          `  if the agent stopped on a trust dialog, start it once in ${cwd} by hand,\n` +
-          `  or pass --cwd with a directory it already trusts.${said}`,
-        );
+        const hint = profile.failureHint
+          ?? `  if the agent stopped on a trust dialog, start it once in ${cwd} by hand,\n`
+            + '  or pass --cwd with a directory it already trusts.';
+        throw new Error(`no prompt-carrying request arrived within the timeout.\n${hint}${said}`);
       }
       console.log(`  captured seq=${found.event.seq} tools=${found.got.toolNames.length} bytes=${found.event.payload.bytes}`);
       return runId;

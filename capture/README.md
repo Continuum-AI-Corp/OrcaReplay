@@ -32,6 +32,12 @@ node capture/capture.mjs codex  --model gpt-5.6-sol
 node capture/capture.mjs --index                       # rebuild index.json only
 ```
 
+Claude Code and Codex work in one command. **OpenCode does not yet**: the folder routing is in
+place, so a capture lands in `prompt/OPENCODE/` on its own, but the launch step never reaches the
+proxy and the command fails before writing anything. It prints the two-step that does work, and
+`--from-run` files the result. The `opencode` profile in `capture.mjs` records what has been ruled
+out.
+
 It stands up the proxy, launches the agent, waits for the request that carries the prompt, pulls
 the prompt out, scrubs it, writes it to `prompt/`, and files the evidence under `capture/`.
 Nothing else to run.
