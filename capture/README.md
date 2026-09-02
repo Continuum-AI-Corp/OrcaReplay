@@ -73,15 +73,19 @@ model and which mode it came from:
 
 | file | where | scrubbed | what |
 |---|---|---|---|
-| `<name>-system-prompt.md` | `capture/<name>/` and `prompt/` | yes | the prompt on its own, nothing else |
+| `<model>-system-prompt.md` | `capture/<name>/` and `prompt/<HARNESS>/` | yes | the prompt on its own, nothing else |
 | `<name>-prompt-annotated.txt` | `capture/<name>/` | yes | same text with block boundaries and char counts |
 | `<name>-request.json` | `capture/<name>/` | yes | the whole request body as sent |
 | `<name>-tools.json` | `capture/<name>/` | yes | tool definitions |
 | `<name>-meta.json` | `capture/<name>/` | n/a | run id, sizes, token counts, tool names |
 | `trace/` | `capture/<name>/` | **no** | the raw orca run. holds account and session ids |
 
-So the Fable interactive prompt is `prompt/claude-fable-5-1-system-prompt.md` and the `-p` one is
-`prompt/claude-fable-5-1-print-system-prompt.md`.
+`prompt/` groups by harness, one folder per agent, so the file inside is named for the model
+alone: `prompt/CLAUDECODE/claude-fable-5-1-system-prompt.md`, and the `-p` variant beside it as
+`claude-fable-5-1-print-system-prompt.md`. Two harnesses can serve the same model, which is what
+the harness folder disambiguates — `prompt/CODEX/gpt-5-6-sol-system-prompt.md` and
+`prompt/OPENCODE/gpt-5-6-sol-system-prompt.md` are different prompts for one model. Under
+`capture/` the same collision needs `--dir`, since there is no harness level there.
 
 Only `trace/` is unsafe to share, and `capture/.gitignore` keeps it out of commits. Everything else
 runs through the scrubber, and a capture aborts rather than writing a file if anything identifying

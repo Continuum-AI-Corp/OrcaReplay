@@ -3,3 +3,6 @@
 # documents and the scrubbed prompts under ../prompt/ are committed.
 */
 index.json
+
+# The Chinese runbook is kept locally. CAPTURE-RUNBOOK.md is the committed one.
+*.zh-CN.md

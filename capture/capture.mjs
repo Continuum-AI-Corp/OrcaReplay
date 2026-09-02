@@ -89,7 +89,7 @@ const powershell = (script) =>
 function parseArgs(argv) {
   const flags = {};
   let harness;
-  const valued = new Set(['model', 'upstream', 'port', 'cwd', 'prompt', 'timeout']);
+  const valued = new Set(['model', 'upstream', 'port', 'cwd', 'prompt', 'timeout', 'from-run', 'dir']);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (!a.startsWith('--')) { harness ??= a; continue; }
@@ -101,7 +101,7 @@ function parseArgs(argv) {
 
 const { harness, flags } = parseArgs(process.argv.slice(2));
 
-const USAGE = `usage: node capture/capture.mjs <claude|codex> [options]
+const USAGE = `usage: node capture/capture.mjs <claude|codex|opencode> [options]
 
   --model <id>       model to capture. default: the harness's own default
   --print            claude only: capture the -p prompt instead of the interactive one
@@ -118,7 +118,11 @@ const USAGE = `usage: node capture/capture.mjs <claude|codex> [options]
   --allow-failed     file the capture even when the turn came back an error. the prompt
                      is still genuine; refused by default so a wrong --model cannot
                      quietly create a folder for a model that does not exist
-  --index            rebuild capture/index.json and exit`;
+  --index            rebuild capture/index.json and exit
+  --from-run <dir>   file an orca run that already exists instead of capturing a new
+                     one. the run directory is read in place and left where it is
+  --dir <name>       folder name under capture/, when two harnesses serve the same
+                     model and would otherwise land in the same one`;
 
 // ---------------------------------------------------------------------------- harness profiles
 
@@ -134,6 +138,7 @@ const PROFILES = {
   claude: {
     id: 'claude',
     adapter: 'claude',
+    promptDir: 'CLAUDECODE',
     exe: () => join(npmRoot(), '@anthropic-ai', 'claude-code', 'bin', 'claude.exe'),
     defaultInteractive: true,
     trustKeyed: true,
@@ -175,6 +180,7 @@ const PROFILES = {
   codex: {
     id: 'codex',
     adapter: 'codex',
+    promptDir: 'CODEX',
     // Codex ships a JS entry point rather than a binary, so the console is opened on the npm
     // shim; Start-Process gives `codex.cmd` a console just as readily as an executable.
     exe: () => join(npmPrefix(), 'codex.cmd'),
@@ -208,6 +214,83 @@ const PROFILES = {
       return {
         blocks, context, tools, toolNames: names,
         meta: { reasoning: body.reasoning, text: body.text, store: body.store },
+      };
+    },
+  },
+  opencode: {
+    id: 'opencode',
+    adapter: 'opencode',
+    promptDir: 'OPENCODE',
+    recordVia: 'attach',
+    exe: () => join(npmPrefix(), 'opencode.cmd'),
+    defaultInteractive: false,
+    recordArgs: (model, prompt) => ['--', 'run', ...(model ? ['--model', model] : []), prompt],
+    consoleArgs: (model, prompt) => ['run', ...(model ? ['--model', model] : []), `"${prompt}"`],
+    forceAnthropicUpstream: false,
+
+    /**
+     * OpenCode keeps its provider origin in `opencode.json`, not in an environment variable, so
+     * `OPENAI_BASE_URL` alone leaves the run talking straight to the gateway and the trace empty.
+     *
+     * A project-level config in the working directory is the way in: OpenCode reads it, and the
+     * `{env:VAR}` form in a config value is resolved at load, which is what lets a proxy port that
+     * is not known until launch reach a file written before it. The block is cloned whole from the
+     * user's own config because a partial override does not merge — dropping `npm` or `models`
+     * unregisters the provider. The credential travels as an environment variable so a generated
+     * file never holds a key, and the file is removed on the way out either way.
+     */
+    prepareCwd(cwd, model, port) {
+      const globalPath = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'opencode', 'opencode.json');
+      let cfg;
+      try { cfg = JSON.parse(readFileSync(globalPath, 'utf8')); } catch {
+        throw new Error(`opencode has no config at ${globalPath}; configure a provider first`);
+      }
+      const wanted = model ?? cfg.model;
+      const providerName = String(wanted ?? '').split('/')[0];
+      const block = cfg.provider?.[providerName];
+      if (!block) {
+        throw new Error(`opencode config names no provider '${providerName}' for model '${wanted}'`);
+      }
+      // The literal port, not `{env:OPENAI_BASE_URL}`: the proxy port is fixed before the config
+      // is written, so the indirection buys nothing and one config layer that quietly fails to
+      // resolve is one too many. The file is removed on the way out, key and all.
+      const clone = JSON.parse(JSON.stringify(block));
+      clone.options = { ...clone.options, baseURL: `http://127.0.0.1:${port}/v1` };
+      const local = join(cwd, 'opencode.json');
+      const had = existsSync(local) ? readFileSync(local, 'utf8') : undefined;
+      writeFileSync(local, JSON.stringify({
+        $schema: 'https://opencode.ai/config.json',
+        provider: { [providerName]: clone },
+        model: wanted,
+      }, null, 2), 'utf8');
+      return {
+        env: {},
+        restore() {
+          if (had === undefined) rmSync(local, { force: true });
+          else writeFileSync(local, had, 'utf8');
+        },
+      };
+    },
+
+    extract(body) {
+      const blocks = [];
+      const context = [];
+      for (const m of body.messages ?? []) {
+        const text = typeof m.content === 'string'
+          ? m.content
+          : (Array.isArray(m.content) ? m.content : []).map((p) => p.text ?? '').join('');
+        if (text === '') continue;
+        if (m.role === 'system' || m.role === 'developer') {
+          blocks.push({ label: `${m.role}[${blocks.length}]`, text });
+        } else if (/^\s*<[a-z_]+[\s>]/.test(text)) {
+          context.push({ label: 'context', text });
+        }
+      }
+      const tools = body.tools ?? [];
+      return {
+        blocks, context, tools,
+        toolNames: tools.map((x) => x.function?.name ?? x.name).filter(Boolean),
+        meta: { temperature: body.temperature, max_tokens: body.max_tokens ?? body.max_completion_tokens },
       };
     },
   },
@@ -427,16 +510,25 @@ function upstreamArgs(profile) {
 
 /** Non-interactive: one `orca record`, which exits on its own when the agent does. */
 function captureRecorded(profile, cwd, model, prompt) {
-  const args = [
-    'record', profile.adapter, '--no-fs', '--no-shell',
-    ...upstreamArgs(profile), ...profile.recordArgs(model, prompt),
-  ];
-  console.log(`  orca ${args.join(' ')}`);
-  const { out } = runShim('orca', args, { cwd, timeout: Number(flags.timeout ?? 300) * 1000 });
-  const runId = /run=(run_[0-9a-f]+)/.exec(out)?.[1];
-  if (!runId) throw new Error(`orca record produced no run id.\n${out.trim()}`);
-  if (/capture\.empty/.test(out)) throw new Error(`the agent never called the proxy.\n${out.trim()}`);
-  return runId;
+  const prepared = profile.prepareCwd?.(cwd, model, port);
+  try {
+    const args = [
+      'record', profile.adapter, '--no-fs', '--no-shell',
+      ...upstreamArgs(profile), ...profile.recordArgs(model, prompt),
+    ];
+    console.log(`  orca ${args.join(' ')}`);
+    const { out } = runShim('orca', args, {
+      cwd,
+      timeout: Number(flags.timeout ?? 300) * 1000,
+      env: { ...process.env, ...(prepared?.env ?? {}) },
+    });
+    const runId = /run=(run_[0-9a-f]+)/.exec(out)?.[1];
+    if (!runId) throw new Error(`orca record produced no run id.\n${out.trim()}`);
+    if (/capture\.empty/.test(out)) throw new Error(`the agent never called the proxy.\n${out.trim()}`);
+    return runId;
+  } finally {
+    prepared?.restore();
+  }
 }
 
 const killPort = (port) => powershell(
@@ -455,7 +547,77 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * `cols > 0 && rows > 0`, which it cannot learn from a pipe. Node's own `detached` is no help
  * either, since on Windows it means DETACHED_PROCESS — no console at all.
  */
-async function captureInteractive(profile, cwd, model, prompt) {
+/**
+ * Start the agent in a console of its own. `Start-Process` without `-NoNewWindow` is the whole
+ * trick: Windows hands a console application a real console, so `process.stdin.isTTY` is true and
+ * the harness assembles its interactive prompt. A pty shim does not work here — winpty asserts on
+ * `cols > 0 && rows > 0`, which it cannot learn from a pipe — and node's `detached` means
+ * DETACHED_PROCESS on Windows, so no console at all.
+ */
+function consoleLauncher(profile, cwd, model, prompt) {
+  return (port, prepared) => {
+    const exe = profile.exe();
+    if (!existsSync(exe)) throw new Error(`agent executable not found: ${exe}`);
+    // A nested session inherits these and registers as a child, which changes the prompt.
+    const strip = [
+      'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID',
+      'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_PID', 'CLAUDE_EFFORT',
+      'CLAUDE_CODE_EXECPATH', 'AI_AGENT',
+    ];
+    const psQuote = (s) => `'${String(s).replace(/'/g, "''")}'`;
+    const argList = profile.consoleArgs(model, prompt).map(psQuote).join(',');
+    const script = [
+      `foreach ($n in @(${strip.map(psQuote).join(',')})) { if (Test-Path "Env:\$n") { Remove-Item "Env:\$n" } }`,
+      ...Object.entries(prepared?.env ?? {}).map(([k, v]) => `$env:${k} = ${psQuote(v)}`),
+      `$env:ANTHROPIC_BASE_URL = 'http://127.0.0.1:${port}'`,
+      `$env:OPENAI_BASE_URL = 'http://127.0.0.1:${port}/v1'`,
+      `$p = Start-Process -FilePath ${psQuote(exe)} -WindowStyle Minimized -PassThru -WorkingDirectory ${psQuote(cwd)} -ArgumentList @(${argList})`,
+      `Write-Output "PID=$($p.Id)"`,
+    ].join('; ');
+    const launched = powershell(script);
+    const pid = /PID=(\d+)/.exec(launched.out)?.[1];
+    if (!pid) throw new Error(`could not launch the agent in a console.\n${launched.out.trim()}`);
+    console.log(`  launched pid=${pid} in its own console`);
+    return { stop: () => powershell(`Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue`) };
+  };
+}
+
+/**
+ * Start the agent as an ordinary child, for a harness that needs no terminal.
+ *
+ * Used instead of `orca record` where the adapter's environment does not reach the agent: OpenCode
+ * answered from the gateway with the proxy set and left an empty trace, and the same launch under
+ * a held-open proxy records fine. Holding the proxy ourselves also fixes the port before the
+ * agent's config is written, which is what makes the `{env:...}` indirection in that config work.
+ */
+function shimLauncher(profile, cwd, model, prompt) {
+  return (port, prepared) => {
+    const args = profile.recordArgs(model, prompt).filter((a) => a !== '--');
+    console.log(`  ${profile.adapter} ${args.join(' ')}`);
+    const r = runShim(profile.adapter, args, {
+      cwd,
+      timeout: Number(flags.timeout ?? 180) * 1000,
+      // No base-URL variables when the harness was redirected through its own config: OpenCode
+      // lets an environment variable win over the config value, and setting both left it talking
+      // to the gateway while the proxy recorded nothing. Whoever redirected the agent owns the
+      // origin, and only one of them may.
+      env: prepared
+        ? { ...process.env, ...prepared.env }
+        : {
+          ...process.env,
+          OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`,
+          ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
+        },
+    });
+    // Kept whole: when the trace comes back empty the agent's own output is the only evidence of
+    // why, and a tail line is usually just an ANSI reset.
+    const lines = r.out.replace(/\u001b\[[0-9;]*m/g, '').split('\n').map((l) => l.trim()).filter(Boolean);
+    for (const l of lines.slice(-3)) console.log(`  ${l.slice(0, 100)}`);
+    return { stop: () => undefined, output: lines };
+  };
+}
+
+async function captureWithProxy(profile, cwd, model, prompt, launch) {
   if (profile.trustKeyed && !trustState(cwd).trusted) {
     throw new Error(
       `${profile.id} has not been trusted in ${cwd}, so it would stop on the trust dialog.\n` +
@@ -483,29 +645,14 @@ async function captureInteractive(profile, cwd, model, prompt) {
     }
     if (!runId) throw new Error(`orca attach never reported a run id.\n${attachOut.trim()}`);
 
-    const exe = profile.exe();
-    if (!existsSync(exe)) throw new Error(`agent executable not found: ${exe}`);
-
-    // A nested session inherits these and registers as a child, which changes the prompt.
-    const strip = [
-      'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID',
-      'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_PID', 'CLAUDE_EFFORT',
-      'CLAUDE_CODE_EXECPATH', 'AI_AGENT',
-    ];
-    const psQuote = (s) => `'${String(s).replace(/'/g, "''")}'`;
-    const argList = profile.consoleArgs(model, prompt).map(psQuote).join(',');
-    const script = [
-      `foreach ($n in @(${strip.map(psQuote).join(',')})) { if (Test-Path "Env:\\$n") { Remove-Item "Env:\\$n" } }`,
-      `$env:ANTHROPIC_BASE_URL = 'http://127.0.0.1:${port}'`,
-      `$env:OPENAI_BASE_URL = 'http://127.0.0.1:${port}/v1'`,
-      `$p = Start-Process -FilePath ${psQuote(exe)} -WindowStyle Minimized -PassThru -WorkingDirectory ${psQuote(cwd)} -ArgumentList @(${argList})`,
-      `Write-Output "PID=$($p.Id)"`,
-    ].join('; ');
-
-    const launched = powershell(script);
-    const pid = /PID=(\d+)/.exec(launched.out)?.[1];
-    if (!pid) throw new Error(`could not launch the agent in a console.\n${launched.out.trim()}`);
-    console.log(`  launched pid=${pid} in its own console`);
+    const prepared = profile.prepareCwd?.(cwd, model, port);
+    let running;
+    try {
+      running = launch(port, prepared);
+    } catch (err) {
+      prepared?.restore();
+      throw err;
+    }
 
     try {
       const dir = runDir(cwd, runId);
@@ -517,16 +664,20 @@ async function captureInteractive(profile, cwd, model, prompt) {
         if (!found) await sleep(1000);
       }
       if (!found) {
+        const said = running.output?.length
+          ? `\n  the agent said:\n${running.output.map((l) => `    ${l.slice(0, 120)}`).join('\n')}`
+          : '';
         throw new Error(
           'no prompt-carrying request arrived within the timeout.\n' +
           `  if the agent stopped on a trust dialog, start it once in ${cwd} by hand,\n` +
-          '  or pass --cwd with a directory it already trusts.',
+          `  or pass --cwd with a directory it already trusts.${said}`,
         );
       }
       console.log(`  captured seq=${found.event.seq} tools=${found.got.toolNames.length} bytes=${found.event.payload.bytes}`);
       return runId;
     } finally {
-      powershell(`Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue`);
+      running.stop();
+      prepared?.restore();
     }
   } finally {
     attach.kill();
@@ -537,8 +688,8 @@ async function captureInteractive(profile, cwd, model, prompt) {
 
 // ---------------------------------------------------------------------------- writing
 
-function writeCapture(profile, cwd, runId, interactive) {
-  const dir = runDir(cwd, runId);
+function writeCapture(profile, cwd, runId, interactive, dirOverride) {
+  const dir = dirOverride ?? runDir(cwd, runId);
   const found = pickPromptRequest(dir, profile);
   if (!found) throw new Error(`run ${runId} holds no prompt-carrying request`);
   const { body, got, event } = found;
@@ -560,12 +711,32 @@ function writeCapture(profile, cwd, runId, interactive) {
   const model = body.model ?? 'unknown-model';
   // One folder per model, as asked — but print and interactive are two different prompts for the
   // same model, so the non-default mode gets a suffix rather than overwriting the canonical one.
-  const dirName = interactive === profile.defaultInteractive
-    ? model
-    : `${model}.${interactive ? 'interactive' : 'print'}`;
+  const dirName = typeof flags.dir === 'string'
+    ? flags.dir
+    : interactive === profile.defaultInteractive
+      ? model
+      : `${model}.${interactive ? 'interactive' : 'print'}`;
   const dest = join(CAPTURE_DIR, dirName);
+
+  // A model id does not identify a capture on its own: two harnesses can serve the same model, and
+  // filing the second one over the first destroys it silently. Learned the hard way — opencode and
+  // codex both run gpt-5.6-sol.
+  const existingMeta = join(dest, `${dirName.replace(/\./g, '-')}-meta.json`);
+  if (existsSync(existingMeta)) {
+    try {
+      const prev = JSON.parse(readFileSync(existingMeta, 'utf8'));
+      if (prev.harness && prev.harness !== profile.id) {
+        throw new Error(
+          `capture/${dirName} already holds a ${prev.harness} capture of ${prev.model}.\n`
+          + `  pass --dir ${profile.id}-${model} to file this one beside it.`,
+        );
+      }
+    } catch (err) {
+      if (err instanceof SyntaxError === false) throw err;
+    }
+  }
+
   mkdirSync(dest, { recursive: true });
-  mkdirSync(PROMPT_DIR, { recursive: true });
 
   // Every file carries the folder's name, so a file pulled out on its own still says which model
   // and which mode it came from. `.` would read as a second extension, hence the dash.
@@ -608,7 +779,12 @@ function writeCapture(profile, cwd, runId, interactive) {
   };
 
   meta.dir_slug = slug;
-  meta.prompt_file = `prompt/${slug}-system-prompt.md`;
+  // The capture folder may be disambiguated by hand (--dir) when two harnesses serve one model.
+  // Under prompt/ the harness folder already does that, so the file is named for the model alone.
+  meta.prompt_slug = `${model}${interactive === profile.defaultInteractive ? '' : interactive ? '-interactive' : '-print'}`
+    .replace(/[^A-Za-z0-9._-]+/g, '-').replace(/\./g, '-');
+  meta.prompt_dir = profile.promptDir ?? profile.id.toUpperCase();
+  meta.prompt_file = `prompt/${meta.prompt_dir}/${meta.prompt_slug}-system-prompt.md`;
   meta.regenerate = `node capture/capture.mjs ${profile.id} --model ${model}`
     + (interactive === profile.defaultInteractive ? '' : interactive ? ' --interactive' : ' --print');
 
@@ -617,12 +793,17 @@ function writeCapture(profile, cwd, runId, interactive) {
   // source and `mirrorPrompts()` repairs the other from it, so a hand edit to one cannot survive
   // unnoticed.
   writeFileSync(file('system-prompt.md'), promptText, 'utf8');
-  writeFileSync(join(PROMPT_DIR, `${slug}-system-prompt.md`), promptText, 'utf8');
+  const mirrorPath = join(PROMPT_DIR, meta.prompt_dir, `${meta.prompt_slug}-system-prompt.md`);
+  mkdirSync(dirname(mirrorPath), { recursive: true });
+  writeFileSync(mirrorPath, promptText, 'utf8');
   writeFileSync(file('prompt-annotated.txt'), annotated, 'utf8');
   writeFileSync(file('request.json'), JSON.stringify(scrubJson(body), null, 2), 'utf8');
   writeFileSync(file('tools.json'), JSON.stringify(scrubJson(got.tools), null, 2), 'utf8');
   writeFileSync(file('meta.json'), JSON.stringify(meta, null, 2), 'utf8');
   writeFileSync(join(dest, 'README.md'), folderReadme(meta), 'utf8');
+
+  // An existing run belongs to whoever made it: read in place, never moved or deleted.
+  if (dirOverride) return { dest, meta };
 
   // The stale-trace case is why this runs either way: a folder that keeps last run's trace while
   // meta.json names this one describes two different runs at once.
@@ -690,11 +871,12 @@ function mirrorPrompts(metas) {
   for (const m of metas) {
     const src = join(CAPTURE_DIR, m.dir_name, `${m.dir_slug}-system-prompt.md`);
     if (!existsSync(src)) continue;
-    const dst = join(PROMPT_DIR, `${m.dir_slug}-system-prompt.md`);
+    if (!m.prompt_dir || !m.prompt_slug) continue;
+    const dst = join(PROMPT_DIR, m.prompt_dir, `${m.prompt_slug}-system-prompt.md`);
     const want = readFileSync(src, 'utf8');
     const have = existsSync(dst) ? readFileSync(dst, 'utf8') : undefined;
     if (have === want) continue;
-    mkdirSync(PROMPT_DIR, { recursive: true });
+    mkdirSync(dirname(dst), { recursive: true });
     writeFileSync(dst, want, 'utf8');
     repaired.push(`${m.dir_slug}: ${have === undefined ? 'mirror was missing' : 'mirror differed'}`);
   }
@@ -720,12 +902,13 @@ function writeIndex() {
         request_bytes: m.sizes?.request_bytes, prefix_tokens: m.prefix_tokens,
         dir: `capture/${d.name}`, prompt_file: m.prompt_file,
         dir_name: d.name, dir_slug: m.dir_slug,
+        prompt_dir: m.prompt_dir, prompt_slug: m.prompt_slug,
       };
     })
     .sort((a, b) => a.model.localeCompare(b.model));
   const repaired = mirrorPrompts(rows);
   // dir_name and dir_slug are plumbing for the mirror, not part of the published index.
-  const published = rows.map(({ dir_name, dir_slug, ...rest }) => rest);
+  const published = rows.map(({ dir_name, dir_slug, prompt_dir, prompt_slug, ...rest }) => rest);
   writeFileSync(join(CAPTURE_DIR, 'index.json'), JSON.stringify(published, null, 2), 'utf8');
   return { rows: published, repaired };
 }
@@ -761,10 +944,21 @@ console.log(`capturing ${profile.id}${model ? ` · ${model}` : ''} · ${interact
 console.log(`  cwd ${cwd}`);
 
 try {
-  const runId = interactive
-    ? await captureInteractive(profile, cwd, model, userPrompt)
-    : captureRecorded(profile, cwd, model, userPrompt);
-  const { dest, meta } = writeCapture(profile, cwd, runId, interactive);
+  const fromRun = typeof flags['from-run'] === 'string' ? resolve(flags['from-run']) : undefined;
+  let runId;
+  if (fromRun) {
+    if (!existsSync(join(fromRun, 'events.jsonl'))) {
+      throw new Error(`${fromRun} is not an orca run directory`);
+    }
+    runId = basename(fromRun);
+    console.log(`  filing existing run ${runId}`);
+  } else {
+    const launcher = profile.recordVia === 'attach' ? shimLauncher : consoleLauncher;
+    runId = interactive || profile.recordVia === 'attach'
+      ? await captureWithProxy(profile, cwd, model, userPrompt, launcher(profile, cwd, model, userPrompt))
+      : captureRecorded(profile, cwd, model, userPrompt);
+  }
+  const { dest, meta } = writeCapture(profile, cwd, runId, interactive, fromRun);
   writeIndex();
   console.log('');
   console.log(`  ${basename(dest)}/`);

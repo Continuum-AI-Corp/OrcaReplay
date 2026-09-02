@@ -56,8 +56,6 @@ Before saving, check for an existing file that already covers it. Update that fi
 You have been invoked in the following environment: 
  - Primary working directory: {{CWD}}
  - Is a git repository: true
- - Additional working directories:
-  - {{CWD}}
  - Platform: win32
  - Shell: PowerShell (primary); Bash tool also available for POSIX scripts — each takes its own syntax.
  - OS Version: Windows 10 Pro {{OS_BUILD}}
@@ -120,14 +118,16 @@ Before running a command that changes system state (such as restarts, deletes, o
 
 gitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.
 
-Current branch: main
+Current branch: capture-system-prompts
 
 Main branch (you will usually use this for PRs): main
 
 Git user: {{GIT_USER}}
 
 Status:
-(clean)
+M capture/capture.mjs
+ D prompt/claude-fable-5-1-system-prompt.md
+?? prompt/opencode-gpt-5-6-sol-system-prompt.md
 
 Recent commits:
 {{RECENT_COMMITS}}

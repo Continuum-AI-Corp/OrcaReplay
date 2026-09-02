@@ -1,43 +1,48 @@
-# Fable 5.1 提示词抓取手册
+# Capturing an agent's system prompt
 
-用 OrcaReplay 在本机代理层抓下 Claude Code 交互模式发给 `claude-fable-5-1` 的完整系统提示词。
-抓的是本机 agent 的出站请求，不涉及任何服务端。
+How to read the system prompt a coding agent assembled on your own machine, using OrcaReplay's
+proxy as the vantage point. Nothing here talks to a service about anything but the agent's own
+model call: the prompt is captured from the request the harness sent, on the way out.
 
-> 这份手册记录的是手动流程。日常用 `node capture/capture.mjs <claude|codex>` 一条命令跑完，
-> 八步都在里面。手册留着是为了移植到别的 harness 或别的平台时知道每一步在做什么。
+`node capture/capture.mjs <claude|codex|opencode>` does all of this in one command. This document
+is the manual procedure behind it, for porting the approach to a harness the script does not cover
+or to a platform it does not run on.
 
-环境：Claude Code 2.1.258 · OrcaReplay 0.1.2 · Windows 10 Pro · node 22.23.2 · 2026-09-02
+Measured against Claude Code 2.1.258, Codex 0.149.0 and OpenCode 1.18.26 on Windows 10, node
+22.23.2, OrcaReplay 0.1.2.
 
-## 产出
+## What you get
 
-| 项 | 值 |
+| piece | where it lives |
 |---|---|
-| `system[]` 四个 block | 14,953 字符 |
-| 注入的 `role:"system"` 消息 | 11,529 字符 |
-| 工具定义 | 35 个 / 140,071 字节 |
-| 请求体总计 | 168,303 字节 |
-| 服务端计费 prefix | 59,811 tokens |
+| the prompt on its own | `prompt/<HARNESS>/<model>-system-prompt.md` |
+| the same text with block boundaries | `capture/<name>/<name>-prompt-annotated.txt` |
+| the whole request body | `capture/<name>/<name>-request.json` |
+| tool definitions | `capture/<name>/<name>-tools.json` |
+| run id, sizes, token counts | `capture/<name>/<name>-meta.json` |
+| the raw orca run | `capture/<name>/trace/` |
 
-最终落地 `prompt/claude-fable-5-1-system-prompt.md`，只含提示词本身。
+Everything but `trace/` is scrubbed.
 
-## 前置条件
+## Prerequisites
 
-| 项 | 要求 |
+| | |
 |---|---|
-| node | 20.19+ 或 22.12+ |
+| node | 20.19+ or 22.12+ |
 | orcareplay | `npm i -g orcareplay` |
-| claude | 已登录且能直连 api.anthropic.com |
-| 终端 | Windows。步骤 4 需要 PowerShell |
+| the agent | installed, signed in, and able to reach the model it names |
+| terminal | PowerShell is needed for step 4 on Windows |
 
-Linux 和 macOS 上第 3 到 5 步可以合并成一条 `orca record claude`：那里管道背后仍是 pty，
-Claude Code 会按交互模式装配。Windows 不行，原因见下面的坑。
+On Linux and macOS steps 3 to 5 collapse into a single `orca record`: a pipe there still sits
+behind a pty, so the harness assembles its interactive prompt anyway. Windows is the case that
+needs the extra work, for the reason in the pitfalls below.
 
-## 步骤
+## Steps
 
-### 1. 先看 orca 会把请求发到哪
+### 1. Find out where orca will forward
 
-如果 `orca setup` 配过 gateway，`resolveUpstream()`（`packages/cli/src/config.ts:132`）会把所有
-anthropic 流量转到那里，而第三方 router 通常没有 fable。
+If `orca setup` has configured a gateway, `resolveUpstream()` (`packages/cli/src/config.ts:132`)
+sends every Anthropic call there, and a third-party router usually does not serve the model.
 
 ```console
 $ cat ~/.config/orca/config.json
@@ -45,11 +50,13 @@ $ cat ~/.config/orca/config.json
   "models": [ "gpt-5.6-sol" ] }
 ```
 
-只要这个文件里有 `gateway`，后面每条 orca 命令都加上 `--upstream-anthropic https://api.anthropic.com`。
+If that file names a gateway, add `--upstream-anthropic https://api.anthropic.com` to every orca
+command below. Codex is the opposite case: its own `config.toml` already points at that gateway, so
+leaving the upstream alone is what makes its model resolve.
 
-### 2. 先抓一份 print 模式的，验证链路
+### 2. Capture the non-interactive prompt first
 
-可选，但便宜且能立刻确认代理、凭据、模型 id 三者都通。
+Optional, but cheap, and it confirms the proxy, the credential and the model id in one go.
 
 ```console
 $ orca record claude --no-fs --no-shell \
@@ -60,12 +67,13 @@ ok
 info recorded run=run_8e6d567d4ca4 events=7 blobs=3 exit=0
 ```
 
-看到 `exit=0` 说明链路没问题。注意这份是 `cc_entrypoint=sdk-cli`，不是交互模式那份。
+`exit=0` means the path works. Note this is the `-p` prompt, tagged `cc_entrypoint=sdk-cli`, not the
+interactive one.
 
-### 3. 起一个常驻代理
+### 3. Hold a proxy open
 
-`orca attach` 不负责启动 agent，只把代理挂住并打印要 export 的变量。`--port` 没写进 `--help`，
-但它存在，固定端口能省掉解析输出这一步。
+`orca attach` does not launch the agent. It holds the proxy and prints the variable to export.
+`--port` is not in `--help` but it exists, and a fixed port saves parsing the output.
 
 ```console
 $ orca attach --for claude --port 46001 \
@@ -79,12 +87,12 @@ info attached run=run_bc749535e248 proxy=http://127.0.0.1:46001 for=claude-code
   Recording. Press ctrl-C when the agent is done.
 ```
 
-这条命令会一直挂着。开新窗口做下一步。
+This command stays up. Use a second window for the next step.
 
-### 4. 在一个真 console 里启动 claude
+### 4. Start the agent in a console of its own
 
-关键在 `Start-Process` 不带 `-NoNewWindow`：Windows 会给控制台程序分配一个真的 console，
-于是 `process.stdin.isTTY` 为真，Claude Code 走交互模式装配。
+`Start-Process` without `-NoNewWindow` is the whole trick: Windows hands a console application a
+real console, so `process.stdin.isTTY` is true and the harness assembles its interactive prompt.
 
 ```powershell
 $claude = "$env:APPDATA\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe"
@@ -99,11 +107,13 @@ Start-Process -FilePath $claude -WindowStyle Minimized -PassThru `
   -ArgumentList @('--model','claude-fable-5-1','"say only the word ok"')
 ```
 
-提示词用内嵌双引号包成**单个**参数。工作目录选一个 claude 已经信任过的仓库，否则它会弹信任确认然后卡住。
+Wrap the prompt in embedded quotes so it arrives as a **single** argument. Choose a working
+directory the agent already trusts, or it stops on the trust dialog with nobody to answer it.
 
-### 5. 等带工具的那条请求落盘
+### 5. Wait for the request that carries tools
 
-第一条 `model.request` 是标题生成调用，`tools=0`，不是你要的。等 `tools` 大于零的那条。
+The first `model.request` is the title generator, `tools=0`, and it is not the one you want. Wait
+for the one where `tools` is greater than zero.
 
 ```console
 $ until grep -q '"tools":3' .orca/runs/*/events.jsonl; do sleep 2; done
@@ -111,9 +121,10 @@ seq 4  model.request   claude-fable-5-1  tools=35  blob=175255
 seq 5  model.response  200  end_turn  cache_read=59811
 ```
 
-### 6. 收干净
+### 6. Clean up
 
-两个进程都要停。杀掉启动 `orca attach` 的那个 shell 并不会杀掉它底下的 node，端口会一直被占。
+Both processes have to stop. Killing the shell that started `orca attach` does not reach the node
+process behind it, and the port stays bound.
 
 ```powershell
 Stop-Process -Id 18544 -Force
@@ -121,10 +132,11 @@ Get-NetTCPConnection -LocalPort 46001 -State Listen |
   ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
 ```
 
-### 7. 从 trace 里取出请求体
+### 7. Read the request body out of the trace
 
-事件里存的是 blob 的 sha256，按前两位分目录。取 `tools>0` 的**第一条**，别取最大那条——
-后面的轮次会加载延迟工具，工具数会从 35 涨到 37。
+Events hold the blob's sha256, sharded by its first two characters. Take the **first** request with
+tools, not the largest: later turns load deferred tools, so the tool count climbs from 35 to 37 and
+the biggest request describes a state the first turn was never in.
 
 ```js
 const evs = readFileSync(dir + '/events.jsonl', 'utf8')
@@ -132,13 +144,15 @@ const evs = readFileSync(dir + '/events.jsonl', 'utf8')
 const r = evs.filter(e => e.type === 'model.request' && e.attrs.tools > 0)[0];
 const sha = r.payload.$blob.replace('sha256:', '');
 let body = JSON.parse(readFileSync(`${dir}/blobs/${sha.slice(0,2)}/${sha}`, 'utf8'));
-if (typeof body === 'string') body = JSON.parse(body);   // blob 是双层 JSON
+if (typeof body === 'string') body = JSON.parse(body);   // blobs are double-encoded
 ```
 
-### 8. 拼出提示词并脱敏
+### 8. Assemble the prompt and scrub it
 
-提示词分两处：`body.system` 四个 block，以及 `body.messages` 里那条 `role:"system"`
-（装的是 agent 类型、skill 清单和权限模式段）。
+Where the prompt lives depends on the dialect.
+
+**Claude Code**, Anthropic messages: the `system` array, then the injected `role: "system"` message
+that carries agent types, the skill list and a paragraph about the permission mode.
 
 ```js
 const prompt = body.system.map(s => s.text).join('\n\n')
@@ -146,77 +160,108 @@ const prompt = body.system.map(s => s.text).join('\n\n')
 ```
 
 ```
-  [0]     70 字符  cache=none    billing header
-  [1]     57 字符  cache=1h      identity
-  [2]    907 字符  cache=none    reporting outcomes
-  [3]  13919 字符  cache=1h      正文
-  role:system  11529 字符
+  [0]     70 chars  cache=none    billing header
+  [1]     57 chars  cache=1h      identity
+  [2]    907 chars  cache=none    reporting outcomes
+  [3]  13919 chars  cache=1h      the body
+  role:system  11478 chars
 ```
 
-然后把机器相关的值替换成占位符。`capture.mjs` 里的规则是从本机推出来的，不是写死的：家目录、
-用户名、git 用户名和邮箱、gateway 主机、Claude Code 的项目 slug、系统 build，再加上邮箱、uuid、
-32 位以上十六进制串的通用规则。顺序有讲究——memory 目录在家目录里面，家目录规则先跑会留下
-半替换的路径。替换完回扫一遍，有残留就直接报错不写文件。
+**Codex**, OpenAI responses: no `instructions` field and no top-level `tools`. The prompt arrives as
+`developer`-role messages inside `input`, and the tools hang off a custom `additional_tools` item as
+a namespace tree, which is why the recorded event reads `tools: 0`.
 
-## 两个模式差多少
+**OpenCode**, OpenAI chat completions: a single `system` message, tools in the standard `tools`
+array.
 
-| | print (sdk-cli) | interactive (cli) |
+Then replace the machine-specific values with placeholders. Derive them from the machine rather
+than hard-coding them: home directory, username, git name and email, the gateway host from
+`~/.config/orca/config.json`, the Claude Code project slug, the OS build, plus generic rules for
+emails, uuids and hex runs of 32 or more. Order matters, because the memory directory sits inside
+the home directory. Re-scan afterwards and refuse to write the file if anything survives.
+
+## How much the mode changes
+
+| | print (`sdk-cli`) | interactive (`cli`) |
 |---|---|---|
-| `system[]` | 13,641 字符 | 14,953 字符 |
-| `role:system` | 7,585 字符 | 11,529 字符 |
+| `system[]` | 13,641 chars | 14,953 chars |
+| `role:system` | 7,585 chars | 11,529 chars |
 | tools | 29 | 35 |
-| 请求体 | 104,492 字节 | 168,303 字节 |
+| request | 104,492 bytes | 168,303 bytes |
 | tokens | 37,831 | 59,811 |
 
-交互模式独有：`! <command>` 提示、整个 Scratchpad Directory 段、cwd 是 git 仓库时追加的
-`gitStatus` 块，以及 `Artifact`、`AskUserQuestion`、`EnterPlanMode`、`ExitPlanMode` 四个工具。
+Interactive adds the `! <command>` hint, the whole Scratchpad Directory section, a `gitStatus` block
+when the working directory is a repository, and `Artifact`, `AskUserQuestion`, `EnterPlanMode` and
+`ExitPlanMode`.
 
-身份行也不一样：
+The identity line changes too:
 
 - print — `You are a Claude agent, built on Anthropic's Claude Agent SDK.`
 - interactive — `You are Claude Code, Anthropic's official CLI for Claude.`
 
-## 坑
+## Pitfalls
 
-**gateway 会静默改写上游。** `400 unknown provider for model claude-fable-5-1` 来自你自己配的
-gateway，不是 Anthropic，也和 claude 装没装无关。本机 claude 能跑是因为它直连官方端点。
+**A gateway rewrites the upstream silently.** `400 unknown provider for model claude-fable-5-1`
+comes from the gateway you configured, not from Anthropic, and has nothing to do with whether the
+agent is installed. The agent works on its own because it talks to the official endpoint directly.
 
-**凭据会被转发到上游。** `packages/proxy/src/server.ts` 里 `SECRET_REQUEST_HEADERS` 明确会
-forward auth 头（只是不写进 trace）。上游指向第三方 gateway 时，等于把 OAuth token 连同整个
-提示词发了过去。走明文 HTTP 更糟。
+**Credentials are forwarded upstream.** `SECRET_REQUEST_HEADERS` in
+`packages/proxy/src/server.ts` forwards auth headers, though it never writes them to a trace. With
+the upstream pointed at a third-party gateway that sends an OAuth token there along with the whole
+prompt, and over plain HTTP if that is what the gateway speaks.
 
-**`orca record claude` 抓不到交互模式。** 它用管道启动，`isTTY` 为假，Claude Code 直接走非交互
-装配。适配器里 `command` 硬编码成 `'claude'`，也没法插一层 winpty 进去。
+**`orca record claude` cannot reach the interactive prompt.** It launches through a pipe, `isTTY` is
+false, and the harness takes the non-interactive path. The adapter also hard-codes `command:
+'claude'`, so there is no room to slip a pty shim in front of it.
 
-**winpty 在无 console 环境下起不来。** `winpty.cc:924` 断言 `cols > 0 && rows > 0` 失败，因为它
-从 stdout 拿不到窗口尺寸，而命令行又没有 `--cols`。所以走 `Start-Process` 让系统分配 console，
-比自己造 pty 省事。
+**winpty will not start without a console.** It asserts `cols > 0 && rows > 0` at
+`winpty.cc:924`, because it cannot learn the window size from a pipe and the command line has no
+`--cols`. Letting `Start-Process` allocate a console is less work than building a pty. Node's own
+`detached` is no help either: on Windows it means `DETACHED_PROCESS`, so no console at all.
 
-**PowerShell 会把带空格的参数拆开。** `-ArgumentList` 里写 `'reply with just: ok'`，claude 只收到
-`reply`，然后自己去翻 git 和 PR 找上下文。系统提示词不受影响，但会白烧 token。
+**PowerShell splits an argument containing spaces.** Passing `'reply with just: ok'` in
+`-ArgumentList` delivers only `reply`, and the agent then goes looking through git and pull requests
+for context. The system prompt is unaffected, but the tokens are wasted.
 
-**不清 `CLAUDE_*` 会被当成嵌套会话。** 从一个 Claude Code 会话里启动 claude，`CLAUDECODE=1` 和
-`CLAUDE_CODE_CHILD_SESSION=1` 会被继承。步骤 4 里那一串 `Remove-Item` 就是为这个。
+**A nested session inherits `CLAUDE_*`.** Starting the agent from inside another Claude Code session
+passes down `CLAUDECODE=1` and `CLAUDE_CODE_CHILD_SESSION=1`, which changes the prompt. That is what
+the `Remove-Item` loop in step 4 is for.
 
-## 怎么确认抓到的是真的
+**The working directory is part of the prompt.** Capturing in a temporary non-repository loses the
+whole `gitStatus` block: 4,271 characters on a measured Opus 5 run. Capture where you actually work.
 
-跑两次，diff `system[3]`。除了下面这些 cwd 派生的值，应该逐字节相同。
+**A failed turn still produces a prompt.** A wrong `--model` and a transient `overloaded_error` fail
+the same way, and in both cases the request was already recorded. Check the response before filing
+the capture, or a typo creates a folder for a model that does not exist.
 
-| 允许的差异 | 为什么 |
+**OpenCode keeps its origin in a config file.** `OPENAI_BASE_URL` alone leaves the run talking
+straight to the gateway and the trace empty. A project-level `opencode.json` in the working
+directory redirects it, and the block has to be cloned whole from the user's own config: dropping
+`npm` or `models` unregisters the provider.
+
+## Proving a capture is genuine
+
+Run it twice and diff `system[3]`. Everything but the values below should be byte for byte
+identical.
+
+| difference | why |
 |---|---|
-| scratchpad 路径 | 每个会话一个 uuid |
-| memory 目录 | 由 cwd 派生 |
-| `gitStatus` 块 | 随仓库状态变 |
-| `cc_version` 后缀 | 对装配后 prompt 取的哈希，上面几项一变它就变 |
+| scratchpad path | one uuid per session |
+| memory directory | derived from the working directory |
+| `gitStatus` block | tracks the repository state |
+| `cc_version` suffix | a hash over the assembled prompt, so the above change it |
 
-另一个交叉验证：那次被 gateway 拒的抓取和后来 200 成功的抓取，`system[3]` 只差工作目录和
-memory 哈希，工具定义与 `role:system` 完全一致。**上游返回什么不影响已经录下的请求**——提示词是
-本机装配后发出去的，代理在转发前就落盘了。
+There is a second, sharper check. Compare a run the gateway rejected with a run that returned 200:
+`system[3]` differs only in the working directory and the memory hash, while the tool definitions
+and the `role:system` turn are identical. **What the upstream returns does not affect the request
+already recorded** — the prompt is assembled locally and written to disk before it is forwarded.
 
-## 参考 run
+## Reference runs
 
-| run | 模式 | 结果 |
-|---|---|---|
-| `run_bc749535e248` | interactive | 200 |
-| `run_8e6d567d4ca4` | print | 200 |
-| `run_7a02fa0c8266` | print | 被 gateway 拒，请求体仍完整 |
+| run | harness | mode | result |
+|---|---|---|---|
+| `run_bc749535e248` | claude | interactive | 200 |
+| `run_8e6d567d4ca4` | claude | print | 200 |
+| `run_7a02fa0c8266` | claude | print | rejected by the gateway; request body still complete |
+| `run_31102b8bde19` | codex | exec | 200 |
+| `run_6e92b193d46d` | opencode | run | 200 |
