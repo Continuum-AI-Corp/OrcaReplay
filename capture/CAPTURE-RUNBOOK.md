@@ -234,10 +234,13 @@ whole `gitStatus` block: 4,271 characters on a measured Opus 5 run. Capture wher
 the same way, and in both cases the request was already recorded. Check the response before filing
 the capture, or a typo creates a folder for a model that does not exist.
 
-**OpenCode keeps its origin in a config file.** `OPENAI_BASE_URL` alone leaves the run talking
-straight to the gateway and the trace empty. A project-level `opencode.json` in the working
-directory redirects it, and the block has to be cloned whole from the user's own config: dropping
-`npm` or `models` unregisters the provider.
+**OpenCode keeps its origin in a config file, so redirect it at the socket instead.**
+`OPENAI_BASE_URL` alone leaves the run talking straight past the proxy. A project-level
+`opencode.json` carrying the proxy origin does redirect it when the command is typed in a shell,
+and did not when the same file and command were launched from a script. `--tls-intercept
+--tls-hosts '+opencode.ai,+*.opencode.ai'` sidesteps the question: orca terminates the TLS OpenCode
+established itself and the config is left alone. Expect a few `tls.handshake_failed` warnings for
+connections that are not the model call; the model call still records.
 
 ## Proving a capture is genuine
 
@@ -264,4 +267,5 @@ already recorded** — the prompt is assembled locally and written to disk befor
 | `run_8e6d567d4ca4` | claude | print | 200 |
 | `run_7a02fa0c8266` | claude | print | rejected by the gateway; request body still complete |
 | `run_31102b8bde19` | codex | exec | 200 |
-| `run_6e92b193d46d` | opencode | run | 200 |
+| `run_6e92b193d46d` | opencode | run | 200, redirected by a project config |
+| `run_578faf1d269e` | opencode | run | 200, `--tls-intercept` on a free model |
