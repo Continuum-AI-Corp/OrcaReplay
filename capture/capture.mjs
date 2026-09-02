@@ -89,7 +89,7 @@ const powershell = (script) =>
 function parseArgs(argv) {
   const flags = {};
   let harness;
-  const valued = new Set(['model', 'upstream', 'port', 'cwd', 'prompt', 'timeout', 'from-run', 'dir']);
+  const valued = new Set(['model', 'upstream', 'port', 'cwd', 'prompt', 'timeout', 'from-run', 'dir', 'retries']);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (!a.startsWith('--')) { harness ??= a; continue; }
@@ -115,6 +115,7 @@ const USAGE = `usage: node capture/capture.mjs <claude|codex|opencode> [options]
   --timeout <sec>    how long to wait for the request. default 180
   --no-trace         delete the raw orca run instead of keeping it under
                      capture/<model>/trace/
+  --retries <n>      how many extra attempts after a transient failure. default 2
   --allow-failed     file the capture even when the turn came back an error. the prompt
                      is still genuine; refused by default so a wrong --model cannot
                      quietly create a folder for a model that does not exist
@@ -221,80 +222,42 @@ const PROFILES = {
     id: 'opencode',
     adapter: 'opencode',
     promptDir: 'OPENCODE',
-    recordVia: 'attach',
+    defaultInteractive: false,
 
     /**
-     * Not working yet, and the two-step below is the way to capture OpenCode today.
+     * OpenCode is captured by decrypting its own origin rather than by moving it.
      *
-     * What is known: the project config is written to the right path with the right proxy origin,
-     * the child sees that directory as its working directory and can read the file, and the proxy
-     * records nothing at all — zero events, so the request never reached it. The same file and the
-     * same command run from a shell do redirect, and a deliberately dead port in that file makes
-     * OpenCode fail to connect, which proves the project config is normally honoured. Something
-     * about being launched through the `.cmd` shim makes OpenCode skip it. Neither the working
-     * directory, the environment plumbing, nor `{env:...}` versus a literal origin explains it.
+     * Redirecting it does not work: the provider origin lives in `opencode.json`, not in an
+     * environment variable, so `OPENAI_BASE_URL` leaves the run talking straight past the proxy.
+     * Writing a project-level config with the proxy origin in it does redirect OpenCode when the
+     * command is typed in a shell, and did not when the same file and command were launched from
+     * here — the proxy recorded nothing at all. Rather than keep chasing that, this takes the route
+     * orca built for an agent whose origin cannot be moved: `--tls-intercept` terminates the TLS
+     * OpenCode established itself, at the socket, and the config is left alone.
+     *
+     * The models under the built-in `opencode` provider are the ones this reaches, several of them
+     * free, which is also what makes iterating on the capture cost nothing. A provider pointed at a
+     * plain-HTTP gateway of your own is neither redirected nor decrypted, and needs its own answer.
      */
-    failureHint: [
-      '  the opencode path does not work yet. capture it in two steps instead:',
-      '    orca attach --for opencode --port 46001',
-      '    # then, in the capture directory, an opencode.json whose provider baseURL is',
-      '    # http://127.0.0.1:46001/v1, and: opencode run "say ok"',
-      '  then file the run with --from-run <the run directory> --dir opencode-<model>',
-    ].join('\n'),
-    exe: () => join(npmPrefix(), 'opencode.cmd'),
-    defaultInteractive: false,
+    recordFlags: ['--tls-intercept', '--tls-hosts', '+opencode.ai,+*.opencode.ai'],
+    defaultModel: 'opencode/mimo-v2.5-free',
     recordArgs: (model, prompt) => ['--', 'run', ...(model ? ['--model', model] : []), prompt],
     consoleArgs: (model, prompt) => ['run', ...(model ? ['--model', model] : []), `"${prompt}"`],
     forceAnthropicUpstream: false,
 
     /**
-     * OpenCode keeps its provider origin in `opencode.json`, not in an environment variable, so
-     * `OPENAI_BASE_URL` alone leaves the run talking straight to the gateway and the trace empty.
-     *
-     * A project-level config in the working directory is the way in: OpenCode reads it, and the
-     * `{env:VAR}` form in a config value is resolved at load, which is what lets a proxy port that
-     * is not known until launch reach a file written before it. The block is cloned whole from the
-     * user's own config because a partial override does not merge — dropping `npm` or `models`
-     * unregisters the provider. The credential travels as an environment variable so a generated
-     * file never holds a key, and the file is removed on the way out either way.
+     * Two dialects, because OpenCode picks one per model: a chat-completions body with the prompt
+     * in `messages`, or a responses body with it in `input`. `mimo-v2.5-free` takes the first,
+     * `muse-spark-1.2-contributor-free` the second, and reading only `messages` finds nothing at
+     * all in the second — the capture fails with "holds no prompt-carrying request" while the
+     * prompt sits in the trace. Both turn up as one flat list of role-tagged text either way.
      */
-    prepareCwd(cwd, model, port) {
-      const globalPath = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'opencode', 'opencode.json');
-      let cfg;
-      try { cfg = JSON.parse(readFileSync(globalPath, 'utf8')); } catch {
-        throw new Error(`opencode has no config at ${globalPath}; configure a provider first`);
-      }
-      const wanted = model ?? cfg.model;
-      const providerName = String(wanted ?? '').split('/')[0];
-      const block = cfg.provider?.[providerName];
-      if (!block) {
-        throw new Error(`opencode config names no provider '${providerName}' for model '${wanted}'`);
-      }
-      // The literal port, not `{env:OPENAI_BASE_URL}`: the proxy port is fixed before the config
-      // is written, so the indirection buys nothing and one config layer that quietly fails to
-      // resolve is one too many. The file is removed on the way out, key and all.
-      const clone = JSON.parse(JSON.stringify(block));
-      clone.options = { ...clone.options, baseURL: `http://127.0.0.1:${port}/v1` };
-      const local = join(cwd, 'opencode.json');
-      const had = existsSync(local) ? readFileSync(local, 'utf8') : undefined;
-      writeFileSync(local, JSON.stringify({
-        $schema: 'https://opencode.ai/config.json',
-        provider: { [providerName]: clone },
-        model: wanted,
-      }, null, 2), 'utf8');
-      return {
-        env: {},
-        restore() {
-          if (had === undefined) rmSync(local, { force: true });
-          else writeFileSync(local, had, 'utf8');
-        },
-      };
-    },
-
     extract(body) {
       const blocks = [];
       const context = [];
-      for (const m of body.messages ?? []) {
+      const turns = [...(body.messages ?? []), ...(body.input ?? [])];
+      for (const m of turns) {
+        if (m.type !== undefined && m.type !== 'message') continue;
         const text = typeof m.content === 'string'
           ? m.content
           : (Array.isArray(m.content) ? m.content : []).map((p) => p.text ?? '').join('');
@@ -309,7 +272,11 @@ const PROFILES = {
       return {
         blocks, context, tools,
         toolNames: tools.map((x) => x.function?.name ?? x.name).filter(Boolean),
-        meta: { temperature: body.temperature, max_tokens: body.max_tokens ?? body.max_completion_tokens },
+        meta: {
+          dialect: body.input ? 'openai-responses' : 'openai-chat',
+          temperature: body.temperature,
+          max_tokens: body.max_tokens ?? body.max_completion_tokens,
+        },
       };
     },
   },
@@ -487,6 +454,10 @@ const hasPromptRequest = (dir, profile) => {
  * good — the prompt travels in the request — but reporting nothing would let a failed turn look
  * like a clean one.
  */
+const isTransientFailure = ({ response_error: kind, response_status: status }) =>
+  (status !== undefined && status >= 500)
+  || /overload|rate_?limit|server_error|unavailable|timeout|internal/i.test(kind ?? '');
+
 function responseFacts(dir, seq) {
   for (const e of readEvents(dir)) {
     if (e.type !== 'model.response' || e.seq < seq) continue;
@@ -533,6 +504,7 @@ function captureRecorded(profile, cwd, model, prompt) {
   try {
     const args = [
       'record', profile.adapter, '--no-fs', '--no-shell',
+      ...(profile.recordFlags ?? []),
       ...upstreamArgs(profile), ...profile.recordArgs(model, prompt),
     ];
     console.log(`  orca ${args.join(' ')}`);
@@ -718,12 +690,17 @@ function writeCapture(profile, cwd, runId, interactive, dirOverride) {
   // and naming the error is the honest split; a genuinely wanted failed capture says so.
   const facts = responseFacts(dir, event.seq);
   if (facts.response_error && !flags['allow-failed']) {
-    throw new Error(
+    const err = new Error(
       `the captured turn came back ${facts.response_error}`
       + `${facts.response_status ? ` (status ${facts.response_status})` : ''}, so nothing was filed.\n`
-      + '  a transient overload just needs another run. a wrong --model fails the same way,\n'
-      + '  so check the id first. pass --allow-failed to keep the capture regardless.',
+      + '  pass --allow-failed to keep the capture regardless; the prompt itself is genuine.',
     );
+    // Worth separating, because the two failures want opposite handling. A 4xx means the request
+    // was wrong -- a mistyped model, a missing credential -- and filing it would create a folder
+    // for a model that does not exist. A 5xx or an overload is the free tier being busy, and the
+    // prompt in that request is as good as any other, so the answer is to run it again.
+    err.transient = isTransientFailure(facts);
+    throw err;
   }
 
   const model = body.model ?? 'unknown-model';
@@ -953,7 +930,7 @@ if (!WIN && interactive) {
 }
 
 const cwd = resolve(typeof flags.cwd === 'string' ? flags.cwd : process.cwd());
-const model = typeof flags.model === 'string' ? flags.model : undefined;
+const model = typeof flags.model === 'string' ? flags.model : profile.defaultModel;
 const userPrompt = typeof flags.prompt === 'string'
   ? flags.prompt
   : 'Reply with exactly: ok. Do not use any tools.';
@@ -961,8 +938,10 @@ const userPrompt = typeof flags.prompt === 'string'
 console.log(`capturing ${profile.id}${model ? ` · ${model}` : ''} · ${interactive ? 'interactive' : 'non-interactive'}`);
 console.log(`  cwd ${cwd}`);
 
-try {
-  const fromRun = typeof flags['from-run'] === 'string' ? resolve(flags['from-run']) : undefined;
+const fromRun = typeof flags['from-run'] === 'string' ? resolve(flags['from-run']) : undefined;
+const attempts = fromRun ? 1 : 1 + Number(flags.retries ?? 2);
+
+async function attempt() {
   let runId;
   if (fromRun) {
     if (!existsSync(join(fromRun, 'events.jsonl'))) {
@@ -976,24 +955,40 @@ try {
       ? await captureWithProxy(profile, cwd, model, userPrompt, launcher(profile, cwd, model, userPrompt))
       : captureRecorded(profile, cwd, model, userPrompt);
   }
-  const { dest, meta } = writeCapture(profile, cwd, runId, interactive, fromRun);
-  writeIndex();
-  console.log('');
-  console.log(`  ${basename(dest)}/`);
-  console.log(`    prompt    ${meta.sizes.prompt_chars.toLocaleString()} chars in ${meta.sizes.blocks.length} blocks`);
-  console.log(`    tools     ${meta.sizes.tools}`);
-  console.log(`    request   ${meta.sizes.request_bytes.toLocaleString()} bytes`);
-  if (meta.prefix_tokens) console.log(`    prefix    ${meta.prefix_tokens.toLocaleString()} tokens`);
-  console.log('    scrubbed  clean');
-  if (meta.response_error) {
-    console.log('');
-    console.log(`  note: the agent's turn came back ${meta.response_error}, so there is no token`);
-    console.log('        count for it. the prompt is unaffected - it travels in the request.');
-  }
-  console.log('');
-  console.log(`written to ${dest}`);
-  console.log(`  mirrored ${meta.prompt_file}`);
-} catch (err) {
-  console.error(`\ncapture failed: ${err.message}`);
-  process.exit(1);
+  return writeCapture(profile, cwd, runId, interactive, fromRun);
 }
+
+let result;
+for (let i = 1; i <= attempts; i += 1) {
+  try {
+    result = await attempt();
+    break;
+  } catch (err) {
+    const last = i === attempts;
+    if (!err.transient || last) {
+      console.error(`\ncapture failed: ${err.message}`);
+      if (err.transient) console.error(`  gave up after ${attempts} attempts.`);
+      process.exit(1);
+    }
+    console.log(`  ${err.message.split('\n')[0]}`);
+    console.log(`  transient, retrying (${i + 1}/${attempts})`);
+  }
+}
+
+const { dest, meta } = result;
+writeIndex();
+console.log('');
+console.log(`  ${basename(dest)}/`);
+console.log(`    prompt    ${meta.sizes.prompt_chars.toLocaleString()} chars in ${meta.sizes.blocks.length} blocks`);
+console.log(`    tools     ${meta.sizes.tools}`);
+console.log(`    request   ${meta.sizes.request_bytes.toLocaleString()} bytes`);
+if (meta.prefix_tokens) console.log(`    prefix    ${meta.prefix_tokens.toLocaleString()} tokens`);
+console.log('    scrubbed  clean');
+if (meta.response_error) {
+  console.log('');
+  console.log(`  note: the agent's turn came back ${meta.response_error}, so there is no token`);
+  console.log('        count for it. the prompt is unaffected - it travels in the request.');
+}
+console.log('');
+console.log(`written to ${dest}`);
+console.log(`  mirrored ${meta.prompt_file}`);

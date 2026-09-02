@@ -32,11 +32,16 @@ node capture/capture.mjs codex  --model gpt-5.6-sol
 node capture/capture.mjs --index                       # rebuild index.json only
 ```
 
-Claude Code and Codex work in one command. **OpenCode does not yet**: the folder routing is in
-place, so a capture lands in `prompt/OPENCODE/` on its own, but the launch step never reaches the
-proxy and the command fails before writing anything. It prints the two-step that does work, and
-`--from-run` files the result. The `opencode` profile in `capture.mjs` records what has been ruled
-out.
+```console
+node capture/capture.mjs opencode                      # a free model, so this one costs nothing
+```
+
+All three work in one command. OpenCode is reached a different way: its provider origin lives in
+`opencode.json` rather than an environment variable, so it cannot be redirected, and the capture
+uses `--tls-intercept` to terminate the TLS it established itself. Its config is left untouched.
+The default model is one of OpenCode's own free ones, which is what makes iterating on a capture
+free. A provider of your own pointing at a plain-HTTP gateway is neither redirected nor decrypted,
+and needs its own answer.
 
 It stands up the proxy, launches the agent, waits for the request that carries the prompt, pulls
 the prompt out, scrubs it, writes it to `prompt/`, and files the evidence under `capture/`.
@@ -65,6 +70,22 @@ Measured on one machine, and the reason the table is here rather than in a folde
 | `claude-opus-4-8` | claude | interactive | 19,083 chars | 33 | 54,545 tok |
 | `gpt-5.6-sol` | codex | `exec` | 23,377 chars | 9 | 1,689 tok |
 | `gpt-5.6-luna` | codex | `exec` | 20,842 chars | 3 | - |
+| `big-pickle` | opencode | `run` | 9,621 chars | 11 | 8,017 tok |
+| `ling-3.0-flash-fin-free` | opencode | `run` | 9,647 chars | 11 | - |
+| `mimo-v2.5-free` | opencode | `run` | 9,629 chars | 11 | 8,025 tok |
+| `muse-spark-1.2-contributor-free` | opencode | `run` | 10,249 chars | 11 | - |
+| `nemotron-3-ultra-free` | opencode | `run` | 9,643 chars | 11 | - |
+| `nemotron-3.5-lightning-free` | opencode | `run` | 9,655 chars | 11 | - |
+| `gpt-5.6-sol` | opencode | `run` | 10,413 chars | 9 | 6,327 tok |
+
+The OpenCode rows are one harness on seven models, and they are not one prompt. Three templates
+show up. Five of the free models open with *You are opencode, an interactive CLI tool that helps
+users with software engineering tasks*; `muse-spark-1.2-contributor-free` opens with *You are
+OpenCode, a coding agent that helps users with software engineering tasks* and is the only one on
+the responses dialect rather than chat completions; `gpt-5.6-sol` through a gateway of my own gets
+a third, *You are OpenCode, You and the user share the same workspace*, and is the only one with
+`apply_patch` in place of `edit` and `write`. The prompt and the wire format are both chosen per
+model.
 
 Sizes are the prompt as sent. The file on disk is a few hundred characters shorter, since the
 placeholders are shorter than the paths they replace; `meta.json` carries both figures.
