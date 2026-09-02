@@ -9,18 +9,26 @@
  * carrying its own hold, then gifenc packs them under a single palette. The holds are stretched
  * where the real run waits — the pause before `captured seq=4` is the agent starting up in its own
  * console and sending its first turn, which is most of the wall clock.
+ *
+ * Frames go to a fresh directory in the OS temp space, the way scripts/render-demo.mjs and
+ * scripts/render-cards.mjs do it. An earlier version pointed them at `join(process.cwd(), ...)`
+ * and removed that directory before starting, which silently deleted any folder of that name in
+ * whatever directory the script was run from. Outputs are written to an explicit path beside this
+ * script rather than relative to the caller's directory.
  */
 import { chromium } from 'playwright-core';
-import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { PNG } from 'pngjs';
 import gifenc from 'gifenc';
 
 const { GIFEncoder, quantize, applyPalette } = gifenc;
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
-const FRAMES = join(process.cwd(), 'frames-run');
-rmSync(FRAMES, { recursive: true, force: true });
-mkdirSync(FRAMES, { recursive: true });
+const HERE = dirname(fileURLToPath(import.meta.url));
+const TARGET = join(HERE, 'capture-run.gif');
+const FRAMES = mkdtempSync(join(tmpdir(), 'orca-capture-run-'));
 
 /** [class, text, hold in ms] */
 const LINES = [
@@ -39,7 +47,7 @@ const LINES = [
   ['ok', '    scrubbed  clean', 800],
   ['gap', '', 200],
   ['dim', 'written to capture\\claude-opus-5', 420],
-  ['dim', '  mirrored prompt/claude-opus-5-system-prompt.md', 3400],
+  ['dim', '  mirrored prompt/CLAUDECODE/claude-opus-5-system-prompt.md', 3400],
 ];
 
 const CSS = `
@@ -102,7 +110,7 @@ for (const [i, f] of files.entries()) {
 }
 enc.finish();
 const bytes = Buffer.from(enc.bytes());
-writeFileSync('capture-run.gif', bytes);
+writeFileSync(TARGET, bytes);
 rmSync(FRAMES, { recursive: true, force: true });
-console.log(`capture-run.gif: ${files.length} frames, ${(bytes.length / 1024).toFixed(0)} KB, ` +
+console.log(`${TARGET}: ${files.length} frames, ${(bytes.length / 1024).toFixed(0)} KB, ` +
   `${(delays.reduce((a, b) => a + b, 0) / 1000).toFixed(1)}s`);

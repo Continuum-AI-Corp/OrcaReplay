@@ -6,20 +6,28 @@
  * this is the path that works.
  *
  * Same approach as scripts/render-demo.mjs in the repo: a headless Chromium renders one PNG per
- * state change, each frame carrying its own hold, then gifenc packs them with a single palette.
- * ffmpeg turns the same frames into the mp4.
+ * state change, each frame carrying its own hold, then gifenc packs them with a single palette,
+ * and ffmpeg turns the same frames into the mp4.
+ *
+ * Frames go to a fresh directory in the OS temp space, the way scripts/render-demo.mjs and
+ * scripts/render-cards.mjs do it. An earlier version pointed them at `join(process.cwd(), ...)`
+ * and removed that directory before starting, which silently deleted any folder of that name in
+ * whatever directory the script was run from. Outputs are written to an explicit path beside this
+ * script rather than relative to the caller's directory.
  */
 import { chromium } from 'playwright-core';
-import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { PNG } from 'pngjs';
 import gifenc from 'gifenc';
 
 const { GIFEncoder, quantize, applyPalette } = gifenc;
 const EDGE = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
-const FRAMES = join(process.cwd(), 'frames');
-rmSync(FRAMES, { recursive: true, force: true });
-mkdirSync(FRAMES, { recursive: true });
+const HERE = dirname(fileURLToPath(import.meta.url));
+const TARGET = join(HERE, 'fable-capture.gif');
+const FRAMES = mkdtempSync(join(tmpdir(), 'orca-capture-'));
 
 const SCENES = [
   {
@@ -195,7 +203,14 @@ for (const [i, f] of files.entries()) {
 }
 enc.finish();
 const bytes = Buffer.from(enc.bytes());
-writeFileSync('fable-capture.gif', bytes);
-writeFileSync('delays.json', JSON.stringify(delays));
-console.log(`fable-capture.gif: ${files.length} frames, ${(bytes.length / 1024).toFixed(0)} KB`);
+writeFileSync(TARGET, bytes);
+
+// The mp4 is encoded from the same frames, so the concat list is written next to them: ffmpeg's
+// concat demuxer wants one `duration` per frame and the last frame repeated.
+const list = `${files.map((f, i) => `file ${f}\nduration ${((delays[i] ?? 460) / 1000).toFixed(3)}\n`).join('')}file ${files[files.length - 1]}\n`;
+writeFileSync(join(FRAMES, 'list.txt'), list, 'utf8');
+console.log(`${TARGET}: ${files.length} frames, ${(bytes.length / 1024).toFixed(0)} KB`);
 console.log(`total runtime: ${(delays.reduce((a, b) => a + b, 0) / 1000).toFixed(1)}s`);
+console.log('for the mp4:');
+console.log(`  ffmpeg -f concat -safe 0 -i ${join(FRAMES, 'list.txt')}`);
+console.log(`    -vf fps=25,format=yuv420p -c:v libx264 -crf 20 ${join(HERE, 'fable-capture.mp4')}`);
