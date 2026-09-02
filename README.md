@@ -44,6 +44,19 @@ from step 4 onward. The model is the only variable, which is what makes the answ
 npm i -g orcareplay
 ```
 
+## Read your agent's own system prompt
+
+A proxy that sees the whole loop also sees the prompt the harness assembled before it sent
+anything. One command captures it, scrubs the machine out of it, and files it by model:
+
+```console
+node capture/capture.mjs claude --model claude-opus-5
+```
+
+Interactive prompts and `-p` prompts are not the same prompt, and neither is the same across
+models. See [`capture/README.md`](capture/README.md) for the measured differences, the pitfalls,
+and the sanitising rules.
+
 ## Why this exists
 
 Agent debugging today is archaeology. You scroll a terminal, you re-run and get a different
