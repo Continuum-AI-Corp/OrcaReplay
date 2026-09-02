@@ -1,0 +1,787 @@
+#!/usr/bin/env node
+/**
+ * One command to capture an agent harness's system prompt.
+ *
+ *   node capture/capture.mjs claude                    # interactive, model from settings
+ *   node capture/capture.mjs claude --model claude-fable-5-1
+ *   node capture/capture.mjs claude --print            # the cheaper -p variant
+ *   node capture/capture.mjs codex --model gpt-5.6-sol
+ *   node capture/capture.mjs --index                   # rebuild capture/index.json only
+ *
+ * The prompt lands in `prompt/<model>-system-prompt.md`; the request body, tool definitions,
+ * metadata and raw run land in `capture/<model>/`.
+ *
+ * Why this is not just `orca record`: the interactive prompt is a different, larger prompt than
+ * the non-interactive one, and a harness only assembles it when stdin is a real console. A pipe is
+ * not, so `orca record claude` always captures the -p variant. Interactive mode here holds a proxy
+ * open with `orca attach`, then has PowerShell launch the agent in a console of its own.
+ *
+ * Everything written except capture/<model>/trace/ is scrubbed: paths, usernames, emails,
+ * uuids, long hex runs and the configured gateway host become {{PLACEHOLDERS}}, and the run aborts
+ * if anything identifying survives the pass.
+ */
+import { spawn, spawnSync } from 'node:child_process';
+import {
+  cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync,
+} from 'node:fs';
+import { homedir, tmpdir, userInfo } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Two roots on purpose. `prompt/` is the browsable collection and holds exactly one file per
+// capture, the prompt itself; `capture/` holds the machinery and the evidence. The prompt text is
+// written once, in `prompt/`, so the two directories cannot drift apart.
+const CAPTURE_DIR = dirname(fileURLToPath(import.meta.url));
+const PROMPT_DIR = join(dirname(CAPTURE_DIR), 'prompt');
+const BS = String.fromCharCode(92); // one literal backslash, spelled out so it survives editing
+const SEP_CLASS = `[${BS}${BS}/]`; // regex source matching either path separator
+const WIN = process.platform === 'win32';
+
+// ---------------------------------------------------------------------------- process plumbing
+
+/** Escape a regex metacharacter run. */
+const reEscape = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, (m) => BS + m);
+
+/**
+ * A regex matching one filesystem path with either separator, case-insensitively, because Windows
+ * paths are case-insensitive and some harnesses lowercase them before printing.
+ */
+function pathRe(p, flags = 'gi') {
+  // Split on separators first, then escape each segment. Escaping the whole path and swapping the
+  // separators afterwards does not work: the character class inserted for the first separator
+  // itself contains a backslash-slash pair, so the next pass splits the class it just wrote.
+  return new RegExp(p.split(/[\\/]/).map(reEscape).join(SEP_CLASS), flags);
+}
+
+/** cmd.exe quoting. Node does not quote for you when `shell` is set, which splits any argument
+ *  containing a space — the throwaway prompt, every time. */
+const cmdQuote = (a) => (/[\s"^&|<>()%!]/.test(a) ? `"${a.replace(/"/g, `${BS}"`)}"` : a);
+
+/** Run a real executable. `powershell.exe` is one, so no shell is involved and no quoting applies. */
+function runExe(exe, args, opts = {}) {
+  const r = spawnSync(exe, args, { encoding: 'utf8', ...opts });
+  return { code: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}`.replace(/\r/g, '') };
+}
+
+/** Run a shim such as `orca.cmd`, which node cannot spawn without a shell. */
+function runShim(name, args, opts = {}) {
+  if (!WIN) return runExe(name, args, opts);
+  const line = [name, ...args.map(cmdQuote)].join(' ');
+  const r = spawnSync(process.env.COMSPEC ?? 'cmd.exe', ['/d', '/s', '/c', line], {
+    encoding: 'utf8', windowsVerbatimArguments: true, ...opts,
+  });
+  return { code: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}`.replace(/\r/g, '') };
+}
+
+function spawnShim(name, args, opts = {}) {
+  if (!WIN) return spawn(name, args, opts);
+  const line = [name, ...args.map(cmdQuote)].join(' ');
+  return spawn(process.env.COMSPEC ?? 'cmd.exe', ['/d', '/s', '/c', line], {
+    windowsVerbatimArguments: true, ...opts,
+  });
+}
+
+const powershell = (script) =>
+  runExe('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script]);
+
+// ---------------------------------------------------------------------------- args
+
+function parseArgs(argv) {
+  const flags = {};
+  let harness;
+  const valued = new Set(['model', 'upstream', 'port', 'cwd', 'prompt', 'timeout']);
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (!a.startsWith('--')) { harness ??= a; continue; }
+    const key = a.slice(2);
+    flags[key] = valued.has(key) ? argv[++i] : true;
+  }
+  return { harness, flags };
+}
+
+const { harness, flags } = parseArgs(process.argv.slice(2));
+
+const USAGE = `usage: node capture/capture.mjs <claude|codex> [options]
+
+  --model <id>       model to capture. default: the harness's own default
+  --print            claude only: capture the -p prompt instead of the interactive one
+  --interactive      codex only: capture the TUI prompt instead of the exec one
+  --upstream <url>   override where the proxy forwards. default: api.anthropic.com for
+                     claude when an orca gateway is configured, otherwise untouched
+  --port <n>         proxy port for interactive capture. default 46011
+  --cwd <path>       directory to run the agent in. default: the current directory.
+                     interactive claude needs a directory it already trusts
+  --prompt <text>    the throwaway user turn. default: a one-word reply
+  --timeout <sec>    how long to wait for the request. default 180
+  --no-trace         delete the raw orca run instead of keeping it under
+                     capture/<model>/trace/
+  --allow-failed     file the capture even when the turn came back an error. the prompt
+                     is still genuine; refused by default so a wrong --model cannot
+                     quietly create a folder for a model that does not exist
+  --index            rebuild capture/index.json and exit`;
+
+// ---------------------------------------------------------------------------- harness profiles
+
+const npmPrefix = () => join(process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'), 'npm');
+const npmRoot = () => join(npmPrefix(), 'node_modules');
+
+/**
+ * Each profile knows how to pull the prompt out of one wire dialect. `blocks` is what lands in
+ * system-prompt.md; `context` is harness-injected material that is not system-role, kept in the
+ * annotated file only so the shareable prompt file stays what its name says.
+ */
+const PROFILES = {
+  claude: {
+    id: 'claude',
+    adapter: 'claude',
+    exe: () => join(npmRoot(), '@anthropic-ai', 'claude-code', 'bin', 'claude.exe'),
+    defaultInteractive: true,
+    trustKeyed: true,
+    recordArgs: (model, prompt) => ['--', '-p', prompt, ...(model ? ['--model', model] : [])],
+    consoleArgs: (model, prompt) => [...(model ? ['--model', model] : []), `"${prompt}"`],
+    forceAnthropicUpstream: true,
+    extract(body) {
+      const blocks = [];
+      const context = [];
+      for (const s of body.system ?? []) {
+        if (typeof s.text === 'string') {
+          blocks.push({ label: `system[${blocks.length}]`, text: s.text, cache: s.cache_control?.ttl ?? 'none' });
+        }
+      }
+      for (const m of body.messages ?? []) {
+        const parts = Array.isArray(m.content) ? m.content : [{ text: m.content }];
+        for (const p of parts) {
+          if (typeof p.text !== 'string') continue;
+          if (m.role === 'system') blocks.push({ label: 'role:system', text: p.text });
+          else if (p.text.includes('<system-reminder>')) context.push({ label: 'system-reminder', text: p.text });
+        }
+      }
+      const tools = body.tools ?? [];
+      const header = body.system?.[0]?.text ?? '';
+      return {
+        blocks, context, tools,
+        toolNames: tools.map((t) => t.name),
+        meta: {
+          entrypoint: /cc_entrypoint=([\w-]+)/.exec(header)?.[1],
+          harness_version: /cc_version=([\w.]+)/.exec(header)?.[1],
+          thinking: body.thinking,
+          output_config: body.output_config,
+          max_tokens: body.max_tokens,
+        },
+      };
+    },
+  },
+
+  codex: {
+    id: 'codex',
+    adapter: 'codex',
+    // Codex ships a JS entry point rather than a binary, so the console is opened on the npm
+    // shim; Start-Process gives `codex.cmd` a console just as readily as an executable.
+    exe: () => join(npmPrefix(), 'codex.cmd'),
+    defaultInteractive: false,
+    recordArgs: (model, prompt) => [
+      '--', 'exec', '--skip-git-repo-check', ...(model ? ['--model', model] : []), prompt,
+    ],
+    consoleArgs: (model, prompt) => [...(model ? ['--model', model] : []), `"${prompt}"`],
+    forceAnthropicUpstream: false,
+    extract(body) {
+      const blocks = [];
+      const context = [];
+      let tools = [];
+      for (const item of body.input ?? []) {
+        if (item.type === 'additional_tools') { tools = item.tools ?? []; continue; }
+        if (item.type !== 'message') continue;
+        const parts = Array.isArray(item.content) ? item.content : [{ text: item.content }];
+        for (const p of parts) {
+          if (typeof p.text !== 'string') continue;
+          if (item.role === 'developer') blocks.push({ label: `developer[${blocks.length}]`, text: p.text });
+          else if (/^\s*<[a-z_]+[\s>]/.test(p.text)) context.push({ label: 'context', text: p.text });
+        }
+      }
+      // Codex nests tools in namespaces, so the leaves are the tools and the branches are not.
+      const names = [];
+      const walk = (t) => {
+        if (t.name && t.type !== 'namespace') names.push(t.name);
+        (t.tools ?? []).forEach(walk);
+      };
+      tools.forEach(walk);
+      return {
+        blocks, context, tools, toolNames: names,
+        meta: { reasoning: body.reasoning, text: body.text, store: body.store },
+      };
+    },
+  },
+};
+
+// ---------------------------------------------------------------------------- scrubbing
+
+function gitValue(cwd, key) {
+  const r = spawnSync('git', ['config', '--get', key], { cwd, encoding: 'utf8' });
+  return r.status === 0 ? r.stdout.trim() : '';
+}
+
+function orcaGatewayHost() {
+  const p = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'orca', 'config.json');
+  try {
+    const url = JSON.parse(readFileSync(p, 'utf8')).gateway?.url;
+    return url ? new URL(url).hostname : '';
+  } catch {
+    return '';
+  }
+}
+
+/** How Claude Code slugs a working directory for its per-project state folders. */
+const projectSlug = (cwd) => cwd.replace(/[:\\/]/g, '-').replace(/_/g, '-');
+
+/**
+ * Ordered, because the rules overlap: the memory directory sits inside the home directory, so a
+ * bare home rule applied first would leave a half-scrubbed path behind.
+ */
+function buildScrubber(cwd) {
+  const home = homedir();
+  const user = userInfo().username;
+  const gitName = gitValue(cwd, 'user.name');
+  const gitEmail = gitValue(cwd, 'user.email');
+  const gateway = orcaGatewayHost();
+
+  const rules = [
+    [/Recent commits:\n(?:[0-9a-f]{7,40} [^\n]*\n?)+/g, 'Recent commits:\n{{RECENT_COMMITS}}\n'],
+    [pathRe(join(home, '.claude', 'projects')), '{{CLAUDE_PROJECTS}}'],
+    [pathRe(join(home, '.codex')), '{{CODEX_HOME}}'],
+    [pathRe(join(home, '.claude')), '{{CLAUDE_HOME}}'],
+    [pathRe(cwd), '{{CWD}}'],
+    [new RegExp(reEscape(projectSlug(cwd)), 'gi'), '{{PROJECT_SLUG}}'],
+    [pathRe(tmpdir()), '{{TMP}}'],
+    [pathRe(home), '{{HOME}}'],
+  ];
+  if (gitName) rules.push([new RegExp(`Git user: ${reEscape(gitName)}`, 'g'), 'Git user: {{GIT_USER}}']);
+  if (gitEmail) rules.push([new RegExp(reEscape(gitEmail), 'gi'), '{{EMAIL}}']);
+  if (gateway) rules.push([new RegExp(reEscape(gateway), 'g'), '{{GATEWAY}}']);
+  rules.push(
+    [/(OS Version: [^\n]*?)\d+\.\d+\.\d{4,}/g, '$1{{OS_BUILD}}'],
+    [/[\w.+-]+@[\w-]+\.[\w.]{2,}/g, '{{EMAIL}}'],
+    // Lookarounds rather than \b: an id is often prefixed, as in `msg_01a06161-...`, and `_` is a
+    // word character, so \b never matches between the two and the whole rule silently misses.
+    [/(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])/gi, '{{UUID}}'],
+    [/(?<![0-9a-f])[0-9a-f]{32,}(?![0-9a-f])/gi, '{{HEX}}'],
+    [new RegExp(`\\b${reEscape(user)}\\b`, 'gi'), '{{USER}}'],
+  );
+
+  const scrub = (s) => rules.reduce((acc, [re, to]) => acc.replace(re, to), s);
+
+  /** Anything surviving the pass means a rule is wrong, and silence would be the real bug. */
+  const audit = (s) => {
+    const checks = {
+      home: pathRe(home),
+      username: new RegExp(`\\b${reEscape(user)}\\b`, 'gi'),
+      email: /[\w.+-]+@[\w-]+\.[\w.]{2,}/g,
+      uuid: /(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])/gi,
+      long_hex: /(?<![0-9a-f])[0-9a-f]{32,}(?![0-9a-f])/gi,
+      ipv4: /\b(?!127\.0\.0\.1|0\.0\.0\.0)\d{1,3}(?:\.\d{1,3}){3}\b/g,
+    };
+    if (gitName) checks.git_user = new RegExp(reEscape(gitName), 'g');
+    const found = [];
+    for (const [k, re] of Object.entries(checks)) {
+      const m = s.match(re);
+      if (m) found.push(`${k} x${m.length} (${m[0]})`);
+    }
+    return found;
+  };
+
+  const scrubJson = (v) =>
+    typeof v === 'string' ? scrub(v)
+      : Array.isArray(v) ? v.map(scrubJson)
+      : v && typeof v === 'object'
+        ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, scrubJson(x)]))
+        : v;
+
+  return {
+    scrub, scrubJson, audit,
+    inputs: { home: true, user: true, git_user: Boolean(gitName), git_email: Boolean(gitEmail), gateway: Boolean(gateway) },
+  };
+}
+
+// ---------------------------------------------------------------------------- workspace trust
+
+/**
+ * Claude Code will not start interactively in a directory it has not been trusted in, and the
+ * dialog it shows instead has nobody to answer it here — the console it opens in is unattended, so
+ * the capture just waits out its timeout.
+ *
+ * Trust is one boolean in `~/.claude.json`, keyed by the working directory with forward slashes.
+ * `-p` never asks, which is why non-interactive captures work in a scratch directory.
+ *
+ * Checked but never written. Setting the flag from here would work, and it was a mistake to offer:
+ * it makes capturing in a throwaway directory the path of least resistance, and the working
+ * directory is part of the prompt. A capture in a non-repository loses the whole `gitStatus` block
+ * and describes an environment the user never works in. Refusing early instead pushes the capture
+ * into a directory that is actually representative.
+ *
+ * `--dangerously-skip-permissions` is not a way around this either: it adds a paragraph about the
+ * active permission mode to the injected system turn, so it changes the prompt being captured.
+ */
+const claudeConfigPath = () => join(homedir(), '.claude.json');
+const trustKey = (cwd) => resolve(cwd).split(BS).join('/');
+
+function trustState(cwd) {
+  let cfg;
+  try { cfg = JSON.parse(readFileSync(claudeConfigPath(), 'utf8')); } catch { return {}; }
+  const want = trustKey(cwd).toLowerCase();
+  const key = Object.keys(cfg.projects ?? {})
+    .find((k) => k.split(BS).join('/').toLowerCase() === want);
+  return { key, trusted: key !== undefined && cfg.projects[key].hasTrustDialogAccepted === true };
+}
+
+// ---------------------------------------------------------------------------- trace reading
+
+const runDir = (cwd, runId) => join(cwd, '.orca', 'runs', runId);
+
+const readEvents = (dir) =>
+  readFileSync(join(dir, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+
+function readBlob(dir, ref) {
+  const sha = ref.replace('sha256:', '');
+  let v = JSON.parse(readFileSync(join(dir, 'blobs', sha.slice(0, 2), sha), 'utf8'));
+  if (typeof v === 'string') v = JSON.parse(v); // orca stores request bodies double-encoded
+  return v;
+}
+
+/**
+ * The recorded request that carries the agent's own prompt.
+ *
+ * Not the largest: later turns of a Claude Code run load deferred tools, so the biggest request in
+ * a trace describes a state the first turn was never in. Not the first with a prompt in it either
+ * — a harness opens with side calls that carry a full `system[]` of their own. Claude Code's title
+ * generator is the trap here: four system blocks, a naming spec, and no tools. The agent turn is
+ * the one that ships the tool definitions, so that is what identifies it, with the looser test
+ * kept only for a trace where nothing declares tools at all.
+ */
+function pickPromptRequest(dir, profile) {
+  let fallback;
+  for (const e of readEvents(dir)) {
+    if (e.type !== 'model.request' || !e.payload?.$blob) continue;
+    let body;
+    try { body = readBlob(dir, e.payload.$blob); } catch { continue; }
+    const got = profile.extract(body);
+    if (got.blocks.length === 0) continue;
+    if (got.toolNames.length > 0) return { event: e, body, got };
+    fallback ??= { event: e, body, got };
+  }
+  return fallback;
+}
+
+/** True once the trace holds the request we want, so the poll loop knows to stop. */
+const hasPromptRequest = (dir, profile) => {
+  const got = pickPromptRequest(dir, profile);
+  return got && got.got.toolNames.length > 0 ? got : undefined;
+};
+
+/**
+ * What came back for one specific request: the prefix the server charged for, or the error instead.
+ *
+ * Read off the response to that request rather than the first plausible number in the trace, since
+ * the side calls carry usage blocks of their own. The error case matters as much as the token
+ * count: a turn can come back `overloaded_error` inside a 200 stream, and the capture is still
+ * good — the prompt travels in the request — but reporting nothing would let a failed turn look
+ * like a clean one.
+ */
+function responseFacts(dir, seq) {
+  for (const e of readEvents(dir)) {
+    if (e.type !== 'model.response' || e.seq < seq) continue;
+    let text = typeof e.payload === 'string' ? e.payload : undefined;
+    if (!text && e.payload?.$blob) {
+      const sha = e.payload.$blob.replace('sha256:', '');
+      try { text = readFileSync(join(dir, 'blobs', sha.slice(0, 2), sha), 'utf8'); } catch { continue; }
+    }
+    const m = /"usage":\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/.exec(text ?? '');
+    if (m) {
+      try {
+        const u = JSON.parse(m[0].slice('"usage":'.length));
+        const prefix = (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
+          + (u.input_tokens ?? 0) + (u.prompt_tokens ?? 0);
+        if (prefix > 0) return { prefix_tokens: prefix, usage: u };
+      } catch { /* fall through to the error check */ }
+    }
+    const err = /"error":\s*\{[^{}]*"type":\s*"([\w-]+)"/.exec(text ?? '')
+      ?? /"type":\s*"([\w]*error[\w]*)"/.exec(text ?? '');
+    if (err) return { response_error: err[1], response_status: e.attrs.status };
+    return {};
+  }
+  return {};
+}
+
+// ---------------------------------------------------------------------------- capture modes
+
+function upstreamArgs(profile) {
+  if (typeof flags.upstream === 'string') {
+    return ['--upstream-anthropic', flags.upstream, '--upstream-openai', flags.upstream];
+  }
+  // A configured gateway captures every anthropic call, and a third-party router usually does not
+  // serve the model, which surfaces as `400 unknown provider`. Codex is the opposite case: its own
+  // config points at that gateway, so leaving it alone is what makes the model resolve.
+  if (profile.forceAnthropicUpstream && orcaGatewayHost()) {
+    return ['--upstream-anthropic', 'https://api.anthropic.com'];
+  }
+  return [];
+}
+
+/** Non-interactive: one `orca record`, which exits on its own when the agent does. */
+function captureRecorded(profile, cwd, model, prompt) {
+  const args = [
+    'record', profile.adapter, '--no-fs', '--no-shell',
+    ...upstreamArgs(profile), ...profile.recordArgs(model, prompt),
+  ];
+  console.log(`  orca ${args.join(' ')}`);
+  const { out } = runShim('orca', args, { cwd, timeout: Number(flags.timeout ?? 300) * 1000 });
+  const runId = /run=(run_[0-9a-f]+)/.exec(out)?.[1];
+  if (!runId) throw new Error(`orca record produced no run id.\n${out.trim()}`);
+  if (/capture\.empty/.test(out)) throw new Error(`the agent never called the proxy.\n${out.trim()}`);
+  return runId;
+}
+
+const killPort = (port) => powershell(
+  `$c = Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue; ` +
+  `if ($c) { $c | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } }`,
+);
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Interactive: hold the proxy open, then let PowerShell start the agent in a console of its own.
+ *
+ * `Start-Process` without `-NoNewWindow` is the whole trick — Windows hands a console application
+ * a real console, so `process.stdin.isTTY` is true and the harness assembles its interactive
+ * prompt. A pty shim is the obvious alternative and does not work: winpty asserts on
+ * `cols > 0 && rows > 0`, which it cannot learn from a pipe. Node's own `detached` is no help
+ * either, since on Windows it means DETACHED_PROCESS — no console at all.
+ */
+async function captureInteractive(profile, cwd, model, prompt) {
+  if (profile.trustKeyed && !trustState(cwd).trusted) {
+    throw new Error(
+      `${profile.id} has not been trusted in ${cwd}, so it would stop on the trust dialog.\n` +
+      '  start it there once by hand and accept, then run this again.\n' +
+      '  capture in a directory you actually work in: the working directory is part of the\n' +
+      '  prompt, and a non-repository loses the gitStatus block entirely.',
+    );
+  }
+  const port = Number(flags.port ?? 46011);
+  const deadline = Date.now() + Number(flags.timeout ?? 180) * 1000;
+  killPort(port);
+
+  const attachArgs = ['attach', '--for', profile.adapter, '--port', String(port), ...upstreamArgs(profile)];
+  console.log(`  orca ${attachArgs.join(' ')}`);
+  const attach = spawnShim('orca', attachArgs, { cwd });
+  let attachOut = '';
+  attach.stdout?.on('data', (d) => { attachOut += d; });
+  attach.stderr?.on('data', (d) => { attachOut += d; });
+
+  try {
+    let runId;
+    while (!runId && Date.now() < deadline) {
+      runId = /attached run=(run_[0-9a-f]+)/.exec(attachOut)?.[1];
+      if (!runId) await sleep(300);
+    }
+    if (!runId) throw new Error(`orca attach never reported a run id.\n${attachOut.trim()}`);
+
+    const exe = profile.exe();
+    if (!existsSync(exe)) throw new Error(`agent executable not found: ${exe}`);
+
+    // A nested session inherits these and registers as a child, which changes the prompt.
+    const strip = [
+      'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID',
+      'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_PID', 'CLAUDE_EFFORT',
+      'CLAUDE_CODE_EXECPATH', 'AI_AGENT',
+    ];
+    const psQuote = (s) => `'${String(s).replace(/'/g, "''")}'`;
+    const argList = profile.consoleArgs(model, prompt).map(psQuote).join(',');
+    const script = [
+      `foreach ($n in @(${strip.map(psQuote).join(',')})) { if (Test-Path "Env:\\$n") { Remove-Item "Env:\\$n" } }`,
+      `$env:ANTHROPIC_BASE_URL = 'http://127.0.0.1:${port}'`,
+      `$env:OPENAI_BASE_URL = 'http://127.0.0.1:${port}/v1'`,
+      `$p = Start-Process -FilePath ${psQuote(exe)} -WindowStyle Minimized -PassThru -WorkingDirectory ${psQuote(cwd)} -ArgumentList @(${argList})`,
+      `Write-Output "PID=$($p.Id)"`,
+    ].join('; ');
+
+    const launched = powershell(script);
+    const pid = /PID=(\d+)/.exec(launched.out)?.[1];
+    if (!pid) throw new Error(`could not launch the agent in a console.\n${launched.out.trim()}`);
+    console.log(`  launched pid=${pid} in its own console`);
+
+    try {
+      const dir = runDir(cwd, runId);
+      let found;
+      while (!found && Date.now() < deadline) {
+        if (existsSync(join(dir, 'events.jsonl'))) {
+          try { found = hasPromptRequest(dir, profile); } catch { /* mid-write, retry */ }
+        }
+        if (!found) await sleep(1000);
+      }
+      if (!found) {
+        throw new Error(
+          'no prompt-carrying request arrived within the timeout.\n' +
+          `  if the agent stopped on a trust dialog, start it once in ${cwd} by hand,\n` +
+          '  or pass --cwd with a directory it already trusts.',
+        );
+      }
+      console.log(`  captured seq=${found.event.seq} tools=${found.got.toolNames.length} bytes=${found.event.payload.bytes}`);
+      return runId;
+    } finally {
+      powershell(`Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue`);
+    }
+  } finally {
+    attach.kill();
+    await sleep(600);
+    killPort(port); // killing the shim does not reach the node process behind it
+  }
+}
+
+// ---------------------------------------------------------------------------- writing
+
+function writeCapture(profile, cwd, runId, interactive) {
+  const dir = runDir(cwd, runId);
+  const found = pickPromptRequest(dir, profile);
+  if (!found) throw new Error(`run ${runId} holds no prompt-carrying request`);
+  const { body, got, event } = found;
+
+  // A request whose turn came back an error still holds a real prompt, and for a transient
+  // overload that is worth keeping. But a mistyped model id fails the same way, and filing it
+  // would put a folder and an index row under a model that does not exist. Refusing by default
+  // and naming the error is the honest split; a genuinely wanted failed capture says so.
+  const facts = responseFacts(dir, event.seq);
+  if (facts.response_error && !flags['allow-failed']) {
+    throw new Error(
+      `the captured turn came back ${facts.response_error}`
+      + `${facts.response_status ? ` (status ${facts.response_status})` : ''}, so nothing was filed.\n`
+      + '  a transient overload just needs another run. a wrong --model fails the same way,\n'
+      + '  so check the id first. pass --allow-failed to keep the capture regardless.',
+    );
+  }
+
+  const model = body.model ?? 'unknown-model';
+  // One folder per model, as asked — but print and interactive are two different prompts for the
+  // same model, so the non-default mode gets a suffix rather than overwriting the canonical one.
+  const dirName = interactive === profile.defaultInteractive
+    ? model
+    : `${model}.${interactive ? 'interactive' : 'print'}`;
+  const dest = join(CAPTURE_DIR, dirName);
+  mkdirSync(dest, { recursive: true });
+  mkdirSync(PROMPT_DIR, { recursive: true });
+
+  // Every file carries the folder's name, so a file pulled out on its own still says which model
+  // and which mode it came from. `.` would read as a second extension, hence the dash.
+  const slug = dirName.replace(/\./g, '-');
+  const file = (suffix) => join(dest, `${slug}-${suffix}`);
+
+  const { scrub, scrubJson, audit, inputs } = buildScrubber(cwd);
+
+  const promptText = `${got.blocks.map((b) => scrub(b.text.replace(/^\n+|\n+$/g, ''))).join('\n\n')}\n`;
+  const leaks = audit(promptText);
+  if (leaks.length > 0) throw new Error(`scrubbing left identifying data behind: ${leaks.join('; ')}`);
+
+  const annotated = `${[...got.blocks, ...got.context]
+    .map((b) => `===== ${b.label} · ${b.text.length} chars${b.cache ? ` · cache=${b.cache}` : ''} =====\n${scrub(b.text)}`)
+    .join('\n\n')}\n`;
+
+  const meta = {
+    model,
+    harness: profile.id,
+    mode: interactive ? 'interactive' : 'non-interactive',
+    captured_at: new Date().toISOString(),
+    orca_run: runId,
+    orca_version: JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8')).orca_version,
+    ...got.meta,
+    // Every figure here describes the prompt as sent. Scrubbing shortens the text a little, so
+    // the file on disk is a few hundred characters smaller; mixing the two made the block sizes
+    // fail to add up to the total.
+    sizes: {
+      prompt_chars: got.blocks.reduce((a, b) => a + b.text.length, 0),
+      prompt_file_chars: promptText.length,
+      blocks: got.blocks.map((b) => ({ label: b.label, chars: b.text.length })),
+      context_chars: got.context.reduce((a, c) => a + c.text.length, 0),
+      tools: got.toolNames.length,
+      tools_bytes: JSON.stringify(got.tools).length,
+      request_bytes: event.payload.bytes,
+    },
+    ...facts,
+    tool_names: got.toolNames,
+    scrubbed_with: inputs,
+  };
+
+  meta.dir_slug = slug;
+  meta.prompt_file = `prompt/${slug}-system-prompt.md`;
+  meta.regenerate = `node capture/capture.mjs ${profile.id} --model ${model}`
+    + (interactive === profile.defaultInteractive ? '' : interactive ? ' --interactive' : ' --print');
+
+  // Two copies on purpose: the capture folder stays self-contained, and `prompt/` stays a flat
+  // collection you can read without walking into subdirectories. The capture-side file is the
+  // source and `mirrorPrompts()` repairs the other from it, so a hand edit to one cannot survive
+  // unnoticed.
+  writeFileSync(file('system-prompt.md'), promptText, 'utf8');
+  writeFileSync(join(PROMPT_DIR, `${slug}-system-prompt.md`), promptText, 'utf8');
+  writeFileSync(file('prompt-annotated.txt'), annotated, 'utf8');
+  writeFileSync(file('request.json'), JSON.stringify(scrubJson(body), null, 2), 'utf8');
+  writeFileSync(file('tools.json'), JSON.stringify(scrubJson(got.tools), null, 2), 'utf8');
+  writeFileSync(file('meta.json'), JSON.stringify(meta, null, 2), 'utf8');
+  writeFileSync(join(dest, 'README.md'), folderReadme(meta), 'utf8');
+
+  // The stale-trace case is why this runs either way: a folder that keeps last run's trace while
+  // meta.json names this one describes two different runs at once.
+  const traceDest = join(dest, 'trace');
+  rmSync(traceDest, { recursive: true, force: true });
+  if (flags['no-trace']) {
+    rmSync(dir, { recursive: true, force: true });
+  } else {
+    // The capture directory and prompt/ are routinely on different drives, and rename cannot
+    // cross one. Copy-then-delete is the only move that works in both cases.
+    try {
+      renameSync(dir, traceDest);
+    } catch (err) {
+      if (err.code !== 'EXDEV') throw err;
+      cpSync(dir, traceDest, { recursive: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  // Either way the run has left the capture directory, so orca's scaffolding there is dead.
+  try {
+    if (readdirSync(join(cwd, '.orca', 'runs')).length === 0) {
+      rmSync(join(cwd, '.orca'), { recursive: true, force: true });
+    }
+  } catch { /* someone else's .orca, leave it */ }
+
+  return { dest, meta };
+}
+
+/**
+ * A folder's README, derived from its own meta.json so `--index` can refresh it in place after a
+ * rename rather than letting the file table drift out of date.
+ */
+function folderReadme(meta) {
+  const slug = meta.dir_slug;
+  return [
+    `# ${meta.model}`,
+    '',
+    `${meta.harness}, ${meta.mode}${meta.entrypoint ? ` (\`cc_entrypoint=${meta.entrypoint}\`)` : ''}, captured ${meta.captured_at.slice(0, 10)}.`,
+    '',
+    '| file | scrubbed | what |',
+    '|---|---|---|',
+    `| \`${slug}-system-prompt.md\` | yes | the prompt on its own, nothing else |`,
+    `| \`${slug}-prompt-annotated.txt\` | yes | same text with block boundaries and char counts |`,
+    `| \`${slug}-request.json\` | yes | the whole request body as sent |`,
+    `| \`${slug}-tools.json\` | yes | tool definitions |`,
+    `| \`${slug}-meta.json\` | n/a | run id, sizes, token counts, tool names |`,
+    '| `trace/` | **no** | the raw orca run. holds account and session ids |',
+    '',
+    `Mirrored to \`../${meta.prompt_file}\`. This copy is the source; \`--index\` repairs the other from it.`,
+    '',
+    `Regenerate with \`${meta.regenerate}\`.`,
+    '',
+  ].join('\n');
+}
+
+/**
+ * Keep `prompt/` in step with the capture folders.
+ *
+ * Two copies of one text is a drift risk, so it gets checked rather than trusted: the capture-side
+ * file is the source, and a mirror that is missing or different is rewritten from it. Reported, not
+ * silent, because a difference means someone edited a generated file.
+ */
+function mirrorPrompts(metas) {
+  const repaired = [];
+  for (const m of metas) {
+    const src = join(CAPTURE_DIR, m.dir_name, `${m.dir_slug}-system-prompt.md`);
+    if (!existsSync(src)) continue;
+    const dst = join(PROMPT_DIR, `${m.dir_slug}-system-prompt.md`);
+    const want = readFileSync(src, 'utf8');
+    const have = existsSync(dst) ? readFileSync(dst, 'utf8') : undefined;
+    if (have === want) continue;
+    mkdirSync(PROMPT_DIR, { recursive: true });
+    writeFileSync(dst, want, 'utf8');
+    repaired.push(`${m.dir_slug}: ${have === undefined ? 'mirror was missing' : 'mirror differed'}`);
+  }
+  return repaired;
+}
+
+function writeIndex() {
+  const rows = readdirSync(CAPTURE_DIR, { withFileTypes: true })
+    .map((d) => {
+      if (!d.isDirectory()) return undefined;
+      const metaFile = join(CAPTURE_DIR, d.name, `${d.name.replace(/\./g, '-')}-meta.json`);
+      return existsSync(metaFile) ? { name: d.name, metaFile } : undefined;
+    })
+    .filter(Boolean)
+    .map((d) => {
+      const m = JSON.parse(readFileSync(d.metaFile, 'utf8'));
+      if (m.dir_slug && m.regenerate) {
+        writeFileSync(join(CAPTURE_DIR, d.name, 'README.md'), folderReadme(m), 'utf8');
+      }
+      return {
+        model: m.model, harness: m.harness, mode: m.mode, captured_at: m.captured_at,
+        prompt_chars: m.sizes?.prompt_chars, tools: m.sizes?.tools,
+        request_bytes: m.sizes?.request_bytes, prefix_tokens: m.prefix_tokens,
+        dir: `capture/${d.name}`, prompt_file: m.prompt_file,
+        dir_name: d.name, dir_slug: m.dir_slug,
+      };
+    })
+    .sort((a, b) => a.model.localeCompare(b.model));
+  const repaired = mirrorPrompts(rows);
+  // dir_name and dir_slug are plumbing for the mirror, not part of the published index.
+  const published = rows.map(({ dir_name, dir_slug, ...rest }) => rest);
+  writeFileSync(join(CAPTURE_DIR, 'index.json'), JSON.stringify(published, null, 2), 'utf8');
+  return { rows: published, repaired };
+}
+
+// ---------------------------------------------------------------------------- main
+
+if (flags.index) {
+  const { rows, repaired } = writeIndex();
+  console.log(`index.json: ${rows.length} model${rows.length === 1 ? '' : 's'}`);
+  for (const r of repaired) console.log(`  mirrored  ${r}`);
+  process.exit(0);
+}
+
+const profile = PROFILES[harness ?? ''];
+if (!profile) {
+  console.error(USAGE);
+  process.exit(1);
+}
+
+const interactive = flags.print ? false : flags.interactive ? true : profile.defaultInteractive;
+if (!WIN && interactive) {
+  console.error('interactive capture is Windows-only for now; pass --print for the other variant');
+  process.exit(1);
+}
+
+const cwd = resolve(typeof flags.cwd === 'string' ? flags.cwd : process.cwd());
+const model = typeof flags.model === 'string' ? flags.model : undefined;
+const userPrompt = typeof flags.prompt === 'string'
+  ? flags.prompt
+  : 'Reply with exactly: ok. Do not use any tools.';
+
+console.log(`capturing ${profile.id}${model ? ` · ${model}` : ''} · ${interactive ? 'interactive' : 'non-interactive'}`);
+console.log(`  cwd ${cwd}`);
+
+try {
+  const runId = interactive
+    ? await captureInteractive(profile, cwd, model, userPrompt)
+    : captureRecorded(profile, cwd, model, userPrompt);
+  const { dest, meta } = writeCapture(profile, cwd, runId, interactive);
+  writeIndex();
+  console.log('');
+  console.log(`  ${basename(dest)}/`);
+  console.log(`    prompt    ${meta.sizes.prompt_chars.toLocaleString()} chars in ${meta.sizes.blocks.length} blocks`);
+  console.log(`    tools     ${meta.sizes.tools}`);
+  console.log(`    request   ${meta.sizes.request_bytes.toLocaleString()} bytes`);
+  if (meta.prefix_tokens) console.log(`    prefix    ${meta.prefix_tokens.toLocaleString()} tokens`);
+  console.log('    scrubbed  clean');
+  if (meta.response_error) {
+    console.log('');
+    console.log(`  note: the agent's turn came back ${meta.response_error}, so there is no token`);
+    console.log('        count for it. the prompt is unaffected - it travels in the request.');
+  }
+  console.log('');
+  console.log(`written to ${dest}`);
+  console.log(`  mirrored ${meta.prompt_file}`);
+} catch (err) {
+  console.error(`\ncapture failed: ${err.message}`);
+  process.exit(1);
+}
