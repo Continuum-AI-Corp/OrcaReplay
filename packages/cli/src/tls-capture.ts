@@ -288,6 +288,7 @@ export async function persistNetExchange(
       port: exchange.port,
       method: exchange.method,
       path: exchange.path,
+      ...(exchange.alpn === undefined ? {} : { alpn: exchange.alpn }),
       intercepted: true,
       headers: exchange.requestHeaders,
       truncated: exchange.requestTruncated,

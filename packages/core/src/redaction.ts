@@ -55,6 +55,14 @@ interface Rule {
  * Order matters: a PEM block or a JWT contains base64 that the narrower rules would otherwise
  * chew into pieces, leaving fragments of key material on disk.
  */
+/**
+ * Marks a recorded body held as base64 rather than as text.
+ *
+ * Written by the proxy when a body is not valid UTF-8, and honoured here so the encoding survives
+ * the trace. Kept in this module because the redactor and the proxy have to agree on it.
+ */
+export const BINARY_BODY_PREFIX = 'orca-base64:';
+
 const RULES: Rule[] = [
   {
     kind: 'private_key',
@@ -229,6 +237,15 @@ export class Redactor {
     for (const rule of RULES) {
       value = value.replace(rule.pattern, (m) => this.#hit(rule.kind, m, context, hits));
     }
+    // A body recorded as base64 is one long high-entropy run by construction, and the entropy
+    // scanner shredded a 14 KB Connect/protobuf response into 226 placeholders -- destroying it
+    // outright while protecting nothing, since a credential inside a binary body is not matchable
+    // once encoded anyway. The named rules above still run: those look for shapes, not randomness.
+    // `includes`, not `startsWith`: a body reaches the trace inside a JSON-encoded blob, so the
+    // marker sits one quote in. The marker is only ever written by the proxy around a body it
+    // base64-encoded itself, so its presence identifies the value rather than merely appearing in
+    // it.
+    if (value.includes(BINARY_BODY_PREFIX)) return value;
     return this.#scanEntropy(value, context, hits);
   }
 
