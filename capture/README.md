@@ -34,7 +34,13 @@ node capture/capture.mjs --index                       # rebuild index.json only
 
 ```console
 node capture/capture.mjs opencode                      # a free model, so this one costs nothing
+node capture/capture.mjs qwen  --model gpt-5.6-sol --dir qwen-gpt-5.6-sol
+ORCA_BIN=packages/cli/dist/cli.js node capture/capture.mjs cursor
 ```
+
+Cursor needs `ORCA_BIN` pointing at a local build: it is reached by decrypting HTTP/2, which no
+published orca has. `CURSOR-HTTP2.md` covers that in full - four obstacles, three of them fixed in
+orca itself, and what is still out of reach.
 
 All three work in one command. OpenCode is reached a different way: its provider origin lives in
 `opencode.json` rather than an environment variable, so it cannot be redirected, and the capture
@@ -197,6 +203,8 @@ than just omitting the line:
 
 ## Documents
 
+- `CURSOR-HTTP2.md` - Cursor: HTTP/2 interception, a protobuf wire format, and a prompt that
+  arrives in the response.
 - `CAPTURE-RUNBOOK.md` - the manual procedure in eight steps, with the pitfalls and how to prove a
   capture is genuine. Read it to port this to another harness or another platform.
 - `capture-run.gif` - one `capture.mjs` run, rendered by `render-run.mjs`.
