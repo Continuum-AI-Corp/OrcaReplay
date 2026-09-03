@@ -24,6 +24,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import {
   cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs';
+import { gunzipSync } from 'node:zlib';
 import { homedir, tmpdir, userInfo } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -61,6 +62,19 @@ const cmdQuote = (a) => (/[\s"^&|<>()%!]/.test(a) ? `"${a.replace(/"/g, `${BS}"`
 function runExe(exe, args, opts = {}) {
   const r = spawnSync(exe, args, { encoding: 'utf8', ...opts });
   return { code: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}`.replace(/\r/g, '') };
+}
+
+/**
+ * How to invoke orca.
+ *
+ * `ORCA_BIN` pointing at a built `cli.js` runs a local checkout instead of whatever is on PATH,
+ * which is what a capture needs while a fix is still in the working tree: the h2 interception the
+ * Cursor profile depends on does not exist in a published build.
+ */
+function orcaCommand(args) {
+  const bin = process.env.ORCA_BIN;
+  if (bin === undefined) return { name: 'orca', args };
+  return { name: process.execPath, args: [bin, ...args] };
 }
 
 /** Run a shim such as `orca.cmd`, which node cannot spawn without a shell. */
@@ -101,7 +115,7 @@ function parseArgs(argv) {
 
 const { harness, flags } = parseArgs(process.argv.slice(2));
 
-const USAGE = `usage: node capture/capture.mjs <claude|codex|opencode> [options]
+const USAGE = `usage: node capture/capture.mjs <claude|codex|opencode|qwen|cursor> [options]
 
   --model <id>       model to capture. default: the harness's own default
   --print            claude only: capture the -p prompt instead of the interactive one
@@ -135,6 +149,110 @@ const npmRoot = () => join(npmPrefix(), 'node_modules');
  * system-prompt.md; `context` is harness-injected material that is not system-role, kept in the
  * annotated file only so the shareable prompt file stays what its name says.
  */
+/**
+ * Pull the prompt out of an OpenAI-shaped request, either dialect.
+ *
+ * A harness picks one per model: a chat-completions body with the prompt in `messages`, or a
+ * responses body with it in `input`. OpenCode uses both — `mimo-v2.5-free` the first,
+ * `muse-spark-1.2-contributor-free` the second — and reading only `messages` finds nothing at all
+ * in the second, so the capture fails while the prompt sits in the trace.
+ */
+function extractOpenAiShaped(body) {
+  const blocks = [];
+  const context = [];
+  for (const m of [...(body.messages ?? []), ...(body.input ?? [])]) {
+    if (m.type !== undefined && m.type !== 'message') continue;
+    const text = typeof m.content === 'string'
+      ? m.content
+      : (Array.isArray(m.content) ? m.content : []).map((c) => c.text ?? '').join('');
+    if (text === '') continue;
+    if (m.role === 'system' || m.role === 'developer') {
+      blocks.push({ label: `${m.role}[${blocks.length}]`, text });
+    } else if (/^\s*<[a-z_]+[\s>]/.test(text)) {
+      context.push({ label: 'context', text });
+    }
+  }
+  const tools = body.tools ?? [];
+  return {
+    blocks,
+    context,
+    tools,
+    toolNames: tools.map((x) => x.function?.name ?? x.name).filter(Boolean),
+    meta: {
+      dialect: body.input ? 'openai-responses' : 'openai-chat',
+      temperature: body.temperature,
+      max_tokens: body.max_tokens ?? body.max_completion_tokens,
+    },
+  };
+}
+
+/** A recorded body, whichever of the two forms orca stored it in. */
+const BINARY_BODY_PREFIX = 'orca-base64:';
+const recordedBytes = (body) =>
+  typeof body === 'string' && body.startsWith(BINARY_BODY_PREFIX)
+    ? Buffer.from(body.slice(BINARY_BODY_PREFIX.length), 'base64')
+    : Buffer.from(String(body ?? ''), 'utf8');
+
+/**
+ * Split a Connect-protocol body into its messages.
+ *
+ * Five bytes of framing per message: one flag byte where bit 0 means the payload is compressed,
+ * then a big-endian length. Cursor gzips the frames that carry the conversation.
+ */
+function connectFrames(buf) {
+  const out = [];
+  for (let off = 0; off + 5 <= buf.length; ) {
+    const flags = buf[off];
+    const len = buf.readUInt32BE(off + 1);
+    let body = buf.subarray(off + 5, Math.min(off + 5 + len, buf.length));
+    if (flags & 1) {
+      try { body = gunzipSync(body); } catch { /* keep it compressed and move on */ }
+    }
+    out.push(body);
+    off += 5 + len;
+  }
+  return out;
+}
+
+/**
+ * Every `{"role": ...}` object in a string, matched by brace counting.
+ *
+ * The protobuf carries the conversation as JSON strings, and reading them out needs no schema --
+ * which is the only reason this is tractable without Cursor's `.proto` files.
+ */
+function roleObjects(text) {
+  const found = [];
+  for (let i = text.indexOf('{"role"'); i !== -1; i = text.indexOf('{"role"', i)) {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let j = i;
+    for (; j < text.length; j += 1) {
+      const c = text[j];
+      if (escaped) { escaped = false; continue; }
+      if (c === '\\') { escaped = true; continue; }
+      if (c === '"') { inString = !inString; continue; }
+      if (inString) continue;
+      if (c === '{') depth += 1;
+      else if (c === '}' && --depth === 0) { j += 1; break; }
+    }
+    try { found.push(JSON.parse(text.slice(i, j))); } catch { /* a frame cut mid-object */ }
+    i = j;
+  }
+  return found;
+}
+
+/** The gateway credential from `orca setup`, for a harness that has no store of its own. */
+function orcaGatewayKey() {
+  const path = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'orca', 'config.json');
+  try {
+    const g = JSON.parse(readFileSync(path, 'utf8')).gateway ?? {};
+    return g.api_key ?? (g.api_key_env ? process.env[g.api_key_env] : undefined);
+  } catch {
+    return undefined;
+  }
+}
+
 const PROFILES = {
   claude: {
     id: 'claude',
@@ -245,40 +363,177 @@ const PROFILES = {
     consoleArgs: (model, prompt) => ['run', ...(model ? ['--model', model] : []), `"${prompt}"`],
     forceAnthropicUpstream: false,
 
+    extract: extractOpenAiShaped,
+  },
+
+  cursor: {
+    id: 'cursor',
+    adapter: 'exec',
+    netOnly: true,
+    promptDir: 'CURSOR',
+    defaultInteractive: false,
+    exe: () => join(process.env.LOCALAPPDATA ?? '', 'cursor-agent', 'cursor-agent.cmd'),
+    forceAnthropicUpstream: false,
+
     /**
-     * Two dialects, because OpenCode picks one per model: a chat-completions body with the prompt
-     * in `messages`, or a responses body with it in `input`. `mimo-v2.5-free` takes the first,
-     * `muse-spark-1.2-contributor-free` the second, and reading only `messages` finds nothing at
-     * all in the second — the capture fails with "holds no prompt-carrying request" while the
-     * prompt sits in the trace. Both turn up as one flat list of role-tagged text either way.
+     * Cursor is the awkward one, and every part of that is a protocol fact rather than a choice.
+     *
+     * Its agent stream speaks HTTP/2 exclusively to a host of its own, so there is no base URL to
+     * move and interception has to terminate h2 -- which orca could not do until the interceptor
+     * learned to. The wire format is Connect over protobuf, so the body is bytes rather than JSON
+     * and only survives a trace because a non-text body is now recorded as base64. And the prompt
+     * is not in the request at all: the request carries the user's turn and the model settings,
+     * and the server sends the composed conversation *back* in the response stream, gzipped inside
+     * the protobuf. That is where this reads it from.
+     *
+     * `--trust` because the agent will not run non-interactively in a directory it has not been
+     * trusted in, and unlike `--yolo` it grants nothing else.
      */
-    extract(body) {
-      const blocks = [];
-      const context = [];
-      const turns = [...(body.messages ?? []), ...(body.input ?? [])];
-      for (const m of turns) {
-        if (m.type !== undefined && m.type !== 'message') continue;
-        const text = typeof m.content === 'string'
-          ? m.content
-          : (Array.isArray(m.content) ? m.content : []).map((p) => p.text ?? '').join('');
-        if (text === '') continue;
-        if (m.role === 'system' || m.role === 'developer') {
-          blocks.push({ label: `${m.role}[${blocks.length}]`, text });
-        } else if (/^\s*<[a-z_]+[\s>]/.test(text)) {
-          context.push({ label: 'context', text });
+    recordFlags: [
+      '--tls-intercept',
+      '--tls-hosts',
+      '+api2.cursor.sh,+*.cursor.sh',
+    ],
+    defaultModel: 'auto',
+    recordArgs: (model, prompt) => [
+      '--',
+      join(process.env.LOCALAPPDATA ?? '', 'cursor-agent', 'cursor-agent.cmd'),
+      '-p',
+      '--trust',
+      ...(model ? ['--model', model] : []),
+      prompt,
+    ],
+    consoleArgs: (model, prompt) => ['-p', '--trust', ...(model ? ['--model', model] : []), `"${prompt}"`],
+
+    /** Not used: the prompt is read from the trace as a whole, by `extractFromRun` below. */
+    extract: () => ({ blocks: [], context: [], tools: [], toolNames: [], meta: {} }),
+
+    /**
+     * Reads the run rather than one request, because the halves live in different messages: the
+     * model id is in the request and the conversation is in the response.
+     */
+    extractFromRun(dir) {
+      const events = readEvents(dir);
+      const blobText = (payload) => {
+        if (payload === undefined) return undefined;
+        if (typeof payload === 'string') return payload;
+        if (!payload.$blob) return undefined;
+        const sha = payload.$blob.replace('sha256:', '');
+        return JSON.parse(readFileSync(join(dir, 'blobs', sha.slice(0, 2), sha), 'utf8'));
+      };
+
+      const agentEvents = events.filter((e) => String(e.attrs?.host ?? '').includes('agentn'));
+      if (agentEvents.length === 0) {
+        throw new Error(
+          'no Cursor agent stream in the run.\n'
+          + '  the conversation host is reached over HTTP/2, so the interceptor has to speak h2;\n'
+          + '  check that --tls-hosts covers *.cursor.sh and that this orca build has the h2 path.',
+        );
+      }
+
+      const messages = [];
+      let model;
+      let serverError;
+      for (const e of agentEvents) {
+        const body = blobText(e.payload);
+        if (body === undefined) continue;
+        for (const frame of connectFrames(recordedBytes(body))) {
+          const text = frame.toString('utf8');
+          messages.push(...roleObjects(text));
+          // Which model actually answered, from the response.
+          //
+          // Not from the request: with `auto` the request carries the router's whole candidate
+          // set -- nine of them on one run, grok-4.6 first -- so reading a name out of it reports
+          // a candidate and files the capture under the wrong model. The response states the
+          // choice once, in `providerOptions`.
+          model ??= /"modelName":"(?:cursor-)?([a-zA-Z0-9.\-]+)"/.exec(text)?.[1];
+          // The stream carries its own errors as JSON, and they explain an empty capture far
+          // better than the absence of a system message does. `resource_exhausted` is what a
+          // model the account has no quota for looks like.
+          serverError ??= /"error":\{"code":"([a-z_]+)"/.exec(text)?.[1];
         }
       }
-      const tools = body.tools ?? [];
+
+      const system = messages.filter((m) => m.role === 'system');
+      if (system.length === 0) {
+        throw new Error(
+          serverError
+            ? `Cursor answered ${serverError} rather than running the turn, so there is no prompt`
+              + ' to read.\n  resource_exhausted means the account has no quota left for this'
+              + ' model; try another, or `auto`.'
+            : 'the Cursor agent stream carried no system message',
+        );
+      }
+      const blocks = system.map((m, i) => ({ label: `system[${i}]`, text: String(m.content) }));
+      const context = messages
+        .filter((m) => m.role !== 'system')
+        .map((m, i) => ({
+          label: `${m.role}[${i}]`,
+          text: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+        }));
+
+      // Cursor declares no tool schemas at all. The prompt describes two meta-tools --
+      // `GetDynamicTools` and `CallDynamicTool` -- and names the rest as an attribute on a
+      // namespace element, leaving the schemas server-side. So the names come from there, and a
+      // count of zero would have been the wrong answer rather than a missing one.
+      const contextText = context.map((c) => c.text).join('\n');
+      const named = [...contextText.matchAll(/<namespace\s[^>]*tools="([^"]+)"/g)]
+        .flatMap((m) => m[1].split(',').map((s) => s.trim()))
+        .filter(Boolean);
+      const meta = [...contextText.matchAll(/`(GetDynamicTools|CallDynamicTool)`/g)].map((m) => m[1]);
+      const toolNames = [...new Set([...meta, ...named])];
+
+      // The router's candidates, from the request. Worth keeping: it is the only place that says
+      // what `auto` was choosing between.
+      const requestText = agentEvents
+        .filter((e) => e.type === 'net.request' || e.type === 'model.request')
+        .map((e) => blobText(e.payload))
+        .filter((b) => b !== undefined)
+        .flatMap((b) => connectFrames(recordedBytes(b)).map((f) => f.toString('utf8')))
+        .join('\n');
+      const candidates = [...new Set(
+        [...requestText.matchAll(/(?:claude|gpt|gemini|grok|composer)-[a-z0-9]+(?:[.-][a-z0-9]+)*/gi)]
+          .map((m) => m[0])
+          // The working directory reaches the request as a path, and a slug beginning `claude-`
+          // matches the same shape. Real ids are short.
+          .filter((id) => id.length <= 24),
+      )].sort();
+
       return {
-        blocks, context, tools,
-        toolNames: tools.map((x) => x.function?.name ?? x.name).filter(Boolean),
-        meta: {
-          dialect: body.input ? 'openai-responses' : 'openai-chat',
-          temperature: body.temperature,
-          max_tokens: body.max_tokens ?? body.max_completion_tokens,
-        },
+        model,
+        blocks,
+        context,
+        tools: [],
+        toolNames,
+        meta: { wire: 'connect+proto', router_candidates: candidates },
       };
     },
+  },
+
+  qwen: {
+    id: 'qwen',
+    adapter: 'generic-openai',
+    promptDir: 'QWENCODE',
+    defaultInteractive: false,
+    recordArgs: (_model, prompt) => ['--', 'qwen', '-p', prompt],
+    consoleArgs: (_model, prompt) => ['-p', `"${prompt}"`],
+    forceAnthropicUpstream: false,
+
+    /**
+     * Qwen Code reads its OpenAI-compatible endpoint straight from the environment, which is the
+     * one thing `generic-openai` redirects, so nothing clever is needed — no config to rewrite and
+     * no TLS to terminate. What it does need is the key and the model name, since it has no
+     * credential store of its own: `OPENAI_API_KEY` if the environment already carries one,
+     * otherwise the gateway key `orca setup` stored, which is where the traffic is going anyway.
+     */
+    prepare(_cwd, model) {
+      const key = process.env.OPENAI_API_KEY ?? orcaGatewayKey();
+      if (!key) throw new Error('qwen needs OPENAI_API_KEY set, or an orca gateway with a key');
+      if (!model) throw new Error('qwen needs --model: the id its endpoint serves');
+      return { env: { OPENAI_API_KEY: key, OPENAI_MODEL: model }, restore() {} };
+    },
+
+    extract: extractOpenAiShaped,
   },
 };
 
@@ -500,7 +755,9 @@ function upstreamArgs(profile) {
 
 /** Non-interactive: one `orca record`, which exits on its own when the agent does. */
 function captureRecorded(profile, cwd, model, prompt) {
-  const prepared = profile.prepareCwd?.(cwd, model, port);
+  // No port here: this path lets orca stand the proxy up and pick one. Only the held-open proxy
+  // path knows a port in advance, and only a harness whose config has to name it cares.
+  const prepared = profile.prepare?.(cwd, model);
   try {
     const args = [
       'record', profile.adapter, '--no-fs', '--no-shell',
@@ -508,14 +765,20 @@ function captureRecorded(profile, cwd, model, prompt) {
       ...upstreamArgs(profile), ...profile.recordArgs(model, prompt),
     ];
     console.log(`  orca ${args.join(' ')}`);
-    const { out } = runShim('orca', args, {
+    const cmd = orcaCommand(args);
+    const { out } = runShim(cmd.name, cmd.args, {
       cwd,
       timeout: Number(flags.timeout ?? 300) * 1000,
       env: { ...process.env, ...(prepared?.env ?? {}) },
     });
     const runId = /run=(run_[0-9a-f]+)/.exec(out)?.[1];
     if (!runId) throw new Error(`orca record produced no run id.\n${out.trim()}`);
-    if (/capture\.empty/.test(out)) throw new Error(`the agent never called the proxy.\n${out.trim()}`);
+    // `capture.empty` counts *model* exchanges, and a harness captured by decrypting its own
+    // protocol has none -- Cursor's traffic is recorded as net exchanges instead. Treating the
+    // warning as fatal there rejected a run that had the prompt in it.
+    if (!profile.netOnly && /capture\.empty/.test(out)) {
+      throw new Error(`the agent never called the proxy.\n${out.trim()}`);
+    }
     return runId;
   } finally {
     prepared?.restore();
@@ -623,7 +886,8 @@ async function captureWithProxy(profile, cwd, model, prompt, launch) {
 
   const attachArgs = ['attach', '--for', profile.adapter, '--port', String(port), ...upstreamArgs(profile)];
   console.log(`  orca ${attachArgs.join(' ')}`);
-  const attach = spawnShim('orca', attachArgs, { cwd });
+  const attachCmd = orcaCommand(attachArgs);
+  const attach = spawnShim(attachCmd.name, attachCmd.args, { cwd });
   let attachOut = '';
   attach.stdout?.on('data', (d) => { attachOut += d; });
   attach.stderr?.on('data', (d) => { attachOut += d; });
@@ -636,7 +900,7 @@ async function captureWithProxy(profile, cwd, model, prompt, launch) {
     }
     if (!runId) throw new Error(`orca attach never reported a run id.\n${attachOut.trim()}`);
 
-    const prepared = profile.prepareCwd?.(cwd, model, port);
+    const prepared = profile.prepare?.(cwd, model, port);
     let running;
     try {
       running = launch(port, prepared);
@@ -680,7 +944,10 @@ async function captureWithProxy(profile, cwd, model, prompt, launch) {
 
 function writeCapture(profile, cwd, runId, interactive, dirOverride) {
   const dir = dirOverride ?? runDir(cwd, runId);
-  const found = pickPromptRequest(dir, profile);
+  // A harness whose prompt is spread across a stream reads the run, not one request.
+  const found = profile.extractFromRun
+    ? { body: {}, got: profile.extractFromRun(dir), event: { seq: 0, payload: { bytes: 0 } } }
+    : pickPromptRequest(dir, profile);
   if (!found) throw new Error(`run ${runId} holds no prompt-carrying request`);
   const { body, got, event } = found;
 
@@ -703,7 +970,7 @@ function writeCapture(profile, cwd, runId, interactive, dirOverride) {
     throw err;
   }
 
-  const model = body.model ?? 'unknown-model';
+  const model = got.model ?? body.model ?? 'unknown-model';
   // One folder per model, as asked — but print and interactive are two different prompts for the
   // same model, so the non-default mode gets a suffix rather than overwriting the canonical one.
   const dirName = typeof flags.dir === 'string'
@@ -766,7 +1033,7 @@ function writeCapture(profile, cwd, runId, interactive, dirOverride) {
       context_chars: got.context.reduce((a, c) => a + c.text.length, 0),
       tools: got.toolNames.length,
       tools_bytes: JSON.stringify(got.tools).length,
-      request_bytes: event.payload.bytes,
+      request_bytes: event.payload?.bytes ?? 0,
     },
     ...facts,
     tool_names: got.toolNames,
