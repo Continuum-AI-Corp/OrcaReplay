@@ -366,8 +366,19 @@ export function attachTlsIntercept(
 
     server.on('stream', (stream: ServerHttp2Stream, headers) => {
       void forwardH2(stream, headers).catch((err: unknown) => {
-        if (!stream.headersSent) stream.respond({ ':status': 502 });
-        stream.end(JSON.stringify({ error: { message: `orca tls-intercept h2: ${String(err)}` } }));
+        // Reported as well as answered, because the guard below returns without writing anything
+        // when the client has already gone -- and a failure nobody is left to receive is exactly
+        // the one worth having in the run's failure list.
+        reportH2(stream.session?.socket, err, 'forward');
+        // Guarded for the same reason as the response path: by the time a failure surfaces the
+        // client may be gone, and respond/end would then throw out of a rejection handler.
+        if (stream.destroyed) return;
+        try {
+          if (!stream.headersSent) stream.respond({ ':status': 502 });
+          stream.end(JSON.stringify({ error: { message: `orca tls-intercept h2: ${String(err)}` } }));
+        } catch {
+          stream.destroy();
+        }
       });
     });
 
@@ -391,12 +402,12 @@ export function attachTlsIntercept(
    * complaining -- "HTTP/2 keepalive ping timed out" -- with nothing on this side saying why, which
    * is the same blindness the HTTP/1.1 path avoids by reporting handshake failures.
    */
-  const reportH2 = (socket: unknown, reason: unknown): void => {
+  const reportH2 = (socket: unknown, reason: unknown, what = 'session'): void => {
     const target = targetOf(socket);
     options.onFailure?.({
       host: target?.host ?? 'unknown',
       port: target?.port ?? 0,
-      reason: `h2 session: ${String(reason)}`,
+      reason: `h2 ${what}: ${String(reason)}`,
     });
   };
   /**
@@ -439,18 +450,77 @@ export function attachTlsIntercept(
 
     const requestBody = new Capture(maxCaptured);
     const responseBody = new Capture(maxCaptured);
+    const contentEncoding =
+      typeof headers['content-encoding'] === 'string' ? headers['content-encoding'] : undefined;
+
+    // Replay answers from the recording and must never reach the origin. The HTTP/1.1 twin has
+    // consulted this hook since interception existed; without the same call here, a run recorded
+    // over HTTP/1.1 and replayed by a client that now negotiates h2 would be forwarded live --
+    // real model calls, on the caller's own credential, during what the operator ran offline.
+    if (options.onRequest) {
+      for await (const chunk of stream) requestBody.add(Buffer.from(chunk as Buffer));
+      const reply = await options.onRequest({
+        host: target.host,
+        port: target.port,
+        method,
+        path,
+        requestHeaders: recordableHeaders,
+        requestBytes: requestBody.buffer(),
+        requestTruncated: requestBody.truncated,
+      });
+      if (reply) {
+        if (stream.destroyed) return;
+        stream.respond({ ':status': reply.status, ...(reply.headers ?? {}) });
+        stream.end(reply.body);
+        counters.intercepted += 1;
+        return;
+      }
+      // The bounded capture size is also the maximum replayable request size: forwarding a
+      // truncated body upstream is worse than refusing clearly, which is what HTTP/1.1 does.
+      if (requestBody.truncated) {
+        throw new Error(`request exceeded capture limit of ${maxCaptured} bytes`);
+      }
+    }
 
     await new Promise<void>((resolve, reject) => {
       const upstream = upstreamH2(target).request(outbound);
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
 
-      stream.on('data', (chunk: Buffer) => {
-        requestBody.add(chunk);
-        if (!upstream.write(chunk)) {
-          stream.pause();
-          upstream.once('drain', () => stream.resume());
-        }
-      });
-      stream.on('end', () => upstream.end());
+      /**
+       * The client can go at any point, and every write after that throws.
+       *
+       * `stream.respond` on a destroyed stream raises ERR_HTTP2_INVALID_STREAM synchronously from
+       * inside an upstream event callback, where nothing catches it: the promise is already
+       * constructed, so the throw is an uncaught exception and the proxy exits. Reproduced against
+       * Node 22 with a client RST at 60 ms and an origin answering at 400 ms.
+       */
+      const abandon = (): void => {
+        upstream.destroy();
+        finish();
+      };
+      stream.on('aborted', abandon);
+      stream.on('close', abandon);
+
+      if (options.onRequest) {
+        // The hook above consumed the body, so replay the bytes it read rather than the stream.
+        upstream.end(requestBody.buffer());
+      } else {
+        stream.on('data', (chunk: Buffer) => {
+          requestBody.add(chunk);
+          if (!upstream.write(chunk)) {
+            stream.pause();
+            upstream.once('drain', () => stream.resume());
+          }
+        });
+        // Without this, a client that aborts mid-upload never emits `end`, `upstream.end()` is
+        // never called, and the origin waits for a body that will not arrive.
+        stream.on('end', () => upstream.end());
+      }
       stream.on('error', reject);
 
       upstream.on('error', reject);
@@ -466,32 +536,54 @@ export function attachTlsIntercept(
             recordableResponse[key] = value;
           }
         }
+        if (stream.destroyed) {
+          abandon();
+          return;
+        }
         stream.respond(downstream);
 
         // Tee, never buffer, for the same reason as HTTP/1.1: a model reply arrives over seconds
         // and the agent renders it as it lands.
         upstream.on('data', (chunk: Buffer) => {
           responseBody.add(chunk);
+          if (stream.destroyed) {
+            abandon();
+            return;
+          }
           if (!stream.write(chunk)) {
+            // `drain` never fires on a destroyed stream, so a client that goes mid-response would
+            // otherwise leave upstream paused for good and the exchange never recorded.
             upstream.pause();
             stream.once('drain', () => upstream.resume());
           }
         });
         upstream.on('end', () => {
-          stream.end();
+          if (settled) return;
+          if (!stream.destroyed) stream.end();
           counters.intercepted += 1;
+          // A body orca cannot decode is still an exchange worth having. `decodeRequestBody`
+          // throws for zstd on a runtime without it -- inside `engines`, and why the repo's own
+          // zstd test is skipped there -- and an exception in this callback would take the process
+          // down with the exchange unrecorded. server.ts already decodes inside a try/catch for
+          // the same reason.
+          let recordedRequest: string;
+          try {
+            recordedRequest = decodeRequestBody(requestBody.buffer(), contentEncoding);
+          } catch (err) {
+            options.onFailure?.({
+              host: target.host,
+              port: target.port,
+              reason: `request body left opaque: ${String(err)}`,
+            });
+            recordedRequest = requestBody.text();
+          }
           options.onNetExchange?.({
             host: target.host,
             port: target.port,
             method,
             path,
             requestHeaders: recordableHeaders,
-            requestBody: decodeRequestBody(
-              requestBody.buffer(),
-              typeof headers['content-encoding'] === 'string'
-                ? headers['content-encoding']
-                : undefined,
-            ),
+            requestBody: recordedRequest,
             requestTruncated: requestBody.truncated,
             status,
             alpn: 'h2',
@@ -501,7 +593,7 @@ export function attachTlsIntercept(
             responseBytes: responseBody.bytes,
             durationMs: Date.now() - startedAt,
           });
-          resolve();
+          finish();
         });
       });
     });

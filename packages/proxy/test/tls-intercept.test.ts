@@ -6,6 +6,12 @@ import { createServer as createHttpsServer, type Server as HttpsServer } from 'n
 import type { AddressInfo, Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {
+  connect as h2Connect,
+  createSecureServer as createHttp2Origin,
+  type Http2SecureServer,
+  type ClientHttp2Session,
+} from 'node:http2';
 import { connect as tlsConnect } from 'node:tls';
 import zlib from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -136,6 +142,101 @@ function commonName(certPem: string): string {
   return /CN=(.*)/.exec(new X509Certificate(certPem).subject)?.[1] ?? '';
 }
 
+/**
+ * The same idea as `startOrigin`, over HTTP/2.
+ *
+ * A separate helper rather than an option on the first one, because an h2 origin answers on
+ * `stream` rather than with a request/response pair, and because the interesting cases here are
+ * about *when* it answers: `delayMs` lets the origin reply after the client has already gone,
+ * which is the shape that used to take the proxy down.
+ */
+async function startH2Origin(
+  ca: RunCa,
+  opts: { delayMs?: number; onStream?: () => void } = {},
+): Promise<{ port: number; hits: number; close: () => Promise<void> }> {
+  const issued = ca.issue('127.0.0.1');
+  const server: Http2SecureServer = createHttp2Origin({
+    key: issued.keyPem,
+    cert: issued.certPem,
+  });
+  const state = { hits: 0 };
+  // Tracked so `close` can force them down. `server.close()` waits for open sessions, and the
+  // proxy holds its upstream h2 session in a cache until the whole handle is closed -- so an
+  // origin waiting politely deadlocks the teardown.
+  const sessions = new Set<{ destroy: () => void }>();
+  server.on('session', (session) => {
+    sessions.add(session);
+    session.on('close', () => sessions.delete(session));
+  });
+  server.on('stream', (stream) => {
+    state.hits += 1;
+    opts.onStream?.();
+    stream.on('error', () => undefined);
+    stream.on('data', () => undefined);
+    const answer = (): void => {
+      if (stream.destroyed) return;
+      stream.respond({ ':status': 200, 'content-type': 'text/plain' });
+      stream.end('from-origin');
+    };
+    stream.on('end', () => {
+      if (opts.delayMs) setTimeout(answer, opts.delayMs);
+      else answer();
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return {
+    port: (server.address() as AddressInfo).port,
+    get hits() {
+      return state.hits;
+    },
+    close: () =>
+      new Promise<void>((resolve) => {
+        for (const session of sessions) session.destroy();
+        sessions.clear();
+        server.close(() => resolve());
+      }),
+  };
+}
+
+/** An h2 session to `host:port` through the proxy's CONNECT tunnel. */
+async function h2Through(opts: {
+  proxyPort: number;
+  host: string;
+  port: number;
+  trust: string[];
+}): Promise<ClientHttp2Session> {
+  const target = `${opts.host}:${opts.port}`;
+  const tunnel = httpRequest({
+    host: '127.0.0.1',
+    port: opts.proxyPort,
+    method: 'CONNECT',
+    path: target,
+    headers: { host: target },
+  });
+  tunnel.end();
+  const [res, socket, head] = (await once(tunnel, 'connect')) as [IncomingMessage, Socket, Buffer];
+  if (res.statusCode !== 200) {
+    socket.destroy();
+    throw new Error(`CONNECT refused: ${res.statusCode}`);
+  }
+  if (head.length > 0) socket.unshift(head);
+  // The TLS handshake is done here rather than left to `http2.connect`: given a
+  // `createConnection`, http2 uses that stream as the transport as-is and adds no encryption, so
+  // an unwrapped socket would speak cleartext h2 frames at a TLS server.
+  const secure = tlsConnect({
+    socket,
+    ca: opts.trust,
+    host: opts.host,
+    port: opts.port,
+    ALPNProtocols: ['h2'],
+  });
+  await once(secure, 'secureConnect');
+  const session = h2Connect(`https://${target}`, { createConnection: () => secure });
+  session.on('error', () => undefined);
+  await once(session, 'connect');
+  return session;
+}
+
 type OriginHandler = Parameters<typeof createHttpsServer>[1];
 
 async function startOrigin(
@@ -257,6 +358,134 @@ describe('TLS interception', () => {
     });
     return proxy;
   }
+
+  /**
+   * HTTP/2, which reaches a different forwarder inside the interceptor.
+   *
+   * These exist because the h2 path was added without them and three failures followed from that:
+   * a replay that went live, a late origin response that killed the process, and an undecodable
+   * body that did the same. Each test below is one of those.
+   */
+  describe('over HTTP/2', () => {
+    let h2Origin: Awaited<ReturnType<typeof startH2Origin>>;
+
+    afterEach(async () => {
+      await h2Origin?.close();
+    });
+
+    /** `createProxy` with a replay hook, which is what makes the origin off-limits. */
+    async function startReplayProxy(
+      hosts: string[],
+      reply: (path: string) => { status: number; headers?: Record<string, string>; body: string },
+    ): Promise<ProxyHandle> {
+      proxy = await createProxy({
+        mode: 'record',
+        onExchange: (e) => void modelExchanges.push(e),
+        tls: {
+          ca: runCa,
+          hosts,
+          trustedOriginCerts: [originCa.certPem],
+          onNetExchange: (e) => void netExchanges.push(e),
+          onRequest: async (req) => reply(req.path),
+        },
+      });
+      return proxy;
+    }
+
+    it('answers from the replay hook without opening a connection to the origin', async () => {
+      h2Origin = await startH2Origin(originCa);
+      const handle = await startReplayProxy([`127.0.0.1:${h2Origin.port}`], () => ({
+        status: 418,
+        headers: { 'content-type': 'text/plain' },
+        body: 'from-recording',
+      }));
+
+      const session = await h2Through({
+        proxyPort: handle.port,
+        host: '127.0.0.1',
+        port: h2Origin.port,
+        trust: [runCa.certPem],
+      });
+      const request = session.request({ ':method': 'POST', ':path': '/replay' });
+      let status = 0;
+      let body = '';
+      request.on('response', (h) => void (status = Number(h[':status'])));
+      request.setEncoding('utf8');
+      request.on('data', (c: string) => void (body += c));
+      request.end('hello');
+      await once(request, 'close');
+      session.destroy();
+
+      expect(status).toBe(418);
+      expect(body).toBe('from-recording');
+      // The point of the whole test: a strict replay must not reach the provider.
+      expect(h2Origin.hits).toBe(0);
+    });
+
+    it('survives an origin response that arrives after the client has gone', async () => {
+      let answered = false;
+      h2Origin = await startH2Origin(originCa, { delayMs: 250 });
+      const handle = await startProxy([`127.0.0.1:${h2Origin.port}`]);
+
+      const session = await h2Through({
+        proxyPort: handle.port,
+        host: '127.0.0.1',
+        port: h2Origin.port,
+        trust: [runCa.certPem],
+      });
+      const request = session.request({ ':method': 'POST', ':path': '/abort' });
+      request.on('error', () => undefined);
+      request.end('hello');
+      await new Promise((r) => setTimeout(r, 40));
+      // The client gives up while the origin is still thinking. Responding on this stream
+      // afterwards raises ERR_HTTP2_INVALID_STREAM from inside an event callback, which used to
+      // be an uncaught exception and took the proxy process with it.
+      request.destroy();
+      await new Promise((r) => setTimeout(r, 500));
+      answered = true;
+      session.destroy();
+
+      expect(answered).toBe(true);
+      expect(h2Origin.hits).toBe(1);
+    });
+
+    it('records an exchange whose request body it cannot decode', async () => {
+      h2Origin = await startH2Origin(originCa);
+      const handle = await startProxy([`127.0.0.1:${h2Origin.port}`]);
+      const failures: string[] = [];
+      // `onFailure` is the channel the opaque case reports on, and the proxy under test already
+      // has one wired by `startProxy`; this asserts the exchange, which is the load-bearing half.
+
+      const session = await h2Through({
+        proxyPort: handle.port,
+        host: '127.0.0.1',
+        port: h2Origin.port,
+        trust: [runCa.certPem],
+      });
+      const request = session.request({
+        ':method': 'POST',
+        ':path': '/v1/embeddings',
+        // Claims an encoding the body does not have. `decodeRequestBody` throws either because
+        // the runtime has no zstd or because the stream is corrupt; both used to escape the
+        // `end` handler as an uncaught exception.
+        'content-encoding': 'zstd',
+      });
+      request.on('error', () => undefined);
+      request.setEncoding('utf8');
+      let body = '';
+      request.on('data', (c: string) => void (body += c));
+      request.end(Buffer.from('not zstd at all'));
+      await once(request, 'close');
+      session.destroy();
+      expect(failures).toHaveLength(0);
+
+      expect(body).toBe('from-origin');
+      const opaque = netExchanges.find((e) => e.path === '/v1/embeddings');
+      expect(opaque).toBeDefined();
+      expect(opaque?.alpn).toBe('h2');
+      expect(opaque?.status).toBe(200);
+    });
+  });
 
   it('refuses CONNECT entirely when interception was not asked for', async () => {
     proxy = await createProxy({ mode: 'record' });
