@@ -104,3 +104,74 @@ export function assertKnownFlags(args: ParsedArgs): void {
       `\n  flags for this command: ${allowed.length === 0 ? '(none)' : allowed.map((f) => `--${f}`).join(' ')}`,
   );
 }
+
+/**
+ * How many positional arguments each command reads.
+ *
+ * Counted from the `positionals[0]` call sites, the same way the flag list above is counted from
+ * the `args.*` ones. `record` reads an agent name and the run commands read a selector; the seven
+ * that read none genuinely take none — `attach` is configured entirely by flags, and `list`, `gc`,
+ * `doctor`, `setup`, `models` and `mcp` take nothing at all.
+ */
+const POSITIONALS: Record<string, number> = {
+  record: 1,
+  replay: 1,
+  compare: 1,
+  show: 1,
+  events: 1,
+  checkpoints: 1,
+  graph: 1,
+  export: 1,
+  ui: 1,
+  scrub: 1,
+  attach: 0,
+  list: 0,
+  gc: 0,
+  doctor: 0,
+  setup: 0,
+  models: 0,
+  mcp: 0,
+  help: 0,
+};
+
+/** Exposed so a test can hold {@link POSITIONALS} against the source it mirrors. */
+export const POSITIONAL_COUNTS: Readonly<Record<string, number>> = POSITIONALS;
+
+/**
+ * Reject a positional argument the command does not read.
+ *
+ * The parser collects every token that is not a flag, and each command reads at most the first.
+ * Anything past that was dropped in silence — and for `record` that is the worst shape available:
+ * the arguments meant for the agent never reach it, the harness starts with none, and orca reports
+ * a successful recording of a run that was never asked to do anything.
+ *
+ *   orca record codex exec "fix auth.ts"    ->  manifest argv: ["codex"]
+ *
+ * The agent's own arguments go after `--`, which is the one thing that message has to say. Counting
+ * per command rather than allowing one everywhere matters for the seven that read none: `orca
+ * attach claude` looks like it names the agent, and `--for` is what actually does.
+ */
+export function assertNoStrayPositionals(args: ParsedArgs): void {
+  // An unknown command is the dispatcher's to report, as above.
+  const takes = POSITIONALS[args.command];
+  if (takes === undefined) return;
+  const stray = args.positionals.slice(takes);
+  if (stray.length === 0) return;
+
+  const quote = (a: string): string => (/\s/.test(a) ? `"${a}"` : a);
+  const listed = stray.map(quote).join(' ');
+  const takesLine =
+    takes === 0
+      ? `\n  "orca ${args.command}" takes no arguments; everything it needs is a flag`
+      : `\n  "orca ${args.command}" takes one: ${quote(args.positionals[0]!)}`;
+  // Only `record` hands its tail to something else, so only `record` can say where the tail goes.
+  const forAgent =
+    args.command === 'record'
+      ? `\n  arguments for the agent go after --: orca record ${quote(args.positionals[0]!)} -- ${listed}`
+      : '';
+  throw new Error(
+    `unexpected argument${stray.length > 1 ? 's' : ''} for "orca ${args.command}": ${listed}` +
+      takesLine +
+      forAgent,
+  );
+}

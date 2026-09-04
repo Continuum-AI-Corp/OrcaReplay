@@ -348,18 +348,53 @@ footer {
 .pane[data-dir='down'] { animation: orca-enter-down 130ms cubic-bezier(0.2, 0, 0, 1); }
 .pane[data-dir='up'] { animation: orca-enter-up 130ms cubic-bezier(0.2, 0, 0, 1); }
 
-/* One-shot wash when playback lands on something that needs attention. No shadow — the design
-   system uses hairlines and weight, never depth — and no hue, since state here is carried by
-   form. An overlay whose opacity animates stays on the compositor and never repaints the row. */
+/* A row that needs attention is a band: the ground and the ink trade places. Keyed on data-tone,
+   which is what the row *is*, rather than on data-pulse, which only says playback happened to land
+   here — two failures otherwise render differently depending on how far someone pressed play.
+
+   Every state that the rest of the table carries in background has to be restated here, because a
+   band already owns that channel: selection moves to the rail, hover lifts the band rather than
+   replacing it, and the wash inverts. Leaving any of them out makes the row that matters most the
+   one you cannot tell anything about. */
 .row { position: relative; }
+.row[data-tone='attention'] { background: var(--ink); }
+.row[data-tone='attention'],
+.row[data-tone='attention'] .label,
+.row[data-tone='attention'] .detail,
+.row[data-tone='attention'] .meta,
+.row[data-tone='attention'] .seq { color: var(--ground); }
+/* The chip is already inverted against the paper, so on a band it inverts back. */
+.row[data-tone='attention'] .chip.attention { background: var(--ground); color: var(--ink); }
+.row[data-tone='attention'] .chip.normal,
+.row[data-tone='attention'] .chip.quiet { border-color: var(--ink-3); color: var(--ground); }
+
+/* Selection: the rail, not the ground. --ink on --ink is invisible. */
+.row[data-tone='attention'][aria-selected='true'] {
+  background: var(--ink);
+  border-left-color: var(--ground);
+  color: var(--ground);
+}
+/* Hover lifts the band instead of replacing it with --sunk, which would read as un-erroring it. */
+.row[data-tone='attention']:hover { background: var(--ink-2); }
+.row[data-tone='attention']:focus-visible { outline-color: var(--ground); }
+
+/* The playback wash, inverted so it reads on a band as it does on paper. No shadow — the design
+   system uses hairlines and weight, never depth — and no hue, since state here is carried by form.
+   An overlay whose opacity animates stays on the compositor and never repaints the row.
+
+   opacity:0 is the base and it is load-bearing: without it the element inherits the default of 1
+   and the only thing holding it invisible is an animation that has not finished, so the wash goes
+   solid the moment the animation ends and stays there, because data-pulse is never removed. */
 .row[data-pulse='true']::after {
   content: '';
   position: absolute;
   inset: 0;
   background: var(--ink);
+  opacity: 0;
   pointer-events: none;
   animation: orca-attention 420ms ease-out;
 }
+.row[data-tone='attention'][data-pulse='true']::after { background: var(--ground); }
 @keyframes orca-attention {
   from { opacity: 0.14; }
   to { opacity: 0; }

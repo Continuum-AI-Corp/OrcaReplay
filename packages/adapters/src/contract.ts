@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import nodePath from 'node:path';
 import type { Adapter, Launch, RecordContext } from '@orcareplay/plugin-api';
 import { PLACEHOLDER_KEY, readEnv } from './env.js';
 
@@ -427,10 +428,34 @@ function absolutePaths(value: string): string[] {
   return found;
 }
 
-function isInside(path: string, base: string): boolean {
+/**
+ * Whether `path` is `base` or sits under it.
+ *
+ * Delegated to the platform's own path rules rather than compared as strings. The prefix used to be
+ * built with a forward slash only, so on Windows — where `path.join` spells the whole path with
+ * backslashes — a file genuinely inside `runDir` never matched, and `no-foreign-paths` called the
+ * run's own scratch file foreign. That failed the contract for every adapter that puts a runDir
+ * path into the environment: grok, openclaw and node. On POSIX the comparison was true either way,
+ * so CI never saw it.
+ *
+ * Normalising the separators by hand would have swapped one wrong answer for another: a backslash
+ * is a legal character in a POSIX filename, so `/tmp/run` + a file called `run\evil` would have
+ * read as contained when it is not — a leak check answering yes to the thing it exists to catch.
+ *
+ * `impl` is a parameter so both flavours are reachable from a test on either OS. The Windows
+ * behaviour is the whole reason this function was touched, and a test that can only run on Windows
+ * is how the original slipped through.
+ */
+export function isInside(path: string, base: string, impl: PathImpl = nodePath): boolean {
   if (base === '') return false;
-  const prefix = base.endsWith('/') ? base : `${base}/`;
-  return path === base || path.startsWith(prefix);
+  const rel = impl.relative(base, path);
+  return rel === '' || (!rel.startsWith('..') && !impl.isAbsolute(rel));
+}
+
+/** The slice of `node:path` {@link isInside} needs, so `path.win32` and `path.posix` both fit. */
+export interface PathImpl {
+  relative(from: string, to: string): string;
+  isAbsolute(p: string): boolean;
 }
 
 const SEMVER_COMPARATOR =

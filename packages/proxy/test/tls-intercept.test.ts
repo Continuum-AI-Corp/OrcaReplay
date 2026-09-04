@@ -12,6 +12,7 @@ import {
   type Http2SecureServer,
   type ClientHttp2Session,
 } from 'node:http2';
+import type { IncomingHttpHeaders } from 'node:http';
 import { connect as tlsConnect } from 'node:tls';
 import zlib from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -152,7 +153,7 @@ function commonName(certPem: string): string {
  */
 async function startH2Origin(
   ca: RunCa,
-  opts: { delayMs?: number; onStream?: () => void } = {},
+  opts: { delayMs?: number; onStream?: (headers: IncomingHttpHeaders) => void } = {},
 ): Promise<{ port: number; hits: number; close: () => Promise<void> }> {
   const issued = ca.issue('127.0.0.1');
   const server: Http2SecureServer = createHttp2Origin({
@@ -168,9 +169,9 @@ async function startH2Origin(
     sessions.add(session);
     session.on('close', () => sessions.delete(session));
   });
-  server.on('stream', (stream) => {
+  server.on('stream', (stream, headers) => {
     state.hits += 1;
-    opts.onStream?.();
+    opts.onStream?.(headers);
     stream.on('error', () => undefined);
     stream.on('data', () => undefined);
     const answer = (): void => {
@@ -274,6 +275,8 @@ describe('TLS interception', () => {
   let release: (() => void) | undefined;
   /** What the origin actually received, so "forwarded" can be asserted without echoing it back. */
   let originSawAuth: string | undefined;
+  /** The same, for the headers a provider attributes traffic by. */
+  let originSawAttribution: Record<string, string | undefined>;
 
   beforeEach(async () => {
     runDir = await mkdtemp(join(tmpdir(), 'orca-mitm-run-'));
@@ -284,6 +287,7 @@ describe('TLS interception', () => {
     tunnels = [];
     modelExchanges = [];
     originSawAuth = undefined;
+    originSawAttribution = {};
 
     model = await startOrigin(originCa, (req, res) => {
       const chunks: Buffer[] = [];
@@ -319,6 +323,10 @@ describe('TLS interception', () => {
           return;
         }
         originSawAuth = req.headers.authorization;
+        originSawAttribution = {
+          'http-referer': req.headers['http-referer'] as string | undefined,
+          'x-title': req.headers['x-title'] as string | undefined,
+        };
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ saw: body, path: req.url }));
       });
@@ -391,6 +399,49 @@ describe('TLS interception', () => {
       });
       return proxy;
     }
+
+    /**
+     * The same guarantee over h2, which is the path that actually matters here: `openrouter.ai`
+     * negotiates h2, so every OpenRouter-attributed request reaches the interceptor through
+     * `forwardH2` rather than the HTTP/1.1 forwarder. The two forwarders build their header maps
+     * separately, so the property has to be pinned on both or it holds only where it was tested.
+     */
+    it('forwards the app attribution headers untouched over h2 too', async () => {
+      const referer = 'https://github.com/Continuum-AI-Corp/OrcaReplay';
+      const title = 'Some Coding Agent';
+      let seen: IncomingHttpHeaders = {};
+      h2Origin = await startH2Origin(originCa, { onStream: (h) => void (seen = h) });
+      const handle = await startProxy([`127.0.0.1:${h2Origin.port}`]);
+
+      const session = await h2Through({
+        proxyPort: handle.port,
+        host: '127.0.0.1',
+        port: h2Origin.port,
+        trust: [runCa.certPem],
+      });
+      const request = session.request({
+        ':method': 'POST',
+        ':path': '/v1/embeddings',
+        authorization: 'Bearer sk-live-abcdefghijklmnop',
+        'http-referer': referer,
+        'x-title': title,
+      });
+      request.on('error', () => undefined);
+      // The response has to be drained, or h2 flow control keeps the stream open and `close`
+      // never fires.
+      request.setEncoding('utf8');
+      request.on('data', () => undefined);
+      request.end('{}');
+      await once(request, 'close');
+      session.destroy();
+
+      expect(seen['http-referer']).toBe(referer);
+      expect(seen['x-title']).toBe(title);
+      const recorded = netExchanges.find((e) => e.path === '/v1/embeddings');
+      expect(recorded?.requestHeaders['http-referer']).toBe(referer);
+      expect(recorded?.requestHeaders['x-title']).toBe(title);
+      expect(recorded?.requestHeaders.authorization).toBeUndefined();
+    });
 
     it('answers from the replay hook without opening a connection to the origin', async () => {
       h2Origin = await startH2Origin(originCa);
@@ -706,6 +757,49 @@ describe('TLS interception', () => {
     const recorded = JSON.stringify(netExchanges[0]);
     expect(recorded).not.toContain('sk-live-abcdefghijklmnop');
     expect(recorded).not.toContain('secret-key');
+    expect(netExchanges[0]!.requestHeaders.authorization).toBeUndefined();
+  });
+
+  /**
+   * The mirror image of the credential test above: these two headers must survive, and must be
+   * recorded.
+   *
+   * `HTTP-Referer` and `X-Title` are how a provider attributes a request to the app that made it —
+   * OpenRouter builds its public app leaderboard from exactly these. A proxy that rewrote or
+   * dropped them would re-attribute the agent's tokens to whoever ran the recording, silently
+   * changing a third party's published ranking; that is not orca's to alter, and a debugger is the
+   * last thing that should be editing attribution. Recording them, unlike recording a credential,
+   * is the right call: they say which app produced the exchange, which is the one thing a trace
+   * holding several agents' traffic cannot otherwise recover.
+   */
+  it('forwards the app attribution headers untouched, and records them', async () => {
+    const handle = await startProxy([`127.0.0.1:${model.port}`]);
+    const referer = 'https://github.com/Continuum-AI-Corp/OrcaReplay';
+    const title = 'Some Coding Agent';
+
+    const response = await through({
+      proxyPort: handle.port,
+      host: '127.0.0.1',
+      port: model.port,
+      trust: [runCa.certPem],
+      method: 'POST',
+      path: '/v1/embeddings',
+      body: '{}',
+      headers: {
+        authorization: 'Bearer sk-live-abcdefghijklmnop',
+        'http-referer': referer,
+        'x-title': title,
+      },
+    });
+
+    expect(response.status).toBe(200);
+    // Byte-identical at the origin: not re-cased, not re-written, not orca's own.
+    expect(originSawAttribution['http-referer']).toBe(referer);
+    expect(originSawAttribution['x-title']).toBe(title);
+    // And present in the trace, which is what lets one recording separate two agents.
+    expect(netExchanges[0]!.requestHeaders['http-referer']).toBe(referer);
+    expect(netExchanges[0]!.requestHeaders['x-title']).toBe(title);
+    // The credential rule still holds alongside them.
     expect(netExchanges[0]!.requestHeaders.authorization).toBeUndefined();
   });
 

@@ -347,9 +347,22 @@ describe('bunOptionsWithHook', () => {
     expect(bunOptionsWithHook(path, undefined, 'linux')).toBe(`--preload ${path}`);
   });
 
-  // Node resolves `--require` from `NODE_OPTIONS` without that escaping, so it is left alone.
-  it('leaves the Node form as it was', () => {
+  /**
+   * Node needs no rewrite here, but for a narrower reason than "Node is fine": this path has no
+   * space, so it is not quoted, and the parser only reads a backslash as an escape inside quotes.
+   * Add a space and Node mangles it exactly as Bun does — covered in the node-instrument tests,
+   * which is where the escaping lives.
+   */
+  it('leaves an unquoted Node path as it was', () => {
     const path = String.raw`C:\Users\d\run\hook.cjs`;
     expect(nodeOptionsWithHook(path, undefined)).toBe(`--require ${path}`);
+  });
+
+  /** And the same path with a space in it comes back escaped rather than eaten. */
+  it('escapes a Node path that has to be quoted', () => {
+    const path = String.raw`C:\My Projects\run\hook.cjs`;
+    expect(nodeOptionsWithHook(path, undefined)).toBe(
+      String.raw`--require "C:\\My Projects\\run\\hook.cjs"`,
+    );
   });
 });
