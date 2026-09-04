@@ -375,7 +375,9 @@ export function attachTlsIntercept(
         if (stream.destroyed) return;
         try {
           if (!stream.headersSent) stream.respond({ ':status': 502 });
-          stream.end(JSON.stringify({ error: { message: `orca tls-intercept h2: ${String(err)}` } }));
+          stream.end(
+            JSON.stringify({ error: { message: `orca tls-intercept h2: ${String(err)}` } }),
+          );
         } catch {
           stream.destroy();
         }
