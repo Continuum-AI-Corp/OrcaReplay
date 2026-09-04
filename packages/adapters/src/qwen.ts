@@ -39,8 +39,22 @@ export function qwenHasOwnAuth(): boolean {
  * that works today. Different reason, same conclusion: an origin orca cannot serve is one it
  * should not take away.
  *
- * To record Qwen against its own models, terminate the TLS instead of moving the origin:
- * `orca record qwen --tls-intercept --tls-hosts '+dashscope.aliyuncs.com'`.
+ * To record Qwen against its own models, terminate the TLS instead of moving the origin. One host
+ * is not enough, because `HostPolicy` matches a bare pattern exactly and the harness reaches a
+ * whole family — read off the same bundle: `dashscope.aliyuncs.com` is only the default, with
+ * `coding.dashscope.aliyuncs.com` and `coding-intl.dashscope.aliyuncs.com` for the coding plan,
+ * `cn-hongkong.dashscope.aliyuncs.com`, `dashscope-intl.aliyuncs.com` and
+ * `dashscope-us.aliyuncs.com` by region, and the token plan on a different domain again at
+ * `token-plan.cn-beijing.maas.aliyuncs.com` / `token-plan.ap-southeast-1.maas.aliyuncs.com`. So:
+ *
+ *     orca record qwen --tls-intercept --tls-hosts \
+ *       '+dashscope.aliyuncs.com,+*.dashscope.aliyuncs.com,+dashscope-intl.aliyuncs.com,+dashscope-us.aliyuncs.com'
+ *
+ * adding `+token-plan.cn-beijing.maas.aliyuncs.com` or the Singapore one if that is the plan in
+ * use, and `+api-inference.modelscope.cn` for a ModelScope endpoint. The wildcard covers the
+ * `*.dashscope` subdomains without reaching the console: DashScope's sign-in lives on
+ * `bailian.console.aliyun.com` and `modelstudio.console.alibabacloud.com`, different domains
+ * entirely, which is what makes the wildcard narrower here than one over a vendor's whole zone.
  */
 export const qwenAdapter: Adapter = {
   id: 'qwen',
