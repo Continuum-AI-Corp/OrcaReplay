@@ -70,7 +70,11 @@ export async function showCommand(
   const summary = summarize(manifest, events);
 
   out.plain(
-    `${summary.runId}  ${summary.adapter}  ${summary.eventCount} events  exit ${summary.exitCode ?? 0}`,
+    // `?? 0` said a run that never reached an exit had exited cleanly — and a run that died before
+    // its agent started is sealed with the code deliberately absent, precisely because it is
+    // unknown rather than zero. `--json` reported it honestly as null the whole time; only the
+    // line a person reads claimed success.
+    `${summary.runId}  ${summary.adapter}  ${summary.eventCount} events  exit ${summary.exitCode ?? '— (never finished)'}`,
   );
   // A forked run's timeline opens mid-conversation in a worktree that no longer exists. Without
   // this line the only way to learn where it came from is to cat the manifest — for the feature

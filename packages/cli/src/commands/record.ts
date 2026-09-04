@@ -232,43 +232,87 @@ async function runRecording(
 
   if (fs) await appendSnapshot(fs, writer, out, 0, { initial: true });
 
-  const ctx: RecordContext = {
-    runId: writer.runId,
-    cwd,
-    proxyUrl: proxy.url,
-    runDir: writer.runDir,
-    userArgs: args.passthrough,
-    env: process.env,
-  };
-  const launch = await adapter.prepare(ctx);
-
-  // Listed before the agent starts, so the file it writes can be told from the ones already there.
-  // The harness's transcript is the only record of what the person typed; without it an
-  // interactive run is captured but not replayable.
-  const sessionBefore = await snapshotDir(adapter.session?.dir(cwd, process.env));
-
-  if (shell) {
-    launch.env.PATH = `${shell.dir}${delimiter}${process.env.PATH ?? ''}`;
-  }
-  if (mcp) {
-    pointAtMcpConfig(launch.env, mcp.configPath);
-    // The variables above are belt and braces for a harness orca has not met. What actually
-    // reaches Claude Code is this: it takes the path on the command line and reads no environment
-    // variable for it, so without this the instrumented config was written and never opened.
-    const mcpArgs = adapter.mcpConfigArgs?.(mcp.configPath);
-    if (mcpArgs !== undefined) launch.args = [...mcpArgs, ...launch.args];
-    else
-      out.warn('mcp.not_wired', {
-        adapter: adapter.id,
-        cause: `${adapter.id} has no command-line form for an MCP config, and reads none of the variables orca sets`,
-        effect:
-          'the instrumented config exists but the agent will not load it, so no MCP frames will be captured',
-      });
+  /**
+   * Give up on a run that has already started, then re-throw.
+   *
+   * Two failures share this path, and both were silent in their own way.
+   *
+   * A listening proxy keeps Node's event loop alive, so a throw printed the error and then hung
+   * — `orca record generic-openai -- /nonexistent` never exited, and mistyping an agent name is
+   * the first thing a new user does. And an unsealed trace has no `ended_at`, `counts` or
+   * `integrity`, so everything the agent did is on disk while `verifyIntegrity` reports the run as
+   * *tampered* rather than as unfinished.
+   *
+   * Sealing rather than discarding: a run that died is often the run you most want to read, and
+   * the exit code is unknown rather than zero, so it is left absent.
+   */
+  async function abandon(err: unknown): Promise<never> {
+    await proxy.close().catch(() => undefined);
+    await writes.drain().catch(() => undefined);
+    if (ca) await ca.dispose().catch(() => undefined);
+    await writer
+      .append({ type: 'run.end', actor: 'orca', turn, attrs: { error: String(err) } })
+      .catch(() => undefined);
+    await writer.close().catch(() => undefined);
+    throw err;
   }
 
-  if (proxy.tls) {
-    await trustRunCa(writer, proxy.tls, proxy.url, launch.env, out);
-  }
+  /*
+   * Everything from here to the child's exit runs with the proxy already listening, so everything
+   * from here to the child's exit has to come back through `abandon`.
+   *
+   * The guard used to start at the spawn, which covered the failure it was written for — an agent
+   * that is not on PATH — and missed the one that happens first. An adapter validates the
+   * invocation in `prepare`, before anything is spawned: `orca record node agent.mjs`, with the
+   * `--` left out, printed exactly the right message about the `--` and then hung forever. So did
+   * a failure to snapshot the session directory, or to trust the run CA.
+   */
+  const { launch, sessionBefore } = await (async () => {
+    try {
+      const ctx: RecordContext = {
+        runId: writer.runId,
+        cwd,
+        proxyUrl: proxy.url,
+        runDir: writer.runDir,
+        userArgs: args.passthrough,
+        env: process.env,
+      };
+      const prepared = await adapter.prepare(ctx);
+
+      // Listed before the agent starts, so the file it writes can be told from the ones already
+      // there. The harness's transcript is the only record of what the person typed; without it an
+      // interactive run is captured but not replayable.
+      const before = await snapshotDir(adapter.session?.dir(cwd, process.env));
+
+      if (shell) {
+        prepared.env.PATH = `${shell.dir}${delimiter}${process.env.PATH ?? ''}`;
+      }
+      if (mcp) {
+        pointAtMcpConfig(prepared.env, mcp.configPath);
+        // The variables above are belt and braces for a harness orca has not met. What actually
+        // reaches Claude Code is this: it takes the path on the command line and reads no
+        // environment variable for it, so without this the instrumented config was written and
+        // never opened.
+        const mcpArgs = adapter.mcpConfigArgs?.(mcp.configPath);
+        if (mcpArgs !== undefined) prepared.args = [...mcpArgs, ...prepared.args];
+        else
+          out.warn('mcp.not_wired', {
+            adapter: adapter.id,
+            cause: `${adapter.id} has no command-line form for an MCP config, and reads none of the variables orca sets`,
+            effect:
+              'the instrumented config exists but the agent will not load it, so no MCP frames will be captured',
+          });
+      }
+
+      if (proxy.tls) {
+        await trustRunCa(writer, proxy.tls, proxy.url, prepared.env, out);
+      }
+
+      return { launch: prepared, sessionBefore: before };
+    } catch (err) {
+      return abandon(err);
+    }
+  })();
 
   out.phase('recording', {
     run: writer.runId,
@@ -289,24 +333,7 @@ async function runRecording(
       args.bool('json'),
     );
   } catch (err) {
-    // Two failures share this path, and both were silent in their own way.
-    //
-    // A listening proxy keeps Node's event loop alive, so a throw here printed the error and then
-    // hung — `orca record generic-openai -- /nonexistent` never exited, and mistyping an agent
-    // name is the first thing a new user does. And an unsealed trace has no `ended_at`, `counts`
-    // or `integrity`, so everything the agent did is on disk while `verifyIntegrity` reports the
-    // run as *tampered* rather than as unfinished.
-    //
-    // Sealing here rather than discarding: a run that died is often the run you most want to
-    // read, and the exit code is unknown rather than zero, so it is left absent.
-    await proxy.close().catch(() => undefined);
-    await writes.drain().catch(() => undefined);
-    if (ca) await ca.dispose().catch(() => undefined);
-    await writer
-      .append({ type: 'run.end', actor: 'orca', turn, attrs: { error: String(err) } })
-      .catch(() => undefined);
-    await writer.close().catch(() => undefined);
-    throw err;
+    return abandon(err);
   }
 
   await writes.drain();
