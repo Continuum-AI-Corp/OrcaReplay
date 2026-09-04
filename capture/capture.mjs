@@ -22,7 +22,14 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import {
-  cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
 } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import { homedir, tmpdir, userInfo } from 'node:os';
@@ -82,7 +89,9 @@ function runShim(name, args, opts = {}) {
   if (!WIN) return runExe(name, args, opts);
   const line = [name, ...args.map(cmdQuote)].join(' ');
   const r = spawnSync(process.env.COMSPEC ?? 'cmd.exe', ['/d', '/s', '/c', line], {
-    encoding: 'utf8', windowsVerbatimArguments: true, ...opts,
+    encoding: 'utf8',
+    windowsVerbatimArguments: true,
+    ...opts,
   });
   return { code: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}`.replace(/\r/g, '') };
 }
@@ -91,7 +100,8 @@ function spawnShim(name, args, opts = {}) {
   if (!WIN) return spawn(name, args, opts);
   const line = [name, ...args.map(cmdQuote)].join(' ');
   return spawn(process.env.COMSPEC ?? 'cmd.exe', ['/d', '/s', '/c', line], {
-    windowsVerbatimArguments: true, ...opts,
+    windowsVerbatimArguments: true,
+    ...opts,
   });
 }
 
@@ -103,10 +113,23 @@ const powershell = (script) =>
 function parseArgs(argv) {
   const flags = {};
   let harness;
-  const valued = new Set(['model', 'upstream', 'port', 'cwd', 'prompt', 'timeout', 'from-run', 'dir', 'retries']);
+  const valued = new Set([
+    'model',
+    'upstream',
+    'port',
+    'cwd',
+    'prompt',
+    'timeout',
+    'from-run',
+    'dir',
+    'retries',
+  ]);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
-    if (!a.startsWith('--')) { harness ??= a; continue; }
+    if (!a.startsWith('--')) {
+      harness ??= a;
+      continue;
+    }
     const key = a.slice(2);
     flags[key] = valued.has(key) ? argv[++i] : true;
   }
@@ -162,9 +185,10 @@ function extractOpenAiShaped(body) {
   const context = [];
   for (const m of [...(body.messages ?? []), ...(body.input ?? [])]) {
     if (m.type !== undefined && m.type !== 'message') continue;
-    const text = typeof m.content === 'string'
-      ? m.content
-      : (Array.isArray(m.content) ? m.content : []).map((c) => c.text ?? '').join('');
+    const text =
+      typeof m.content === 'string'
+        ? m.content
+        : (Array.isArray(m.content) ? m.content : []).map((c) => c.text ?? '').join('');
     if (text === '') continue;
     if (m.role === 'system' || m.role === 'developer') {
       blocks.push({ label: `${m.role}[${blocks.length}]`, text });
@@ -201,12 +225,16 @@ const recordedBytes = (body) =>
  */
 function connectFrames(buf) {
   const out = [];
-  for (let off = 0; off + 5 <= buf.length; ) {
+  for (let off = 0; off + 5 <= buf.length;) {
     const flags = buf[off];
     const len = buf.readUInt32BE(off + 1);
     let body = buf.subarray(off + 5, Math.min(off + 5 + len, buf.length));
     if (flags & 1) {
-      try { body = gunzipSync(body); } catch { /* keep it compressed and move on */ }
+      try {
+        body = gunzipSync(body);
+      } catch {
+        /* keep it compressed and move on */
+      }
     }
     out.push(body);
     off += 5 + len;
@@ -229,14 +257,30 @@ function roleObjects(text) {
     let j = i;
     for (; j < text.length; j += 1) {
       const c = text[j];
-      if (escaped) { escaped = false; continue; }
-      if (c === '\\') { escaped = true; continue; }
-      if (c === '"') { inString = !inString; continue; }
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (c === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (c === '"') {
+        inString = !inString;
+        continue;
+      }
       if (inString) continue;
       if (c === '{') depth += 1;
-      else if (c === '}' && --depth === 0) { j += 1; break; }
+      else if (c === '}' && --depth === 0) {
+        j += 1;
+        break;
+      }
     }
-    try { found.push(JSON.parse(text.slice(i, j))); } catch { /* a frame cut mid-object */ }
+    try {
+      found.push(JSON.parse(text.slice(i, j)));
+    } catch {
+      /* a frame cut mid-object */
+    }
     i = j;
   }
   return found;
@@ -244,7 +288,11 @@ function roleObjects(text) {
 
 /** The gateway credential from `orca setup`, for a harness that has no store of its own. */
 function orcaGatewayKey() {
-  const path = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'orca', 'config.json');
+  const path = join(
+    process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'),
+    'orca',
+    'config.json',
+  );
   try {
     const g = JSON.parse(readFileSync(path, 'utf8')).gateway ?? {};
     return g.api_key ?? (g.api_key_env ? process.env[g.api_key_env] : undefined);
@@ -269,7 +317,11 @@ const PROFILES = {
       const context = [];
       for (const s of body.system ?? []) {
         if (typeof s.text === 'string') {
-          blocks.push({ label: `system[${blocks.length}]`, text: s.text, cache: s.cache_control?.ttl ?? 'none' });
+          blocks.push({
+            label: `system[${blocks.length}]`,
+            text: s.text,
+            cache: s.cache_control?.ttl ?? 'none',
+          });
         }
       }
       for (const m of body.messages ?? []) {
@@ -277,13 +329,16 @@ const PROFILES = {
         for (const p of parts) {
           if (typeof p.text !== 'string') continue;
           if (m.role === 'system') blocks.push({ label: 'role:system', text: p.text });
-          else if (p.text.includes('<system-reminder>')) context.push({ label: 'system-reminder', text: p.text });
+          else if (p.text.includes('<system-reminder>'))
+            context.push({ label: 'system-reminder', text: p.text });
         }
       }
       const tools = body.tools ?? [];
       const header = body.system?.[0]?.text ?? '';
       return {
-        blocks, context, tools,
+        blocks,
+        context,
+        tools,
         toolNames: tools.map((t) => t.name),
         meta: {
           entrypoint: /cc_entrypoint=([\w-]+)/.exec(header)?.[1],
@@ -305,7 +360,11 @@ const PROFILES = {
     exe: () => join(npmPrefix(), 'codex.cmd'),
     defaultInteractive: false,
     recordArgs: (model, prompt) => [
-      '--', 'exec', '--skip-git-repo-check', ...(model ? ['--model', model] : []), prompt,
+      '--',
+      'exec',
+      '--skip-git-repo-check',
+      ...(model ? ['--model', model] : []),
+      prompt,
     ],
     consoleArgs: (model, prompt) => [...(model ? ['--model', model] : []), `"${prompt}"`],
     forceAnthropicUpstream: false,
@@ -314,13 +373,18 @@ const PROFILES = {
       const context = [];
       let tools = [];
       for (const item of body.input ?? []) {
-        if (item.type === 'additional_tools') { tools = item.tools ?? []; continue; }
+        if (item.type === 'additional_tools') {
+          tools = item.tools ?? [];
+          continue;
+        }
         if (item.type !== 'message') continue;
         const parts = Array.isArray(item.content) ? item.content : [{ text: item.content }];
         for (const p of parts) {
           if (typeof p.text !== 'string') continue;
-          if (item.role === 'developer') blocks.push({ label: `developer[${blocks.length}]`, text: p.text });
-          else if (/^\s*<[a-z_]+[\s>]/.test(p.text)) context.push({ label: 'context', text: p.text });
+          if (item.role === 'developer')
+            blocks.push({ label: `developer[${blocks.length}]`, text: p.text });
+          else if (/^\s*<[a-z_]+[\s>]/.test(p.text))
+            context.push({ label: 'context', text: p.text });
         }
       }
       // Codex nests tools in namespaces, so the leaves are the tools and the branches are not.
@@ -331,7 +395,10 @@ const PROFILES = {
       };
       tools.forEach(walk);
       return {
-        blocks, context, tools, toolNames: names,
+        blocks,
+        context,
+        tools,
+        toolNames: names,
         meta: { reasoning: body.reasoning, text: body.text, store: body.store },
       };
     },
@@ -389,11 +456,7 @@ const PROFILES = {
      * `--trust` because the agent will not run non-interactively in a directory it has not been
      * trusted in, and unlike `--yolo` it grants nothing else.
      */
-    recordFlags: [
-      '--tls-intercept',
-      '--tls-hosts',
-      '+api2.cursor.sh,+*.cursor.sh',
-    ],
+    recordFlags: ['--tls-intercept', '--tls-hosts', '+api2.cursor.sh,+*.cursor.sh'],
     defaultModel: 'auto',
     recordArgs: (model, prompt) => [
       '--',
@@ -403,7 +466,12 @@ const PROFILES = {
       ...(model ? ['--model', model] : []),
       prompt,
     ],
-    consoleArgs: (model, prompt) => ['-p', '--trust', ...(model ? ['--model', model] : []), `"${prompt}"`],
+    consoleArgs: (model, prompt) => [
+      '-p',
+      '--trust',
+      ...(model ? ['--model', model] : []),
+      `"${prompt}"`,
+    ],
 
     /** Not used: the prompt is read from the trace as a whole, by `extractFromRun` below. */
     extract: () => ({ blocks: [], context: [], tools: [], toolNames: [], meta: {} }),
@@ -425,9 +493,9 @@ const PROFILES = {
       const agentEvents = events.filter((e) => String(e.attrs?.host ?? '').includes('agentn'));
       if (agentEvents.length === 0) {
         throw new Error(
-          'no Cursor agent stream in the run.\n'
-          + '  the conversation host is reached over HTTP/2, so the interceptor has to speak h2;\n'
-          + '  check that --tls-hosts covers *.cursor.sh and that this orca build has the h2 path.',
+          'no Cursor agent stream in the run.\n' +
+            '  the conversation host is reached over HTTP/2, so the interceptor has to speak h2;\n' +
+            '  check that --tls-hosts covers *.cursor.sh and that this orca build has the h2 path.',
         );
       }
 
@@ -458,9 +526,9 @@ const PROFILES = {
       if (system.length === 0) {
         throw new Error(
           serverError
-            ? `Cursor answered ${serverError} rather than running the turn, so there is no prompt`
-              + ' to read.\n  resource_exhausted means the account has no quota left for this'
-              + ' model; try another, or `auto`.'
+            ? `Cursor answered ${serverError} rather than running the turn, so there is no prompt` +
+                ' to read.\n  resource_exhausted means the account has no quota left for this' +
+                ' model; try another, or `auto`.'
             : 'the Cursor agent stream carried no system message',
         );
       }
@@ -480,7 +548,9 @@ const PROFILES = {
       const named = [...contextText.matchAll(/<namespace\s[^>]*tools="([^"]+)"/g)]
         .flatMap((m) => m[1].split(',').map((s) => s.trim()))
         .filter(Boolean);
-      const meta = [...contextText.matchAll(/`(GetDynamicTools|CallDynamicTool)`/g)].map((m) => m[1]);
+      const meta = [...contextText.matchAll(/`(GetDynamicTools|CallDynamicTool)`/g)].map(
+        (m) => m[1],
+      );
       const toolNames = [...new Set([...meta, ...named])];
 
       // The router's candidates, from the request. Worth keeping: it is the only place that says
@@ -491,13 +561,19 @@ const PROFILES = {
         .filter((b) => b !== undefined)
         .flatMap((b) => connectFrames(recordedBytes(b)).map((f) => f.toString('utf8')))
         .join('\n');
-      const candidates = [...new Set(
-        [...requestText.matchAll(/(?:claude|gpt|gemini|grok|composer)-[a-z0-9]+(?:[.-][a-z0-9]+)*/gi)]
-          .map((m) => m[0])
-          // The working directory reaches the request as a path, and a slug beginning `claude-`
-          // matches the same shape. Real ids are short.
-          .filter((id) => id.length <= 24),
-      )].sort();
+      const candidates = [
+        ...new Set(
+          [
+            ...requestText.matchAll(
+              /(?:claude|gpt|gemini|grok|composer)-[a-z0-9]+(?:[.-][a-z0-9]+)*/gi,
+            ),
+          ]
+            .map((m) => m[0])
+            // The working directory reaches the request as a path, and a slug beginning `claude-`
+            // matches the same shape. Real ids are short.
+            .filter((id) => id.length <= 24),
+        ),
+      ].sort();
 
       return {
         model,
@@ -578,7 +654,8 @@ function buildScrubber(cwd) {
     [pathRe(tmpdir()), '{{TMP}}'],
     [pathRe(home), '{{HOME}}'],
   ];
-  if (gitName) rules.push([new RegExp(`Git user: ${reEscape(gitName)}`, 'g'), 'Git user: {{GIT_USER}}']);
+  if (gitName)
+    rules.push([new RegExp(`Git user: ${reEscape(gitName)}`, 'g'), 'Git user: {{GIT_USER}}']);
   if (gitEmail) rules.push([new RegExp(reEscape(gitEmail), 'gi'), '{{EMAIL}}']);
   if (gateway) rules.push([new RegExp(reEscape(gateway), 'g'), '{{GATEWAY}}']);
   rules.push(
@@ -586,7 +663,10 @@ function buildScrubber(cwd) {
     [/[\w.+-]+@[\w-]+\.[\w.]{2,}/g, '{{EMAIL}}'],
     // Lookarounds rather than \b: an id is often prefixed, as in `msg_01a06161-...`, and `_` is a
     // word character, so \b never matches between the two and the whole rule silently misses.
-    [/(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])/gi, '{{UUID}}'],
+    [
+      /(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])/gi,
+      '{{UUID}}',
+    ],
     [/(?<![0-9a-f])[0-9a-f]{32,}(?![0-9a-f])/gi, '{{HEX}}'],
     [new RegExp(`\\b${reEscape(user)}\\b`, 'gi'), '{{USER}}'],
   );
@@ -613,15 +693,25 @@ function buildScrubber(cwd) {
   };
 
   const scrubJson = (v) =>
-    typeof v === 'string' ? scrub(v)
-      : Array.isArray(v) ? v.map(scrubJson)
-      : v && typeof v === 'object'
-        ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, scrubJson(x)]))
-        : v;
+    typeof v === 'string'
+      ? scrub(v)
+      : Array.isArray(v)
+        ? v.map(scrubJson)
+        : v && typeof v === 'object'
+          ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, scrubJson(x)]))
+          : v;
 
   return {
-    scrub, scrubJson, audit,
-    inputs: { home: true, user: true, git_user: Boolean(gitName), git_email: Boolean(gitEmail), gateway: Boolean(gateway) },
+    scrub,
+    scrubJson,
+    audit,
+    inputs: {
+      home: true,
+      user: true,
+      git_user: Boolean(gitName),
+      git_email: Boolean(gitEmail),
+      gateway: Boolean(gateway),
+    },
   };
 }
 
@@ -649,10 +739,15 @@ const trustKey = (cwd) => resolve(cwd).split(BS).join('/');
 
 function trustState(cwd) {
   let cfg;
-  try { cfg = JSON.parse(readFileSync(claudeConfigPath(), 'utf8')); } catch { return {}; }
+  try {
+    cfg = JSON.parse(readFileSync(claudeConfigPath(), 'utf8'));
+  } catch {
+    return {};
+  }
   const want = trustKey(cwd).toLowerCase();
-  const key = Object.keys(cfg.projects ?? {})
-    .find((k) => k.split(BS).join('/').toLowerCase() === want);
+  const key = Object.keys(cfg.projects ?? {}).find(
+    (k) => k.split(BS).join('/').toLowerCase() === want,
+  );
   return { key, trusted: key !== undefined && cfg.projects[key].hasTrustDialogAccepted === true };
 }
 
@@ -661,7 +756,10 @@ function trustState(cwd) {
 const runDir = (cwd, runId) => join(cwd, '.orca', 'runs', runId);
 
 const readEvents = (dir) =>
-  readFileSync(join(dir, 'events.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  readFileSync(join(dir, 'events.jsonl'), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l));
 
 function readBlob(dir, ref) {
   const sha = ref.replace('sha256:', '');
@@ -685,7 +783,11 @@ function pickPromptRequest(dir, profile) {
   for (const e of readEvents(dir)) {
     if (e.type !== 'model.request' || !e.payload?.$blob) continue;
     let body;
-    try { body = readBlob(dir, e.payload.$blob); } catch { continue; }
+    try {
+      body = readBlob(dir, e.payload.$blob);
+    } catch {
+      continue;
+    }
     const got = profile.extract(body);
     if (got.blocks.length === 0) continue;
     if (got.toolNames.length > 0) return { event: e, body, got };
@@ -710,8 +812,8 @@ const hasPromptRequest = (dir, profile) => {
  * like a clean one.
  */
 const isTransientFailure = ({ response_error: kind, response_status: status }) =>
-  (status !== undefined && status >= 500)
-  || /overload|rate_?limit|server_error|unavailable|timeout|internal/i.test(kind ?? '');
+  (status !== undefined && status >= 500) ||
+  /overload|rate_?limit|server_error|unavailable|timeout|internal/i.test(kind ?? '');
 
 function responseFacts(dir, seq) {
   for (const e of readEvents(dir)) {
@@ -719,19 +821,29 @@ function responseFacts(dir, seq) {
     let text = typeof e.payload === 'string' ? e.payload : undefined;
     if (!text && e.payload?.$blob) {
       const sha = e.payload.$blob.replace('sha256:', '');
-      try { text = readFileSync(join(dir, 'blobs', sha.slice(0, 2), sha), 'utf8'); } catch { continue; }
+      try {
+        text = readFileSync(join(dir, 'blobs', sha.slice(0, 2), sha), 'utf8');
+      } catch {
+        continue;
+      }
     }
     const m = /"usage":\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/.exec(text ?? '');
     if (m) {
       try {
         const u = JSON.parse(m[0].slice('"usage":'.length));
-        const prefix = (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
-          + (u.input_tokens ?? 0) + (u.prompt_tokens ?? 0);
+        const prefix =
+          (u.cache_read_input_tokens ?? 0) +
+          (u.cache_creation_input_tokens ?? 0) +
+          (u.input_tokens ?? 0) +
+          (u.prompt_tokens ?? 0);
         if (prefix > 0) return { prefix_tokens: prefix, usage: u };
-      } catch { /* fall through to the error check */ }
+      } catch {
+        /* fall through to the error check */
+      }
     }
-    const err = /"error":\s*\{[^{}]*"type":\s*"([\w-]+)"/.exec(text ?? '')
-      ?? /"type":\s*"([\w]*error[\w]*)"/.exec(text ?? '');
+    const err =
+      /"error":\s*\{[^{}]*"type":\s*"([\w-]+)"/.exec(text ?? '') ??
+      /"type":\s*"([\w]*error[\w]*)"/.exec(text ?? '');
     if (err) return { response_error: err[1], response_status: e.attrs.status };
     return {};
   }
@@ -760,9 +872,13 @@ function captureRecorded(profile, cwd, model, prompt) {
   const prepared = profile.prepare?.(cwd, model);
   try {
     const args = [
-      'record', profile.adapter, '--no-fs', '--no-shell',
+      'record',
+      profile.adapter,
+      '--no-fs',
+      '--no-shell',
       ...(profile.recordFlags ?? []),
-      ...upstreamArgs(profile), ...profile.recordArgs(model, prompt),
+      ...upstreamArgs(profile),
+      ...profile.recordArgs(model, prompt),
     ];
     console.log(`  orca ${args.join(' ')}`);
     const cmd = orcaCommand(args);
@@ -785,10 +901,11 @@ function captureRecorded(profile, cwd, model, prompt) {
   }
 }
 
-const killPort = (port) => powershell(
-  `$c = Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue; ` +
-  `if ($c) { $c | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } }`,
-);
+const killPort = (port) =>
+  powershell(
+    `$c = Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue; ` +
+      `if ($c) { $c | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } }`,
+  );
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -814,9 +931,16 @@ function consoleLauncher(profile, cwd, model, prompt) {
     if (!existsSync(exe)) throw new Error(`agent executable not found: ${exe}`);
     // A nested session inherits these and registers as a child, which changes the prompt.
     const strip = [
-      'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID',
-      'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_PID', 'CLAUDE_EFFORT',
-      'CLAUDE_CODE_EXECPATH', 'AI_AGENT',
+      'CLAUDECODE',
+      'CLAUDE_CODE_ENTRYPOINT',
+      'CLAUDE_CODE_CHILD_SESSION',
+      'CLAUDE_CODE_SESSION_ID',
+      'CLAUDE_CODE_MESSAGING_SOCKET',
+      'CLAUDE_CODE_MESSAGING_TOKEN',
+      'CLAUDE_PID',
+      'CLAUDE_EFFORT',
+      'CLAUDE_CODE_EXECPATH',
+      'AI_AGENT',
     ];
     const psQuote = (s) => `'${String(s).replace(/'/g, "''")}'`;
     const argList = profile.consoleArgs(model, prompt).map(psQuote).join(',');
@@ -832,7 +956,9 @@ function consoleLauncher(profile, cwd, model, prompt) {
     const pid = /PID=(\d+)/.exec(launched.out)?.[1];
     if (!pid) throw new Error(`could not launch the agent in a console.\n${launched.out.trim()}`);
     console.log(`  launched pid=${pid} in its own console`);
-    return { stop: () => powershell(`Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue`) };
+    return {
+      stop: () => powershell(`Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue`),
+    };
   };
 }
 
@@ -858,14 +984,18 @@ function shimLauncher(profile, cwd, model, prompt) {
       env: prepared
         ? { ...process.env, ...prepared.env }
         : {
-          ...process.env,
-          OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`,
-          ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
-        },
+            ...process.env,
+            OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`,
+            ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
+          },
     });
     // Kept whole: when the trace comes back empty the agent's own output is the only evidence of
     // why, and a tail line is usually just an ANSI reset.
-    const lines = r.out.replace(/\u001b\[[0-9;]*m/g, '').split('\n').map((l) => l.trim()).filter(Boolean);
+    const lines = r.out
+      .replace(/\u001b\[[0-9;]*m/g, '')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
     for (const l of lines.slice(-3)) console.log(`  ${l.slice(0, 100)}`);
     return { stop: () => undefined, output: lines };
   };
@@ -875,22 +1005,33 @@ async function captureWithProxy(profile, cwd, model, prompt, launch) {
   if (profile.trustKeyed && !trustState(cwd).trusted) {
     throw new Error(
       `${profile.id} has not been trusted in ${cwd}, so it would stop on the trust dialog.\n` +
-      '  start it there once by hand and accept, then run this again.\n' +
-      '  capture in a directory you actually work in: the working directory is part of the\n' +
-      '  prompt, and a non-repository loses the gitStatus block entirely.',
+        '  start it there once by hand and accept, then run this again.\n' +
+        '  capture in a directory you actually work in: the working directory is part of the\n' +
+        '  prompt, and a non-repository loses the gitStatus block entirely.',
     );
   }
   const port = Number(flags.port ?? 46011);
   const deadline = Date.now() + Number(flags.timeout ?? 180) * 1000;
   killPort(port);
 
-  const attachArgs = ['attach', '--for', profile.adapter, '--port', String(port), ...upstreamArgs(profile)];
+  const attachArgs = [
+    'attach',
+    '--for',
+    profile.adapter,
+    '--port',
+    String(port),
+    ...upstreamArgs(profile),
+  ];
   console.log(`  orca ${attachArgs.join(' ')}`);
   const attachCmd = orcaCommand(attachArgs);
   const attach = spawnShim(attachCmd.name, attachCmd.args, { cwd });
   let attachOut = '';
-  attach.stdout?.on('data', (d) => { attachOut += d; });
-  attach.stderr?.on('data', (d) => { attachOut += d; });
+  attach.stdout?.on('data', (d) => {
+    attachOut += d;
+  });
+  attach.stderr?.on('data', (d) => {
+    attachOut += d;
+  });
 
   try {
     let runId;
@@ -914,7 +1055,11 @@ async function captureWithProxy(profile, cwd, model, prompt, launch) {
       let found;
       while (!found && Date.now() < deadline) {
         if (existsSync(join(dir, 'events.jsonl'))) {
-          try { found = hasPromptRequest(dir, profile); } catch { /* mid-write, retry */ }
+          try {
+            found = hasPromptRequest(dir, profile);
+          } catch {
+            /* mid-write, retry */
+          }
         }
         if (!found) await sleep(1000);
       }
@@ -922,12 +1067,15 @@ async function captureWithProxy(profile, cwd, model, prompt, launch) {
         const said = running.output?.length
           ? `\n  the agent said:\n${running.output.map((l) => `    ${l.slice(0, 120)}`).join('\n')}`
           : '';
-        const hint = profile.failureHint
-          ?? `  if the agent stopped on a trust dialog, start it once in ${cwd} by hand,\n`
-            + '  or pass --cwd with a directory it already trusts.';
+        const hint =
+          profile.failureHint ??
+          `  if the agent stopped on a trust dialog, start it once in ${cwd} by hand,\n` +
+            '  or pass --cwd with a directory it already trusts.';
         throw new Error(`no prompt-carrying request arrived within the timeout.\n${hint}${said}`);
       }
-      console.log(`  captured seq=${found.event.seq} tools=${found.got.toolNames.length} bytes=${found.event.payload.bytes}`);
+      console.log(
+        `  captured seq=${found.event.seq} tools=${found.got.toolNames.length} bytes=${found.event.payload.bytes}`,
+      );
       return runId;
     } finally {
       running.stop();
@@ -958,9 +1106,9 @@ function writeCapture(profile, cwd, runId, interactive, dirOverride) {
   const facts = responseFacts(dir, event.seq);
   if (facts.response_error && !flags['allow-failed']) {
     const err = new Error(
-      `the captured turn came back ${facts.response_error}`
-      + `${facts.response_status ? ` (status ${facts.response_status})` : ''}, so nothing was filed.\n`
-      + '  pass --allow-failed to keep the capture regardless; the prompt itself is genuine.',
+      `the captured turn came back ${facts.response_error}` +
+        `${facts.response_status ? ` (status ${facts.response_status})` : ''}, so nothing was filed.\n` +
+        '  pass --allow-failed to keep the capture regardless; the prompt itself is genuine.',
     );
     // Worth separating, because the two failures want opposite handling. A 4xx means the request
     // was wrong -- a mistyped model, a missing credential -- and filing it would create a folder
@@ -973,11 +1121,12 @@ function writeCapture(profile, cwd, runId, interactive, dirOverride) {
   const model = got.model ?? body.model ?? 'unknown-model';
   // One folder per model, as asked — but print and interactive are two different prompts for the
   // same model, so the non-default mode gets a suffix rather than overwriting the canonical one.
-  const dirName = typeof flags.dir === 'string'
-    ? flags.dir
-    : interactive === profile.defaultInteractive
-      ? model
-      : `${model}.${interactive ? 'interactive' : 'print'}`;
+  const dirName =
+    typeof flags.dir === 'string'
+      ? flags.dir
+      : interactive === profile.defaultInteractive
+        ? model
+        : `${model}.${interactive ? 'interactive' : 'print'}`;
   const dest = join(CAPTURE_DIR, dirName);
 
   // A model id does not identify a capture on its own: two harnesses can serve the same model, and
@@ -989,8 +1138,8 @@ function writeCapture(profile, cwd, runId, interactive, dirOverride) {
       const prev = JSON.parse(readFileSync(existingMeta, 'utf8'));
       if (prev.harness && prev.harness !== profile.id) {
         throw new Error(
-          `capture/${dirName} already holds a ${prev.harness} capture of ${prev.model}.\n`
-          + `  pass --dir ${profile.id}-${model} to file this one beside it.`,
+          `capture/${dirName} already holds a ${prev.harness} capture of ${prev.model}.\n` +
+            `  pass --dir ${profile.id}-${model} to file this one beside it.`,
         );
       }
     } catch (err) {
@@ -1009,10 +1158,14 @@ function writeCapture(profile, cwd, runId, interactive, dirOverride) {
 
   const promptText = `${got.blocks.map((b) => scrub(b.text.replace(/^\n+|\n+$/g, ''))).join('\n\n')}\n`;
   const leaks = audit(promptText);
-  if (leaks.length > 0) throw new Error(`scrubbing left identifying data behind: ${leaks.join('; ')}`);
+  if (leaks.length > 0)
+    throw new Error(`scrubbing left identifying data behind: ${leaks.join('; ')}`);
 
   const annotated = `${[...got.blocks, ...got.context]
-    .map((b) => `===== ${b.label} · ${b.text.length} chars${b.cache ? ` · cache=${b.cache}` : ''} =====\n${scrub(b.text)}`)
+    .map(
+      (b) =>
+        `===== ${b.label} · ${b.text.length} chars${b.cache ? ` · cache=${b.cache}` : ''} =====\n${scrub(b.text)}`,
+    )
     .join('\n\n')}\n`;
 
   const meta = {
@@ -1043,12 +1196,15 @@ function writeCapture(profile, cwd, runId, interactive, dirOverride) {
   meta.dir_slug = slug;
   // The capture folder may be disambiguated by hand (--dir) when two harnesses serve one model.
   // Under prompt/ the harness folder already does that, so the file is named for the model alone.
-  meta.prompt_slug = `${model}${interactive === profile.defaultInteractive ? '' : interactive ? '-interactive' : '-print'}`
-    .replace(/[^A-Za-z0-9._-]+/g, '-').replace(/\./g, '-');
+  meta.prompt_slug =
+    `${model}${interactive === profile.defaultInteractive ? '' : interactive ? '-interactive' : '-print'}`
+      .replace(/[^A-Za-z0-9._-]+/g, '-')
+      .replace(/\./g, '-');
   meta.prompt_dir = profile.promptDir ?? profile.id.toUpperCase();
   meta.prompt_file = `prompt/${meta.prompt_dir}/${meta.prompt_slug}-system-prompt.md`;
-  meta.regenerate = `node capture/capture.mjs ${profile.id} --model ${model}`
-    + (interactive === profile.defaultInteractive ? '' : interactive ? ' --interactive' : ' --print');
+  meta.regenerate =
+    `node capture/capture.mjs ${profile.id} --model ${model}` +
+    (interactive === profile.defaultInteractive ? '' : interactive ? ' --interactive' : ' --print');
 
   // Two copies on purpose: the capture folder stays self-contained, and `prompt/` stays a flat
   // collection you can read without walking into subdirectories. The capture-side file is the
@@ -1089,7 +1245,9 @@ function writeCapture(profile, cwd, runId, interactive, dirOverride) {
     if (readdirSync(join(cwd, '.orca', 'runs')).length === 0) {
       rmSync(join(cwd, '.orca'), { recursive: true, force: true });
     }
-  } catch { /* someone else's .orca, leave it */ }
+  } catch {
+    /* someone else's .orca, leave it */
+  }
 
   return { dest, meta };
 }
@@ -1140,7 +1298,9 @@ function mirrorPrompts(metas) {
     if (have === want) continue;
     mkdirSync(dirname(dst), { recursive: true });
     writeFileSync(dst, want, 'utf8');
-    repaired.push(`${m.dir_slug}: ${have === undefined ? 'mirror was missing' : 'mirror differed'}`);
+    repaired.push(
+      `${m.dir_slug}: ${have === undefined ? 'mirror was missing' : 'mirror differed'}`,
+    );
   }
   return repaired;
 }
@@ -1159,12 +1319,20 @@ function writeIndex() {
         writeFileSync(join(CAPTURE_DIR, d.name, 'README.md'), folderReadme(m), 'utf8');
       }
       return {
-        model: m.model, harness: m.harness, mode: m.mode, captured_at: m.captured_at,
-        prompt_chars: m.sizes?.prompt_chars, tools: m.sizes?.tools,
-        request_bytes: m.sizes?.request_bytes, prefix_tokens: m.prefix_tokens,
-        dir: `capture/${d.name}`, prompt_file: m.prompt_file,
-        dir_name: d.name, dir_slug: m.dir_slug,
-        prompt_dir: m.prompt_dir, prompt_slug: m.prompt_slug,
+        model: m.model,
+        harness: m.harness,
+        mode: m.mode,
+        captured_at: m.captured_at,
+        prompt_chars: m.sizes?.prompt_chars,
+        tools: m.sizes?.tools,
+        request_bytes: m.sizes?.request_bytes,
+        prefix_tokens: m.prefix_tokens,
+        dir: `capture/${d.name}`,
+        prompt_file: m.prompt_file,
+        dir_name: d.name,
+        dir_slug: m.dir_slug,
+        prompt_dir: m.prompt_dir,
+        prompt_slug: m.prompt_slug,
       };
     })
     .sort((a, b) => a.model.localeCompare(b.model));
@@ -1198,11 +1366,12 @@ if (!WIN && interactive) {
 
 const cwd = resolve(typeof flags.cwd === 'string' ? flags.cwd : process.cwd());
 const model = typeof flags.model === 'string' ? flags.model : profile.defaultModel;
-const userPrompt = typeof flags.prompt === 'string'
-  ? flags.prompt
-  : 'Reply with exactly: ok. Do not use any tools.';
+const userPrompt =
+  typeof flags.prompt === 'string' ? flags.prompt : 'Reply with exactly: ok. Do not use any tools.';
 
-console.log(`capturing ${profile.id}${model ? ` · ${model}` : ''} · ${interactive ? 'interactive' : 'non-interactive'}`);
+console.log(
+  `capturing ${profile.id}${model ? ` · ${model}` : ''} · ${interactive ? 'interactive' : 'non-interactive'}`,
+);
 console.log(`  cwd ${cwd}`);
 
 const fromRun = typeof flags['from-run'] === 'string' ? resolve(flags['from-run']) : undefined;
@@ -1218,9 +1387,16 @@ async function attempt() {
     console.log(`  filing existing run ${runId}`);
   } else {
     const launcher = profile.recordVia === 'attach' ? shimLauncher : consoleLauncher;
-    runId = interactive || profile.recordVia === 'attach'
-      ? await captureWithProxy(profile, cwd, model, userPrompt, launcher(profile, cwd, model, userPrompt))
-      : captureRecorded(profile, cwd, model, userPrompt);
+    runId =
+      interactive || profile.recordVia === 'attach'
+        ? await captureWithProxy(
+            profile,
+            cwd,
+            model,
+            userPrompt,
+            launcher(profile, cwd, model, userPrompt),
+          )
+        : captureRecorded(profile, cwd, model, userPrompt);
   }
   return writeCapture(profile, cwd, runId, interactive, fromRun);
 }
@@ -1246,7 +1422,9 @@ const { dest, meta } = result;
 writeIndex();
 console.log('');
 console.log(`  ${basename(dest)}/`);
-console.log(`    prompt    ${meta.sizes.prompt_chars.toLocaleString()} chars in ${meta.sizes.blocks.length} blocks`);
+console.log(
+  `    prompt    ${meta.sizes.prompt_chars.toLocaleString()} chars in ${meta.sizes.blocks.length} blocks`,
+);
 console.log(`    tools     ${meta.sizes.tools}`);
 console.log(`    request   ${meta.sizes.request_bytes.toLocaleString()} bytes`);
 if (meta.prefix_tokens) console.log(`    prefix    ${meta.prefix_tokens.toLocaleString()} tokens`);
