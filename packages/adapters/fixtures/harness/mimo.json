@@ -1,0 +1,10 @@
+{
+  "adapter": "mimo",
+  "harness_versions": ">=0.1.14",
+  "verified_at": "2026-09-04",
+  "command": "mimo",
+  "env_vars": [],
+  "base_urls": {},
+  "optional_env_vars": [],
+  "note": "Empty for the same reason OpenCode's redirect does not work, which MiMo inherits by being a fork: the provider origin lives in ~/.config/mimocode/mimocode.jsonc, not in an environment variable, so OPENAI_BASE_URL leaves the run talking past the proxy. Interception is the route, and api.xiaomimimo.com is in DEFAULT_TLS_HOSTS so the built-in xiaomi/* and mimo/* models need no extra --tls-hosts. Verified against @mimo-ai/cli 0.1.14 by running it: `orca record exec --tls-intercept -- mimo run --model xiaomi/mimo-v2.5` recorded a model exchange whose request carries 122,002 characters beginning 'You are MiMoCode, an interactive CLI tool that helps users with software engineering tasks'. The account had no valid key and the server answered 'Invalid API Key' -- which is the point: MiMo sends the request and lets the server reject it, and the prompt is in the request, so no credential is needed to capture it. Being an OpenCode fork does not mean inheriting an OpenCode installation: the two read parallel config directories, so a machine with OpenCode set up still starts MiMo on Xiaomi's provider. A provider of your own on a plain-HTTP gateway is captured by neither route, since orca sets HTTPS_PROXY and not HTTP_PROXY."
+}

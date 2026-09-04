@@ -36,6 +36,10 @@ export const DEFAULT_TLS_HOSTS: readonly string[] = [
   'api.fireworks.ai',
   'api.together.xyz',
   'openrouter.ai',
+  // Xiaomi's, reached by MiMo Code's built-in `xiaomi/*` and `mimo/*` models. A single host,
+  // not a wildcard: verified against a real run, and narrow enough to leave the vendor's
+  // sign-in and telemetry origins -- MiMo also talks to `tracking.miui.com` -- unread.
+  'api.xiaomimimo.com',
 ];
 
 /**
