@@ -112,7 +112,7 @@ assistant: Clients are marked as failed in the `connectToServer` function in src
 You are powered by the model named kilo-auto/free. The exact model ID is kilo/kilo-auto/free
 Here is some useful information about the environment you are running in:
 <env>
-  Is directory a git repo: no
+  Is directory a git repo: yes
   Platform: win32
   Today's date: Fri Sep 04 2026
   Project config: .kilo/command/*.md, .kilo/agent/*.md, kilo.json, AGENTS.md. Put new commands and agents in .kilo/. Do not use .kilocode/ or .opencode/.

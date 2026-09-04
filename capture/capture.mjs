@@ -78,10 +78,27 @@ function runExe(exe, args, opts = {}) {
  * which is what a capture needs while a fix is still in the working tree: the h2 interception the
  * Cursor profile depends on does not exist in a published build.
  */
+/**
+ * Which orca this script drives.
+ *
+ * The build in this checkout comes first, and that ordering is the whole point: a globally
+ * installed `orca` is a *release*, and a release does not know about an adapter that was added to
+ * the tree after it shipped. Running `node capture/capture.mjs kilo` against one produced
+ * "unknown adapter 'kilo'" listing the published registry -- an error about a binary the operator
+ * never meant to use, from a script sitting three directories from the source that does support
+ * it. `ORCA_BIN` still wins for anyone pointing this at a build elsewhere, and PATH is the
+ * fallback for a machine with no checkout built.
+ */
 function orcaCommand(args) {
-  const bin = process.env.ORCA_BIN;
+  const bin = process.env.ORCA_BIN ?? localOrcaBuild();
   if (bin === undefined) return { name: 'orca', args };
   return { name: process.execPath, args: [bin, ...args] };
+}
+
+/** The CLI entry point built from this checkout, or undefined when it has not been built. */
+function localOrcaBuild() {
+  const built = join(dirname(CAPTURE_DIR), 'packages', 'cli', 'dist', 'cli.js');
+  return existsSync(built) ? built : undefined;
 }
 
 /** Run a shim such as `orca.cmd`, which node cannot spawn without a shell. */
@@ -442,9 +459,17 @@ const PROFILES = {
    * the prompt is in the request -- an `Invalid API Key` run still yields a complete capture.
    *
    * One prompt for the whole `xiaomi/*` family, and it is worth knowing that is *not* a
-   * per-variant question. `mimo-v2.5`, `mimo-v2.5-pro` and `mimo-v2.5-pro-ultraspeed` all send
-   * byte-identical prompts and tool sets -- same sha256 -- so the tier changes the model behind
-   * the request and nothing about the request itself.
+   * per-variant question. Captured from the same directory, `mimo-v2.5`, `mimo-v2.5-pro` and
+   * `mimo-v2.5-pro-ultraspeed` send byte-identical prompts and tool sets -- same sha256 -- so the
+   * tier changes the model behind the request and nothing about the request itself.
+   *
+   * "From the same directory" is load-bearing, and not only here: the OpenCode family embeds the
+   * working directory's facts in the prompt. MiMo derives a project id from it, so the memory path
+   * reads `projects/global/MEMORY.md` outside a recognised project and `projects/<id>/MEMORY.md`
+   * inside one; Kilo and OpenCode carry `Is directory a git repo` and today's date, which is why
+   * the OPENCODE captures already on disk disagree with each other about the former. Two captures
+   * are comparable when they were made from the same place, and otherwise the diff is about the
+   * cwd rather than about the model.
    *
    * It does change with the *provider*, though, because being an OpenCode fork it inherits
    * per-model templates. Pointed at a GPT-family model it sends the Codex template with its own
@@ -461,11 +486,7 @@ const PROFILES = {
     recordFlags: ['--tls-intercept'],
     defaultModel: 'xiaomi/mimo-v2.5',
     recordArgs: (model, prompt) => ['--', 'run', ...(model ? ['--model', model] : []), prompt],
-    consoleArgs: (model, prompt) => [
-      'run',
-      ...(model ? ['--model', model] : []),
-      `"${prompt}"`,
-    ],
+    consoleArgs: (model, prompt) => ['run', ...(model ? ['--model', model] : []), `"${prompt}"`],
     forceAnthropicUpstream: false,
 
     extract: extractOpenAiShaped,
@@ -488,11 +509,7 @@ const PROFILES = {
     recordFlags: ['--tls-intercept'],
     defaultModel: 'kilo/kilo-auto/free',
     recordArgs: (model, prompt) => ['--', 'run', ...(model ? ['--model', model] : []), prompt],
-    consoleArgs: (model, prompt) => [
-      'run',
-      ...(model ? ['--model', model] : []),
-      `"${prompt}"`,
-    ],
+    consoleArgs: (model, prompt) => ['run', ...(model ? ['--model', model] : []), `"${prompt}"`],
     forceAnthropicUpstream: false,
 
     extract: extractOpenAiShaped,

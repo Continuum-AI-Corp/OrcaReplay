@@ -3,19 +3,10 @@
   "harness_versions": ">=0.22.3",
   "verified_at": "2026-09-04",
   "command": "qwen",
-  "env_vars": [
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_BASE_URL",
-    "DASHSCOPE_PROXY_BASE_URL",
-    "GEMINI_NEXT_GEN_API_BASE_URL",
-    "OPENAI_API_KEY",
-    "OPENAI_BASE_URL"
-  ],
+  "env_vars": ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY", "OPENAI_BASE_URL"],
   "base_urls": {
     "OPENAI_BASE_URL": "/v1",
-    "DASHSCOPE_PROXY_BASE_URL": "/v1",
-    "ANTHROPIC_BASE_URL": "",
-    "GEMINI_NEXT_GEN_API_BASE_URL": ""
+    "ANTHROPIC_BASE_URL": ""
   },
   "optional_env_vars": [
     "ANTHROPIC_AUTH_TOKEN",
@@ -25,5 +16,5 @@
     "OPENAI_MODEL",
     "QWEN_CODE_MODEL"
   ],
-  "note": "Four origins because Qwen Code reads one per provider. Taken off the installed bundle of @qwen-code/qwen-code 0.22.3 rather than inferred: DEFAULT_DASHSCOPE_BASE_URL is https://dashscope.aliyuncs.com/compatible-mode/v1 with DASHSCOPE_PROXY_BASE_URL as its override, which is the path Qwen's own models take, and GEMINI_NEXT_GEN_API_BASE_URL defaults to https://generativelanguage.googleapis.com. WEB_SEARCH_BASE_URL is read too and deliberately left alone: it is the web-search tool's endpoint, keyed separately and off unless ENABLE_WEB_SEARCH is set. The two placeholder keys appear only when the environment carries no key and ~/.qwen/oauth_creds.json is absent, so recording never makes a provider look configured that is not, and never shadows a sign-in the harness made for itself."
+  "note": "Two origins of the four Qwen Code reads, and the boundary is about what orca can put on the other end rather than about the harness. Taken off the installed bundle of @qwen-code/qwen-code 0.22.3: it also reads DASHSCOPE_PROXY_BASE_URL (overriding https://dashscope.aliyuncs.com/compatible-mode/v1, the path Qwen's own models take) and GEMINI_NEXT_GEN_API_BASE_URL (overriding https://generativelanguage.googleapis.com). Both are deliberately left pointing at their real APIs. The proxy resolves a live upstream by wire dialect, not by provider, and resolveUpstream can only name anthropic/openai origins -- so a redirected DashScope call arrives as POST /v1/chat/completions, is claimed by the openai dialect and forwarded to api.openai.com with the user's DashScope key on it, while a Gemini call hits /v1beta/models/... which no dialect claims and passthroughOrigin, which recognises only Anthropic headers, sends to api.openai.com too. Recording Qwen against those providers needs interception rather than redirection: --tls-intercept --tls-hosts '+dashscope.aliyuncs.com'. WEB_SEARCH_BASE_URL is a documented gap for a different reason -- it is the web-search tool's endpoint, keyed separately and off unless ENABLE_WEB_SEARCH is set. The two placeholder keys appear only when the environment carries no key and ~/.qwen/oauth_creds.json is absent, so recording never makes a provider look configured that is not, and never shadows a sign-in the harness made for itself."
 }

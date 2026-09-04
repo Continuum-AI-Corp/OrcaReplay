@@ -13,18 +13,34 @@ export function qwenHasOwnAuth(): boolean {
 /**
  * Qwen Code, which reaches four different providers and reads a separate origin for each.
  *
- * The four are all redirected, for the same reason OpenCode's two are: the harness picks its
- * provider from the model it was given, and an origin left pointing at the real API is traffic
- * the run never sees. Read off the installed bundle rather than guessed —
- * `DEFAULT_DASHSCOPE_BASE_URL` is `https://dashscope.aliyuncs.com/compatible-mode/v1` with
- * `DASHSCOPE_PROXY_BASE_URL` as its override, and that is the path Qwen's *own* models take, so
- * an adapter that redirected only `OPENAI_BASE_URL` would miss the default configuration.
+ * Two of the four are redirected, and the other two deliberately are not. The line is not about
+ * the harness at all — it is about what orca can put on the other end.
  *
- * Deliberately not redirected: `WEB_SEARCH_BASE_URL`. It is the web-search tool's endpoint, not
- * the agent's model origin — off unless `ENABLE_WEB_SEARCH` is set, keyed separately by
- * `WEB_SEARCH_API_KEY`, and falling back to DashScope. Pointing it at the proxy without the
- * matching key would break a tool that works today, so the search calls of a run with search
- * enabled are a known gap in the recording rather than something this adapter silently half-fixes.
+ * `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL` are moved, because the proxy can restore those
+ * origins: `resolveUpstream` produces `anthropic`, `openai` and `openai-responses` keys, and the
+ * dialects default to `api.anthropic.com` and `api.openai.com` when nothing is configured. A
+ * redirected call reaches the provider the client was already addressing.
+ *
+ * `DASHSCOPE_PROXY_BASE_URL` and `GEMINI_NEXT_GEN_API_BASE_URL` are left alone, and this is the
+ * uncomfortable part: they are the origins Qwen's *own* models and Gemini use, so leaving them is
+ * a real gap in what a run records. Redirecting them would be worse. The proxy resolves a live
+ * upstream by **wire dialect, not by provider**, and no `--upstream` form or gateway setting can
+ * name either destination — so with no gateway configured (a setup the README supports outright)
+ * a DashScope call arrives as `POST /v1/chat/completions`, is claimed by the openai dialect, and
+ * is forwarded to `api.openai.com` carrying `Authorization: Bearer <the user's DashScope key>`.
+ * A Gemini call reaches `/v1beta/models/...`, which no dialect claims, so `passthroughOrigin`
+ * guesses from headers — and it recognises only Anthropic's, treating everything else as OpenAI,
+ * which sends `x-goog-api-key` the same way. Its own comment says why that matters: "a wrong guess
+ * does not merely fail — it hands one vendor a key issued by another."
+ *
+ * So these two join `WEB_SEARCH_BASE_URL` as documented gaps. That one is the web-search tool's
+ * endpoint rather than a model origin — off unless `ENABLE_WEB_SEARCH` is set, keyed separately by
+ * `WEB_SEARCH_API_KEY` — and pointing it at the proxy without the matching key would break a tool
+ * that works today. Different reason, same conclusion: an origin orca cannot serve is one it
+ * should not take away.
+ *
+ * To record Qwen against its own models, terminate the TLS instead of moving the origin:
+ * `orca record qwen --tls-intercept --tls-hosts '+dashscope.aliyuncs.com'`.
  */
 export const qwenAdapter: Adapter = {
   id: 'qwen',
@@ -36,13 +52,12 @@ export const qwenAdapter: Adapter = {
   },
 
   async prepare(ctx: RecordContext): Promise<Launch> {
+    // Only the two origins the proxy can put a real provider behind. See the note above for why
+    // DashScope and Gemini are left pointing at their own APIs rather than at a proxy that would
+    // forward them, and their credentials, to OpenAI.
     const env: Record<string, string> = {
       OPENAI_BASE_URL: proxyBase(ctx.proxyUrl, 'v1'),
-      // DashScope is OpenAI-shaped — `compatible-mode/v1` — so it takes the same `/v1` base.
-      DASHSCOPE_PROXY_BASE_URL: proxyBase(ctx.proxyUrl, 'v1'),
       ANTHROPIC_BASE_URL: proxyBase(ctx.proxyUrl),
-      // Gemini's client appends its own `v1beta/...`, so it gets the bare origin.
-      GEMINI_NEXT_GEN_API_BASE_URL: proxyBase(ctx.proxyUrl),
     };
 
     // The same credential rule as OpenCode, and for the same two reasons. Which keys the harness
