@@ -308,6 +308,9 @@ export async function persistNetExchange(
       headers: exchange.responseHeaders,
       bytes: exchange.responseBytes,
       truncated: exchange.responseTruncated,
+      // Only when it happened, so a normal exchange carries no field saying it was normal. It
+      // reads differently from `truncated`: the agent stopped reading, orca did not stop keeping.
+      ...(exchange.abandoned ? { abandoned: true } : {}),
       duration_ms: exchange.durationMs,
     },
     payload: exchange.responseBody as never,

@@ -70,6 +70,78 @@ interface ProxiedResponse {
 }
 
 /** CONNECT, then TLS over the tunnel, then one HTTP request — a proxy-aware client in 30 lines. */
+/**
+ * A client that stops reading before the response is over.
+ *
+ * `through` resolves on `end`, which is the one thing this case never reaches. A harness reading a
+ * streaming reply only until it has its answer -- and one that gives up before the origin answers
+ * at all -- both leave the exchange half-finished, and half-finished is what has to be recorded.
+ * Returns whatever arrived before the client walked away.
+ */
+async function abandoned(
+  opts: ProxiedRequest & { leaveAfter: 'first-chunk' | 'request' },
+): Promise<string> {
+  const target = `${opts.host}:${opts.port}`;
+  const tunnel = httpRequest({
+    host: '127.0.0.1',
+    port: opts.proxyPort,
+    method: 'CONNECT',
+    path: target,
+    headers: { host: target },
+  });
+  tunnel.end();
+
+  const [res, socket, head] = (await once(tunnel, 'connect')) as [IncomingMessage, Socket, Buffer];
+  if (res.statusCode !== 200) {
+    socket.destroy();
+    throw new Error(`CONNECT refused: ${res.statusCode}`);
+  }
+  if (head.length > 0) socket.unshift(head);
+
+  const secure = tlsConnect({ socket, ca: opts.trust, host: opts.host, port: opts.port });
+  await once(secure, 'secureConnect');
+
+  return await new Promise<string>((resolve) => {
+    let seen = '';
+    const req = httpRequest(
+      {
+        createConnection: () => secure,
+        host: opts.host,
+        port: opts.port,
+        method: opts.method ?? 'GET',
+        path: opts.path ?? '/',
+        headers: { host: target, ...opts.headers },
+      },
+      (response) => {
+        response.setEncoding('utf8');
+        response.on('data', (chunk: string) => {
+          seen += chunk;
+          if (opts.leaveAfter === 'first-chunk') {
+            secure.destroy();
+            resolve(seen);
+          }
+        });
+      },
+    );
+    // No `error` rejection: tearing the socket down is the behaviour under test, so the errors it
+    // raises on this side are the expected consequence rather than a failure.
+    req.on('error', () => undefined);
+    if (opts.body !== undefined) req.write(opts.body);
+    req.end();
+    if (opts.leaveAfter === 'request') {
+      // Gone while the origin is still thinking. One beat first, so the request is on the wire
+      // before the socket goes -- that is what makes the recorded request body non-empty.
+      setTimeout(() => {
+        secure.destroy();
+        resolve(seen);
+      }, 150);
+    }
+  });
+}
+
+/** Long enough for the proxy to notice the client left and file what it had. */
+const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 300));
+
 async function through(opts: ProxiedRequest): Promise<ProxiedResponse> {
   const target = `${opts.host}:${opts.port}`;
   const tunnel = httpRequest({
@@ -307,6 +379,18 @@ describe('TLS interception', () => {
           });
           return;
         }
+        if (req.url === '/v1/chat/completions' && req.headers['x-test-hold'] !== undefined) {
+          // Held before a single response header is written, which is the state a client that
+          // gives up early leaves the exchange in: a request orca decrypted and a response that
+          // never began. Released in `afterEach` along with `/stream`.
+          void new Promise<void>((resolve) => {
+            release = resolve;
+          }).then(() => {
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end('{}');
+          });
+          return;
+        }
         if (req.url === '/v1/chat/completions') {
           res.writeHead(200, { 'content-type': 'application/json' });
           res.end(
@@ -507,6 +591,37 @@ describe('TLS interception', () => {
 
       expect(answered).toBe(true);
       expect(h2Origin.hits).toBe(1);
+    });
+
+    it('records an h2 exchange the client abandoned before the origin answered', async () => {
+      // The test above proves the proxy survives this. This one proves the run remembers it.
+      let sawStream = (): void => undefined;
+      const streamReached = new Promise<void>((resolve) => {
+        sawStream = resolve;
+      });
+      h2Origin = await startH2Origin(originCa, { delayMs: 250, onStream: () => sawStream() });
+      const handle = await startProxy([`127.0.0.1:${h2Origin.port}`]);
+
+      const session = await h2Through({
+        proxyPort: handle.port,
+        host: '127.0.0.1',
+        port: h2Origin.port,
+        trust: [runCa.certPem],
+      });
+      const request = session.request({ ':method': 'POST', ':path': '/abort' });
+      request.on('error', () => undefined);
+      request.end('hello');
+      await streamReached;
+      request.destroy();
+      await new Promise((r) => setTimeout(r, 500));
+      session.destroy();
+
+      expect(netExchanges).toHaveLength(1);
+      expect(netExchanges[0]!.abandoned).toBe(true);
+      expect(netExchanges[0]!.alpn).toBe('h2');
+      // The request reached the origin, so the bytes the agent sent are the part worth keeping.
+      expect(netExchanges[0]!.requestBody).toBe('hello');
+      expect(netExchanges[0]!.status).toBe(0);
     });
 
     it('records an exchange whose request body it cannot decode', async () => {
@@ -874,6 +989,74 @@ describe('TLS interception', () => {
 
     expect(response.body).toBe('data: first\n\ndata: second\n\n');
     expect(netExchanges[0]!.responseBody).toBe('data: first\n\ndata: second\n\n');
+  });
+
+  /**
+   * The failure that made Hermes look uncapturable.
+   *
+   * Recording used to happen only when the response reached `end`, so a client that stopped
+   * reading a streaming reply the moment it had its answer left nothing behind -- and the run
+   * reported `capture.empty` with "the agent never called the proxy", about a request orca had
+   * decrypted and forwarded itself. The prefix is the evidence, and the prefix is what gets kept.
+   */
+  it('records a streaming exchange the client walks away from mid-flight', async () => {
+    const handle = await startProxy([`127.0.0.1:${model.port}`]);
+
+    const seen = await abandoned({
+      proxyPort: handle.port,
+      host: '127.0.0.1',
+      port: model.port,
+      trust: [runCa.certPem],
+      path: '/stream',
+      leaveAfter: 'first-chunk',
+    });
+    expect(seen).toBe('data: first\n\n');
+    // The origin is left holding the second chunk on purpose. Releasing it here would let
+    // the response reach `end` and be filed the ordinary way, which is the path this test is
+    // not about; `afterEach` releases it into a socket that has already gone.
+    await settle();
+
+    expect(netExchanges).toHaveLength(1);
+    const captured = netExchanges[0]!;
+    expect(captured.abandoned).toBe(true);
+    expect(captured.status).toBe(200);
+    expect(captured.responseBody).toContain('first');
+    // Not a capture-limit truncation: orca kept everything it was handed.
+    expect(captured.responseTruncated).toBe(false);
+  });
+
+  /**
+   * An exchange with no response is evidence, not a model call.
+   *
+   * `onDecrypted` promotes a decrypted POST to a model exchange when a dialect claims the path,
+   * and a call abandoned before the answer would satisfy that on the path alone. Promoting it puts
+   * an entry in the replay set that can answer nothing and cannot be forked, so it is kept as
+   * network traffic instead -- which is what it is.
+   */
+  it('keeps a model call abandoned before the origin answered as network traffic', async () => {
+    const handle = await startProxy([`127.0.0.1:${model.port}`]);
+
+    await abandoned({
+      proxyPort: handle.port,
+      host: '127.0.0.1',
+      port: model.port,
+      trust: [runCa.certPem],
+      method: 'POST',
+      path: '/v1/chat/completions',
+      body: JSON.stringify({ model: 'gpt-5.2', messages: [{ role: 'user', content: 'hello' }] }),
+      headers: { 'content-type': 'application/json', 'x-test-hold': '1' },
+      leaveAfter: 'request',
+    });
+    // Deliberately not released here: the point is an exchange whose response never began, and
+    // letting the origin answer first would give it the status that makes it a model call.
+    // `afterEach` releases it into a socket that has already gone.
+    await settle();
+
+    expect(modelExchanges).toHaveLength(0);
+    expect(netExchanges).toHaveLength(1);
+    expect(netExchanges[0]!.abandoned).toBe(true);
+    expect(netExchanges[0]!.status).toBe(0);
+    expect(netExchanges[0]!.requestBody).toContain('gpt-5.2');
   });
 
   it('refuses an origin whose certificate it cannot verify instead of downgrading', async () => {
