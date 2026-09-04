@@ -385,6 +385,7 @@ describe('AdapterRegistry', () => {
       'opencode',
       'qwen',
       'mimo',
+      'kilo',
       'cursor',
       'grok',
       'openclaw',

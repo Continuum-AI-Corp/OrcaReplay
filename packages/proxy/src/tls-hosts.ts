@@ -40,6 +40,9 @@ export const DEFAULT_TLS_HOSTS: readonly string[] = [
   // not a wildcard: verified against a real run, and narrow enough to leave the vendor's
   // sign-in and telemetry origins -- MiMo also talks to `tracking.miui.com` -- unread.
   'api.xiaomimimo.com',
+  // Kilo's own gateway, which its built-in `kilo/*` models route through. Kilo also posts to
+  // `us.i.posthog.com`; that is not a model API and stays tunnelled.
+  'api.kilo.ai',
 ];
 
 /**

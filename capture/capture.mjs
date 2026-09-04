@@ -138,7 +138,7 @@ function parseArgs(argv) {
 
 const { harness, flags } = parseArgs(process.argv.slice(2));
 
-const USAGE = `usage: node capture/capture.mjs <claude|codex|opencode|qwen|cursor> [options]
+const USAGE = `usage: node capture/capture.mjs <claude|codex|opencode|qwen|mimo|kilo|cursor> [options]
 
   --model <id>       model to capture. default: the harness's own default
   --print            claude only: capture the -p prompt instead of the interactive one
@@ -433,6 +433,65 @@ const PROFILES = {
     extract: extractOpenAiShaped,
   },
 
+  /**
+   * MiMo Code, Xiaomi's OpenCode fork. Captured by decrypting its own origin, exactly as OpenCode
+   * is and for the same reason: the provider lives in `~/.config/mimocode/mimocode.jsonc` rather
+   * than in a variable. `api.xiaomimimo.com` is in the default host list, so no `--tls-hosts`.
+   *
+   * No credential needed. MiMo sends the request and lets the server reject an invalid key, and
+   * the prompt is in the request -- an `Invalid API Key` run still yields a complete capture.
+   *
+   * Two prompts, not one, and which you get depends on the model. Being an OpenCode fork it
+   * inherits per-model templates: `xiaomi/*` gets "You are MiMoCode, an interactive CLI tool",
+   * while a GPT-family model gets the Codex template with its own name substituted into it
+   * (`$MiMoCode_HOME` where Codex would say `$CODEX_HOME`) and `apply_patch` tooling. Worth
+   * capturing both rather than assuming the default speaks for the harness.
+   */
+  mimo: {
+    id: 'mimo',
+    adapter: 'mimo',
+    promptDir: 'MIMOCODE',
+    defaultInteractive: false,
+    recordFlags: ['--tls-intercept'],
+    defaultModel: 'xiaomi/mimo-v2.5',
+    recordArgs: (model, prompt) => ['--', 'run', ...(model ? ['--model', model] : []), prompt],
+    consoleArgs: (model, prompt) => [
+      'run',
+      ...(model ? ['--model', model] : []),
+      `"${prompt}"`,
+    ],
+    forceAnthropicUpstream: false,
+
+    extract: extractOpenAiShaped,
+  },
+
+  /**
+   * Kilo Code's CLI, a third OpenCode fork, captured the same way. `api.kilo.ai` is in the
+   * default host list.
+   *
+   * Unlike MiMo, Kilo checks entitlement *locally* before opening a connection: a model the
+   * account cannot use fails with "You need to sign in to use this model" and sends nothing, so
+   * there is nothing to capture. `kilo/kilo-auto/free` is reachable without a paid plan, which is
+   * why it is the default here.
+   */
+  kilo: {
+    id: 'kilo',
+    adapter: 'kilo',
+    promptDir: 'KILOCODE',
+    defaultInteractive: false,
+    recordFlags: ['--tls-intercept'],
+    defaultModel: 'kilo/kilo-auto/free',
+    recordArgs: (model, prompt) => ['--', 'run', ...(model ? ['--model', model] : []), prompt],
+    consoleArgs: (model, prompt) => [
+      'run',
+      ...(model ? ['--model', model] : []),
+      `"${prompt}"`,
+    ],
+    forceAnthropicUpstream: false,
+
+    extract: extractOpenAiShaped,
+  },
+
   cursor: {
     id: 'cursor',
     adapter: 'exec',
@@ -614,6 +673,11 @@ const PROFILES = {
 };
 
 // ---------------------------------------------------------------------------- scrubbing
+
+/** A model id or folder name reduced to a single path segment. */
+function flattenModelId(name) {
+  return name.replace(/[\\/]+/g, '-');
+}
 
 function gitValue(cwd, key) {
   const r = spawnSync('git', ['config', '--get', key], { cwd, encoding: 'utf8' });
@@ -1121,12 +1185,18 @@ function writeCapture(profile, cwd, runId, interactive, dirOverride) {
   const model = got.model ?? body.model ?? 'unknown-model';
   // One folder per model, as asked — but print and interactive are two different prompts for the
   // same model, so the non-default mode gets a suffix rather than overwriting the canonical one.
-  const dirName =
+  // Flattened, because a provider-qualified model id is not a path. `kilo/kilo-auto/free` left
+  // alone makes `join` read its slashes as directories, and the capture dies on
+  // `capture/kilo-auto/free/kilo-auto/free-system-prompt.md` -- a folder nobody created, reported
+  // as an ENOENT that says nothing about the cause. `prompt_slug` below has always flattened; this
+  // is the same treatment for the folder, so the two agree.
+  const dirName = flattenModelId(
     typeof flags.dir === 'string'
       ? flags.dir
       : interactive === profile.defaultInteractive
         ? model
-        : `${model}.${interactive ? 'interactive' : 'print'}`;
+        : `${model}.${interactive ? 'interactive' : 'print'}`,
+  );
   const dest = join(CAPTURE_DIR, dirName);
 
   // A model id does not identify a capture on its own: two harnesses can serve the same model, and
