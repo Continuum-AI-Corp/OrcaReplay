@@ -83,6 +83,23 @@ Measured on one machine, and the reason the table is here rather than in a folde
 | `nemotron-3-ultra-free` | opencode | `run` | 9,643 chars | 11 | - |
 | `nemotron-3.5-lightning-free` | opencode | `run` | 9,655 chars | 11 | - |
 | `gpt-5.6-sol` | opencode | `run` | 10,413 chars | 9 | 6,327 tok |
+| `gpt-5.6-sol` | qwen | `-p` | 28,285 chars | 23 | 18,258 tok |
+| `grok-4.5-high` | cursor | `-p` | 1,954 chars | 5 | - |
+| `mimo-v2.5` | mimo | `run` | 50,618 chars | 16 | - |
+| `mimo-v2.5-pro` | mimo | `run` | 50,618 chars | 16 | - |
+| `kilo-auto/free` | kilo | `run` | 11,326 chars | 13 | - |
+
+The five rows below the OpenCode block were missing until now. Three of them carry no prefix
+count: `mimo-v2.5` and `mimo-v2.5-pro` were captured with no valid key, so the server answered
+`invalid_key` and reported no usage -- the prompt is unaffected, since it travels in the request,
+which is why `capture.mjs` files these only under `--allow-failed` and says so. `grok-4.5-high`
+and `kilo-auto/free` completed, but neither response carried a usage block to read.
+
+The two MiMo rows are identical on purpose: captured from the same directory, `mimo-v2.5`,
+`mimo-v2.5-pro` and `mimo-v2.5-pro-ultraspeed` send byte-identical prompts and tool sets, same
+sha256. The tier changes the model behind the request and nothing about the request. Pointed at a
+GPT-family model instead, MiMo sends the Codex template with its own name substituted in and one
+`exec` tool rather than sixteen -- that one is not filed here, being mostly Codex's prompt.
 
 The OpenCode rows are one harness on seven models, and they are not one prompt. Three templates
 show up. Five of the free models open with *You are opencode, an interactive CLI tool that helps

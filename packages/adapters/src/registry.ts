@@ -1,12 +1,16 @@
 import type { Adapter } from '@orcareplay/plugin-api';
 import { claudeCodeAdapter } from './claude-code.js';
 import { codexAdapter } from './codex.js';
+import { cursorAdapter } from './cursor.js';
+import { kiloAdapter } from './kilo.js';
+import { mimoAdapter } from './mimo.js';
 import { execAdapter } from './exec.js';
 import { genericOpenAiAdapter } from './generic-openai.js';
 import { grokAdapter } from './grok.js';
 import { openClawAdapter } from './openclaw.js';
 import { nodeAdapter } from './node.js';
 import { openCodeAdapter } from './opencode.js';
+import { qwenAdapter } from './qwen.js';
 
 export class AdapterRegistry {
   readonly #adapters = new Map<string, Adapter>();
@@ -86,6 +90,10 @@ export function defaultAdapters(): AdapterRegistry {
   registry.register(claudeCodeAdapter);
   registry.register(codexAdapter);
   registry.register(openCodeAdapter);
+  registry.register(qwenAdapter);
+  registry.register(mimoAdapter);
+  registry.register(kiloAdapter);
+  registry.register(cursorAdapter);
   registry.register(grokAdapter);
   registry.register(openClawAdapter);
   registry.register(nodeAdapter);

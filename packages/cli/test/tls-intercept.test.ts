@@ -285,6 +285,41 @@ describe('orca record --tls-intercept', () => {
     expect(lines.join('')).toContain('tls.hosts_ignored');
   });
 
+  /** `exec` and `cursor` declare `capture: 'transport'`; the helper above records generic-openai. */
+  function recordAs(id: string, flags: string[]): ReturnType<typeof recordCommand> {
+    return recordCommand(
+      parseArgs(['record', id, '--no-fs', '--no-shell', ...flags, '--', 'node', TLS_AGENT]),
+      out,
+      workspace,
+    );
+  }
+
+  /**
+   * The mirror of the test above. That one covers hosts named without the flag; this one covers
+   * the flag missing when it is the adapter's *only* route to the traffic.
+   *
+   * A `transport` adapter points the agent nowhere on purpose, so without interception the run
+   * finishes, exits zero, and records no model traffic at all — the exact silent shape the adapter
+   * contract exists to catch. Verified by hand against the cursor adapter: `orca record cursor`
+   * with no flag answered the prompt correctly and filed `exchanges=0`.
+   */
+  it('says so up front when a transport adapter is run without interception', async () => {
+    await recordAs('exec', []);
+    expect(lines.join('')).toContain('tls.intercept_required');
+  });
+
+  it('stays quiet once the transport adapter has the interception it needs', async () => {
+    await recordAs('exec', ['--tls-intercept', '--tls-hosts', `127.0.0.1:${model.port}`]);
+    expect(lines.join('')).not.toContain('tls.intercept_required');
+  });
+
+  it('does not cry wolf at an adapter that redirects a variable of its own', async () => {
+    // generic-openai captures at the environment, so interception is optional for it and warning
+    // here would train the operator to ignore the warning that matters.
+    await record([]);
+    expect(lines.join('')).not.toContain('tls.intercept_required');
+  });
+
   it('trusts the run CA through the child environment and nowhere else', async () => {
     const result = await record(['--tls-intercept', '--tls-hosts', `127.0.0.1:${model.port}`]);
     const env = await childEnv();

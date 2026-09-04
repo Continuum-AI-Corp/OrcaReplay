@@ -78,10 +78,27 @@ function runExe(exe, args, opts = {}) {
  * which is what a capture needs while a fix is still in the working tree: the h2 interception the
  * Cursor profile depends on does not exist in a published build.
  */
+/**
+ * Which orca this script drives.
+ *
+ * The build in this checkout comes first, and that ordering is the whole point: a globally
+ * installed `orca` is a *release*, and a release does not know about an adapter that was added to
+ * the tree after it shipped. Running `node capture/capture.mjs kilo` against one produced
+ * "unknown adapter 'kilo'" listing the published registry -- an error about a binary the operator
+ * never meant to use, from a script sitting three directories from the source that does support
+ * it. `ORCA_BIN` still wins for anyone pointing this at a build elsewhere, and PATH is the
+ * fallback for a machine with no checkout built.
+ */
 function orcaCommand(args) {
-  const bin = process.env.ORCA_BIN;
+  const bin = process.env.ORCA_BIN ?? localOrcaBuild();
   if (bin === undefined) return { name: 'orca', args };
   return { name: process.execPath, args: [bin, ...args] };
+}
+
+/** The CLI entry point built from this checkout, or undefined when it has not been built. */
+function localOrcaBuild() {
+  const built = join(dirname(CAPTURE_DIR), 'packages', 'cli', 'dist', 'cli.js');
+  return existsSync(built) ? built : undefined;
 }
 
 /** Run a shim such as `orca.cmd`, which node cannot spawn without a shell. */
@@ -138,7 +155,7 @@ function parseArgs(argv) {
 
 const { harness, flags } = parseArgs(process.argv.slice(2));
 
-const USAGE = `usage: node capture/capture.mjs <claude|codex|opencode|qwen|cursor> [options]
+const USAGE = `usage: node capture/capture.mjs <claude|codex|opencode|qwen|mimo|kilo|cursor> [options]
 
   --model <id>       model to capture. default: the harness's own default
   --print            claude only: capture the -p prompt instead of the interactive one
@@ -433,6 +450,71 @@ const PROFILES = {
     extract: extractOpenAiShaped,
   },
 
+  /**
+   * MiMo Code, Xiaomi's OpenCode fork. Captured by decrypting its own origin, exactly as OpenCode
+   * is and for the same reason: the provider lives in `~/.config/mimocode/mimocode.jsonc` rather
+   * than in a variable. `api.xiaomimimo.com` is in the default host list, so no `--tls-hosts`.
+   *
+   * No credential needed. MiMo sends the request and lets the server reject an invalid key, and
+   * the prompt is in the request -- an `Invalid API Key` run still yields a complete capture.
+   *
+   * One prompt for the whole `xiaomi/*` family, and it is worth knowing that is *not* a
+   * per-variant question. Captured from the same directory, `mimo-v2.5`, `mimo-v2.5-pro` and
+   * `mimo-v2.5-pro-ultraspeed` send byte-identical prompts and tool sets -- same sha256 -- so the
+   * tier changes the model behind the request and nothing about the request itself.
+   *
+   * "From the same directory" is load-bearing, and not only here: the OpenCode family embeds the
+   * working directory's facts in the prompt. MiMo derives a project id from it, so the memory path
+   * reads `projects/global/MEMORY.md` outside a recognised project and `projects/<id>/MEMORY.md`
+   * inside one; Kilo and OpenCode carry `Is directory a git repo` and today's date, which is why
+   * the OPENCODE captures already on disk disagree with each other about the former. Two captures
+   * are comparable when they were made from the same place, and otherwise the diff is about the
+   * cwd rather than about the model.
+   *
+   * It does change with the *provider*, though, because being an OpenCode fork it inherits
+   * per-model templates. Pointed at a GPT-family model it sends the Codex template with its own
+   * name substituted into it -- `$MiMoCode_HOME` where Codex says `$CODEX_HOME` -- and exposes a
+   * single `exec` tool carrying the TypeScript declaration of every other one, instead of the 16
+   * ordinary tools the `xiaomi/*` prompt declares. Only the `xiaomi/*` capture is filed here:
+   * that is MiMo's own prompt for MiMo's own models, and the other is mostly Codex's.
+   */
+  mimo: {
+    id: 'mimo',
+    adapter: 'mimo',
+    promptDir: 'MIMOCODE',
+    defaultInteractive: false,
+    recordFlags: ['--tls-intercept'],
+    defaultModel: 'xiaomi/mimo-v2.5',
+    recordArgs: (model, prompt) => ['--', 'run', ...(model ? ['--model', model] : []), prompt],
+    consoleArgs: (model, prompt) => ['run', ...(model ? ['--model', model] : []), `"${prompt}"`],
+    forceAnthropicUpstream: false,
+
+    extract: extractOpenAiShaped,
+  },
+
+  /**
+   * Kilo Code's CLI, a third OpenCode fork, captured the same way. `api.kilo.ai` is in the
+   * default host list.
+   *
+   * Unlike MiMo, Kilo checks entitlement *locally* before opening a connection: a model the
+   * account cannot use fails with "You need to sign in to use this model" and sends nothing, so
+   * there is nothing to capture. `kilo/kilo-auto/free` is reachable without a paid plan, which is
+   * why it is the default here.
+   */
+  kilo: {
+    id: 'kilo',
+    adapter: 'kilo',
+    promptDir: 'KILOCODE',
+    defaultInteractive: false,
+    recordFlags: ['--tls-intercept'],
+    defaultModel: 'kilo/kilo-auto/free',
+    recordArgs: (model, prompt) => ['--', 'run', ...(model ? ['--model', model] : []), prompt],
+    consoleArgs: (model, prompt) => ['run', ...(model ? ['--model', model] : []), `"${prompt}"`],
+    forceAnthropicUpstream: false,
+
+    extract: extractOpenAiShaped,
+  },
+
   cursor: {
     id: 'cursor',
     adapter: 'exec',
@@ -614,6 +696,11 @@ const PROFILES = {
 };
 
 // ---------------------------------------------------------------------------- scrubbing
+
+/** A model id or folder name reduced to a single path segment. */
+function flattenModelId(name) {
+  return name.replace(/[\\/]+/g, '-');
+}
 
 function gitValue(cwd, key) {
   const r = spawnSync('git', ['config', '--get', key], { cwd, encoding: 'utf8' });
@@ -1121,12 +1208,18 @@ function writeCapture(profile, cwd, runId, interactive, dirOverride) {
   const model = got.model ?? body.model ?? 'unknown-model';
   // One folder per model, as asked — but print and interactive are two different prompts for the
   // same model, so the non-default mode gets a suffix rather than overwriting the canonical one.
-  const dirName =
+  // Flattened, because a provider-qualified model id is not a path. `kilo/kilo-auto/free` left
+  // alone makes `join` read its slashes as directories, and the capture dies on
+  // `capture/kilo-auto/free/kilo-auto/free-system-prompt.md` -- a folder nobody created, reported
+  // as an ENOENT that says nothing about the cause. `prompt_slug` below has always flattened; this
+  // is the same treatment for the folder, so the two agree.
+  const dirName = flattenModelId(
     typeof flags.dir === 'string'
       ? flags.dir
       : interactive === profile.defaultInteractive
         ? model
-        : `${model}.${interactive ? 'interactive' : 'print'}`;
+        : `${model}.${interactive ? 'interactive' : 'print'}`,
+  );
   const dest = join(CAPTURE_DIR, dirName);
 
   // A model id does not identify a capture on its own: two harnesses can serve the same model, and

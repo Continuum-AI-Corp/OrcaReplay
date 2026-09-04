@@ -68,6 +68,32 @@ describe('TLS interception host policy', () => {
     expect(policy.allows('auth.openai.com', 443)).toBe(false);
   });
 
+  /**
+   * The same rule as the OpenAI sign-in host, on the vendor where the shortcut is tempting.
+   *
+   * MiMo Code reaches four model endpoints under `xiaomimimo.com` -- the API and one token-plan
+   * host per region -- so `*.xiaomimimo.com` would be one line instead of four. It would also
+   * decrypt `platform.xiaomimimo.com`, which is the console where the API key is issued, and that
+   * is the origin this list exists to leave alone. The four are named individually for that
+   * reason, and this is what stops the shortcut coming back.
+   */
+  it("decrypts a vendor's model endpoints without reaching its key console", () => {
+    const policy = HostPolicy.from(DEFAULT_TLS_HOSTS);
+
+    for (const host of [
+      'api.xiaomimimo.com',
+      'token-plan-cn.xiaomimimo.com',
+      'token-plan-sgp.xiaomimimo.com',
+      'token-plan-ams.xiaomimimo.com',
+    ]) {
+      expect(policy.allows(host, 443), `${host} is a model endpoint`).toBe(true);
+    }
+
+    // The console issues the credential; the tracker is not a model API at all.
+    expect(policy.allows('platform.xiaomimimo.com', 443)).toBe(false);
+    expect(policy.allows('tracking.miui.com', 443)).toBe(false);
+  });
+
   it('lists what it will intercept, so the run can say so out loud', () => {
     expect(HostPolicy.from(['api.openai.com', '*.chatgpt.com']).describe()).toBe(
       'api.openai.com, *.chatgpt.com',

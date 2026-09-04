@@ -1,0 +1,10 @@
+{
+  "adapter": "kilo",
+  "harness_versions": ">=7.5.9",
+  "verified_at": "2026-09-04",
+  "command": "kilo",
+  "env_vars": [],
+  "base_urls": {},
+  "optional_env_vars": [],
+  "note": "Empty for the reason the whole OpenCode family shares, which Kilo inherits as a fork: the provider origin lives in the harness's own config rather than in an environment variable, so OPENAI_BASE_URL leaves the run talking past the proxy. Interception is the route and api.kilo.ai is in DEFAULT_TLS_HOSTS, so the built-in kilo/* models need no extra --tls-hosts. Verified against kilo 7.5.9 by running it: `orca record exec --tls-intercept --tls-hosts '+api.kilo.ai' -- kilo run --model kilo/kilo-auto/free` recorded two model.request/model.response pairs, one request carrying 44,973 characters beginning 'You are Kilo, a highly skilled software engineer with extensive knowledge in many programming languages, frameworks, design patterns, and best practices.' Kilo checks entitlement locally before opening a connection, so a model the account cannot use fails with 'You need to sign in to use this model' and sends nothing at all -- kilo/kilo-auto/free is reachable without a paid plan, which is what makes this capturable. Kilo also posts to us.i.posthog.com; not a model API, so it stays tunnelled and unread."
+}

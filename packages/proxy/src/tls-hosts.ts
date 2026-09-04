@@ -36,6 +36,21 @@ export const DEFAULT_TLS_HOSTS: readonly string[] = [
   'api.fireworks.ai',
   'api.together.xyz',
   'openrouter.ai',
+  // Xiaomi's, reached by MiMo Code's built-in `xiaomi/*` and `mimo/*` models. Named individually
+  // rather than as `*.xiaomimimo.com`, because the wildcard would also cover
+  // `platform.xiaomimimo.com` -- the console where the API key is issued, which is exactly the
+  // kind of origin the paragraph above promises to leave alone. `tracking.miui.com` is MiMo's
+  // telemetry and stays tunnelled for the same reason.
+  'api.xiaomimimo.com',
+  // The token-plan endpoints, one per region. All three are in the shipped binary alongside
+  // `api.xiaomimimo.com`; without them a run on a token plan is decrypted for none of its
+  // traffic, which reads as "orca recorded nothing" rather than as a missing host.
+  'token-plan-cn.xiaomimimo.com',
+  'token-plan-sgp.xiaomimimo.com',
+  'token-plan-ams.xiaomimimo.com',
+  // Kilo's own gateway, which its built-in `kilo/*` models route through. Kilo also posts to
+  // `us.i.posthog.com`; that is not a model API and stays tunnelled.
+  'api.kilo.ai',
 ];
 
 /**
