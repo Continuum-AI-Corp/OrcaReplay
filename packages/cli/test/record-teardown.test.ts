@@ -61,8 +61,14 @@ describe('orca record, when the run dies before the agent starts', () => {
   it(
     'exits when the adapter rejects the invocation',
     async () => {
-      // The `--` left out, so the adapter has no command to run and says so in `prepare`.
-      await failsWith(['record', 'node', 'agent.mjs'], /needs the command to run/);
+      // `--` with nothing after it: the adapter has no command to run and says so in `prepare`,
+      // which is where the proxy is already listening and the hang used to happen.
+      //
+      // `orca record node agent.mjs` — the `--` left out entirely — was the original way in, and
+      // `assertNoStrayPositionals` now refuses that before the proxy is ever opened. Better for the
+      // user and useless here: the point is to throw *inside* the guarded window, so the case has
+      // to be one that reaches `prepare` rather than one that is turned away before it.
+      await failsWith(['record', 'node', '--'], /needs the command to run/);
     },
     timeout,
   );
