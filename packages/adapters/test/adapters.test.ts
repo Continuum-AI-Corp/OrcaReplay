@@ -383,6 +383,7 @@ describe('AdapterRegistry', () => {
       'claude-code',
       'codex',
       'opencode',
+      'qwen',
       'grok',
       'openclaw',
       'node',

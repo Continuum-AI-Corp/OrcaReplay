@@ -7,6 +7,7 @@ import { grokAdapter } from './grok.js';
 import { openClawAdapter } from './openclaw.js';
 import { nodeAdapter } from './node.js';
 import { openCodeAdapter } from './opencode.js';
+import { qwenAdapter } from './qwen.js';
 
 export class AdapterRegistry {
   readonly #adapters = new Map<string, Adapter>();
@@ -86,6 +87,7 @@ export function defaultAdapters(): AdapterRegistry {
   registry.register(claudeCodeAdapter);
   registry.register(codexAdapter);
   registry.register(openCodeAdapter);
+  registry.register(qwenAdapter);
   registry.register(grokAdapter);
   registry.register(openClawAdapter);
   registry.register(nodeAdapter);

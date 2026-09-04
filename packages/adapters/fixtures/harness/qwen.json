@@ -1,0 +1,29 @@
+{
+  "adapter": "qwen",
+  "harness_versions": ">=0.22.3",
+  "verified_at": "2026-09-04",
+  "command": "qwen",
+  "env_vars": [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "DASHSCOPE_PROXY_BASE_URL",
+    "GEMINI_NEXT_GEN_API_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL"
+  ],
+  "base_urls": {
+    "OPENAI_BASE_URL": "/v1",
+    "DASHSCOPE_PROXY_BASE_URL": "/v1",
+    "ANTHROPIC_BASE_URL": "",
+    "GEMINI_NEXT_GEN_API_BASE_URL": ""
+  },
+  "optional_env_vars": [
+    "ANTHROPIC_AUTH_TOKEN",
+    "DASHSCOPE_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "OPENAI_MODEL",
+    "QWEN_CODE_MODEL"
+  ],
+  "note": "Four origins because Qwen Code reads one per provider. Taken off the installed bundle of @qwen-code/qwen-code 0.22.3 rather than inferred: DEFAULT_DASHSCOPE_BASE_URL is https://dashscope.aliyuncs.com/compatible-mode/v1 with DASHSCOPE_PROXY_BASE_URL as its override, which is the path Qwen's own models take, and GEMINI_NEXT_GEN_API_BASE_URL defaults to https://generativelanguage.googleapis.com. WEB_SEARCH_BASE_URL is read too and deliberately left alone: it is the web-search tool's endpoint, keyed separately and off unless ENABLE_WEB_SEARCH is set. The two placeholder keys appear only when the environment carries no key and ~/.qwen/oauth_creds.json is absent, so recording never makes a provider look configured that is not, and never shadows a sign-in the harness made for itself."
+}
