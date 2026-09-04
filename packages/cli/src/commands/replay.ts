@@ -461,6 +461,28 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
       workspace.dir,
       args.bool('json'),
     );
+  } catch (err) {
+    // A listening proxy keeps node's event loop alive, so a throw here printed the error and then
+    // hung forever. The agent that was recorded is not always installed where the recording is
+    // replayed — that is half the point of a trace — and `spawn <agent> ENOENT` is what that looks
+    // like from in here.
+    //
+    // The fork path below already does this, and `orca record` does it too. This was the third of
+    // the three and the one still missing it, which is visible from the outside as `orca replay`
+    // being the one command of the three that has to be killed.
+    //
+    // The replay's own trace is sealed rather than abandoned, for the reason the fork gives: a run
+    // that failed to launch is still a run someone will want to read, and an unsealed trace has no
+    // `ended_at` or `integrity`, so `verifyIntegrity` calls it tampered with rather than unfinished.
+    await proxy.close().catch(() => undefined);
+    await writes.drain().catch(() => undefined);
+    if (trace) {
+      await trace
+        .append({ type: 'run.end', actor: 'orca', turn: 0, attrs: { error: String(err) } })
+        .catch(() => undefined);
+      await trace.close().catch(() => undefined);
+    }
+    throw err;
   } finally {
     // In a finally because the whole justification for restoring over the working tree is that it
     // is put back — a throw between here and there would leave someone's checkout holding a
