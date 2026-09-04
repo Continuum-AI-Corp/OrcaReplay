@@ -106,13 +106,40 @@ export async function writeFetchHook(dir: string): Promise<string> {
  * Quoted, because these variables are split on whitespace and a macOS home directory routinely has
  * a space in it — an unquoted path makes the runtime reject the whole variable, and the agent then
  * never starts at all.
+ *
+ * And escaped inside those quotes, because the quoting is where the runtime's own parser starts
+ * treating a backslash as an escape rather than as a separator. Unquoted, `C:\\run\\hook.cjs` arrives
+ * intact; quoted, the same path arrives as `C:runhook.cjs` and the preload is not found. So a
+ * Windows path worked until someone put the project in a directory with a space in its name —
+ * `My Projects`, `Google Drive`, anything under `Program Files` — and then every run went
+ * uninstrumented. The rule belongs to the parser, not to the platform: a backslash is a legal
+ * character in a POSIX filename too, and a POSIX path holding one is mangled the same way once a
+ * space elsewhere in it forces the quotes.
  */
 function withHook(flag: string, hookPath: string, existing: string | undefined): string {
-  const quoted = hookPath.includes(' ') ? `"${hookPath}"` : hookPath;
+  const needsQuotes = hookPath.includes(' ');
+  const quoted = needsQuotes ? `"${escapeForOptionsParser(hookPath)}"` : hookPath;
   const current = existing ?? '';
   if (current.includes(quoted)) return current;
+
+  // A build from before the escaping wrote the path quoted but raw, which the parser cannot read.
+  // Recognising only the new spelling would append a second `--require` and leave the unreadable
+  // one to be loaded first, so the whole variable still fails — replace it instead of adding to it.
+  const stale = needsQuotes ? `"${hookPath}"` : hookPath;
+  if (current.includes(stale)) return current.split(stale).join(quoted);
+
   const added = `${flag} ${quoted}`;
   return current === '' ? added : `${current} ${added}`;
+}
+
+/**
+ * A path that survives being read back out of a quoted options variable.
+ *
+ * Checked against node 22 on Windows: `--require "C:\\a b\\h.cjs"` reports
+ * `Cannot find module 'C:abh.cjs'`, while the same path with its backslashes doubled loads.
+ */
+function escapeForOptionsParser(path: string): string {
+  return path.replaceAll('\\', '\\\\');
 }
 
 /** `NODE_OPTIONS` with the hook added. */

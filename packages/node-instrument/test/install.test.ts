@@ -105,6 +105,50 @@ describe('nodeOptionsWithHook', () => {
     expect(composed).toContain('"/Users/a b/run/hook.cjs"');
   });
 
+  /**
+   * The quoting is where the parser starts reading a backslash as an escape. Unquoted,
+   * `C:\\run\\hook.cjs` reaches the loader intact; quoted, the same path reaches it as
+   * `C:runhook.cjs` and the preload is silently not found — so orca worked until the project sat in
+   * a directory with a space in its name, and then every run went uninstrumented.
+   *
+   * Checked against node 22: doubling the backslashes loads the hook, leaving them does not.
+   */
+  it('escapes backslashes inside the quotes, which the parser would otherwise eat', () => {
+    const composed = nodeOptionsWithHook(String.raw`C:\My Projects\run\hook.cjs`, undefined);
+    expect(composed).toBe(String.raw`--require "C:\\My Projects\\run\\hook.cjs"`);
+  });
+
+  /**
+   * The rule is the parser's, not the platform's: a backslash is a legal character in a POSIX
+   * filename, and one in a path that also holds a space is mangled exactly the same way.
+   */
+  it('escapes them on POSIX too, where the same parser reads the same variable', () => {
+    const path = '/home/d/a b/od' + String.fromCharCode(92) + 'd/hook.cjs';
+    expect(nodeOptionsWithHook(path, undefined)).toContain(
+      'od' + String.fromCharCode(92) + String.fromCharCode(92) + 'd',
+    );
+  });
+
+  /**
+   * The guard that stops the hook being added twice has to recognise the path, not one spelling of
+   * it. A build from before the escaping left `--require "C:\a b\h.cjs"` in the variable; matching
+   * only the new spelling appends a second `--require` and leaves the unreadable one to be loaded
+   * first, so the run dies exactly as it did before the fix.
+   */
+  it('replaces an unescaped hook left by an older build rather than adding a second', () => {
+    const path = String.raw`C:\My Projects\run\hook.cjs`;
+    const stale = `--require "${path}"`;
+    const composed = nodeOptionsWithHook(path, stale);
+    expect(composed.match(/--require/g)).toHaveLength(1);
+    expect(composed).toBe(String.raw`--require "C:\\My Projects\\run\\hook.cjs"`);
+  });
+
+  /** A path with no space is not quoted, so nothing is escaped and nothing needs to be. */
+  it('leaves an unquoted path exactly as it was', () => {
+    const path = String.raw`C:\run\hook.cjs`;
+    expect(nodeOptionsWithHook(path, undefined)).toBe(`--require ${path}`);
+  });
+
   it('does not add the hook twice', () => {
     const once = nodeOptionsWithHook('/run/hook.cjs', undefined);
     expect(nodeOptionsWithHook('/run/hook.cjs', once)).toBe(once);
