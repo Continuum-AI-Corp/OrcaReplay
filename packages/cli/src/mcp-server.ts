@@ -93,7 +93,9 @@ export const MCP_TOOLS: McpTool[] = [
     description:
       'Re-run a recording exactly, with the network blocked and no tokens spent, and report what ' +
       'could not be reproduced: divergences, and requests the recording could not serve. Free ' +
-      'and repeatable. Use it to confirm a failure is deterministic before trying to explain it.',
+      'and repeatable. It shows the recorded decisions still reproduce; it cannot show a fresh ' +
+      'run would fail the same way, because the model is not asked again — its recorded ' +
+      'responses are served back.',
     inputSchema: {
       type: 'object',
       properties: {
