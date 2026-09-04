@@ -88,12 +88,19 @@ Measured on one machine, and the reason the table is here rather than in a folde
 | `mimo-v2.5` | mimo | `run` | 50,618 chars | 16 | - |
 | `mimo-v2.5-pro` | mimo | `run` | 50,618 chars | 16 | - |
 | `kilo-auto/free` | kilo | `run` | 11,326 chars | 13 | - |
+| `nemotron-3.5-lightning-free` | hermes | `-z` | 7,742 chars | 19 | - |
 
 The five rows below the OpenCode block were missing until now. Three of them carry no prefix
 count: `mimo-v2.5` and `mimo-v2.5-pro` were captured with no valid key, so the server answered
 `invalid_key` and reported no usage -- the prompt is unaffected, since it travels in the request,
 which is why `capture.mjs` files these only under `--allow-failed` and says so. `grok-4.5-high`
-and `kilo-auto/free` completed, but neither response carried a usage block to read.
+and `kilo-auto/free` completed, but neither response carried a usage block to read. Hermes
+completed too, on the same anonymous tier, and its response carried no usage block either.
+
+`nemotron-3.5-lightning-free` appears twice, which is the most direct comparison in this
+table: one free model, two harnesses, 9,655 characters and 11 tools from OpenCode against
+7,742 and 19 from Hermes. Same model, same anonymous endpoint, different instructions and a
+different tool surface -- the harness is the variable, and this is the pair that isolates it.
 
 The two MiMo rows are identical on purpose: captured from the same directory, `mimo-v2.5`,
 `mimo-v2.5-pro` and `mimo-v2.5-pro-ultraspeed` send byte-identical prompts and tool sets, same

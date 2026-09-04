@@ -51,6 +51,10 @@ export const DEFAULT_TLS_HOSTS: readonly string[] = [
   // Kilo's own gateway, which its built-in `kilo/*` models route through. Kilo also posts to
   // `us.i.posthog.com`; that is not a model API and stays tunnelled.
   'api.kilo.ai',
+  // Nous Research's, reached by Hermes on its own models. The inference host only: sign-in,
+  // billing and subscription management are on `portal.nousresearch.com`, which is where the API
+  // key is issued and is the kind of origin this list exists to leave alone.
+  'inference-api.nousresearch.com',
 ];
 
 /**
