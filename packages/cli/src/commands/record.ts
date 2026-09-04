@@ -179,6 +179,21 @@ async function runRecording(
   if (tls.ca) minted.push(tls.ca);
   const ca = tls.ca;
 
+  // The mirror of the warning inside `setupTlsCapture`, which fires when hosts are named without
+  // interception. This one fires when interception is the adapter's *only* route to the traffic
+  // and it was not asked for: a `transport` adapter redirects nothing on purpose, so without
+  // `--tls-intercept` the run completes, exits zero and records no model traffic at all. That is
+  // the precise shape of failure the adapter contract exists to catch, and it deserves to be said
+  // out loud rather than inferred from an empty trace. `tls.ca` is minted only when interception
+  // is on, which makes it the signal.
+  if (adapter.capture === 'transport' && !tls.ca) {
+    out.warn('tls.intercept_required', {
+      adapter: adapter.id,
+      reason: 'this adapter points the agent nowhere and relies on interception',
+      next: "add --tls-intercept, and --tls-hosts '+host' for a host outside the defaults",
+    });
+  }
+
   /** Model exchanges the proxy actually captured — the number the warning below turns on. */
   let modelExchanges = 0;
   /**

@@ -1,6 +1,7 @@
 import type { Adapter } from '@orcareplay/plugin-api';
 import { claudeCodeAdapter } from './claude-code.js';
 import { codexAdapter } from './codex.js';
+import { cursorAdapter } from './cursor.js';
 import { execAdapter } from './exec.js';
 import { genericOpenAiAdapter } from './generic-openai.js';
 import { grokAdapter } from './grok.js';
@@ -88,6 +89,7 @@ export function defaultAdapters(): AdapterRegistry {
   registry.register(codexAdapter);
   registry.register(openCodeAdapter);
   registry.register(qwenAdapter);
+  registry.register(cursorAdapter);
   registry.register(grokAdapter);
   registry.register(openClawAdapter);
   registry.register(nodeAdapter);

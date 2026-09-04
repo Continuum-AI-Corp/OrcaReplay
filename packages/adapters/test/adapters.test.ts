@@ -384,6 +384,7 @@ describe('AdapterRegistry', () => {
       'codex',
       'opencode',
       'qwen',
+      'cursor',
       'grok',
       'openclaw',
       'node',
@@ -399,11 +400,14 @@ describe('AdapterRegistry', () => {
   it('names the known ids and the escape hatch when an id is unknown', () => {
     let message = '';
     try {
-      defaultAdapters().get('cursor');
+      // Not a harness anyone will write an adapter for. It used to be `cursor`, which stopped
+      // being unknown the moment one was added -- and the test then passed an id that resolved,
+      // threw nothing, and asserted against an empty string.
+      defaultAdapters().get('not-an-agent');
     } catch (err) {
       message = (err as Error).message;
     }
-    expect(message).toContain('cursor');
+    expect(message).toContain('not-an-agent');
     expect(message).toContain('claude-code');
     expect(message).toContain('generic-openai');
   });

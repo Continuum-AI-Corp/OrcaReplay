@@ -1,0 +1,10 @@
+{
+  "adapter": "cursor",
+  "harness_versions": null,
+  "verified_at": "2026-09-04",
+  "command": "cursor-agent",
+  "env_vars": [],
+  "base_urls": {},
+  "optional_env_vars": [],
+  "note": "Empty by design, and the emptiness is the contract: Cursor's agent stream goes to hosts of its own over HTTP/2 in Connect-over-protobuf with the endpoint compiled in, so there is no origin to move and no credential to pass — the redirect happens underneath, at the socket, when the run is given --tls-intercept. Verified against build 2026.09.02-c22c1a3; harness_versions stays null because Cursor ships date-stamped builds rather than semver, and a range in a vocabulary the harness does not use would say nothing. Two things the operator supplies because this adapter cannot: --tls-hosts '+*.cursor.sh' (a recorded run reached api2.cursor.sh, repo42.cursor.sh and agentn.global.api5.cursor.sh, and the shard numbers vary per account, so it needs the wildcard — which is kept out of DEFAULT_TLS_HOSTS because a wildcard over a vendor's whole domain would decrypt its sign-in origins too), and --trust, which the agent requires to run non-interactively and which is a permission grant no adapter should make on someone's behalf."
+}
