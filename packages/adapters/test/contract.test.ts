@@ -1,8 +1,10 @@
 import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
+import { join, posix, win32 } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   CONTRACT_CHECKS,
   checkAdapterContract,
+  isInside,
   defaultAdapters,
   formatContractResult,
   passKey,
@@ -411,6 +413,27 @@ describe('no-foreign-paths', () => {
     expect(await failedChecks(tidy)).toEqual([]);
   });
 
+  /**
+   * The fixture above joins with a forward slash, which is why the Windows failure went unseen:
+   * that shape matched even when the comparison only knew about `/`. `path.join` is what the real
+   * adapters use, and on Windows it spells the whole path with backslashes.
+   */
+  it('accepts a runDir path built the way the real adapters build one', async () => {
+    const joined = goodAdapter({
+      async prepare(ctx: RecordContext) {
+        return {
+          command: 'fixture',
+          args: [],
+          env: {
+            OPENAI_BASE_URL: proxyBase(ctx.proxyUrl, 'v1'),
+            MYAGENT_CONFIG: join(ctx.runDir, 'myagent.json'),
+          },
+        };
+      },
+    });
+    expect(await failedChecks(joined)).toEqual([]);
+  });
+
   it('does not mistake the path segment of the proxy url for a filesystem path', async () => {
     const withPath = goodAdapter({
       async prepare(ctx: RecordContext) {
@@ -500,5 +523,38 @@ describe('checkAdapterContract', () => {
     const result = await checkAdapterContract(goodAdapter({ id: 'bad', harnessVersions: 'nope' }));
     expect(formatContractResult(result)).toContain('bad');
     expect(formatContractResult(result)).toContain('harness-versions');
+  });
+});
+
+/**
+ * The containment rule itself, against both flavours, on whatever platform runs the suite.
+ *
+ * Two wrong answers were available here and the first fix picked the second one. Comparing with a
+ * forward slash only says no to a real Windows path inside runDir; normalising the separators by
+ * hand says yes to a POSIX file whose *name* contains a backslash, which is a leak check clearing
+ * the thing it exists to catch. Only the platform's own rules give both answers correctly.
+ */
+describe('isInside', () => {
+  const BS = String.fromCharCode(92);
+
+  it('accepts a Windows path under the base, spelled with backslashes', () => {
+    expect(isInside(`C:${BS}run${BS}hook.cjs`, `C:${BS}run`, win32)).toBe(true);
+    expect(isInside(`C:${BS}run`, `C:${BS}run`, win32)).toBe(true);
+  });
+
+  it('rejects a Windows sibling that merely shares a prefix', () => {
+    expect(isInside(`C:${BS}runaway${BS}x`, `C:${BS}run`, win32)).toBe(false);
+  });
+
+  it('rejects a POSIX file whose name contains a backslash, which is not a separator there', () => {
+    expect(isInside(`/tmp/run${BS}evil`, '/tmp/run', posix)).toBe(false);
+  });
+
+  it('accepts a POSIX path under the base', () => {
+    expect(isInside('/tmp/run/hook.cjs', '/tmp/run', posix)).toBe(true);
+  });
+
+  it('rejects an empty base rather than treating everything as inside it', () => {
+    expect(isInside('/tmp/run/x', '', posix)).toBe(false);
   });
 });
