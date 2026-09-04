@@ -475,7 +475,16 @@ describe('TLS interception', () => {
 
     it('survives an origin response that arrives after the client has gone', async () => {
       let answered = false;
-      h2Origin = await startH2Origin(originCa, { delayMs: 250 });
+      // Waited for rather than slept past. The assertion below is that the origin saw the stream,
+      // and the proxy has to complete a TLS handshake and open an h2 session upstream before it
+      // can — so a fixed 40ms was a bet on how long that takes. It came in under the wire on one
+      // CI runner and not on another, and `expected +0 to be 1` is what losing that bet looks
+      // like. Shortening the sleep to zero reproduces it three times out of three.
+      let sawStream = (): void => undefined;
+      const streamReached = new Promise<void>((resolve) => {
+        sawStream = resolve;
+      });
+      h2Origin = await startH2Origin(originCa, { delayMs: 250, onStream: () => sawStream() });
       const handle = await startProxy([`127.0.0.1:${h2Origin.port}`]);
 
       const session = await h2Through({
@@ -487,7 +496,7 @@ describe('TLS interception', () => {
       const request = session.request({ ':method': 'POST', ':path': '/abort' });
       request.on('error', () => undefined);
       request.end('hello');
-      await new Promise((r) => setTimeout(r, 40));
+      await streamReached;
       // The client gives up while the origin is still thinking. Responding on this stream
       // afterwards raises ERR_HTTP2_INVALID_STREAM from inside an event callback, which used to
       // be an uncaught exception and took the proxy process with it.
