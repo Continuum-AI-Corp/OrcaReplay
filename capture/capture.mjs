@@ -441,11 +441,17 @@ const PROFILES = {
    * No credential needed. MiMo sends the request and lets the server reject an invalid key, and
    * the prompt is in the request -- an `Invalid API Key` run still yields a complete capture.
    *
-   * Two prompts, not one, and which you get depends on the model. Being an OpenCode fork it
-   * inherits per-model templates: `xiaomi/*` gets "You are MiMoCode, an interactive CLI tool",
-   * while a GPT-family model gets the Codex template with its own name substituted into it
-   * (`$MiMoCode_HOME` where Codex would say `$CODEX_HOME`) and `apply_patch` tooling. Worth
-   * capturing both rather than assuming the default speaks for the harness.
+   * One prompt for the whole `xiaomi/*` family, and it is worth knowing that is *not* a
+   * per-variant question. `mimo-v2.5`, `mimo-v2.5-pro` and `mimo-v2.5-pro-ultraspeed` all send
+   * byte-identical prompts and tool sets -- same sha256 -- so the tier changes the model behind
+   * the request and nothing about the request itself.
+   *
+   * It does change with the *provider*, though, because being an OpenCode fork it inherits
+   * per-model templates. Pointed at a GPT-family model it sends the Codex template with its own
+   * name substituted into it -- `$MiMoCode_HOME` where Codex says `$CODEX_HOME` -- and exposes a
+   * single `exec` tool carrying the TypeScript declaration of every other one, instead of the 16
+   * ordinary tools the `xiaomi/*` prompt declares. Only the `xiaomi/*` capture is filed here:
+   * that is MiMo's own prompt for MiMo's own models, and the other is mostly Codex's.
    */
   mimo: {
     id: 'mimo',
