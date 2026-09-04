@@ -166,7 +166,17 @@ const snap = async (ms) => {
 };
 
 const hold = (kind, last) =>
-  last ? 2600 : kind === 'cmd' ? 540 : kind === 'gap' ? 190 : kind === 'note' ? 1000 : kind === 'ink' ? 620 : 450;
+  last
+    ? 2600
+    : kind === 'cmd'
+      ? 540
+      : kind === 'gap'
+        ? 190
+        : kind === 'note'
+          ? 1000
+          : kind === 'ink'
+            ? 620
+            : 450;
 
 for (const [si, scene] of SCENES.entries()) {
   await page.evaluate(
@@ -213,4 +223,6 @@ console.log(`${TARGET}: ${files.length} frames, ${(bytes.length / 1024).toFixed(
 console.log(`total runtime: ${(delays.reduce((a, b) => a + b, 0) / 1000).toFixed(1)}s`);
 console.log('for the mp4:');
 console.log(`  ffmpeg -f concat -safe 0 -i ${join(FRAMES, 'list.txt')}`);
-console.log(`    -vf fps=25,format=yuv420p -c:v libx264 -crf 20 ${join(HERE, 'fable-capture.mp4')}`);
+console.log(
+  `    -vf fps=25,format=yuv420p -c:v libx264 -crf 20 ${join(HERE, 'fable-capture.mp4')}`,
+);

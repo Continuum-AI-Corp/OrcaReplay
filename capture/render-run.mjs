@@ -35,7 +35,11 @@ const LINES = [
   ['cmd', '$ node capture/capture.mjs claude --model claude-opus-5 --port 46081', 900],
   ['ink', 'capturing claude · claude-opus-5 · interactive', 420],
   ['dim', '  cwd D:\\your\\repo', 380],
-  ['dim', '  orca attach --for claude --port 46081 --upstream-anthropic https://api.anthropic.com', 700],
+  [
+    'dim',
+    '  orca attach --for claude --port 46081 --upstream-anthropic https://api.anthropic.com',
+    700,
+  ],
   ['ok', '  launched pid=33076 in its own console', 2600],
   ['ok', '  captured seq=4 tools=35 bytes=171461', 900],
   ['gap', '', 200],
@@ -74,8 +78,9 @@ const html =
   `<!doctype html><meta charset="utf-8"><style>${CSS}</style>` +
   `<div class="chrome"><span class="dot"></span><span class="dot"></span><span class="dot"></span>` +
   `<span style="margin-left:.4rem">ONE COMMAND, ONE SYSTEM PROMPT ON DISK</span></div>` +
-  `<div class="body">${LINES.map(([k, t], i) =>
-    `<div class="l ${k}" id="l${i}">${esc(t) || '&nbsp;'}</div>`).join('')}</div>`;
+  `<div class="body">${LINES.map(
+    ([k, t], i) => `<div class="l ${k}" id="l${i}">${esc(t) || '&nbsp;'}</div>`,
+  ).join('')}</div>`;
 
 const browser = await chromium.launch({ executablePath: EDGE });
 const page = await browser.newPage({ viewport: { width: 900, height: 410 }, deviceScaleFactor: 1 });
@@ -95,7 +100,9 @@ for (const [i, [, , hold]] of LINES.entries()) {
 }
 await browser.close();
 
-const files = readdirSync(FRAMES).filter((f) => f.endsWith('.png')).sort();
+const files = readdirSync(FRAMES)
+  .filter((f) => f.endsWith('.png'))
+  .sort();
 const enc = GIFEncoder();
 const ref = PNG.sync.read(readFileSync(join(FRAMES, files[files.length - 1])));
 const palette = quantize(new Uint8ClampedArray(ref.data), 48, { format: 'rgb565' });
@@ -112,5 +119,7 @@ enc.finish();
 const bytes = Buffer.from(enc.bytes());
 writeFileSync(TARGET, bytes);
 rmSync(FRAMES, { recursive: true, force: true });
-console.log(`${TARGET}: ${files.length} frames, ${(bytes.length / 1024).toFixed(0)} KB, ` +
-  `${(delays.reduce((a, b) => a + b, 0) / 1000).toFixed(1)}s`);
+console.log(
+  `${TARGET}: ${files.length} frames, ${(bytes.length / 1024).toFixed(0)} KB, ` +
+    `${(delays.reduce((a, b) => a + b, 0) / 1000).toFixed(1)}s`,
+);
