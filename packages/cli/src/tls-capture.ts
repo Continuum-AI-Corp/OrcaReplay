@@ -151,6 +151,11 @@ export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCaptur
  */
 function warnUnclaimed(out: Output, reported: Set<string>, exchange: NetExchange): void {
   if (exchange.method !== 'POST') return;
+  // No response ever arrived, so this one is not evidence that a path went unrecognised. It is
+  // kept as network traffic because an exchange with nothing to replay cannot be a model exchange
+  // whatever dialect exists -- and telling the operator to write one would not change that. A
+  // harness that opens a call and leaves would otherwise print this on every turn.
+  if (exchange.status === 0) return;
   const body = exchange.requestBody.trim();
   if (!body.startsWith('{')) return;
   // A truncated body cannot parse — it was cut mid-JSON at the capture limit. Requiring a parse
