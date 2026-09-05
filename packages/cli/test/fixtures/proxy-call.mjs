@@ -62,12 +62,23 @@ export async function callThroughProxy(target, trust = trustFromEnv()) {
         });
       },
     );
+    // Errors are the expected consequence of `leave`, not a failure of the call.
     req.on('error', (err) => {
+      if (target.leave) return;
       secure.destroy();
       reject(err);
     });
     if (target.body !== undefined) req.write(target.body);
     req.end();
+    if (target.leave) {
+      // The agent got what it came for and stopped reading. One beat first, so the request is on
+      // the wire before the socket goes -- that is what leaves a decrypted request with no
+      // response behind it.
+      setTimeout(() => {
+        secure.destroy();
+        resolve({ status: undefined, body: '', issuer, abandoned: true });
+      }, 150);
+    }
   });
 }
 
