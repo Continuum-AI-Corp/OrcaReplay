@@ -515,6 +515,45 @@ const PROFILES = {
     extract: extractOpenAiShaped,
   },
 
+  /**
+   * Hermes is the only Python harness here, and the only one whose origin cannot be moved at all.
+   *
+   * `OPENAI_BASE_URL` is not a route into it -- verified against a listener, not assumed -- so the
+   * origin stays where Hermes put it and `--tls-intercept` reads the traffic in place. The prompt
+   * travels in the request, so it is read the ordinary way.
+   *
+   * `--provider opencode-free` is the tier served anonymously, which is what makes this runnable
+   * with no key and no credential in the capture. Its origin is `opencode.ai`, a website as much
+   * as a gateway, so it is named explicitly rather than defaulted into the allowlist. `-z` is the
+   * non-interactive flag; without it Hermes opens a session and waits.
+   */
+  hermes: {
+    id: 'hermes',
+    adapter: 'hermes',
+    promptDir: 'HERMES',
+    defaultInteractive: false,
+    recordFlags: ['--tls-intercept', '--tls-hosts', '+opencode.ai'],
+    defaultModel: 'nemotron-3.5-lightning-free',
+    recordArgs: (model, prompt) => [
+      '--',
+      '--provider',
+      'opencode-free',
+      ...(model ? ['-m', model] : []),
+      '-z',
+      prompt,
+    ],
+    consoleArgs: (model, prompt) => [
+      '--provider',
+      'opencode-free',
+      ...(model ? ['-m', model] : []),
+      '-z',
+      `"${prompt}"`,
+    ],
+    forceAnthropicUpstream: false,
+
+    extract: extractOpenAiShaped,
+  },
+
   cursor: {
     id: 'cursor',
     adapter: 'exec',

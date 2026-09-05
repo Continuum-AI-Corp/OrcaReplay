@@ -367,7 +367,17 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
    */
   function onDecrypted(exchange: NetExchange): void {
     const dialect = selectDialect(dialects, exchange.path);
-    if (dialect && exchange.method === 'POST' && !exchange.requestTruncated) {
+    // `status === 0` means no response header was ever seen: the client abandoned the call before
+    // the origin answered. The request is still worth keeping -- it is what the agent asked --
+    // but a model exchange with no response is not one, and inserting it in the replay set gives
+    // the matcher an entry that can answer nothing and cannot be forked. It goes below as network
+    // traffic instead, which is what it is.
+    if (
+      dialect &&
+      exchange.method === 'POST' &&
+      !exchange.requestTruncated &&
+      exchange.status !== 0
+    ) {
       try {
         // Codex's HTTPS fallback currently labels this SSE body as application/json. The wire
         // framing is authoritative when the provider header is not, otherwise we lose the

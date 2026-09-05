@@ -44,7 +44,7 @@ describe('orca record --tls-intercept', () => {
   let ambient: Record<string, string | undefined>;
 
   async function startOrigin(
-    handler: (path: string) => { status: number; body: string },
+    handler: (path: string) => { status: number; body: string } | undefined,
   ): Promise<{ port: number; close: () => Promise<void> }> {
     const issued = originCa.issue('127.0.0.1');
     const server = createHttpsServer({ key: issued.keyPem, cert: issued.certPem }, (req, res) => {
@@ -52,6 +52,10 @@ describe('orca record --tls-intercept', () => {
       req.on('data', (c: Buffer) => void chunks.push(c));
       req.on('end', () => {
         const reply = handler(req.url ?? '/');
+        // `undefined` means never answer. That is the only way to hold an exchange in the state a
+        // client that leaves early puts it in -- request decrypted, no response header ever sent
+        // -- deterministically, rather than by racing a fast origin.
+        if (!reply) return;
         res.writeHead(reply.status, { 'content-type': 'application/json' });
         res.end(reply.body);
       });
@@ -76,10 +80,11 @@ describe('orca record --tls-intercept', () => {
       status: 200,
       body: JSON.stringify({ served: path, note: 'MODEL-BODY-MARKER' }),
     }));
-    bank = await startOrigin(() => ({
-      status: 200,
-      body: JSON.stringify({ balance: 'BANK-BODY-MARKER' }),
-    }));
+    bank = await startOrigin((path) =>
+      path === '/v3/never'
+        ? undefined
+        : { status: 200, body: JSON.stringify({ balance: 'BANK-BODY-MARKER' }) },
+    );
 
     lines = [];
     out = new Output({ write: (s) => void lines.push(s), isTTY: false });
@@ -267,6 +272,25 @@ describe('orca record --tls-intercept', () => {
 
     const warnings = lines.join('').match(/tls\.unclaimed_path/g) ?? [];
     expect(warnings).toHaveLength(1);
+  });
+
+  it('stays quiet about a call the agent abandoned before the origin answered', async () => {
+    // Same path and the same JSON body as the warning test above, so the only difference is that
+    // this one never got a response. `add a dialect for it` cannot help an exchange with nothing
+    // to replay, and a harness that opens calls and leaves would print this every turn.
+    process.env.ORCA_TEST_TARGETS = JSON.stringify([
+      {
+        host: '127.0.0.1',
+        port: bank.port,
+        path: '/v3/never',
+        method: 'POST',
+        body: JSON.stringify({ prompt: 'hello' }),
+        leave: true,
+      },
+    ]);
+    await record(['--tls-intercept', '--tls-hosts', `127.0.0.1:${bank.port}`]);
+
+    expect(lines.join('')).not.toContain('tls.unclaimed_path');
   });
 
   it('stays quiet about traffic that was never a model call to begin with', async () => {

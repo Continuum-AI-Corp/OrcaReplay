@@ -271,9 +271,17 @@ function parts(event: TraceEvent): RowParts {
       return { label: pick(a, 'url', 'host'), detail: pick(a, 'method') };
     case 'net.response': {
       const status = num(a['status']);
+      // `abandoned` says the agent stopped reading before the response ended, which is a thing
+      // agents do on purpose once a streaming reply has answered them. Named on the row, because
+      // that case arrives as `status 0` -- and a bare zero reads like a failure the run never had.
+      const parts = [
+        status === undefined ? undefined : `status ${status}`,
+        a['abandoned'] === true ? 'client left' : undefined,
+      ].filter((part): part is string => part !== undefined);
       return {
         label: pick(a, 'url', 'host'),
-        detail: status === undefined ? '' : `status ${status}`,
+        detail: parts.join(' · '),
+        // Still not attention: the agent leaving early is its own behaviour, not orca's problem.
         tone: status !== undefined && status >= 400 ? 'attention' : 'normal',
       };
     }

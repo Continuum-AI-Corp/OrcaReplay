@@ -84,6 +84,16 @@ export interface NetExchange {
    * question a trace cannot answer.
    */
   alpn?: string;
+  /**
+   * True when the client went away before the response finished, so the body here is a prefix of
+   * what the origin sent rather than the whole of it.
+   *
+   * Distinct from `responseTruncated`, which means the capture limit was reached: one says orca
+   * stopped keeping bytes, the other says the agent stopped asking for them. A harness that reads
+   * a streaming reply only until it has its answer produces this on every turn, and an exchange
+   * recorded this way is the only evidence such a run leaves behind.
+   */
+  abandoned?: boolean;
   durationMs: number;
 }
 
@@ -494,6 +504,56 @@ export function attachTlsIntercept(
       };
 
       /**
+       * Response state, hoisted so an abandoned exchange is still recorded.
+       *
+       * Same gap the HTTP/1.1 path had: recording happened only in `upstream.on('end')`, so a
+       * client that stopped reading a streaming reply mid-flight left no trace of a request orca
+       * had already decrypted. `status` stays 0 until the origin answers, which is what tells
+       * `onDecrypted` this one has no response to replay.
+       */
+      let status = 0;
+      let recorded = false;
+      const recordableResponse: Record<string, string> = {};
+
+      const emit = (abandoned: boolean): void => {
+        if (recorded) return;
+        recorded = true;
+        counters.intercepted += 1;
+        // A body orca cannot decode is still an exchange worth having. `decodeRequestBody` throws
+        // for zstd on a runtime without it -- inside `engines`, and why the repo's own zstd test is
+        // skipped there -- and an exception in this callback would take the process down with the
+        // exchange unrecorded. server.ts already decodes inside a try/catch for the same reason.
+        let recordedRequest: string;
+        try {
+          recordedRequest = decodeRequestBody(requestBody.buffer(), contentEncoding);
+        } catch (err) {
+          options.onFailure?.({
+            host: target.host,
+            port: target.port,
+            reason: `request body left opaque: ${String(err)}`,
+          });
+          recordedRequest = requestBody.text();
+        }
+        options.onNetExchange?.({
+          host: target.host,
+          port: target.port,
+          method,
+          path,
+          requestHeaders: recordableHeaders,
+          requestBody: recordedRequest,
+          requestTruncated: requestBody.truncated,
+          status,
+          alpn: 'h2',
+          responseHeaders: recordableResponse,
+          responseBody: responseBody.text(),
+          responseTruncated: responseBody.truncated,
+          responseBytes: responseBody.bytes,
+          abandoned,
+          durationMs: Date.now() - startedAt,
+        });
+      };
+
+      /**
        * The client can go at any point, and every write after that throws.
        *
        * `stream.respond` on a destroyed stream raises ERR_HTTP2_INVALID_STREAM synchronously from
@@ -502,6 +562,7 @@ export function attachTlsIntercept(
        * Node 22 with a client RST at 60 ms and an origin answering at 400 ms.
        */
       const abandon = (): void => {
+        emit(true);
         upstream.destroy();
         finish();
       };
@@ -527,8 +588,7 @@ export function attachTlsIntercept(
 
       upstream.on('error', reject);
       upstream.on('response', (responseHeaders) => {
-        const status = Number(responseHeaders[H2.HTTP2_HEADER_STATUS] ?? 0);
-        const recordableResponse: Record<string, string> = {};
+        status = Number(responseHeaders[H2.HTTP2_HEADER_STATUS] ?? 0);
         const downstream: Record<string, string | string[] | number> = { ':status': status };
         for (const [name, value] of Object.entries(responseHeaders)) {
           const key = name.toLowerCase();
@@ -561,40 +621,10 @@ export function attachTlsIntercept(
         });
         upstream.on('end', () => {
           if (settled) return;
+          // Recorded before the stream is closed out, so the `close` listener above cannot win the
+          // race and file the same exchange as abandoned.
+          emit(false);
           if (!stream.destroyed) stream.end();
-          counters.intercepted += 1;
-          // A body orca cannot decode is still an exchange worth having. `decodeRequestBody`
-          // throws for zstd on a runtime without it -- inside `engines`, and why the repo's own
-          // zstd test is skipped there -- and an exception in this callback would take the process
-          // down with the exchange unrecorded. server.ts already decodes inside a try/catch for
-          // the same reason.
-          let recordedRequest: string;
-          try {
-            recordedRequest = decodeRequestBody(requestBody.buffer(), contentEncoding);
-          } catch (err) {
-            options.onFailure?.({
-              host: target.host,
-              port: target.port,
-              reason: `request body left opaque: ${String(err)}`,
-            });
-            recordedRequest = requestBody.text();
-          }
-          options.onNetExchange?.({
-            host: target.host,
-            port: target.port,
-            method,
-            path,
-            requestHeaders: recordableHeaders,
-            requestBody: recordedRequest,
-            requestTruncated: requestBody.truncated,
-            status,
-            alpn: 'h2',
-            responseHeaders: recordableResponse,
-            responseBody: responseBody.text(),
-            responseTruncated: responseBody.truncated,
-            responseBytes: responseBody.bytes,
-            durationMs: Date.now() - startedAt,
-          });
           finish();
         });
       });
@@ -691,9 +721,86 @@ export function attachTlsIntercept(
     }
 
     const finished = new Promise<void>((resolve, reject) => {
-      upstream.on('error', reject);
+      /**
+       * What has been read so far, hoisted out of the response handler so that an exchange the
+       * client walks away from is still recorded.
+       *
+       * Streaming is the normal case for a model API, and a harness that stops reading the moment
+       * it has what it needs leaves the rest of the stream on the floor. `onNetExchange` used to
+       * fire only from `end`, so those runs recorded nothing at all: the request had been
+       * decrypted and the response headers were in hand, and the run still reported
+       * `capture.empty` with "the agent never called the proxy" -- the opposite of what happened.
+       * Hermes is the harness that showed it; the shape is not specific to Hermes.
+       */
+      let recorded = false;
+      let status = 0;
+      const responseHeaders: Record<string, string> = {};
+      const responseBody = new Capture(maxCaptured);
+
+      const emit = (abandoned: boolean): void => {
+        if (recorded) return;
+        recorded = true;
+        counters.intercepted += 1;
+        // A body orca cannot decode is still an exchange worth having, and an exception thrown in
+        // this callback would take the process down with it. Same guard, same reason, as h2.
+        let recordedRequest: string;
+        try {
+          recordedRequest = decodeRequestBody(
+            requestBody.buffer(),
+            typeof req.headers['content-encoding'] === 'string'
+              ? req.headers['content-encoding']
+              : undefined,
+          );
+        } catch (err) {
+          options.onFailure?.({
+            host: target.host,
+            port: target.port,
+            reason: `request body left opaque: ${String(err)}`,
+          });
+          recordedRequest = requestBody.text();
+        }
+        options.onNetExchange?.({
+          host: target.host,
+          port: target.port,
+          method: req.method ?? 'GET',
+          path,
+          requestHeaders: recordableHeaders,
+          requestBody: recordedRequest,
+          requestTruncated: requestBody.truncated,
+          status,
+          alpn: alpnOf(req.socket),
+          responseHeaders,
+          responseBody: responseBody.text(),
+          responseTruncated: responseBody.truncated,
+          responseBytes: responseBody.bytes,
+          abandoned,
+          durationMs: Date.now() - startedAt,
+        });
+      };
+
+      /** The client is gone: keep what was read, stop pulling from the origin, and settle. */
+      const abandon = (): void => {
+        emit(true);
+        upstream.destroy();
+        resolve();
+      };
+      res.on('close', () => {
+        if (!recorded) abandon();
+      });
+
+      upstream.on('error', (err) => {
+        // A client that has already left is not an upstream failure to report. Asked of `res`
+        // only: `req` destroys itself once its body has been read, so a request with no body has
+        // `req.destroyed` set long before anything went wrong, and reading it here turned every
+        // upstream failure -- an origin certificate orca refuses to trust, most of all -- into a
+        // silent abandonment with no 502 for the client to see.
+        if (res.destroyed) {
+          abandon();
+          return;
+        }
+        reject(err);
+      });
       upstream.on('response', (originRes) => {
-        const responseHeaders: Record<string, string> = {};
         const outHeaders: Record<string, string | string[]> = {};
         for (const [name, value] of Object.entries(originRes.headers)) {
           const key = name.toLowerCase();
@@ -703,43 +810,45 @@ export function attachTlsIntercept(
             responseHeaders[key] = value;
           }
         }
+        status = originRes.statusCode ?? 0;
+        if (res.destroyed) {
+          abandon();
+          return;
+        }
         res.writeHead(originRes.statusCode ?? 502, outHeaders);
 
         // Tee, never buffer. A model reply arrives over seconds and the agent renders it as it
         // lands; reading it to completion first would make every turn appear to hang.
-        const responseBody = new Capture(maxCaptured);
         originRes.on('data', (chunk: Buffer) => {
           responseBody.add(chunk);
+          if (res.destroyed) {
+            abandon();
+            return;
+          }
           if (!res.write(chunk)) {
             originRes.pause();
+            // `drain` never fires on a destroyed response, so a client that goes mid-stream would
+            // otherwise leave the origin paused for good and the exchange unrecorded.
             res.once('drain', () => originRes.resume());
           }
         });
-        originRes.on('error', reject);
+        originRes.on('aborted', abandon);
+        originRes.on('error', (err) => {
+          if (res.destroyed) {
+            abandon();
+            return;
+          }
+          // Recorded before rejecting: the response headers are already in hand, and an origin
+          // that dies mid-stream is exactly the run worth having the prefix of.
+          emit(true);
+          reject(err);
+        });
         originRes.on('end', () => {
+          if (recorded) return;
+          // Recorded before the response is closed out, so that the `close` listener above cannot
+          // win the race and file the same exchange as abandoned.
+          emit(false);
           res.end();
-          counters.intercepted += 1;
-          options.onNetExchange?.({
-            host: target.host,
-            port: target.port,
-            method: req.method ?? 'GET',
-            path,
-            requestHeaders: recordableHeaders,
-            requestBody: decodeRequestBody(
-              requestBody.buffer(),
-              typeof req.headers['content-encoding'] === 'string'
-                ? req.headers['content-encoding']
-                : undefined,
-            ),
-            requestTruncated: requestBody.truncated,
-            status: originRes.statusCode ?? 0,
-            alpn: alpnOf(req.socket),
-            responseHeaders,
-            responseBody: responseBody.text(),
-            responseTruncated: responseBody.truncated,
-            responseBytes: responseBody.bytes,
-            durationMs: Date.now() - startedAt,
-          });
           resolve();
         });
       });
