@@ -14,7 +14,11 @@ onto a different model and see who gets it right.
 for Claude, GPT, Gemini, Grok, DeepSeek, Qwen and the rest. It is what `orca setup` points at by
 default, and what makes `orca compare` a single command instead of four provider accounts.
 
-[All models](https://www.orcarouter.ai/models) · [OrcaCode Review](https://www.orcarouter.ai/code-review) · [X](https://x.com/OrcaRouter) · [Hugging Face](https://huggingface.co/orcarouter)
+Find us: [OrcaRouter All model APIs](https://www.orcarouter.ai/models) 
+
+Github Repos: [OrcaCode Review](https://www.orcarouter.ai/code-review) · [OrcaRouter Lite](https://github.com/Continuum-AI-Corp/OrcaRouter-Lite) 
+
+Connect: [X](https://x.com/OrcaRouter) · [Discord](https://discord.com/invite/YEubt8enRA) · [Hugging Face](https://huggingface.co/orcarouter) · [Ollama](https://ollama.com/orcarouter)
 
 <br clear="left">
 
