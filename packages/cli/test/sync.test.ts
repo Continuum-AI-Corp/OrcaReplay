@@ -1,5 +1,5 @@
 import { createServer, type Server } from 'node:http';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -405,5 +405,47 @@ describe('push and pull', () => {
     expect(await readFile(join(dir, 'events.jsonl'), 'utf8')).toBe('{"seq":7}\n');
     // The stranded copy is gone rather than sitting out of scrub's reach forever.
     expect(await readdir(join(workspace, '.orca', 'runs'))).toEqual([runId]);
+  });
+  /**
+   * A PULLED RUN IS AS SENSITIVE AS A RECORDED ONE, AND THE STORE SAYS SO IN TWO WAYS.
+   *
+   * `ensureRunsDir` is what record, attach and replay all go through, and it does two things this
+   * command was silently skipping: it creates `.orca/runs` mode 0700, and it writes `.orca/.gitignore`
+   * containing `*` — git's own idiom for a directory that excludes itself. Pull wrote into the store
+   * with a bare recursive mkdir instead, so under a default umask the run landed 0755/0644 and the
+   * whole store appeared in `git status`, one `git add -A` from being committed.
+   *
+   * Both consequences bite hardest in the case pull exists for: a fresh clone with no recording yet,
+   * where pull is the command that CREATES the store. So the fixture below starts from an empty
+   * workspace rather than seeding a run first.
+   */
+  it('creates the store with the modes and the .gitignore the rest of the CLI uses', async () => {
+    reply = {
+      status: 200,
+      body: Buffer.from(
+        await writeArchive([
+          {
+            name: `${runId}/manifest.json`,
+            bytes: new TextEncoder().encode(`{"run_id":"${runId}"}\n`),
+          },
+          { name: `${runId}/events.jsonl`, bytes: new TextEncoder().encode('{"seq":1}\n') },
+          { name: `${runId}/blobs/ab/abcdef`, bytes: new Uint8Array([9, 8, 7]) },
+        ]),
+      ),
+    };
+
+    await pullCommand(parseArgs(['pull', runId]), out, workspace, env());
+
+    // The store excludes itself from git — the accident ensureRunsDir exists to prevent.
+    expect(await readFile(join(workspace, '.orca', '.gitignore'), 'utf8')).toContain('*');
+
+    // SECURITY.md: "Trace files and blobs are written mode 0600, run directories 0700."
+    const mode = async (...p: string[]): Promise<number> =>
+      (await stat(join(workspace, '.orca', 'runs', ...p))).mode & 0o777;
+    expect(await mode(runId)).toBe(0o700);
+    expect(await mode(runId, 'blobs')).toBe(0o700);
+    expect(await mode(runId, 'manifest.json')).toBe(0o600);
+    expect(await mode(runId, 'events.jsonl')).toBe(0o600);
+    expect(await mode(runId, 'blobs', 'ab', 'abcdef')).toBe(0o600);
   });
 });

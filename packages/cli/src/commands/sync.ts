@@ -1,6 +1,6 @@
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
-import { resolveRunSelector, runDirFor } from '@orcareplay/core';
+import { ensureRunsDir, resolveRunSelector, runDirFor } from '@orcareplay/core';
 import type { ParsedArgs } from '../args.js';
 import type { Output } from '../out.js';
 import { readConfig, gatewayHeaders, sameOrigin, type OrcaConfig } from '../config.js';
@@ -39,6 +39,18 @@ import { readArchive, writeArchive, type ArchiveEntry } from '../archive.js';
  * that reports success locally and is rejected — or worse, accepted with a root that no longer
  * describes the events.
  */
+
+/**
+ * The store's file modes, the same constants core/src/writer.ts and core/src/blobs.ts use.
+ *
+ * SECURITY.md states them as a promise — "Trace files and blobs are written mode 0600, run
+ * directories 0700" — and a pulled run is exactly as sensitive as a recorded one: it is the
+ * gateway's copy of the same source, shell output and workspace snapshots. Passing the mode to
+ * mkdir/writeFile is not sufficient on its own, because the process umask masks bits out of a
+ * creation mode; the explicit chmod after the fact is what actually makes the promise true.
+ */
+const FILE_MODE = 0o600;
+const DIR_MODE = 0o700;
 
 /** The endpoint paths this speaks, kept together because they are the whole API surface. */
 const UPLOAD_PATH = '/api/replay/runs';
@@ -302,6 +314,21 @@ export async function pullCommand(
   // packages/core/src/paths.ts), and the id here came off the wire. readArchive already refuses an
   // entry name that would escape, so this is the second of two independent checks on a value the
   // gateway chose — which is the right number for one that becomes a filesystem path.
+  // THE STORE MUST EXIST ON THE STORE'S OWN TERMS (codex round 3 P1).
+  //
+  // record, attach and replay all create `.orca/runs` through ensureRunsDir; pull wrote into it
+  // with a bare recursive mkdir and inherited none of what that function is for. Two things were
+  // lost, and both matter most in the case pull exists for — a fresh clone with no recording yet,
+  // where pull is what creates the store:
+  //
+  //   - the 0700 directory and 0600 files SECURITY.md promises. A default umask gives 0755/0644,
+  //     so a pulled trace — the gateway's copy of source, shell output and workspace snapshots —
+  //     was world-readable on a shared machine.
+  //   - `.orca/.gitignore` containing `*`, git's own idiom for a directory that excludes itself.
+  //     Without it the whole store lands in `git status` as untracked, one `git add -A` from being
+  //     committed and pushed. That is the accident ensureRunsDir was written to prevent.
+  await ensureRunsDir(cwd);
+
   const dest = runDirFor(cwd, runId);
 
   // Finish or roll back whatever a previous, interrupted pull of this run left behind, BEFORE
@@ -342,12 +369,15 @@ export async function pullCommand(
   const retired = `${dest}.replaced`;
 
   try {
+    await mkdir(staging, { recursive: true, mode: DIR_MODE });
+    await chmod(staging, DIR_MODE).catch(() => undefined);
     for (const entry of entries) {
       const rel = entry.name.slice(entry.name.indexOf('/') + 1);
       if (rel === '' || entry.name.indexOf('/') < 0) continue;
       const path = join(staging, ...rel.split('/'));
-      await mkdir(dirname(path), { recursive: true });
-      await writeFile(path, entry.bytes);
+      await mkdir(dirname(path), { recursive: true, mode: DIR_MODE });
+      await writeFile(path, entry.bytes, { mode: FILE_MODE });
+      await chmod(path, FILE_MODE).catch(() => undefined);
     }
 
     // INSIDE the try: if another process recreated `dest` between the stat above and here, this
