@@ -381,7 +381,7 @@ and turned on under **Settings → request logs**; a gateway that is only record
 is the normal state.
 
 ```console
-$ export ORCA_GATEWAY_URL=https://your-gateway
+$ export ORCA_GATEWAY_URL=https://api.orcarouter.ai   # or your own gateway
 $ read -rs ORCA_GATEWAY_KEY && export ORCA_GATEWAY_KEY   # not typed on the command line
 $ orca push last
 ```
@@ -395,8 +395,10 @@ key you exported for your own gateway.
 - **Never a default destination.** `orca setup` may default the *model* gateway to OrcaRouter,
   because proxying a call your agent was already making is not a disclosure. A run is: it holds
   source, shell output and workspace snapshots, which travel with it as content-addressed blobs.
-  So push has no default host, and `push.packed` reports the file count and byte size *before* the
-  request goes out rather than after.
+  So push has no default host: `ORCA_GATEWAY_URL` above is a line you type, not one `orca setup`
+  fills in for you — naming OrcaRouter there is a destination you chose, and the CLI still has
+  none of its own. `push.packed` also reports the file count and byte size *before* the request
+  goes out rather than after.
 - **Never a key to a host it was not set up for.** Every credential has a home — the stored key's
   is `orca setup`'s gateway, an exported key's is `ORCA_GATEWAY_URL` — and it is attached only when
   the destination matches that home. `--gateway` changes where the run goes, not what the key was
