@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -159,7 +160,24 @@ describe('shell shim', () => {
     expect(contents).not.toBe('');
     expect(shim.shimmed).toContain('sh');
     expect(shim.shimmed).toContain('bash');
+    // zsh is the shell OpenCode's tool resolves to on macOS, where it execs `$SHELL` by absolute
+    // path — the shim only captures anything there because a `zsh` shim exists to point at.
+    expect(shim.shimmed).toContain('zsh');
+    expect(await readFile(join(shim.dir, 'zsh'), 'utf8').catch(() => '')).not.toBe('');
   });
+
+  // Where zsh exists at all, its shim must pass a command through and record it. macOS has one
+  // at /bin/zsh; a minimal Linux image may not, and that is a fact about the image, not the shim.
+  const zshOnPath = ['/bin/zsh', '/usr/bin/zsh', '/usr/local/bin/zsh'].some((p) => existsSync(p));
+  it.skipIf(process.platform === 'win32' || !zshOnPath)(
+    'passes a zsh command through byte for byte and records it',
+    async () => {
+      const result = await through('zsh', ['-c', 'printf zsh-out']);
+      expect(result.stdout).toBe('zsh-out');
+      const [frame] = await readShellFrames(shim.framesPath);
+      expect(frame).toMatchObject({ name: 'zsh', argv: ['-c', 'printf zsh-out'] });
+    },
+  );
 
   it.skipIf(process.platform !== 'win32')(
     'writes command shims Windows can launch from PATH',
@@ -168,7 +186,7 @@ describe('shell shim', () => {
       expect(contents).toContain('@echo off');
       expect(contents).toContain('%*');
       expect(await readFile(join(shim.dir, 'bash.cmd'), 'utf8')).not.toBe('');
-      expect(shim.shimmed).toEqual(['sh', 'bash']);
+      expect(shim.shimmed).toEqual(['sh', 'bash', 'zsh']);
     },
   );
 });

@@ -213,6 +213,7 @@ async function runRecording(
     mode: 'record',
     upstream: plan.upstream,
     upstreamHeaders: plan.headers,
+    upstreamHeadersOrigin: plan.headersOrigin,
     onExchange: (exchange: RecordedExchange) => {
       modelExchanges += 1;
       writes.push(() => persist(exchange));
@@ -499,9 +500,9 @@ async function runRecording(
   /**
    * Shell capture that was on and recorded nothing.
    *
-   * `installShellShim` succeeding means a `bash` and an `sh` were written into the run directory
-   * and put at the front of PATH. It does not mean the harness went through them, and on Windows
-   * Claude Code does not: it finds its shell without consulting PATH, so the shim sits there
+   * `installShellShim` succeeding means a `sh`, a `bash` and a `zsh` were written into the run
+   * directory and put at the front of PATH. It does not mean the harness went through them, and
+   * on Windows Claude Code does not: it finds its shell without consulting PATH, so the shim sits
    * unused while `shell=on` is printed and the frames file stays empty. What is lost is precisely
    * what only the shim can see — the real exit code, the real duration, and which stream each byte
    * came from — while the commands still appear as tool calls, so nothing looks wrong.

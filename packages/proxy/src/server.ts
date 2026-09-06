@@ -30,6 +30,7 @@ import {
   selectDialect,
   type Dialect,
 } from './dialects.js';
+import { decodeForwardPath, type ForwardPath } from './forward.js';
 import {
   attachTlsIntercept,
   decodeRequestBody,
@@ -144,8 +145,17 @@ export interface ProxyOptions {
   fetchImpl?: typeof fetch;
   host?: string;
   port?: number;
-  /** Extra headers to attach to live upstream calls (an API key the agent never saw). */
+  /** Extra headers attached to live upstream calls, and the origin they belong to. */
   upstreamHeaders?: Record<string, string>;
+  /**
+   * The origin {@link upstreamHeaders} are meant for, when they belong to one.
+   *
+   * The gateway's key goes on requests to the gateway and on nothing else: a forwarded request
+   * can name a destination the gateway is not, and attaching the credential anyway would hand a
+   * third party a key they were never meant to see. Unset keeps the old behaviour — headers on
+   * every live call — for callers that attach them per purpose rather than per origin.
+   */
+  upstreamHeadersOrigin?: string;
   /**
    * Where to send a POST whose path no dialect claims.
    *
@@ -317,6 +327,19 @@ function json(res: ServerResponse, status: number, body: unknown): void {
   const text = JSON.stringify(body);
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(text);
+}
+
+/**
+ * Whether two origin strings name the same scheme, host and port — the test a credential must
+ * pass before travelling with a request. Same shape as the copy in the CLI's upstream plan,
+ * which cannot be imported from here: the proxy is a leaf, and the comparison is two lines.
+ */
+function sameOrigin(a: string, b: string): boolean {
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch {
+    return a.replace(/\/+$/, '') === b.replace(/\/+$/, '');
+  }
 }
 
 export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
@@ -509,6 +532,23 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       )
     : undefined;
 
+  /**
+   * The configured extra headers for one outbound call — only when the call is going where they
+   * belong.
+   *
+   * `upstreamHeaders` exist to put a gateway's credential on calls to that gateway. With a
+   * forwarded request naming its own destination, "every live call" would put the credential on
+   * someone else's origin, so the origin the headers name is attached to them and compared here.
+   * Callers that set headers without an origin get the old behaviour: on every call, their
+   * responsibility.
+   */
+  function headersForOrigin(origin: string): Record<string, string> {
+    const extra = options.upstreamHeaders;
+    if (extra === undefined) return {};
+    if (options.upstreamHeadersOrigin === undefined) return extra;
+    return sameOrigin(origin, options.upstreamHeadersOrigin) ? extra : {};
+  }
+
   async function goLive(
     dialect: Dialect,
     path: string,
@@ -519,6 +559,13 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     recordableHeaders: Record<string, string>,
     res: ServerResponse,
     startedAt: number,
+    /**
+     * The base URL the request itself names, from a `/forward/` path. It restores the destination
+     * orca took the call away from, so it outranks only the dialect's vendor default — an upstream
+     * the operator configured is an instruction and wins. Dropped on a cross-provider fork, where
+     * the model asked for is being served by a different origin on purpose.
+     */
+    forwardBase?: string,
   ): Promise<void> {
     stats.liveCalls += 1;
 
@@ -551,9 +598,27 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     // is the common one: someone who passed --upstream-anthropic pointed *this run* at a specific
     // origin, and a gateway serves both dialects from it. Going to api.openai.com instead because
     // the fork changed model would ignore an instruction the user gave explicitly.
+    // Where this call goes, in strict order of who decided it. A `/forward/` path names its own
+    // destination — that is the whole point of the encoding — so on a live call that orca is
+    // merely relaying (record, or a loose replay continuing past its recording) the request's own
+    // base outranks every configured origin: a gateway picked up from `orca setup` is a default
+    // for calls orca would otherwise have to guess at, not a licence to readdress one that
+    // announces where it was headed. A fork is different: substituting the model is the operator
+    // choosing where answers come from, so the fork target's explicit upstream — or the gateway —
+    // decides, and the forwarded base is dropped as incoherent for the substitution.
+    const relaying = options.forkModel === undefined && !crossProvider;
     const origin =
-      options.upstream?.[target.id] ?? options.upstream?.[dialect.id] ?? target.defaultUpstream;
-    const upstreamPath = crossProvider ? target.requestPath : path;
+      relaying && forwardBase !== undefined
+        ? forwardBase
+        : (options.upstream?.[target.id] ??
+          options.upstream?.[dialect.id] ??
+          target.defaultUpstream);
+    // A relayed call keeps the path the client appended, because the base it names expects
+    // exactly that. Everything else is answered by an origin orca chose, which expects the
+    // dialect's own path — and the incoming path cannot be trusted to be it: a bare base url
+    // (no `/v1`) reaches this proxy as `/chat/completions`, and a gateway handed that without the
+    // version segment answers 404.
+    const upstreamPath = relaying && forwardBase !== undefined ? path : target.requestPath;
 
     // Spec §2: "a gateway chose a model". Orca *is* the gateway on this path — it substitutes the
     // model, picks the wire format that serves it, and picks the origin — and it was making all
@@ -582,7 +647,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       headers: {
         'content-type': 'application/json',
         ...headersForModel(headers, options.forkModel),
-        ...(options.upstreamHeaders ?? {}),
+        ...headersForOrigin(origin),
       },
       body: outboundBody,
     });
@@ -664,8 +729,13 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
    * a base URL; the client's own headers say which provider that was, and its own credential is
    * already on the request addressed to them.
    */
-  function passthroughOrigin(headers: Record<string, string>): string {
+  function passthroughOrigin(headers: Record<string, string>, forwardBase?: string): string {
     if (options.passthroughUpstream !== undefined) return options.passthroughUpstream;
+    // A relayed request's own destination, before anything configured: on a live call with no
+    // model substitution, the request says where it was headed, and a gateway picked up from
+    // setup is a default for calls orca would otherwise guess at — not a readdressing of one that
+    // announces its own. A fork is a substitution, and its configured origins decide instead.
+    if (options.forkModel === undefined && forwardBase !== undefined) return forwardBase;
     const configured = [...new Set(Object.values(options.upstream ?? {}))];
     if (configured.length === 1) return configured[0]!;
     const names = new Set(Object.keys(headers).map((h) => h.toLowerCase()));
@@ -692,6 +762,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     recordableHeaders: Record<string, string>,
     res: ServerResponse,
     startedAt: number,
+    forwardBase?: string,
   ): Promise<void> {
     // `hybrid` is a fork, and a fork runs a live agent — so it forwards, exactly as `record` does.
     // Refusing here killed the fork on the first call orca could not read, which is the failure
@@ -710,7 +781,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     }
 
     stats.passedThrough += 1;
-    const origin = passthroughOrigin(headers);
+    const origin = passthroughOrigin(headers, forwardBase);
     const upstreamRes = await doFetch(`${origin}${path}`, {
       method: 'POST',
       // `upstreamHeaders` too, as `goLive` does. Omitting them sent a gateway the agent's own
@@ -719,7 +790,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       headers: {
         'content-type': 'application/json',
         ...headers,
-        ...(options.upstreamHeaders ?? {}),
+        ...headersForOrigin(origin),
       },
       body: rawBody,
     });
@@ -853,14 +924,21 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       return;
     }
 
-    const dialect = selectDialect(dialects, path);
+    // A `/forward/` path carries the base URL the client was actually given — see
+    // `decodeForwardPath`. The dialect reads the real path behind the prefix, and everything
+    // recorded below does too, so the trace shows the conversation the agent had, not the
+    // envelope orca wrapped it in.
+    const forward: ForwardPath | undefined = decodeForwardPath(path);
+    const dialectPath = forward?.path ?? path;
+
+    const dialect = selectDialect(dialects, dialectPath);
     // Only a POST is ever a model call. Relaxing this to `!dialect && …` let a PUT or a DELETE on
     // a dialect path through to `goLive`, which forwarded it upstream and recorded it as a model
     // exchange; and it turned `GET /v1/messages` into a 400 about unreadable JSON rather than the
     // honest answer. Method first, then passthrough decides what to do with a POST orca cannot read.
     if (req.method !== 'POST') {
       json(res, 404, {
-        error: { message: `orca proxy does not handle ${req.method ?? 'GET'} ${path}` },
+        error: { message: `orca proxy does not handle ${req.method ?? 'GET'} ${dialectPath}` },
       });
       return;
     }
@@ -877,7 +955,15 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     }
 
     if (!dialect) {
-      await passThrough(path, rawBody, headers, recordableHeaders, res, startedAt);
+      await passThrough(
+        dialectPath,
+        rawBody,
+        headers,
+        recordableHeaders,
+        res,
+        startedAt,
+        forward?.base,
+      );
       return;
     }
 
@@ -889,7 +975,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       json(res, 400, {
         error: {
           message:
-            `orca proxy could not read the body of POST ${path}: expected JSON, got ` +
+            `orca proxy could not read the body of POST ${dialectPath}: expected JSON, got ` +
             `${rawBody === '' ? 'an empty body' : `${rawBody.length} bytes that do not parse`}`,
         },
       });
@@ -897,7 +983,16 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     }
 
     if (options.mode === 'record') {
-      await goLive(dialect, path, rawBody, headers, recordableHeaders, res, startedAt);
+      await goLive(
+        dialect,
+        dialectPath,
+        rawBody,
+        headers,
+        recordableHeaders,
+        res,
+        startedAt,
+        forward?.base,
+      );
       return;
     }
 
@@ -979,7 +1074,16 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       }
     }
 
-    await goLive(dialect, path, rawBody, headers, recordableHeaders, res, startedAt);
+    await goLive(
+      dialect,
+      dialectPath,
+      rawBody,
+      headers,
+      recordableHeaders,
+      res,
+      startedAt,
+      forward?.base,
+    );
   }
 
   const host = options.host ?? '127.0.0.1';

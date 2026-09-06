@@ -18,6 +18,8 @@
   ],
   "dependencies": {
     "@orcareplay/node-instrument": "0.1.2",
-    "@orcareplay/plugin-api": "0.1.2"
+    "@orcareplay/plugin-api": "0.1.2",
+    "@orcareplay/proxy": "0.1.2",
+    "@orcareplay/shell-shim": "0.1.2"
   }
 }

@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Adapter, Launch, RecordContext } from '@orcareplay/plugin-api';
 import { defaultAdapters } from '../src/index.js';
 
@@ -51,6 +51,25 @@ interface HarnessFixture {
 const SCRATCH = mkdtempSync(join(tmpdir(), 'orca-harness-fixture-'));
 afterAll(() => rmSync(SCRATCH, { recursive: true, force: true }));
 
+/**
+ * An empty home, saved and restored. An adapter's `prepare` may consult the real home — OpenCode's
+ * does, because `opencode auth login` writes a credential file there and that file decides the
+ * credential branch — so a fixture recorded on a machine that has signed in reads a different
+ * contract from one that has not. The fixtures describe the adapter, not the machine running the
+ * tests.
+ */
+const SAVED_HOME = { HOME: process.env['HOME'], USERPROFILE: process.env['USERPROFILE'] };
+beforeAll(() => {
+  process.env['HOME'] = SCRATCH;
+  process.env['USERPROFILE'] = SCRATCH;
+});
+afterAll(() => {
+  for (const [name, value] of Object.entries(SAVED_HOME)) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+});
+
 function ctx(over: Partial<RecordContext> = {}): RecordContext {
   return {
     runId: 'run_fixture',
@@ -58,7 +77,9 @@ function ctx(over: Partial<RecordContext> = {}): RecordContext {
     proxyUrl: PROXY,
     runDir: join(SCRATCH, 'work', '.orca', 'runs', 'run_fixture'),
     userArgs: [...USER_ARGS],
-    env: {},
+    // PATH, because a real run carries one and an adapter may resolve against it — OpenCode's
+    // now points SHELL at a shim, and only when the real shell is findable again.
+    env: { PATH: process.env['PATH'] ?? '' },
     ...over,
   };
 }

@@ -1,4 +1,5 @@
 export * from './matching.js';
+export * from './forward.js';
 export * from './dialects.js';
 export * from './ca.js';
 export * from './intercept.js';

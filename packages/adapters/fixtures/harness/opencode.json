@@ -1,10 +1,17 @@
 {
   "adapter": "opencode",
   "harness_versions": null,
-  "verified_at": "2026-08-29",
+  "verified_at": "2026-09-06",
   "command": "opencode",
-  "env_vars": ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY", "OPENAI_BASE_URL"],
+  "env_vars": [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENCODE_CONFIG_CONTENT",
+    "SHELL"
+  ],
   "base_urls": { "OPENAI_BASE_URL": "/v1", "ANTHROPIC_BASE_URL": "" },
   "optional_env_vars": [],
-  "note": "Both origins are redirected because OpenCode picks its provider per model. Credentials pass through when the user has either one; the placeholders recorded here appear only when the user has neither, so recording never makes a provider look configured that is not."
+  "note": "Both origins are redirected because OpenCode picks its provider per model. The config overlay adds OPENCODE_CONFIG_CONTENT, pointing OpenCode's first-party providers (opencode, opencode-go) at the proxy with their real base encoded into the path — no environment variable names those origins. SHELL points at a run shim so the shell tool, which execs $SHELL by absolute path, is captured; the shim stands in for a shell OpenCode would resolve anyway. Credentials pass through when the user has either one; the placeholders recorded here appear only when the user has neither, so recording never makes a provider look configured that is not."
 }

@@ -332,9 +332,119 @@ describe('openCodeAdapter', () => {
 
   it('falls back to placeholders only when the user has no credential at all', async () => {
     // Nothing to flip here, and an SDK client that refuses to start without a key helps nobody.
+    // The branch reads the credential file `opencode auth login` writes in the real home as well
+    // as the environment, so HOME is isolated: on a machine that has signed in to OpenCode the
+    // placeholder branch is unreachable, which is not what this test is about.
+    isolate();
     const none = await openCodeAdapter.prepare(ctx());
     expect(none.env.OPENAI_API_KEY).toBe('orca-recorded');
     expect(none.env.ANTHROPIC_API_KEY).toBe('orca-recorded');
+  });
+
+  it('rewrites the first-party providers through the proxy in a config overlay', async () => {
+    // OpenCode resolves its API origin per model out of its catalog, and no environment variable
+    // names those origins — so a run on `opencode-go` streamed straight to the provider while the
+    // proxy saw nothing and the trace stayed empty. The overlay points each provider at the proxy
+    // with its real base encoded into the path, which is what makes the request carry its own
+    // destination.
+    const launch = await openCodeAdapter.prepare(ctx());
+    const content = JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT!);
+    expect(content.provider['opencode-go'].options.baseURL).toBe(
+      'http://127.0.0.1:51733/forward/' + encodeURIComponent('https://opencode.ai/zen/go/v1'),
+    );
+    expect(content.provider['opencode'].options.baseURL).toBe(
+      'http://127.0.0.1:51733/forward/' + encodeURIComponent('https://opencode.ai/zen/v1'),
+    );
+    // The base-url variables stay, for the providers the overlay does not name.
+    expect(launch.env.OPENAI_BASE_URL).toBe('http://127.0.0.1:51733/v1');
+  });
+
+  it('carries a user-configured base url through the redirect instead of replacing it', async () => {
+    // Someone who set `options.baseURL` for a first-party provider routed those models somewhere
+    // deliberately. The overlay merges last in OpenCode's config order, so clobbering it would
+    // send the recorded run to a host the user never named.
+    const home = isolate();
+    const configDir = join(home, '.config', 'opencode');
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(
+      join(configDir, 'opencode.jsonc'),
+      [
+        '{',
+        '  // the corporate gateway fronts the zen models too',
+        '  "provider": {',
+        '    "opencode-go": {',
+        '      "options": {',
+        '        "baseURL": "https://corpo.example/v1",',
+        '      },',
+        '    },',
+        '  },',
+        '}',
+      ].join('\n'),
+    );
+    const launch = await openCodeAdapter.prepare(ctx({ env: { HOME: home, PATH: BARE_PATH } }));
+    const content = JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT!);
+    expect(content.provider['opencode-go'].options.baseURL).toBe(
+      'http://127.0.0.1:51733/forward/' + encodeURIComponent('https://corpo.example/v1'),
+    );
+    // A provider the user left alone still gets the catalog base.
+    expect(content.provider['opencode'].options.baseURL).toBe(
+      'http://127.0.0.1:51733/forward/' + encodeURIComponent('https://opencode.ai/zen/v1'),
+    );
+  });
+
+  it('skips the overlay entirely when the user config cannot be parsed', async () => {
+    // A config orca cannot read is an intent orca cannot honour. Rewriting routing on top of an
+    // unreadable config risks sending the run somewhere the user never named; capturing nothing
+    // is the recoverable failure, and the end-of-run warning says so.
+    const home = isolate();
+    const configDir = join(home, '.config', 'opencode');
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, 'opencode.jsonc'), '{ "provider": { "opencode-go": ');
+    const launch = await openCodeAdapter.prepare(ctx({ env: { HOME: home, PATH: BARE_PATH } }));
+    expect('OPENCODE_CONFIG_CONTENT' in launch.env).toBe(false);
+  });
+
+  it('leaves an OPENCODE_CONFIG_CONTENT the user already set standing', async () => {
+    // There is no way to merge two sources of one variable, and clobbering theirs to add capture
+    // would change more than the capture.
+    const theirs = '{"model":"opencode-go/glm-5.3-flash"}';
+    const launch = await openCodeAdapter.prepare(ctx({ env: { OPENCODE_CONFIG_CONTENT: theirs } }));
+    expect(launch.env.OPENCODE_CONFIG_CONTENT).toBe(theirs);
+  });
+
+  it('points SHELL at the shim for a shell OpenCode would have picked anyway', async () => {
+    // OpenCode execs `$SHELL` by absolute path, so a PATH shim never engaged and macOS runs
+    // captured no shell frames at all. The shim must be named after the real shell — OpenCode
+    // accepts it by basename — and the real binary must be on PATH, or every command would 127.
+    if (process.platform === 'win32') return;
+    const runDir = join(scratch, 'run');
+    const launch = await openCodeAdapter.prepare(
+      ctx({
+        runDir,
+        env: { HOME: isolate(), PATH: BARE_PATH, SHELL: '/bin/zsh' },
+      }),
+    );
+    if (process.platform === 'darwin') {
+      expect(launch.env.SHELL).toBe(join(runDir, 'shims', 'zsh'));
+    } else {
+      // The shim name is whichever shell the fallback would use and PATH can resolve again.
+      expect(launch.env.SHELL).toMatch(new RegExp(`.*${join('shims', '(zsh|bash|sh)')}$`));
+    }
+  });
+
+  it('shims the shell OpenCode itself would fall back to', async () => {
+    if (process.platform === 'win32') return;
+    // `fish` is on OpenCode's deny list: unrecorded, it falls back to the platform default, and
+    // the recorded run must fall back to the shim for that same default.
+    const runDir = join(scratch, 'run');
+    const launch = await openCodeAdapter.prepare(
+      ctx({
+        runDir,
+        env: { HOME: isolate(), PATH: BARE_PATH, SHELL: '/usr/local/bin/fish' },
+      }),
+    );
+    const expected = process.platform === 'darwin' ? 'zsh' : 'bash';
+    expect(launch.env.SHELL).toBe(join(runDir, 'shims', expected));
   });
 
   it('detects by ~/.config/opencode, and not at all in a bare environment', async () => {

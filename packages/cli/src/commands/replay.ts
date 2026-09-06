@@ -327,6 +327,7 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
     loose: args.bool('loose'),
     upstream: plan.upstream,
     upstreamHeaders: plan.headers,
+    upstreamHeadersOrigin: plan.headersOrigin,
     ...tls.proxyOptions,
     onDivergence: (d) => {
       divergences.push(d);
@@ -713,6 +714,7 @@ async function replayFork(
     exchanges: ctx.exchanges,
     upstream: plan.upstream,
     upstreamHeaders: plan.headers,
+    upstreamHeadersOrigin: plan.headersOrigin,
     ...tls.proxyOptions,
     onExchange: (exchange) => {
       writes.push(async () => {
