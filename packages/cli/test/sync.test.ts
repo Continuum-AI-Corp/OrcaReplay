@@ -306,10 +306,104 @@ describe('push and pull', () => {
 
     // The run is exactly as it was.
     const dir = join(workspace, '.orca', 'runs', runId);
-    expect(await readFile(join(dir, 'events.jsonl'), 'utf8')).toBe('{"seq":1,"type":"run.start"}\n');
+    expect(await readFile(join(dir, 'events.jsonl'), 'utf8')).toBe(
+      '{"seq":1,"type":"run.start"}\n',
+    );
     expect(Array.from(await readFile(join(dir, 'blobs', 'ab', 'abcdef')))).toEqual([1, 2, 3]);
     // And no staging directory is left behind for `orca list` or the next pull to trip over.
     const siblings = await readdir(join(workspace, '.orca', 'runs'));
     expect(siblings).toEqual([runId]);
+  });
+  /**
+   * A CRASH IS NOT AN EXCEPTION, and the first version of this fix only handled the latter.
+   *
+   * The swap is two renames with a gap in which `dest` does not exist. try/catch covers a thrown
+   * error; SIGKILL, ^C and power loss all land in that gap. Because neither scratch name matches
+   * RUN_ID_PATTERN, every command skips them — so the run does not merely fail to update, it
+   * disappears from `list`, `show`, `gc` and `scrub`, with a possibly secret-bearing copy stranded
+   * where scrub cannot reach it.
+   *
+   * These three tests stage the on-disk state a killed process leaves behind — which is the only
+   * honest way to test it, since the failure is the absence of any further code running — and
+   * assert the next pull reclaims it.
+   */
+  async function halfDoneSwap(
+    which: 'incoming' | 'replaced' | 'both',
+    newSeq: string,
+  ): Promise<string> {
+    const dir = join(workspace, '.orca', 'runs', runId);
+    await seedRun();
+    if (which === 'replaced' || which === 'both') {
+      await mkdir(`${dir}.replaced`, { recursive: true });
+      await writeFile(join(`${dir}.replaced`, 'events.jsonl'), '{"seq":1,"type":"run.start"}\n');
+    }
+    if (which === 'incoming' || which === 'both') {
+      await mkdir(`${dir}.incoming`, { recursive: true });
+      await writeFile(join(`${dir}.incoming`, 'events.jsonl'), newSeq);
+    }
+    // The process died mid-swap: the destination is gone.
+    await rm(dir, { recursive: true, force: true });
+    return dir;
+  }
+
+  it('finishes a swap that was killed after the new copy was written', async () => {
+    const dir = await halfDoneSwap('both', '{"seq":42}\n');
+    reply = {
+      status: 200,
+      body: Buffer.from(
+        await writeArchive([
+          {
+            name: `${runId}/manifest.json`,
+            bytes: new TextEncoder().encode(`{"run_id":"${runId}"}\n`),
+          },
+          { name: `${runId}/events.jsonl`, bytes: new TextEncoder().encode('{"seq":99}\n') },
+        ]),
+      ),
+    };
+
+    // No --force: the recovered run must be visible to the existence check, so this refuses
+    // rather than silently replacing a run the user still has.
+    await expect(pullCommand(parseArgs(['pull', runId]), out, workspace, env())).rejects.toThrow(
+      /already|exists/i,
+    );
+    expect(await readFile(join(dir, 'events.jsonl'), 'utf8')).toBe('{"seq":42}\n');
+    expect(await readdir(join(workspace, '.orca', 'runs'))).toEqual([runId]);
+  });
+
+  it('rolls back a swap that was killed before the new copy landed', async () => {
+    const dir = await halfDoneSwap('replaced', '');
+    reply = { status: 200, body: Buffer.from(await writeArchive([])) };
+
+    await expect(pullCommand(parseArgs(['pull', runId]), out, workspace, env())).rejects.toThrow();
+    // The ORIGINAL is back, not lost.
+    expect(await readFile(join(dir, 'events.jsonl'), 'utf8')).toBe(
+      '{"seq":1,"type":"run.start"}\n',
+    );
+    expect(await readdir(join(workspace, '.orca', 'runs'))).toEqual([runId]);
+  });
+
+  it('sweeps leftovers when the swap did complete', async () => {
+    await seedRun();
+    const dir = join(workspace, '.orca', 'runs', runId);
+    await mkdir(`${dir}.replaced`, { recursive: true });
+    await writeFile(join(`${dir}.replaced`, 'events.jsonl'), 'stale\n');
+
+    reply = {
+      status: 200,
+      body: Buffer.from(
+        await writeArchive([
+          {
+            name: `${runId}/manifest.json`,
+            bytes: new TextEncoder().encode(`{"run_id":"${runId}"}\n`),
+          },
+          { name: `${runId}/events.jsonl`, bytes: new TextEncoder().encode('{"seq":7}\n') },
+        ]),
+      ),
+    };
+    await pullCommand(parseArgs(['pull', runId, '--force']), out, workspace, env());
+
+    expect(await readFile(join(dir, 'events.jsonl'), 'utf8')).toBe('{"seq":7}\n');
+    // The stranded copy is gone rather than sitting out of scrub's reach forever.
+    expect(await readdir(join(workspace, '.orca', 'runs'))).toEqual([runId]);
   });
 });

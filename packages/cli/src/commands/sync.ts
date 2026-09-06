@@ -160,6 +160,47 @@ function multipart(
 }
 
 /**
+ * Complete or roll back a swap that a previous pull did not finish.
+ *
+ * The swap moves the old run aside and the new one into place — two renames with a gap. A process
+ * killed inside that gap leaves `<run>` absent, the finished new copy at `<run>.incoming` and the
+ * old one at `<run>.replaced`; neither sibling matches RUN_ID_PATTERN, so every command ignores
+ * both and the run is simply gone.
+ *
+ * The rule is "whichever complete copy exists wins, newest first":
+ *
+ *   - `dest` missing and `.incoming` present — the interrupted pull had already written every byte
+ *     and was one rename from done. Finish it.
+ *   - `dest` missing and only `.replaced` present — the move-aside happened but the new copy never
+ *     landed. Put the old run back.
+ *   - `dest` present — the swap completed; anything else beside it is litter.
+ *
+ * Best-effort throughout: a store we cannot tidy is not a reason to refuse a pull that would fix it
+ * anyway. What it must never do is delete a copy while no other exists, which is why every branch
+ * renames before it removes.
+ */
+async function recoverInterruptedSwap(dest: string): Promise<void> {
+  const staging = `${dest}.incoming`;
+  const retired = `${dest}.replaced`;
+  const present = async (p: string): Promise<boolean> => !!(await stat(p).catch(() => undefined));
+
+  if (await present(dest)) {
+    await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+    await rm(retired, { recursive: true, force: true }).catch(() => undefined);
+    return;
+  }
+  if (await present(staging)) {
+    await rename(staging, dest).catch(() => undefined);
+    if (await present(dest))
+      await rm(retired, { recursive: true, force: true }).catch(() => undefined);
+    return;
+  }
+  if (await present(retired)) {
+    await rename(retired, dest).catch(() => undefined);
+  }
+}
+
+/**
  * push — send a local run to the gateway.
  *
  * `orca push [run] [--gateway URL] [--force]`
@@ -222,6 +263,21 @@ export async function pullCommand(
     throw new Error('pull needs the run to fetch: `orca pull <run-id>`');
   }
 
+  // RECOVER BEFORE THE NETWORK, NOT AFTER IT.
+  //
+  // The archive names its own run, so the authoritative recovery is the one below, keyed on the id
+  // that came back. But a store left half-swapped by a killed process must not stay that way just
+  // because THIS pull fails — an unreachable gateway, a 404, an empty archive — and the run in that
+  // state is invisible to every other command, so nothing else would ever reclaim it. When the
+  // selector is itself a run id (the common case: you pull the run you just failed to pull), this
+  // heals it first and costs one stat. runDirFor rejects anything that is not a run id, which is
+  // the path-traversal guard, so a selector that is not one simply skips this.
+  try {
+    await recoverInterruptedSwap(runDirFor(cwd, runKey));
+  } catch {
+    // Not a run id — the post-fetch recovery below is the one that matters anyway.
+  }
+
   const res = await fetch(`${url}${exportPath(runKey)}`, { headers });
   if (!res.ok) throw new Error(refusal(res.status, await res.text()));
 
@@ -248,6 +304,11 @@ export async function pullCommand(
   // gateway chose — which is the right number for one that becomes a filesystem path.
   const dest = runDirFor(cwd, runId);
 
+  // Finish or roll back whatever a previous, interrupted pull of this run left behind, BEFORE
+  // deciding whether the run exists — otherwise a run stranded by a crash reads as absent and the
+  // stranded copy is never reclaimed.
+  await recoverInterruptedSwap(dest);
+
   const existing = await stat(dest).catch(() => undefined);
   if (existing && !args.bool('force')) {
     throw new Error(
@@ -255,19 +316,30 @@ export async function pullCommand(
     );
   }
 
-  // STAGE, THEN SWAP. Deleting the old run and writing the new one in its place means anything
-  // that fails in between — a full disk, ^C, an archive naming both `x` and `x/y` — leaves the run
-  // neither the old one nor the new one. The recording is the artifact, and it may be the only
-  // copy of a crash someone spent a day reproducing; `--force` asks to REPLACE it, which is not a
-  // licence to destroy it and then fail.
+  // STAGE, THEN SWAP — AND MAKE THE SWAP RECOVERABLE, not merely exception-safe.
   //
-  // Both scratch names sit beside the destination, so the moves are renames within one directory
-  // rather than cross-device copies. Neither matches RUN_ID_PATTERN (`run_[0-9a-f]{6,32}` admits
-  // no `.`), so a crash between the two renames leaves litter that `orca list` and
-  // `resolveRunSelector` both ignore — never a half-written directory presenting itself as a run.
-  const scratch = `${process.pid.toString(16)}${Math.random().toString(16).slice(2, 10)}`;
-  const staging = `${dest}.incoming-${scratch}`;
-  const retired = `${dest}.replaced-${scratch}`;
+  // Deleting the old run and writing the new one in its place means anything that fails in between
+  // leaves the run neither the old one nor the new one. The recording is the artifact, and it may
+  // be the only copy of a crash someone spent a day reproducing; `--force` asks to REPLACE it,
+  // which is not a licence to destroy it and then fail.
+  //
+  // Staging alone does not finish the job, because POSIX will not rename a directory over a
+  // non-empty one: the old run must be moved aside first, so there is a window of two syscalls in
+  // which `dest` does not exist. try/catch covers a thrown error and NOTHING ELSE — SIGKILL, ^C
+  // and power loss all land in that window, and the earlier version of this code claimed otherwise.
+  // Worse, the names were randomised, and neither matches RUN_ID_PATTERN (`run_[0-9a-f]{6,32}`
+  // admits no `.`), so `list`, `show`, `gc`, `scrub` and `resolveRunSelector` all skip them: the
+  // run had not moved, it had VANISHED, with a possibly secret-bearing copy stranded out of
+  // scrub's reach and nothing that would ever sweep it.
+  //
+  // So the scratch names are DETERMINISTIC per destination, which is what makes the half-done
+  // state recoverable rather than merely invisible, and `recoverInterruptedSwap` below runs before
+  // every pull to finish or roll back whatever the last one left. Determinism costs one thing —
+  // two concurrent pulls of the same run share the scratch names — and buys back the case the
+  // reviewer named: a run that no command can reach again. Those two pulls already raced over
+  // `dest` itself; a race is recoverable, a disappearance is not.
+  const staging = `${dest}.incoming`;
+  const retired = `${dest}.replaced`;
 
   try {
     for (const entry of entries) {
@@ -277,22 +349,23 @@ export async function pullCommand(
       await mkdir(dirname(path), { recursive: true });
       await writeFile(path, entry.bytes);
     }
-  } catch (err) {
-    await rm(staging, { recursive: true, force: true });
-    throw err;
-  }
 
-  if (existing) await rename(dest, retired);
-  try {
+    // INSIDE the try: if another process recreated `dest` between the stat above and here, this
+    // move is what fails, and leaving it outside stranded the staging directory while reporting
+    // an error.
+    if (existing) await rename(dest, retired);
     await rename(staging, dest);
   } catch (err) {
     // Put the original back before reporting the failure: the caller is about to be told the pull
-    // did not happen, and that has to be true of the store as well as of the message.
+    // did not happen, and that has to be true of the store as well as of the message. If even this
+    // fails, the deterministic names above mean the next pull recovers it rather than the copy
+    // being lost — which is exactly why the revert may swallow its own error here and the previous
+    // version may not have.
     if (existing) await rename(retired, dest).catch(() => undefined);
     await rm(staging, { recursive: true, force: true });
     throw err;
   }
-  if (existing) await rm(retired, { recursive: true, force: true });
+  await rm(retired, { recursive: true, force: true });
 
   out.phase('pull.done', { run: runId, files: entries.length, dir: dest });
 }
