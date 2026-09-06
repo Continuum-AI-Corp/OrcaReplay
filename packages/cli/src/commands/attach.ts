@@ -183,6 +183,7 @@ async function runAttached(
     port: requestedPort,
     upstream: plan.upstream,
     upstreamHeaders: plan.headers,
+    upstreamHeadersOrigin: plan.headersOrigin,
     ...tls.proxyOptions,
     onUnmatched: () => {
       unmatched += 1;

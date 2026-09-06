@@ -17,6 +17,15 @@ import { gatewayHeaders, readConfig, resolveUpstream } from './config.js';
 export interface UpstreamPlan {
   upstream: Record<string, string> | undefined;
   headers: Record<string, string> | undefined;
+  /**
+   * The origin the headers belong to, when they belong to one.
+   *
+   * The gateway key is attached per request rather than to every outbound call, because a
+   * forwarded request can legitimately go somewhere the gateway is not — a `/forward/` path names
+   * its own destination, and sending the gateway's credential there hands a third party a key
+   * they were never meant to see, which is the one outcome this plan exists to make impossible.
+   */
+  headersOrigin: string | undefined;
 }
 
 export async function upstreamPlan(
@@ -42,6 +51,7 @@ export async function upstreamPlan(
   return {
     upstream,
     headers: goingToGateway && Object.keys(headers).length > 0 ? headers : undefined,
+    headersOrigin: goingToGateway ? config.gateway!.url : undefined,
   };
 }
 

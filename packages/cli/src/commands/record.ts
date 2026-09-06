@@ -213,6 +213,7 @@ async function runRecording(
     mode: 'record',
     upstream: plan.upstream,
     upstreamHeaders: plan.headers,
+    upstreamHeadersOrigin: plan.headersOrigin,
     onExchange: (exchange: RecordedExchange) => {
       modelExchanges += 1;
       writes.push(() => persist(exchange));
