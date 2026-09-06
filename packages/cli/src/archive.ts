@@ -68,6 +68,38 @@ function assertSafeName(name: string): void {
 
 /** Serialise entries as a zip. Deflated, unless deflating made the entry bigger. */
 export async function writeArchive(entries: ArchiveEntry[]): Promise<Uint8Array> {
+  /**
+   * REFUSE WHAT THE FORMAT CANNOT EXPRESS, RATHER THAN TRUNCATING IT.
+   *
+   * The trailer counts entries in 16 bits and records sizes and offsets in 32.
+   * Writing a larger value silently keeps its low bits, and the damage is
+   * graded — worst in the middle:
+   *
+   *   65535 entries  -> the count IS the zip64 sentinel, and readArchive
+   *                     refuses the file outright
+   *   65536          -> wraps to 0, and readArchive returns nothing
+   *   70000          -> wraps to 4464, and readArchive SUCCEEDS with 4464 of
+   *                     them
+   *
+   * That last band is the one that matters: `orca push` sends a structurally
+   * corrupt archive, and `orca pull` installs a fraction of the run and
+   * reports success. Silent partial loss is exactly what this file's governing
+   * property — entry bytes round-trip EXACTLY — exists to rule out, and a run
+   * directory holds one file per unique content-addressed blob, so a long
+   * session with heavy tool output reaches these counts without trying.
+   *
+   * Refusing rather than emitting zip64: readArchive refuses zip64 too, so
+   * writing it would produce archives this CLI cannot read back — trading a
+   * silent truncation for a confident file nothing here can open. A bound that
+   * says so is the honest answer until both halves learn the format.
+   */
+  const MAX_ENTRIES = 0xfffe; // 0xffff is the reader's zip64 sentinel
+  if (entries.length > MAX_ENTRIES) {
+    throw new Error(
+      `archive has too many entries: ${entries.length}, and a zip trailer counts at most ${MAX_ENTRIES}`,
+    );
+  }
+
   const chunks: Uint8Array[] = [];
   const central: Uint8Array[] = [];
   let offset = 0;
@@ -81,6 +113,16 @@ export async function writeArchive(entries: ArchiveEntry[]): Promise<Uint8Array>
     const stored = entry.bytes.length === 0 || deflated.length >= entry.bytes.length;
     const payload = stored ? entry.bytes : deflated;
     const method = stored ? 0 : 8;
+
+    // The same refusal for the 32-bit size and offset fields. Each is checked
+    // where it is about to be written rather than once at the end, so the
+    // message names the entry that overflows instead of the total.
+    if (payload.length >= ZIP32_SENTINEL || entry.bytes.length >= ZIP32_SENTINEL) {
+      throw new Error(`archive entry is too large for a 32-bit zip field: ${entry.name}`);
+    }
+    if (offset >= ZIP32_SENTINEL) {
+      throw new Error(`archive is too large for a 32-bit zip offset at entry: ${entry.name}`);
+    }
 
     const local = new Uint8Array(30 + name.length);
     const lv = new DataView(local.buffer);
@@ -121,6 +163,9 @@ export async function writeArchive(entries: ArchiveEntry[]): Promise<Uint8Array>
   }
 
   const centralSize = central.reduce((n, c) => n + c.length, 0);
+  if (centralSize >= ZIP32_SENTINEL || offset >= ZIP32_SENTINEL) {
+    throw new Error('archive is too large for a 32-bit zip trailer');
+  }
   const eocd = new Uint8Array(EOCD_LEN);
   const ev = new DataView(eocd.buffer);
   ev.setUint32(0, EOCD_SIG, true);

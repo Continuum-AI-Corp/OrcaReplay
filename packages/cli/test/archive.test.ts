@@ -101,4 +101,43 @@ describe('archive', () => {
       await expect(readArchive(zip), name).rejects.toThrow(/unsafe|name/i);
     }
   });
+
+  /**
+   * THE WRITER REFUSES WHAT ITS OWN FIELDS CANNOT HOLD.
+   *
+   * The EOCD carries the entry count in 16 bits, and writeArchive wrote
+   * `entries.length` into it unchecked. The failure is graded and the middle
+   * band is the dangerous one:
+   *
+   *   65535  -> the count IS the zip64 sentinel; readArchive refuses the file
+   *   65536  -> wraps to 0; readArchive returns no entries
+   *   70000  -> wraps to 4464; readArchive returns 4464 entries AND SUCCEEDS
+   *
+   * A run directory holds one file per unique content-addressed blob, so a
+   * long session with heavy tool output reaches these counts on its own. In
+   * that third band `orca push` sends a structurally corrupt archive and
+   * `orca pull` installs a fraction of the run reporting success — silent
+   * partial data loss, which is the one outcome this file's stated invariant
+   * ("entry bytes round-trip EXACTLY") rules out.
+   *
+   * Refusing is the fix, not zip64: the reader refuses zip64 too, so writing
+   * it would produce archives this CLI cannot read back.
+   */
+  it('refuses to write more entries than the trailer can count', async () => {
+    const many = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({
+        name: `run-1/blobs/aa/${i}`,
+        bytes: new Uint8Array(0),
+      }));
+    // The sentinel itself, which the reader treats as zip64.
+    await expect(writeArchive(many(0xffff))).rejects.toThrow(/too many entries|65534/i);
+    // And the band that wraps to a plausible number and reads back short.
+    await expect(writeArchive(many(0x10000))).rejects.toThrow(/too many entries|65534/i);
+    // One below the sentinel is the largest archive the format can express,
+    // and must still be written — a bound that refuses valid input is a
+    // different bug in the same place.
+    const ok = await writeArchive(many(0xfffe));
+    const back = await readArchive(ok);
+    expect(back.length).toBe(0xfffe);
+  });
 });
