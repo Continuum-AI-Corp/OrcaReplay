@@ -1,9 +1,9 @@
-import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 import { resolveRunSelector, runDirFor } from '@orcareplay/core';
 import type { ParsedArgs } from '../args.js';
 import type { Output } from '../out.js';
-import { readConfig, gatewayHeaders, type OrcaConfig } from '../config.js';
+import { readConfig, gatewayHeaders, sameOrigin, type OrcaConfig } from '../config.js';
 import { readArchive, writeArchive, type ArchiveEntry } from '../archive.js';
 
 /**
@@ -69,10 +69,22 @@ async function resolveGateway(
   // A key from the environment overrides the stored one, so a CI job can push without writing a
   // credential to disk. gatewayHeaders() returns {} rather than an empty bearer when it has no
   // key — see its own note — so an env key is folded in here rather than relying on that.
+  //
+  // THE STORED KEY ONLY TRAVELS TO THE STORED GATEWAY. `--gateway` and ORCA_GATEWAY_URL change the
+  // destination but not the config, so merging the override into `config.gateway` and asking for
+  // its headers — which is what this did — sends the credential for the user's real gateway to
+  // whatever host was named on the command line, with a recording attached. Same defect
+  // `upstreamPlan` already carries a note about for model traffic, and the same resolution: the
+  // stored key applies when the resolved origin IS the configured one, and otherwise does not
+  // apply at all. A key passed in the environment alongside the override is a deliberate pairing
+  // by the person running the command, so it goes where they pointed it.
   const envKey = env.ORCA_GATEWAY_KEY?.trim();
+  const configured = config.gateway?.url;
   const headers = envKey
     ? { authorization: `Bearer ${envKey}`, 'x-api-key': envKey }
-    : gatewayHeaders({ ...config, gateway: { ...config.gateway, url } }, env);
+    : configured !== undefined && sameOrigin(url, configured)
+      ? gatewayHeaders(config, env)
+      : {};
 
   if (!headers.authorization) {
     // REFUSED, NOT ATTEMPTED ANONYMOUSLY. A push with no credential does not fail cleanly at the
@@ -243,18 +255,44 @@ export async function pullCommand(
     );
   }
 
-  // Written to a scratch directory and moved into place would be better still, but a partially
-  // written run is recoverable (`orca pull --force` again) and a half-deleted one is not — so the
-  // existing copy is removed only once every byte has been read and parsed, which is the point
-  // this line is reached.
-  if (existing) await rm(dest, { recursive: true, force: true });
+  // STAGE, THEN SWAP. Deleting the old run and writing the new one in its place means anything
+  // that fails in between — a full disk, ^C, an archive naming both `x` and `x/y` — leaves the run
+  // neither the old one nor the new one. The recording is the artifact, and it may be the only
+  // copy of a crash someone spent a day reproducing; `--force` asks to REPLACE it, which is not a
+  // licence to destroy it and then fail.
+  //
+  // Both scratch names sit beside the destination, so the moves are renames within one directory
+  // rather than cross-device copies. Neither matches RUN_ID_PATTERN (`run_[0-9a-f]{6,32}` admits
+  // no `.`), so a crash between the two renames leaves litter that `orca list` and
+  // `resolveRunSelector` both ignore — never a half-written directory presenting itself as a run.
+  const scratch = `${process.pid.toString(16)}${Math.random().toString(16).slice(2, 10)}`;
+  const staging = `${dest}.incoming-${scratch}`;
+  const retired = `${dest}.replaced-${scratch}`;
 
-  for (const entry of entries) {
-    const rel = entry.name.slice(entry.name.indexOf('/') + 1);
-    if (rel === '' || entry.name.indexOf('/') < 0) continue;
-    const path = join(dest, ...rel.split('/'));
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, entry.bytes);
+  try {
+    for (const entry of entries) {
+      const rel = entry.name.slice(entry.name.indexOf('/') + 1);
+      if (rel === '' || entry.name.indexOf('/') < 0) continue;
+      const path = join(staging, ...rel.split('/'));
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, entry.bytes);
+    }
+  } catch (err) {
+    await rm(staging, { recursive: true, force: true });
+    throw err;
   }
+
+  if (existing) await rename(dest, retired);
+  try {
+    await rename(staging, dest);
+  } catch (err) {
+    // Put the original back before reporting the failure: the caller is about to be told the pull
+    // did not happen, and that has to be true of the store as well as of the message.
+    if (existing) await rename(retired, dest).catch(() => undefined);
+    await rm(staging, { recursive: true, force: true });
+    throw err;
+  }
+  if (existing) await rm(retired, { recursive: true, force: true });
+
   out.phase('pull.done', { run: runId, files: entries.length, dir: dest });
 }

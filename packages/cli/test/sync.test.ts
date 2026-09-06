@@ -1,5 +1,5 @@
 import { createServer, type Server } from 'node:http';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -7,6 +7,7 @@ import { parseArgs } from '../src/args.js';
 import { Output, type LogEntry } from '../src/out.js';
 import { pullCommand, pushCommand } from '../src/commands/sync.js';
 import { readArchive, writeArchive } from '../src/archive.js';
+import { writeConfig } from '../src/config.js';
 
 /**
  * `orca push` and `orca pull`, against a gateway stood up in-process.
@@ -222,5 +223,93 @@ describe('push and pull', () => {
     expect(await readFile(join(workspace, '.orca', 'runs', runId, 'events.jsonl'), 'utf8')).toBe(
       '{"seq":1,"type":"run.start"}\n',
     );
+  });
+  /**
+   * THE STORED KEY BELONGS TO THE STORED GATEWAY, AND TO NOTHING ELSE.
+   *
+   * `--gateway` swaps the destination but the config still holds `api_key`, so the obvious
+   * implementation — merge the override URL into the configured gateway and ask for its headers —
+   * hands the credential for the user's real gateway to whatever host was named on the command
+   * line. `upstream.ts` already learned this for model traffic (see its unanimity note); push is
+   * the same disclosure with a run attached.
+   *
+   * Refusing is the correct outcome, not a limitation: an unauthenticated push fails with a 401 the
+   * user can read, while a leaked key fails silently and permanently.
+   */
+  it('does not send the configured key to a gateway named on the command line', async () => {
+    await seedRun();
+    // The configured gateway is somewhere else entirely, and holds a key.
+    await writeConfig(
+      { gateway: { url: 'https://gateway.example.internal', api_key: 'sk-stored-elsewhere' } },
+      { XDG_CONFIG_HOME: home },
+    );
+
+    await expect(
+      pushCommand(parseArgs(['push', runId, '--gateway', url]), out, workspace, {
+        XDG_CONFIG_HOME: home,
+      }),
+    ).rejects.toThrow(/key/i);
+    // Not "sent without the header" — not sent at all.
+    expect(received).toHaveLength(0);
+    for (const entry of logs) {
+      expect(JSON.stringify(entry)).not.toContain('sk-stored-elsewhere');
+    }
+  });
+
+  /**
+   * The other half, so the rule above cannot be satisfied by refusing everything: pointing
+   * `--gateway` at the gateway you already configured is not an override, and the stored key
+   * applies.
+   */
+  it('still uses the stored key when the named gateway is the configured one', async () => {
+    await seedRun();
+    await writeConfig({ gateway: { url, api_key: 'sk-stored-here' } }, { XDG_CONFIG_HOME: home });
+
+    await pushCommand(parseArgs(['push', runId, '--gateway', `${url}/`]), out, workspace, {
+      XDG_CONFIG_HOME: home,
+    });
+    expect(received[0]!.auth).toBe('Bearer sk-stored-here');
+  });
+
+  /**
+   * A FAILED REPLACE MUST NOT COST THE LOCAL COPY.
+   *
+   * `pull --force` deleted the existing run and then wrote the new one file by file, so anything
+   * that failed in between — a full disk, a corrupt archive, ^C — left the run neither the old one
+   * nor the new one. The recording is the artifact; it may be the only copy of a crash someone
+   * spent a day reproducing.
+   *
+   * The failure injected here is an archive naming both `x` and `x/y`, which is what a corrupt or
+   * hostile archive looks like from the write path: the second entry's mkdir hits ENOTDIR partway
+   * through, after the first files have already landed.
+   */
+  it('keeps the existing run when a --force replace fails partway', async () => {
+    await seedRun();
+    reply = {
+      status: 200,
+      body: Buffer.from(
+        await writeArchive([
+          {
+            name: `${runId}/manifest.json`,
+            bytes: new TextEncoder().encode(`{"run_id":"${runId}"}\n`),
+          },
+          { name: `${runId}/events.jsonl`, bytes: new TextEncoder().encode('{"seq":9}\n') },
+          { name: `${runId}/x`, bytes: new Uint8Array([1]) },
+          { name: `${runId}/x/y`, bytes: new Uint8Array([2]) },
+        ]),
+      ),
+    };
+
+    await expect(
+      pullCommand(parseArgs(['pull', runId, '--force']), out, workspace, env()),
+    ).rejects.toThrow();
+
+    // The run is exactly as it was.
+    const dir = join(workspace, '.orca', 'runs', runId);
+    expect(await readFile(join(dir, 'events.jsonl'), 'utf8')).toBe('{"seq":1,"type":"run.start"}\n');
+    expect(Array.from(await readFile(join(dir, 'blobs', 'ab', 'abcdef')))).toEqual([1, 2, 3]);
+    // And no staging directory is left behind for `orca list` or the next pull to trip over.
+    const siblings = await readdir(join(workspace, '.orca', 'runs'));
+    expect(siblings).toEqual([runId]);
   });
 });

@@ -115,6 +115,22 @@ export function gatewayHeaders(
 }
 
 /**
+ * Two URLs that name the same host, for deciding whether a stored credential may travel.
+ *
+ * Lives here rather than beside either caller because both callers are credential gates —
+ * `upstreamPlan` for model traffic and `resolveGateway` for push/pull — and two comparators that
+ * drift apart mean one of them starts leaking. Falls back to a trimmed string compare when either
+ * side does not parse, which errs towards withholding: an unparseable URL matches only itself.
+ */
+export function sameOrigin(a: string, b: string): boolean {
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch {
+    return a.replace(/\/+$/, '') === b.replace(/\/+$/, '');
+  }
+}
+
+/**
  * Where live model calls go: flag, then environment, then the configured gateway.
  *
  * Needed by record *and* by replay — `--loose` and any fork continue live, and a fork that ignored
