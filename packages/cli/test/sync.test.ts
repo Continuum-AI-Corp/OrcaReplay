@@ -526,4 +526,57 @@ describe('push and pull', () => {
       '{"seq":1,"type":"run.start"}\n',
     );
   }, 20000);
+  /**
+   * AND THE SAME RULE FOR THE ENVIRONMENT KEY, which the first version of this gate exempted.
+   *
+   * I argued that an env key alongside `--gateway` was a deliberate pairing made in one
+   * invocation. The README in this same PR says `read -rs ORCA_GATEWAY_KEY && export
+   * ORCA_GATEWAY_KEY` — and an export persists for the shell session, so the pairing was an
+   * assumption nothing enforced. A user who exported the key for their real gateway and later runs
+   * `orca push --gateway <other-host>` was sending that key and the whole recording to the other
+   * host, while the identical request with the key in config was refused. An asymmetry that turns
+   * on where a credential is STORED rather than where it is GOING is not a boundary.
+   */
+  it('does not send an exported key to a gateway named on the command line', async () => {
+    await seedRun();
+    await expect(
+      pushCommand(parseArgs(['push', runId, '--gateway', 'http://127.0.0.1:9']), out, workspace, {
+        XDG_CONFIG_HOME: home,
+        // Exported for the real gateway, some time ago.
+        ORCA_GATEWAY_URL: url,
+        ORCA_GATEWAY_KEY: 'sk-orca-exported-for-the-real-one',
+      }),
+    ).rejects.toThrow(/key/i);
+    expect(received).toHaveLength(0);
+    for (const entry of logs) {
+      expect(JSON.stringify(entry)).not.toContain('sk-orca-exported-for-the-real-one');
+    }
+  });
+
+  /**
+   * The case the env key exists for, which the rule above must not break: a CI job that names the
+   * destination on the command line and passes the key beside it. Nothing else names a URL, so
+   * there is no earlier association for the flag to contradict.
+   */
+  it('still sends a key whose only destination is the one this invocation names', async () => {
+    await seedRun();
+    await pushCommand(parseArgs(['push', runId, '--gateway', url]), out, workspace, {
+      XDG_CONFIG_HOME: home,
+      ORCA_GATEWAY_KEY: 'sk-orca-ci',
+    });
+    expect(received[0]!.auth).toBe('Bearer sk-orca-ci');
+  });
+
+  /**
+   * And an exported pair with no flag is the ordinary case — the destination IS the key's home.
+   */
+  it('sends an exported key to the gateway it was exported for', async () => {
+    await seedRun();
+    await pushCommand(parseArgs(['push', runId]), out, workspace, {
+      XDG_CONFIG_HOME: home,
+      ORCA_GATEWAY_URL: url,
+      ORCA_GATEWAY_KEY: 'sk-orca-home',
+    });
+    expect(received[0]!.auth).toBe('Bearer sk-orca-home');
+  });
 });

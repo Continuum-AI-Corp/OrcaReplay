@@ -386,6 +386,10 @@ $ read -rs ORCA_GATEWAY_KEY && export ORCA_GATEWAY_KEY   # not typed on the comm
 $ orca push last
 ```
 
+Both exports persist for the shell session, which is the point of the rule above: a later
+`orca push --gateway <somewhere-else>` in that same shell is refused rather than quietly handed the
+key you exported for your own gateway.
+
 ### What it will not do
 
 - **Never a default destination.** `orca setup` may default the *model* gateway to OrcaRouter,
@@ -393,11 +397,12 @@ $ orca push last
   source, shell output and workspace snapshots, which travel with it as content-addressed blobs.
   So push has no default host, and `push.packed` reports the file count and byte size *before* the
   request goes out rather than after.
-- **Never a stored key to a host you named on the command line.** `--gateway` changes the
-  destination, not the config — so the key from `orca setup` is attached only when the resolved
-  origin *is* the configured gateway's. Point it elsewhere and the push is refused rather than
-  authenticated with a credential issued for somewhere else. A key you pass in the environment
-  alongside the override is a deliberate pairing and goes where you pointed it.
+- **Never a key to a host it was not set up for.** Every credential has a home — the stored key's
+  is `orca setup`'s gateway, an exported key's is `ORCA_GATEWAY_URL` — and it is attached only when
+  the destination matches that home. `--gateway` changes where the run goes, not what the key was
+  issued for, so pointing it elsewhere refuses the push rather than authenticating it with someone
+  else's credential. The one case left through is a key whose only destination is the one this
+  invocation names: nothing earlier associated it with a host, which is the CI shape.
 - **Never anonymously.** A push with no key is refused, not attempted. An unauthenticated POST is
   exactly what a misconfigured public endpoint accepts, and a `200` is a poor way to learn your run
   went somewhere with no owner.

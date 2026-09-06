@@ -78,25 +78,41 @@ async function resolveGateway(
     );
   }
 
-  // A key from the environment overrides the stored one, so a CI job can push without writing a
-  // credential to disk. gatewayHeaders() returns {} rather than an empty bearer when it has no
-  // key — see its own note — so an env key is folded in here rather than relying on that.
+  // NO CREDENTIAL TRAVELS ANYWHERE BUT THE ORIGIN IT WAS SET UP FOR — from EITHER source.
   //
-  // THE STORED KEY ONLY TRAVELS TO THE STORED GATEWAY. `--gateway` and ORCA_GATEWAY_URL change the
-  // destination but not the config, so merging the override into `config.gateway` and asking for
-  // its headers — which is what this did — sends the credential for the user's real gateway to
-  // whatever host was named on the command line, with a recording attached. Same defect
-  // `upstreamPlan` already carries a note about for model traffic, and the same resolution: the
-  // stored key applies when the resolved origin IS the configured one, and otherwise does not
-  // apply at all. A key passed in the environment alongside the override is a deliberate pairing
-  // by the person running the command, so it goes where they pointed it.
+  // The first version of this gate applied the origin check to the stored key only, and I argued
+  // on the thread that an env key alongside an override was "a deliberate pairing made in one
+  // invocation". Review pointed at the README in this same PR, which tells you to
+  // `read -rs ORCA_GATEWAY_KEY && export ORCA_GATEWAY_KEY` — and an export PERSISTS. So the
+  // pairing was an assumption nothing enforced: a user who exported the key for their real gateway
+  // and later runs `orca push --gateway <other-host>` (a typo, a stale alias, a URL someone sent
+  // them) attaches that key and the whole recording to the other host — the exact request that is
+  // REFUSED when the same key sits in config. An asymmetry that depends on where a credential is
+  // stored rather than on where it is going is not a security boundary.
+  //
+  // Each key therefore has a HOME: the origin it was configured for.
+  //
+  //   stored key -> config.gateway.url
+  //   env key    -> ORCA_GATEWAY_URL, or the configured gateway when that is unset
+  //
+  // and a key is only sent when the destination matches its home. An env key with NO home is the
+  // one case left through: nothing but this invocation named a URL at all, so `--gateway` and the
+  // key arrived together and there is no earlier association to contradict. That is the CI shape
+  // the env key exists for.
   const envKey = env.ORCA_GATEWAY_KEY?.trim();
   const configured = config.gateway?.url;
-  const headers = envKey
-    ? { authorization: `Bearer ${envKey}`, 'x-api-key': envKey }
-    : configured !== undefined && sameOrigin(url, configured)
-      ? gatewayHeaders(config, env)
-      : {};
+  const envHome = env.ORCA_GATEWAY_URL ?? configured;
+
+  let headers: Record<string, string> = {};
+  if (envKey) {
+    if (envHome === undefined || sameOrigin(url, envHome)) {
+      // gatewayHeaders() returns {} rather than an empty bearer when it has no key — see its own
+      // note — so an env key is folded in here rather than relying on that.
+      headers = { authorization: `Bearer ${envKey}`, 'x-api-key': envKey };
+    }
+  } else if (configured !== undefined && sameOrigin(url, configured)) {
+    headers = gatewayHeaders(config, env);
+  }
 
   if (!headers.authorization) {
     // REFUSED, NOT ATTEMPTED ANONYMOUSLY. A push with no credential does not fail cleanly at the
