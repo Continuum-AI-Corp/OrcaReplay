@@ -448,4 +448,82 @@ describe('push and pull', () => {
     expect(await mode(runId, 'events.jsonl')).toBe(0o600);
     expect(await mode(runId, 'blobs', 'ab', 'abcdef')).toBe(0o600);
   });
+  /**
+   * `.replaced` IS THE EVIDENCE THAT `.incoming` IS COMPLETE — and the first version of the
+   * recovery did not know that.
+   *
+   * A REPLACE writes staging to completion before it moves `dest` aside, so a crash between the two
+   * renames always leaves BOTH siblings. A FIRST pull writes entries straight into `.incoming` and
+   * renames once at the end, so a crash there leaves a PARTIAL `.incoming` and no `.replaced` at
+   * all. Promoting that installed a truncated recording as the run — `show`, `scrub` and `push`
+   * would treat it as whole — and the next pull, the one that would have fetched the good copy, was
+   * refused with "already exists locally".
+   */
+  it('discards a partial .incoming from an interrupted FIRST pull instead of promoting it', async () => {
+    const runs = join(workspace, '.orca', 'runs');
+    const dir = join(runs, runId);
+    // What a first pull killed mid-write leaves: some entries, no manifest, no .replaced.
+    await mkdir(join(`${dir}.incoming`, 'blobs', 'ab'), { recursive: true });
+    await writeFile(join(`${dir}.incoming`, 'blobs', 'ab', 'abcdef'), Buffer.from([1]));
+
+    reply = {
+      status: 200,
+      body: Buffer.from(
+        await writeArchive([
+          {
+            name: `${runId}/manifest.json`,
+            bytes: new TextEncoder().encode(`{"run_id":"${runId}"}\n`),
+          },
+          { name: `${runId}/events.jsonl`, bytes: new TextEncoder().encode('{"seq":1}\n') },
+        ]),
+      ),
+    };
+
+    // No --force: the partial must NOT read as an existing run, or the good copy can never land.
+    await pullCommand(parseArgs(['pull', runId]), out, workspace, env());
+
+    expect(await readFile(join(dir, 'manifest.json'), 'utf8')).toBe(`{"run_id":"${runId}"}\n`);
+    expect(await readFile(join(dir, 'events.jsonl'), 'utf8')).toBe('{"seq":1}\n');
+    // The partial's stray blob did not survive into the run.
+    await expect(readFile(join(dir, 'blobs', 'ab', 'abcdef'))).rejects.toThrow();
+    expect(await readdir(runs)).toEqual([runId]);
+  });
+
+  /**
+   * Two pulls of one run must not be able to destroy both copies.
+   *
+   * The deterministic scratch names that make a half-done swap recoverable also make it shared, and
+   * a recovery's "dest present, so these siblings are litter" cleanup interleaved with another
+   * pull's two renames could delete the staged new copy AND the retired old one — the disappearance
+   * I had claimed the design ruled out. A lock is the fix; this pins that the lock is actually
+   * taken, by holding it and watching a pull refuse rather than proceed into the critical section.
+   */
+  it('refuses to work on a run another pull is holding', async () => {
+    await seedRun();
+    const lock = join(workspace, '.orca', 'runs', `${runId}.lock`);
+    await mkdir(join(workspace, '.orca', 'runs'), { recursive: true });
+    await writeFile(lock, '99999\n');
+
+    reply = {
+      status: 200,
+      body: Buffer.from(
+        await writeArchive([
+          {
+            name: `${runId}/manifest.json`,
+            bytes: new TextEncoder().encode(`{"run_id":"${runId}"}\n`),
+          },
+          { name: `${runId}/events.jsonl`, bytes: new TextEncoder().encode('{"seq":9}\n') },
+        ]),
+      ),
+    };
+
+    await expect(
+      pullCommand(parseArgs(['pull', runId, '--force']), out, workspace, env()),
+    ).rejects.toThrow(/another orca pull|held/i);
+
+    // And the local copy is exactly as it was — the point of refusing.
+    expect(await readFile(join(workspace, '.orca', 'runs', runId, 'events.jsonl'), 'utf8')).toBe(
+      '{"seq":1,"type":"run.start"}\n',
+    );
+  }, 20000);
 });

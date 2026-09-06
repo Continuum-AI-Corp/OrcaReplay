@@ -172,43 +172,127 @@ function multipart(
 }
 
 /**
- * Complete or roll back a swap that a previous pull did not finish.
+ * Serialise everything that touches one run's directory.
+ *
+ * The deterministic scratch names that made a half-done swap RECOVERABLE also made it shared: two
+ * pulls of the same run now aim at the same `.incoming` and `.replaced`. I argued when I introduced
+ * them that this was a fair trade because "a race is recoverable, a disappearance is not" — and
+ * review showed the race produces exactly the disappearance I claimed it could not. Interleave a
+ * recovery's cleanup with another pull's two renames and both copies go: the recovery stats `dest`,
+ * finds the old run, and removes what it believes is litter while the pull is mid-swap, so the
+ * staged new copy and the retired old one are both deleted and the rollback finds nothing to
+ * restore.
+ *
+ * Verifying siblings "immediately before" each removal does not fix it — that is the same
+ * check-then-act one instruction later. Exclusion is the fix, and this is the smallest form of it:
+ * an O_EXCL lock file beside the run, held across recovery, staging and the swap together.
+ *
+ * A lock file needs an answer for the process that dies holding one, or the first crash makes the
+ * run permanently unpullable — which would be a worse failure than the one being fixed. So a lock
+ * older than STALE_LOCK_MS is broken and taken. That is a heuristic, and it is sound here for a
+ * reason worth stating: the work under the lock is bounded by the pull's own archive write, and a
+ * pull still running after ten minutes has a bigger problem than a stolen lock.
+ */
+const STALE_LOCK_MS = 10 * 60 * 1000;
+
+async function withRunLock<T>(dest: string, fn: () => Promise<T>): Promise<T> {
+  const lock = `${dest}.lock`;
+  let held = false;
+  for (let attempt = 0; attempt < 60 && !held; attempt++) {
+    try {
+      await writeFile(lock, `${process.pid}\n`, { flag: 'wx', mode: FILE_MODE });
+      held = true;
+    } catch (err) {
+      // ONLY EEXIST MEANS "someone else holds it". Anything else — a missing parent, a read-only
+      // store, no space — is a real failure, and spinning on it burns the whole retry budget before
+      // reporting an error that was never going to change. The first version caught everything and
+      // took six seconds to fail on a workspace whose .orca/runs did not exist yet, which is the
+      // ordinary first-pull case.
+      if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') throw err;
+      const age = await stat(lock)
+        .then((st) => Date.now() - st.mtimeMs)
+        .catch(() => 0);
+      if (age > STALE_LOCK_MS) {
+        await rm(lock, { force: true }).catch(() => undefined);
+        continue;
+      }
+      await new Promise((ok) => setTimeout(ok, 100));
+    }
+  }
+  if (!held) {
+    throw new Error(
+      `another orca pull is working on this run (${lock} is held). Wait for it to finish, or ` +
+        `remove that file if no pull is running.`,
+    );
+  }
+  try {
+    return await fn();
+  } finally {
+    await rm(lock, { force: true }).catch(() => undefined);
+  }
+}
+
+/**
+ * Complete or roll back a swap that a previous pull did not finish. Call under withRunLock.
  *
  * The swap moves the old run aside and the new one into place — two renames with a gap. A process
  * killed inside that gap leaves `<run>` absent, the finished new copy at `<run>.incoming` and the
  * old one at `<run>.replaced`; neither sibling matches RUN_ID_PATTERN, so every command ignores
  * both and the run is simply gone.
  *
- * The rule is "whichever complete copy exists wins, newest first":
+ * `.replaced` IS THE EVIDENCE THAT `.incoming` IS COMPLETE, and the first version of this function
+ * missed that. It promoted `.incoming` whenever `dest` was absent, on the reasoning that "the
+ * interrupted pull had already written every byte and was one rename from done". True of a REPLACE,
+ * where staging is finished before `dest` is moved aside — so a replace crash always leaves BOTH
+ * siblings. Not true of a first pull, which writes entries straight into `.incoming` and renames it
+ * once at the end: a crash there leaves a PARTIAL `.incoming` and no `.replaced` at all. Promoting
+ * that installed a truncated recording as the run, which `list`, `show`, `scrub` and `push` would
+ * then treat as whole — and the next pull, the one that would have fetched the good copy, refused
+ * with "already exists locally" and a flag the user has no reason to reach for.
  *
- *   - `dest` missing and `.incoming` present — the interrupted pull had already written every byte
- *     and was one rename from done. Finish it.
- *   - `dest` missing and only `.replaced` present — the move-aside happened but the new copy never
- *     landed. Put the old run back.
- *   - `dest` present — the swap completed; anything else beside it is litter.
+ * So the rule is not "newest wins", it is "only a copy something PROVES complete wins":
+ *
+ *   - `dest` missing, both siblings present — a replace crashed between the renames. `.incoming` is
+ *     whole. Finish the swap.
+ *   - `dest` missing, only `.replaced` — the move-aside happened, the new copy never landed. Put
+ *     the old run back.
+ *   - `dest` missing, only `.incoming` — a FIRST pull died mid-write. Partial, unprovable, and the
+ *     archive is still on the gateway. Remove it and let this pull fetch again.
+ *   - `dest` present — the swap completed; the siblings are litter.
  *
  * Best-effort throughout: a store we cannot tidy is not a reason to refuse a pull that would fix it
- * anyway. What it must never do is delete a copy while no other exists, which is why every branch
- * renames before it removes.
+ * anyway.
  */
 async function recoverInterruptedSwap(dest: string): Promise<void> {
   const staging = `${dest}.incoming`;
   const retired = `${dest}.replaced`;
   const present = async (p: string): Promise<boolean> => !!(await stat(p).catch(() => undefined));
+  const drop = async (p: string): Promise<void> =>
+    void (await rm(p, { recursive: true, force: true }).catch(() => undefined));
 
-  if (await present(dest)) {
-    await rm(staging, { recursive: true, force: true }).catch(() => undefined);
-    await rm(retired, { recursive: true, force: true }).catch(() => undefined);
+  const [hasDest, hasStaging, hasRetired] = await Promise.all([
+    present(dest),
+    present(staging),
+    present(retired),
+  ]);
+
+  if (hasDest) {
+    await drop(staging);
+    await drop(retired);
     return;
   }
-  if (await present(staging)) {
+  if (hasStaging && hasRetired) {
     await rename(staging, dest).catch(() => undefined);
-    if (await present(dest))
-      await rm(retired, { recursive: true, force: true }).catch(() => undefined);
+    if (await present(dest)) await drop(retired);
     return;
   }
-  if (await present(retired)) {
+  if (hasRetired) {
     await rename(retired, dest).catch(() => undefined);
+    return;
+  }
+  if (hasStaging) {
+    // Partial by construction — see the note above. The gateway still has the archive.
+    await drop(staging);
   }
 }
 
@@ -284,8 +368,13 @@ export async function pullCommand(
   // selector is itself a run id (the common case: you pull the run you just failed to pull), this
   // heals it first and costs one stat. runDirFor rejects anything that is not a run id, which is
   // the path-traversal guard, so a selector that is not one simply skips this.
+  // The store has to exist before anything can take a lock file inside it, so this runs ahead of
+  // the early recovery rather than beside the staging code it also protects.
+  await ensureRunsDir(cwd);
+
   try {
-    await recoverInterruptedSwap(runDirFor(cwd, runKey));
+    const early = runDirFor(cwd, runKey);
+    await withRunLock(early, () => recoverInterruptedSwap(early));
   } catch {
     // Not a run id — the post-fetch recovery below is the one that matters anyway.
   }
@@ -314,7 +403,7 @@ export async function pullCommand(
   // packages/core/src/paths.ts), and the id here came off the wire. readArchive already refuses an
   // entry name that would escape, so this is the second of two independent checks on a value the
   // gateway chose — which is the right number for one that becomes a filesystem path.
-  // THE STORE MUST EXIST ON THE STORE'S OWN TERMS (codex round 3 P1).
+  // (ensureRunsDir ran above, before the first lock.) THE STORE ON THE STORE'S OWN TERMS (codex round 3 P1).
   //
   // record, attach and replay all create `.orca/runs` through ensureRunsDir; pull wrote into it
   // with a bare recursive mkdir and inherited none of what that function is for. Two things were
@@ -327,75 +416,80 @@ export async function pullCommand(
   //   - `.orca/.gitignore` containing `*`, git's own idiom for a directory that excludes itself.
   //     Without it the whole store lands in `git status` as untracked, one `git add -A` from being
   //     committed and pushed. That is the accident ensureRunsDir was written to prevent.
-  await ensureRunsDir(cwd);
-
   const dest = runDirFor(cwd, runId);
 
   // Finish or roll back whatever a previous, interrupted pull of this run left behind, BEFORE
   // deciding whether the run exists — otherwise a run stranded by a crash reads as absent and the
   // stranded copy is never reclaimed.
-  await recoverInterruptedSwap(dest);
-
-  const existing = await stat(dest).catch(() => undefined);
-  if (existing && !args.bool('force')) {
-    throw new Error(
-      `${runId} already exists locally. Pass --force to replace it, or move it aside first.`,
-    );
-  }
-
-  // STAGE, THEN SWAP — AND MAKE THE SWAP RECOVERABLE, not merely exception-safe.
+  // ONE LOCK OVER RECOVERY, STAGING AND THE SWAP.
   //
-  // Deleting the old run and writing the new one in its place means anything that fails in between
-  // leaves the run neither the old one nor the new one. The recording is the artifact, and it may
-  // be the only copy of a crash someone spent a day reproducing; `--force` asks to REPLACE it,
-  // which is not a licence to destroy it and then fail.
-  //
-  // Staging alone does not finish the job, because POSIX will not rename a directory over a
-  // non-empty one: the old run must be moved aside first, so there is a window of two syscalls in
-  // which `dest` does not exist. try/catch covers a thrown error and NOTHING ELSE — SIGKILL, ^C
-  // and power loss all land in that window, and the earlier version of this code claimed otherwise.
-  // Worse, the names were randomised, and neither matches RUN_ID_PATTERN (`run_[0-9a-f]{6,32}`
-  // admits no `.`), so `list`, `show`, `gc`, `scrub` and `resolveRunSelector` all skip them: the
-  // run had not moved, it had VANISHED, with a possibly secret-bearing copy stranded out of
-  // scrub's reach and nothing that would ever sweep it.
-  //
-  // So the scratch names are DETERMINISTIC per destination, which is what makes the half-done
-  // state recoverable rather than merely invisible, and `recoverInterruptedSwap` below runs before
-  // every pull to finish or roll back whatever the last one left. Determinism costs one thing —
-  // two concurrent pulls of the same run share the scratch names — and buys back the case the
-  // reviewer named: a run that no command can reach again. Those two pulls already raced over
-  // `dest` itself; a race is recoverable, a disappearance is not.
-  const staging = `${dest}.incoming`;
-  const retired = `${dest}.replaced`;
+  // These three steps are one critical section: recovery decides what exists, staging writes the
+  // new copy under a name another pull would also use, and the swap moves both. Locking only the
+  // swap would leave recovery free to delete what staging just wrote.
+  await withRunLock(dest, async () => {
+    await recoverInterruptedSwap(dest);
 
-  try {
-    await mkdir(staging, { recursive: true, mode: DIR_MODE });
-    await chmod(staging, DIR_MODE).catch(() => undefined);
-    for (const entry of entries) {
-      const rel = entry.name.slice(entry.name.indexOf('/') + 1);
-      if (rel === '' || entry.name.indexOf('/') < 0) continue;
-      const path = join(staging, ...rel.split('/'));
-      await mkdir(dirname(path), { recursive: true, mode: DIR_MODE });
-      await writeFile(path, entry.bytes, { mode: FILE_MODE });
-      await chmod(path, FILE_MODE).catch(() => undefined);
+    const existing = await stat(dest).catch(() => undefined);
+    if (existing && !args.bool('force')) {
+      throw new Error(
+        `${runId} already exists locally. Pass --force to replace it, or move it aside first.`,
+      );
     }
 
-    // INSIDE the try: if another process recreated `dest` between the stat above and here, this
-    // move is what fails, and leaving it outside stranded the staging directory while reporting
-    // an error.
-    if (existing) await rename(dest, retired);
-    await rename(staging, dest);
-  } catch (err) {
-    // Put the original back before reporting the failure: the caller is about to be told the pull
-    // did not happen, and that has to be true of the store as well as of the message. If even this
-    // fails, the deterministic names above mean the next pull recovers it rather than the copy
-    // being lost — which is exactly why the revert may swallow its own error here and the previous
-    // version may not have.
-    if (existing) await rename(retired, dest).catch(() => undefined);
-    await rm(staging, { recursive: true, force: true });
-    throw err;
-  }
-  await rm(retired, { recursive: true, force: true });
+    // STAGE, THEN SWAP — AND MAKE THE SWAP RECOVERABLE, not merely exception-safe.
+    //
+    // Deleting the old run and writing the new one in its place means anything that fails in between
+    // leaves the run neither the old one nor the new one. The recording is the artifact, and it may
+    // be the only copy of a crash someone spent a day reproducing; `--force` asks to REPLACE it,
+    // which is not a licence to destroy it and then fail.
+    //
+    // Staging alone does not finish the job, because POSIX will not rename a directory over a
+    // non-empty one: the old run must be moved aside first, so there is a window of two syscalls in
+    // which `dest` does not exist. try/catch covers a thrown error and NOTHING ELSE — SIGKILL, ^C
+    // and power loss all land in that window, and the earlier version of this code claimed otherwise.
+    // Worse, the names were randomised, and neither matches RUN_ID_PATTERN (`run_[0-9a-f]{6,32}`
+    // admits no `.`), so `list`, `show`, `gc`, `scrub` and `resolveRunSelector` all skip them: the
+    // run had not moved, it had VANISHED, with a possibly secret-bearing copy stranded out of
+    // scrub's reach and nothing that would ever sweep it.
+    //
+    // So the scratch names are DETERMINISTIC per destination, which is what makes the half-done
+    // state recoverable rather than merely invisible, and `recoverInterruptedSwap` below runs before
+    // every pull to finish or roll back whatever the last one left. Determinism costs one thing —
+    // two concurrent pulls of the same run share the scratch names — and buys back the case the
+    // reviewer named: a run that no command can reach again. Those two pulls already raced over
+    // `dest` itself; a race is recoverable, a disappearance is not.
+    const staging = `${dest}.incoming`;
+    const retired = `${dest}.replaced`;
+
+    try {
+      await mkdir(staging, { recursive: true, mode: DIR_MODE });
+      await chmod(staging, DIR_MODE).catch(() => undefined);
+      for (const entry of entries) {
+        const rel = entry.name.slice(entry.name.indexOf('/') + 1);
+        if (rel === '' || entry.name.indexOf('/') < 0) continue;
+        const path = join(staging, ...rel.split('/'));
+        await mkdir(dirname(path), { recursive: true, mode: DIR_MODE });
+        await writeFile(path, entry.bytes, { mode: FILE_MODE });
+        await chmod(path, FILE_MODE).catch(() => undefined);
+      }
+
+      // INSIDE the try: if another process recreated `dest` between the stat above and here, this
+      // move is what fails, and leaving it outside stranded the staging directory while reporting
+      // an error.
+      if (existing) await rename(dest, retired);
+      await rename(staging, dest);
+    } catch (err) {
+      // Put the original back before reporting the failure: the caller is about to be told the pull
+      // did not happen, and that has to be true of the store as well as of the message. If even this
+      // fails, the deterministic names above mean the next pull recovers it rather than the copy
+      // being lost — which is exactly why the revert may swallow its own error here and the previous
+      // version may not have.
+      if (existing) await rename(retired, dest).catch(() => undefined);
+      await rm(staging, { recursive: true, force: true });
+      throw err;
+    }
+    await rm(retired, { recursive: true, force: true });
+  });
 
   out.phase('pull.done', { run: runId, files: entries.length, dir: dest });
 }
