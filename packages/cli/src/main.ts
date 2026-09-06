@@ -14,6 +14,7 @@ import {
   showCommand,
   uiCommand,
 } from './commands/inspect.js';
+import { pullCommand, pushCommand } from './commands/sync.js';
 import { compareCommand } from './commands/compare.js';
 import { scrubCommand } from './commands/scrub.js';
 import { gcCommand } from './commands/gc.js';
@@ -53,6 +54,12 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
         --dry-run                say what would go, and write nothing
         --drop-fs                delete the filesystem snapshots, which cannot be scrubbed
   orca ui [run]                  serve the viewer locally
+  orca push [run]                send a run to the gateway, for the rest of the team
+        --gateway <url>          where to send it (default: the configured gateway)
+        --force                  push even though the gateway's scan found a secret
+  orca pull <run>                fetch a gateway run into this machine's store
+        --gateway <url>          where to fetch from (default: the configured gateway)
+        --force                  replace a run of the same id already recorded here
   orca list                      runs recorded here
   orca gc --older-than 7d        reclaim space, forks' scratch worktrees included
                                  --keep N, --dry-run
@@ -179,6 +186,12 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
         return 0;
       case 'export':
         await exportCommand(args, out, cwd);
+        return 0;
+      case 'push':
+        await pushCommand(args, out, cwd);
+        return 0;
+      case 'pull':
+        await pullCommand(args, out, cwd);
         return 0;
       case 'ui':
         await uiCommand(args, out, cwd);

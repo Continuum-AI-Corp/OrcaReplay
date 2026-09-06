@@ -21,6 +21,10 @@ const UPSTREAM = ['upstream-anthropic', 'upstream-openai'] as const;
 const TLS = ['tls-intercept', 'tls-hosts'] as const;
 
 export const BY_COMMAND: Record<string, readonly string[]> = {
+  // push/pull reach a gateway the user names. `--force` means two different deliberate overrides:
+  // on push, store despite a secret-scan finding; on pull, replace a local run that already exists.
+  push: ['gateway', 'force'],
+  pull: ['gateway', 'force'],
   record: ['fs', 'shell', 'mcp-config', ...TLS, ...UPSTREAM],
   attach: [
     'for',
@@ -122,6 +126,10 @@ const POSITIONALS: Record<string, number> = {
   checkpoints: 1,
   graph: 1,
   export: 1,
+  // push defaults to the last run, like every other run-taking command; pull needs to be told
+  // which run to fetch, because "last" means nothing on a machine that has not seen it yet.
+  push: 1,
+  pull: 1,
   ui: 1,
   scrub: 1,
   attach: 0,
