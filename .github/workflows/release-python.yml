@@ -1,0 +1,71 @@
+# `orca-trace` is the read-only Python reader for the trace format. It ships on its own tag,
+# deliberately kept out of release.yml: the npm packages must not fail to publish because PyPI had
+# a bad day, and a Python-only fix must not force a version bump across twelve npm packages.
+#
+# Publishing uses PyPI Trusted Publishing — GitHub's OIDC identity is exchanged for a short-lived
+# upload token, so there is no PyPI secret in this repository to leak or rotate. It needs a
+# one-time registration at pypi.org (Publishing -> Add a pending publisher) naming:
+#
+#   PyPI project   orca-trace
+#   owner          Continuum-AI-Corp
+#   repository     OrcaReplay
+#   workflow       release-python.yml
+#   environment    pypi
+#
+# Until that exists the upload step fails and nothing else is affected — which is the reason this
+# is a separate workflow rather than another job in the release.
+name: Release (Python)
+
+on:
+  push:
+    tags: ['py-v*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Build and check without uploading'
+        type: boolean
+        default: true
+
+jobs:
+  release-python:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # Trusted Publishing: this is the whole credential
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # A tag that disagrees with pyproject would publish a version nobody can reproduce from the
+      # tree. Same check the npm release makes, for the same reason.
+      - name: Tag matches package version
+        if: startsWith(github.ref, 'refs/tags/py-v')
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/py-v}"
+          pkg=$(python -c "import tomllib;print(tomllib.load(open('python/pyproject.toml','rb'))['project']['version'])")
+          [ "$tag" = "$pkg" ] || { echo "tag py-v$tag does not match pyproject $pkg"; exit 1; }
+
+      - name: Test
+        working-directory: python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+          python -m pytest -q
+
+      - name: Build
+        working-directory: python
+        run: |
+          pip install --upgrade build twine
+          python -m build
+          twine check dist/*
+
+      - name: Publish to PyPI
+        if: ${{ github.event.inputs.dry-run != 'true' }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python/dist
