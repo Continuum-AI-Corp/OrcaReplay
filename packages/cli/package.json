@@ -1,6 +1,7 @@
 {
   "name": "orcareplay",
   "version": "0.2.1",
+  "mcpName": "io.github.Continuum-AI-Corp/orcareplay",
   "type": "module",
   "license": "Apache-2.0",
   "description": "Record, replay and fork debugger for AI agents",

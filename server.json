@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Continuum-AI-Corp/orcareplay",
+  "description": "Read, replay and fork recorded coding-agent runs. Capture happens below the harness, so model traffic, shell exit codes, per-turn file changes and MCP calls share one timeline.",
+  "repository": {
+    "url": "https://github.com/Continuum-AI-Corp/OrcaReplay",
+    "source": "github"
+  },
+  "version": "0.2.2",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "orcareplay",
+      "version": "0.2.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeArguments": [
+        {
+          "type": "positional",
+          "value": "mcp",
+          "isRequired": true,
+          "description": "Serves the six read-and-replay tools over stdio."
+        }
+      ]
+    }
+  ]
+}

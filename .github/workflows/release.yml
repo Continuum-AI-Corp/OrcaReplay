@@ -68,3 +68,21 @@ jobs:
               ( cd "$dir" && npm publish --provenance --access public )
             fi
           done
+
+      # The npm packages are the artefact; this makes them findable. Ownership is proved twice at
+      # once: `mcpName` in packages/cli/package.json must equal the name in server.json, and GitHub
+      # OIDC proves the workflow really runs in this repository. No token is stored, and there is no
+      # interactive login — which is why this could not be done by hand.
+      #
+      # A dry run must not reach the registry either, so the whole step is skipped for it.
+      - name: Publish to the MCP Registry
+        if: ${{ github.event.inputs.dry-run != 'true' }}
+        run: |
+          set -euo pipefail
+          os=$(uname -s | tr '[:upper:]' '[:lower:]')
+          arch=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_${os}_${arch}.tar.gz" | tar xz mcp-publisher
+          node scripts/sync-server-json.mjs "${GITHUB_REF#refs/tags/v}"
+          ./mcp-publisher validate
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
