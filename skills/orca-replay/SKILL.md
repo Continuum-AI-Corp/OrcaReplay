@@ -151,7 +151,7 @@ their call, not a detail of your task. Install a pinned version rather than what
 resolves to today:
 
 ```console
-npm i -g orcareplay@0.1.2     # ask first
+npm i -g orcareplay@0.2.1     # ask first
 ```
 
 `orca record <agent>` runs the agent unmodified behind a local proxy. Nothing about the agent
