@@ -1,0 +1,19 @@
+# A trace is evidence, and its integrity is a byte hash over the file. Git's newline conversion
+# rewrites those bytes on a Windows checkout, so a freshly cloned example fails its own integrity
+# check for a reason that has nothing to do with the reader. Before this file existed, every trace
+# under examples/ arrived with CRLF on Windows and `verify_integrity()` returned False on a run
+# that was intact in the repository — the failure mode this project exists to rule out.
+
+# Normalise to LF in the index and check out LF everywhere. The tooling, the tests and the trace
+# format all assume LF; nothing here wants CRLF.
+* text=auto eol=lf
+
+# Content-addressed. Never rewritten, in either direction.
+examples/traces/** -text
+packages/*/fixtures/** -text
+packages/*/test/fixtures/** -text
+
+*.png binary
+*.jpg binary
+*.gz binary
+*.zip binary
