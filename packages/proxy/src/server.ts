@@ -389,7 +389,12 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
    * falls through to `net.request` / `net.response`, where it is described but not interpreted.
    */
   function onDecrypted(exchange: NetExchange): void {
-    const dialect = selectDialect(dialects, exchange.path);
+    // On the path alone. A dialect matches an endpoint, and a query string is not part of the
+    // endpoint -- Azure OpenAI's are all `?api-version=...`, so matching the raw path recorded
+    // those runs as opaque network traffic that cannot be replayed or forked, while telling the
+    // operator no dialect claimed the path. `onInterceptedRequest` below has always split it off
+    // for exactly this reason; the recording side had not.
+    const dialect = selectDialect(dialects, exchange.path.split('?')[0] ?? exchange.path);
     if (dialect && exchange.method === 'POST' && !exchange.requestTruncated) {
       try {
         // Codex's HTTPS fallback currently labels this SSE body as application/json. The wire
