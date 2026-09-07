@@ -389,7 +389,12 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
    * falls through to `net.request` / `net.response`, where it is described but not interpreted.
    */
   function onDecrypted(exchange: NetExchange): void {
-    const dialect = selectDialect(dialects, exchange.path);
+    // On the path alone. A dialect matches an endpoint, and a query string is not part of the
+    // endpoint -- Azure OpenAI's are all `?api-version=...`, so matching the raw path recorded
+    // those runs as opaque network traffic that cannot be replayed or forked, while telling the
+    // operator no dialect claimed the path. `onInterceptedRequest` below has always split it off
+    // for exactly this reason; the recording side had not.
+    const dialect = selectDialect(dialects, exchange.path.split('?')[0] ?? exchange.path);
     // `status === 0` means no response header was ever seen: the client abandoned the call before
     // the origin answered. The request is still worth keeping -- it is what the agent asked --
     // but a model exchange with no response is not one, and inserting it in the replay set gives

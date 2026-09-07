@@ -817,6 +817,30 @@ describe('TLS interception', () => {
     expect(netExchanges).toHaveLength(0);
   });
 
+  it('recognises a model API call whose endpoint carries a query string', async () => {
+    const handle = await startProxy([`127.0.0.1:${model.port}`]);
+
+    await through({
+      proxyPort: handle.port,
+      host: '127.0.0.1',
+      port: model.port,
+      trust: [runCa.certPem],
+      method: 'POST',
+      // What Azure OpenAI's endpoints look like, and they are not optional there.
+      path: '/v1/chat/completions?api-version=2026-02-01',
+      body: JSON.stringify({ model: 'gpt-5.2', messages: [{ role: 'user', content: 'hello' }] }),
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Matching the raw path recorded this as net traffic: unreplayable, unforkable, and reported
+    // as a path no dialect claims.
+    expect(modelExchanges).toHaveLength(1);
+    expect(modelExchanges[0]!.dialect).toBe('openai');
+    expect(netExchanges).toHaveLength(0);
+    // The query stays in the trace -- it is what the agent asked for; only the match ignores it.
+    expect(modelExchanges[0]!.path).toBe('/v1/chat/completions?api-version=2026-02-01');
+  });
+
   it.skipIf(zstdCompressSync === undefined)(
     'replays a zstd-compressed Codex request inside intercepted TLS',
     async () => {
