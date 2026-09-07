@@ -13,11 +13,29 @@ sequence of `npm publish` calls run by hand at the end of a long day.
 ## Every release
 
 ```console
-npm version 0.2.0 --workspaces --include-workspace-root --no-git-tag-version
+npm version 0.3.0 --workspaces --include-workspace-root --no-git-tag-version
+
+# `npm version` bumps each package's own version and nothing else: the internal pins
+# ("@orcareplay/core": "0.2.0") are left naming the previous release. Move them too,
+# before anything installs. By this point the only "0.2.0" left in these files IS a pin.
+sed -i 's/"0\.2\.0"/"0.3.0"/g' packages/*/package.json
+
 node scripts/publish-order.mjs      # sanity: prints the order, fails if versions disagree
-npm ci && npm run check             # what the workflow will run anyway, but faster to find here
-git commit -am "release 0.2.0" && git tag v0.2.0 && git push --follow-tags
+rm -rf node_modules packages/*/node_modules && npm install   # one clean re-resolve
+npm run check                       # what the workflow will run anyway, but faster to find here
+git commit -am "release 0.3.0" && git tag v0.3.0 && git push --follow-tags
 ```
+
+> **Do the pins before any install.** If `npm install` runs while a workspace is at the new
+> version and its dependants still name the old one, npm stops treating them as satisfiable
+> workspace links and fetches the *published* old version into `packages/<name>/node_modules/`.
+> Those copies then shadow the source, `tsc` typechecks the CLI against last release's `.d.ts`,
+> and the errors it reports name symbols that plainly do exist. Worse, the resolution is written
+> into `package-lock.json`, so a later `npm ci` faithfully reinstalls the mess.
+>
+> If it happens: `git checkout package-lock.json`, delete every `node_modules`, fix the pins,
+> and install once. `scripts/publish-order.mjs` catches the mismatch that starts it, which is why
+> it runs before the install and not after.
 
 The tag fires `.github/workflows/release.yml`, which:
 
