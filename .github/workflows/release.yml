@@ -15,6 +15,14 @@ on:
         description: 'Pack and verify without publishing'
         type: boolean
         default: true
+      # The registry validates server.json server-side and can reject a publish after npm has
+      # already gone out — 0.2.2 hit exactly that on a description length limit. Re-running the
+      # whole workflow would then fail on npm, which refuses a version it already has. This lets
+      # the registry half be retried on its own.
+      registry-only:
+        description: 'Publish only to the MCP Registry (npm already published)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -52,6 +60,7 @@ jobs:
           fi
 
       - name: Publish in dependency order
+        if: ${{ github.event.inputs.registry-only != 'true' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           DRY_RUN: ${{ github.event.inputs.dry-run }}
@@ -82,7 +91,10 @@ jobs:
           os=$(uname -s | tr '[:upper:]' '[:lower:]')
           arch=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
           curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_${os}_${arch}.tar.gz" | tar xz mcp-publisher
-          node scripts/sync-server-json.mjs "${GITHUB_REF#refs/tags/v}"
+          v="${GITHUB_REF#refs/tags/v}"
+          # workflow_dispatch has no tag to read, so fall back to what npm actually published.
+          case "$v" in refs/*) v=$(node -p "require('./packages/cli/package.json').version") ;; esac
+          node scripts/sync-server-json.mjs "$v"
           ./mcp-publisher validate
           ./mcp-publisher login github-oidc
           ./mcp-publisher publish
