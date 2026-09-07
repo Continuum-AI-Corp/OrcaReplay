@@ -41,7 +41,7 @@ function ctx(over: Partial<RecordContext> = {}): RecordContext {
     runId: 'run_abc123',
     cwd: '/work',
     proxyUrl: 'http://127.0.0.1:51733',
-    runDir: '/work/.orca/runs/run_abc123',
+    runDir: join(scratch, '.orca/runs/run_abc123'),
     userArgs: [],
     env: {},
     ...over,
@@ -304,7 +304,7 @@ describe('openCodeAdapter', () => {
     const launch = await openCodeAdapter.prepare(ctx());
     expect(launch.command).toBe('opencode');
     expect(launch.env.OPENAI_BASE_URL).toBe('http://127.0.0.1:51733/v1');
-    expect(launch.env.ANTHROPIC_BASE_URL).toBe('http://127.0.0.1:51733');
+    expect(launch.env.ANTHROPIC_BASE_URL).toBe('http://127.0.0.1:51733/v1');
   });
 
   it('passes both keys through', async () => {
@@ -404,12 +404,14 @@ describe('openCodeAdapter', () => {
     expect('OPENCODE_CONFIG_CONTENT' in launch.env).toBe(false);
   });
 
-  it('leaves an OPENCODE_CONFIG_CONTENT the user already set standing', async () => {
-    // There is no way to merge two sources of one variable, and clobbering theirs to add capture
-    // would change more than the capture.
+  it('preserves existing inline config while adding the capture plugin', async () => {
     const theirs = '{"model":"opencode-go/glm-5.3-flash"}';
     const launch = await openCodeAdapter.prepare(ctx({ env: { OPENCODE_CONFIG_CONTENT: theirs } }));
-    expect(launch.env.OPENCODE_CONFIG_CONTENT).toBe(theirs);
+    const content = JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT!);
+    expect(content.model).toBe('opencode-go/glm-5.3-flash');
+    expect(content.provider).toBeUndefined();
+    expect(content.plugin).toHaveLength(1);
+    expect(content.plugin[0]).toMatch(/^file:.*orca-opencode-capture\.mjs$/);
   });
 
   it('points SHELL at the shim for a shell OpenCode would have picked anyway', async () => {

@@ -3,7 +3,8 @@ import type { Adapter, Launch, RecordContext } from '@orcareplay/plugin-api';
 import { forwardBasePath } from '@orcareplay/proxy';
 import { resolveRealBinary } from '@orcareplay/shell-shim';
 import { detectAgent, homeDirHas } from './detect.js';
-import { openCodeConfiguredBaseURLs } from './opencode-config.js';
+import { openCodeConfiguredBaseURLs, stripJsonc } from './opencode-config.js';
+import { writeOpenCodeCapturePlugin } from './opencode-capture.js';
 import { passKey, passThrough, proxyBase, readEnv } from './env.js';
 
 /**
@@ -35,7 +36,7 @@ const OPENCODE_FIRST_PARTY_BASE: Record<string, string> = {
   'opencode-go': 'https://opencode.ai/zen/go/v1',
 };
 
-/** The environment variable the overlay rides in on, and the one it must never clobber. */
+/** The environment variable the run-local overlay rides in on. */
 const CONFIG_CONTENT_VAR = 'OPENCODE_CONFIG_CONTENT';
 
 /**
@@ -97,15 +98,12 @@ async function shellThroughShim(
  *
  * The user's own `options.baseURL` for the same provider is carried through rather than replaced.
  * A config that could not be parsed clears the whole overlay: an unreadable intent is not a
- * licence to reroute someone's provider. And an `OPENCODE_CONFIG_CONTENT` the user already set is
- * relayed untouched — there is no way to merge two sources of one variable, and clobbering theirs
- * to add capture would change more than the capture.
+ * licence to reroute someone's provider. An existing `OPENCODE_CONFIG_CONTENT` keeps its fields
+ * and provider routing; only the run-local capture plugin is appended.
  */
 async function baseURLsThroughProxy(ctx: RecordContext): Promise<Record<string, string>> {
-  // There is no way to merge two sources of one variable, and clobbering theirs to add capture
-  // would change more than the capture — so it is relayed exactly as it arrived.
   const theirs = readEnv(ctx.env, CONFIG_CONTENT_VAR);
-  if (theirs !== undefined) return { [CONFIG_CONTENT_VAR]: theirs };
+  if (theirs !== undefined) return withCapturePlugin(ctx, theirs);
   const scan = await openCodeConfiguredBaseURLs(ctx.env, ctx.cwd);
   if (!scan.trusted) return {};
   const provider: Record<string, { options: { baseURL: string } }> = {};
@@ -113,14 +111,33 @@ async function baseURLsThroughProxy(ctx: RecordContext): Promise<Record<string, 
     const base = scan.overrides.get(id) ?? catalogBase;
     provider[id] = { options: { baseURL: `${proxyBase(ctx.proxyUrl)}${forwardBasePath(base)}` } };
   }
-  return { [CONFIG_CONTENT_VAR]: JSON.stringify({ provider }) };
+  return withCapturePlugin(ctx, JSON.stringify({ provider }));
+}
+
+async function withCapturePlugin(
+  ctx: RecordContext,
+  content: string,
+): Promise<Record<string, string>> {
+  let config: Record<string, unknown>;
+  try {
+    config = JSON.parse(stripJsonc(content));
+    if (!config || typeof config !== 'object' || Array.isArray(config))
+      throw new Error('not an object');
+    if (config.plugin !== undefined && !Array.isArray(config.plugin))
+      throw new Error('not a plugin list');
+  } catch {
+    // Leave invalid config for OpenCode to diagnose without discarding the user's settings.
+    return { [CONFIG_CONTENT_VAR]: content };
+  }
+  const plugin = await writeOpenCodeCapturePlugin(ctx.runDir, proxyBase(ctx.proxyUrl));
+  config.plugin = [...((config.plugin as unknown[] | undefined) ?? []), plugin];
+  return { [CONFIG_CONTENT_VAR]: JSON.stringify(config) };
 }
 
 /**
- * OpenCode picks its provider per model, so both origins are redirected: whichever protocol the
- * chosen model speaks, the traffic lands on the proxy. Providers whose origin is neither of the
- * two — OpenCode's own first-party ones, most visibly — are redirected by the config overlay
- * below, because no environment variable can name their origin for them.
+ * Base URL overrides cover ordinary SDK calls and first-party providers. ChatGPT OAuth rewrites
+ * the URL again inside its auth fetch, so the run-local plugin captures the final fetch instead.
+ * NODE_OPTIONS/BUN_OPTIONS preloads do not run in OpenCode's compiled executable.
  */
 export const openCodeAdapter: Adapter = {
   id: 'opencode',
@@ -132,7 +149,8 @@ export const openCodeAdapter: Adapter = {
   async prepare(ctx: RecordContext): Promise<Launch> {
     const env: Record<string, string> = {
       OPENAI_BASE_URL: proxyBase(ctx.proxyUrl, 'v1'),
-      ANTHROPIC_BASE_URL: proxyBase(ctx.proxyUrl),
+      // OpenCode's AI SDK appends /messages, unlike Claude Code's /v1/messages.
+      ANTHROPIC_BASE_URL: proxyBase(ctx.proxyUrl, 'v1'),
     };
     // Which credentials OpenCode can see is part of how it chooses a provider, so handing it a
     // placeholder for the provider the user has *not* configured can change which model the run
