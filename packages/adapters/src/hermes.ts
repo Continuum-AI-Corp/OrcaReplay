@@ -52,11 +52,15 @@ import { detectAgent } from './detect.js';
  * make a recorded run write somewhere different from the same command uninstrumented, which is
  * the one thing an adapter here must never do. Export it yourself when you want the diffs.
  *
- * **Every turn replays, and one call never will.** A three-exchange run replays `reused=3/3
- * exact=3 divergences=0`, twice over. The `unmatched=1` alongside it is a one-message background
- * call Hermes makes and abandons; the recording holds no answer for it, deliberately, because an
- * exchange with no response cannot be replayed. It is normal on every Hermes run and does not
- * stop one.
+ * **How much of a multi-turn run replays depends on the recording, not on you.** Hermes makes a
+ * one-message background call and abandons it, and where that lands decides the outcome. Landing
+ * after the turns, a three-exchange recording replays `reused=3/3 exact=3 divergences=0`. Landing
+ * between them, the matcher meets it where the recording has a three-message turn and strict
+ * replay stops at `reused=1/3`; `--loose` carries the run to the same answer. Recording the same
+ * task four times gave two of each, and each recording then replays the same way every time --
+ * deterministic per recording, roughly even across them. The `unmatched=1` is that call in both
+ * cases: the recording holds no answer for it, deliberately, because an exchange with no response
+ * cannot be replayed.
  *
  * **The prompt carries Hermes' own skills catalogue, so a short one means a broken install.** It
  * is 14,058 characters and 19 tools, byte-identical across runs, and about 6,300 of that is an
