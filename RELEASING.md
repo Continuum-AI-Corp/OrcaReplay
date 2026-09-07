@@ -21,21 +21,30 @@ npm version 0.3.0 --workspaces --include-workspace-root --no-git-tag-version
 sed -i 's/"0\.2\.0"/"0.3.0"/g' packages/*/package.json
 
 node scripts/publish-order.mjs      # sanity: prints the order, fails if versions disagree
+
+# `npm version` already rewrote package-lock.json — while the pins were still stale. Throw that
+# write away and re-resolve from the last committed lockfile, which is clean.
+git checkout package-lock.json
 rm -rf node_modules packages/*/node_modules && npm install   # one clean re-resolve
+grep -c 'registry.npmjs.org/@orcareplay' package-lock.json   # must be 0: every one is a link
 npm run check                       # what the workflow will run anyway, but faster to find here
 git commit -am "release 0.3.0" && git tag v0.3.0 && git push --follow-tags
 ```
 
-> **Do the pins before any install.** If `npm install` runs while a workspace is at the new
-> version and its dependants still name the old one, npm stops treating them as satisfiable
-> workspace links and fetches the *published* old version into `packages/<name>/node_modules/`.
-> Those copies then shadow the source, `tsc` typechecks the CLI against last release's `.d.ts`,
-> and the errors it reports name symbols that plainly do exist. Worse, the resolution is written
-> into `package-lock.json`, so a later `npm ci` faithfully reinstalls the mess.
+> **Why both the sed and the `git checkout`.** When a workspace sits at the new version and its
+> dependants still name the old one, npm stops treating them as satisfiable workspace links and
+> resolves the *published* old version instead, into `packages/<name>/node_modules/`. Those copies
+> shadow the source, `tsc` then checks the CLI against last release's `.d.ts`, and the errors it
+> reports name symbols that plainly do exist.
 >
-> If it happens: `git checkout package-lock.json`, delete every `node_modules`, fix the pins,
-> and install once. `scripts/publish-order.mjs` catches the mismatch that starts it, which is why
-> it runs before the install and not after.
+> The sed alone does not prevent it, because **`npm version` writes `package-lock.json` itself**,
+> at the one moment when the versions have moved and the pins have not. So the bad resolution is
+> already recorded before you get a chance to fix the pins, and the next `npm install` honours it
+> — as does any later `npm ci`. 0.2.1 hit this with correct manifests and two poisoned lockfile
+> entries. Discarding npm's write and re-resolving from the committed lockfile is what clears it.
+>
+> `scripts/publish-order.mjs` catches the manifest mismatch, and the `grep` catches the lockfile
+> one; the manifests can be perfectly consistent while the lockfile is not, so check both.
 
 The tag fires `.github/workflows/release.yml`, which:
 

@@ -1,6 +1,6 @@
 {
   "name": "@orcareplay/fs-capture",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "license": "Apache-2.0",
   "repository": {
@@ -17,6 +17,6 @@
     "dist"
   ],
   "dependencies": {
-    "@orcareplay/schema": "0.2.0"
+    "@orcareplay/schema": "0.2.1"
   }
 }
