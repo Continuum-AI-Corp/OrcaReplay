@@ -39,6 +39,30 @@ import { detectAgent } from './detect.js';
  *       --provider opencode-free -m nemotron-3.5-lightning-free -z 'your question'
  *
  * `-z` is the non-interactive flag; without it Hermes opens a session and waits.
+ *
+ * Three things about a Hermes recording that are worth knowing before reading one, all measured
+ * against v0.21.0 rather than reasoned about:
+ *
+ * **It does not work in the directory orca launched it in.** `_restore_session_cwd` in Hermes'
+ * own CLI chdirs to the cwd stored in its session metadata, so a run started in a project reports
+ * the home directory when asked, and writes land there. Per-turn filesystem diffs are taken of
+ * the directory orca recorded from, so they read `0 changed` on a run that did change files --
+ * the evidence is still in the trace, as the absolute path inside the `write_file` tool call.
+ * `TERMINAL_CWD` is the lever, and the adapter deliberately does not pull it: forcing it would
+ * make a recorded run write somewhere different from the same command uninstrumented, which is
+ * the one thing an adapter here must never do. Export it yourself when you want the diffs.
+ *
+ * **Strict replay of a multi-turn run stops after the first turn.** Hermes issues a one-message
+ * background call whose position moves between runs; the matcher is sequential, so it lands
+ * second on replay against a recorded second turn that has three messages. `--loose` replays the
+ * whole run -- `reused=3/3 exact=3` on a three-exchange recording, with the agent reaching the
+ * same answer offline. Not a property of this branch: the pre-change promotion rule produces the
+ * same mismatch at the same index, one exchange worse.
+ *
+ * **The system prompt grows with the skills installed under `HERMES_HOME`.** With none, it is
+ * 7,742 characters and 19 tools, byte-identical across runs and shells. With twelve skills in
+ * that home it is 14,058, the extra 6,316 being an `<available_skills>` catalogue. What
+ * `prompt/HERMES/` holds is the no-skills baseline, which is the part that is Hermes' own.
  */
 export const hermesAdapter: Adapter = {
   id: 'hermes',

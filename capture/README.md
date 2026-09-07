@@ -97,6 +97,14 @@ which is why `capture.mjs` files these only under `--allow-failed` and says so. 
 and `kilo-auto/free` completed, but neither response carried a usage block to read. Hermes
 completed too, on the same anonymous tier, and its response carried no usage block either.
 
+The Hermes row is the prompt with **no skills installed**, and that qualifier is load-bearing:
+Hermes appends an `<available_skills>` catalogue built from whatever lives under `HERMES_HOME`.
+Measured on one machine, twelve skills took the same prompt from 7,742 characters to 14,058 -- the
+extra 6,316 describing skills that are the operator's, not Hermes'. The baseline is the part worth
+filing, and it is byte-identical across four runs in two different shells; the catalogue is not
+reproducible from this repo and is deliberately absent. If your own capture comes out much larger,
+check `hermes skills list` before suspecting the capture.
+
 `nemotron-3.5-lightning-free` appears twice, which is the most direct comparison in this
 table: one free model, two harnesses, 9,655 characters and 11 tools from OpenCode against
 7,742 and 19 from Hermes. Same model, same anonymous endpoint, different instructions and a
