@@ -485,14 +485,24 @@ async function runRecording(
    * the adapters; this guards the run, which is where a user actually meets it.
    */
   if (modelExchanges === 0) {
+    const baseUrls = Object.keys(launch.env)
+      .filter((name) => /(?:_BASE_URL|_API_BASE)$/.test(name))
+      .sort();
+    // Which cause is worth naming depends on how this adapter captures at all, and the line
+    // already carries the evidence: `set=none` means there was never a variable to be ignored.
+    // Printing "it may not read a base-URL variable" next to `set=none` contradicts the run's own
+    // output and sends the reader after a route that was never the route -- which is how the
+    // capture bug fixed earlier in this branch stayed hidden through a dozen rounds of debugging.
+    const cause =
+      baseUrls.length > 0
+        ? 'the agent never called the proxy — it may not read a base-URL variable'
+        : tls.ca
+          ? 'this adapter captures at the transport, and nothing orca decrypted looked like a model call'
+          : 'this adapter captures at the transport, and interception was not on';
     out.warn('capture.empty', {
       exchanges: 0,
-      cause: 'the agent never called the proxy — it may not read a base-URL variable',
-      set:
-        Object.keys(launch.env)
-          .filter((name) => /(?:_BASE_URL|_API_BASE)$/.test(name))
-          .sort()
-          .join(',') || 'none',
+      cause,
+      set: baseUrls.join(',') || 'none',
       next: 'orca doctor',
     });
   }
