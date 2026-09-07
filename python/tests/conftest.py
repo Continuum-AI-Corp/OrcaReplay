@@ -52,7 +52,10 @@ def write_trace(
     directory.mkdir(parents=True, exist_ok=True)
     body = "".join(json.dumps(e, separators=(",", ":")) + "\n" for e in events) + trailing
     events_path = directory / "events.jsonl"
-    events_path.write_text(body, encoding="utf-8")
+    # newline="" or Windows rewrites every LF as CRLF on the way out, while the digest below is
+    # taken over the LF form. The file then fails its own integrity check for a reason that has
+    # nothing to do with the reader, which hashes bytes.
+    events_path.write_text(body, encoding="utf-8", newline="")
 
     for digest, payload in (blobs or {}).items():
         shard = directory / "blobs" / digest[:2]
