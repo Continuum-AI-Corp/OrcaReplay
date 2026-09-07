@@ -173,6 +173,7 @@ const RECORDED_RULES: Record<string, string> = {
   'tool.call→tool.result': 'tool result answers its call',
   'shell.exec→shell.result': 'shell result answers its exec',
   'net.request→net.response': 'network response answers its request',
+  'model.request→model.response': 'the model answered this request',
   'model.response→tool.call': 'tool_use block in the response',
   'tool.result→model.request': 'tool_result block in the request',
 };
