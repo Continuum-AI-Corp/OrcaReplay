@@ -52,17 +52,21 @@ import { detectAgent } from './detect.js';
  * make a recorded run write somewhere different from the same command uninstrumented, which is
  * the one thing an adapter here must never do. Export it yourself when you want the diffs.
  *
- * **Strict replay of a multi-turn run stops after the first turn.** Hermes issues a one-message
- * background call whose position moves between runs; the matcher is sequential, so it lands
- * second on replay against a recorded second turn that has three messages. `--loose` replays the
- * whole run -- `reused=3/3 exact=3` on a three-exchange recording, with the agent reaching the
- * same answer offline. Not a property of this branch: the pre-change promotion rule produces the
- * same mismatch at the same index, one exchange worse.
+ * **Every turn replays, and one call never will.** A three-exchange run replays `reused=3/3
+ * exact=3 divergences=0`, twice over. The `unmatched=1` alongside it is a one-message background
+ * call Hermes makes and abandons; the recording holds no answer for it, deliberately, because an
+ * exchange with no response cannot be replayed. It is normal on every Hermes run and does not
+ * stop one.
  *
- * **The system prompt grows with the skills installed under `HERMES_HOME`.** With none, it is
- * 7,742 characters and 19 tools, byte-identical across runs and shells. With twelve skills in
- * that home it is 14,058, the extra 6,316 being an `<available_skills>` catalogue. What
- * `prompt/HERMES/` holds is the no-skills baseline, which is the part that is Hermes' own.
+ * **The prompt carries Hermes' own skills catalogue, so a short one means a broken install.** It
+ * is 14,058 characters and 19 tools, byte-identical across runs, and about 6,300 of that is an
+ * `<available_skills>` block listing the 51 skills `hermes skills list` calls builtin -- Hermes'
+ * content, not the operator's. A split install can hide it: `HERMES_HOME` is a persisted user
+ * variable here, and a shell whose environment predates the install falls back to a home with no
+ * skills directory, where the same prompt comes out 7,742 characters. That also degrades replay,
+ * from `3/3 exact=3` to `1/3` on the same task -- which is worth knowing, because it looks
+ * exactly like a matcher bug. Check `hermes skills list` first: 0 builtin means the harness cannot
+ * find itself.
  */
 export const hermesAdapter: Adapter = {
   id: 'hermes',
