@@ -1,7 +1,7 @@
 {
   "adapter": "opencode",
   "harness_versions": null,
-  "verified_at": "2026-09-06",
+  "verified_at": "2026-09-07",
   "command": "opencode",
   "env_vars": [
     "ANTHROPIC_API_KEY",
@@ -11,7 +11,10 @@
     "OPENCODE_CONFIG_CONTENT",
     "SHELL"
   ],
-  "base_urls": { "OPENAI_BASE_URL": "/v1", "ANTHROPIC_BASE_URL": "" },
+  "base_urls": {
+    "OPENAI_BASE_URL": "/v1",
+    "ANTHROPIC_BASE_URL": "/v1"
+  },
   "optional_env_vars": [],
-  "note": "Both origins are redirected because OpenCode picks its provider per model. The config overlay adds OPENCODE_CONFIG_CONTENT, pointing OpenCode's first-party providers (opencode, opencode-go) at the proxy with their real base encoded into the path — no environment variable names those origins. SHELL points at a run shim so the shell tool, which execs $SHELL by absolute path, is captured; the shim stands in for a shell OpenCode would resolve anyway. Credentials pass through when the user has either one; the placeholders recorded here appear only when the user has neither, so recording never makes a provider look configured that is not."
+  "note": "Verified with OpenCode 1.18.29 using isolated fake OAuth/API-key credentials and a local upstream stub. ChatGPT OAuth rewrites the URL after OPENAI_BASE_URL is applied; a run-local plugin captures the final fetch to chatgpt.com/backend-api/codex/responses or the public OpenAI model endpoints. OPENCODE_CONFIG_CONTENT retains existing settings and plugins while appending the capture plugin. The first-party provider overlay and SHELL shim routing remain in place. The fixture keys describe the no-auth placeholder branch. See docs/opencode-capture.md for reproduction and transport limits. The Anthropic base includes /v1 because OpenCode appends /messages, unlike Claude Code. Verified through the built orca record CLI with an Anthropic API-key fixture."
 }
