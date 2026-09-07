@@ -56,8 +56,14 @@ const SECRET_REQUEST_HEADERS = new Set(AUTH_REQUEST_HEADERS);
 /** A response can hand out credentials too. `set-cookie` is a session, not metadata. */
 const SECRET_RESPONSE_HEADERS = new Set(AUTH_RESPONSE_HEADERS);
 
-/** Enough to hold any model exchange; short of enough to hold somebody's video download. */
-const DEFAULT_MAX_CAPTURED_BYTES = 1024 * 1024;
+/**
+ * Enough to hold any model exchange; short of enough to hold somebody's video download.
+ *
+ * Exported because a run that hits it has to be able to say so in the number the operator will
+ * measure their conversation against. A warning that says "too large" without saying how large is
+ * a warning nobody can act on.
+ */
+export const DEFAULT_MAX_CAPTURED_BYTES = 1024 * 1024;
 
 /** One decrypted HTTP request and its reply, as seen inside an intercepted TLS session. */
 export interface NetExchange {
@@ -126,6 +132,13 @@ export function readRecordedBody(body: string): Buffer {
 
 export function decodeRequestBody(bytes: Buffer, contentEncoding?: string): string {
   const encoding = contentEncoding?.split(',')[0]?.trim().toLowerCase();
+  // The three Node has always been able to decode. Without them a gzipped model request was
+  // recorded as base64 of its compressed bytes, so no dialect could read it, the exchange was
+  // never promoted to a model call, and the run said `capture.empty` without ever mentioning an
+  // encoding -- the same silent shape as the bugs above it in this file.
+  if (encoding === 'gzip') return recordableBody(zlib.gunzipSync(bytes));
+  if (encoding === 'deflate') return recordableBody(zlib.inflateSync(bytes));
+  if (encoding === 'br') return recordableBody(zlib.brotliDecompressSync(bytes));
   if (encoding === 'zstd') {
     // zstd was added to Node's built-in zlib API after the oldest runtime Orca supports. Keep the
     // import compatible there; a Codex call degrades to opaque net capture with a clear error.

@@ -274,6 +274,30 @@ describe('orca record --tls-intercept', () => {
     expect(warnings).toHaveLength(1);
   });
 
+  it('blames the capture limit, not an unrecognised path, for a body it had to cut', async () => {
+    // 1.2 MiB against a 1 MiB limit. The truncation itself is fine -- `truncated: true`, the
+    // prefix kept -- but a body cut mid-JSON cannot be parsed by any dialect, so `add a dialect
+    // for it` is advice that cannot help. Driving this through a real origin printed exactly that
+    // about a path the openai dialect had claimed all along.
+    process.env.ORCA_TEST_TARGETS = JSON.stringify([
+      {
+        host: '127.0.0.1',
+        port: bank.port,
+        path: '/v1/chat/completions',
+        method: 'POST',
+        padKb: 1224,
+      },
+    ]);
+    await record(['--tls-intercept', '--tls-hosts', `127.0.0.1:${bank.port}`]);
+
+    const printed = lines.join('');
+    expect(printed).toContain('tls.request_too_large');
+    expect(printed).toContain('limit_bytes=1048576');
+    // The wrong one, specifically, must not appear.
+    expect(printed).not.toContain('tls.unclaimed_path');
+    expect(printed).not.toContain('plugins.md');
+  });
+
   it('stays quiet about a call the agent abandoned before the origin answered', async () => {
     // Same path and the same JSON body as the warning test above, so the only difference is that
     // this one never got a response. `add a dialect for it` cannot help an exchange with nothing

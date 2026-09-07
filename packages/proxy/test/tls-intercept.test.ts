@@ -30,6 +30,7 @@ import { RunCa } from '../src/ca.js';
  */
 const zstdCompressSync = (zlib as typeof zlib & { zstdCompressSync?: (input: Buffer) => Buffer })
   .zstdCompressSync;
+import { decodeRequestBody } from '../src/intercept.js';
 import {
   createProxy,
   type NetExchange,
@@ -330,6 +331,34 @@ async function startOrigin(
     close: () => new Promise<void>((resolve) => void server.close(() => resolve())),
   };
 }
+
+/**
+ * A body orca cannot decode is a body no dialect can read, and the run says only that nothing
+ * looked like a model call. Sending a gzipped request through a real intercepted host recorded
+ * `orca-base64:H4sIA...` and exactly that message, so these three are worth pinning: they need no
+ * runtime guard, unlike zstd, and gzip is the encoding an SDK is most likely to turn on.
+ */
+describe('decodeRequestBody', () => {
+  const payload = JSON.stringify({ model: 'gpt-5.2', messages: [{ role: 'user', content: 'hi' }] });
+
+  it('reads a gzipped body back as the JSON that went in', () => {
+    expect(decodeRequestBody(zlib.gzipSync(Buffer.from(payload)), 'gzip')).toBe(payload);
+  });
+
+  it('reads deflate and brotli too', () => {
+    expect(decodeRequestBody(zlib.deflateSync(Buffer.from(payload)), 'deflate')).toBe(payload);
+    expect(decodeRequestBody(zlib.brotliCompressSync(Buffer.from(payload)), 'br')).toBe(payload);
+  });
+
+  it("honours the first encoding of a list, and the header's case", () => {
+    expect(decodeRequestBody(zlib.gzipSync(Buffer.from(payload)), 'GZIP, identity')).toBe(payload);
+  });
+
+  it('leaves an unencoded body alone', () => {
+    expect(decodeRequestBody(Buffer.from(payload), undefined)).toBe(payload);
+    expect(decodeRequestBody(Buffer.from(payload), 'identity')).toBe(payload);
+  });
+});
 
 describe('TLS interception', () => {
   let runDir: string;

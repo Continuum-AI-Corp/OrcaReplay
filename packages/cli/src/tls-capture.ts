@@ -3,10 +3,11 @@ import { dirname } from 'node:path';
 import type { TraceWriter } from '@orcareplay/core';
 import type { TraceEvent } from '@orcareplay/schema';
 import {
+  DEFAULT_MAX_CAPTURED_BYTES,
   HostPolicy,
   RunCa,
-  type InterceptFailure,
   resolveTlsHosts,
+  type InterceptFailure,
   type NetExchange,
   type TlsInterceptInfo,
   type TunnelRecord,
@@ -175,6 +176,22 @@ function warnUnclaimed(out: Output, reported: Set<string>, exchange: NetExchange
   const key = `${exchange.host}:${exchange.port}${path}`;
   if (reported.has(key)) return;
   reported.add(key);
+
+  // A body cut mid-JSON at the capture limit is a different fact from a path nobody claims, and
+  // the advice differs with it: no dialect can read a truncated body, so writing one changes
+  // nothing. Driving a 1.2 MiB request through an intercepted host printed the wrong one of these
+  // -- `no wire dialect claims this path`, about a path the openai dialect had claimed all along.
+  if (exchange.requestTruncated) {
+    out.warn('tls.request_too_large', {
+      host: exchange.host,
+      path: exchange.path,
+      limit_bytes: DEFAULT_MAX_CAPTURED_BYTES,
+      detail: 'the request body was cut at the capture limit, so no dialect could read it',
+      consequence: 'it replays as opaque network traffic and cannot be forked to another model',
+      next: 'orca show <run> reads the prefix that was kept',
+    });
+    return;
+  }
 
   out.warn('tls.unclaimed_path', {
     host: exchange.host,
