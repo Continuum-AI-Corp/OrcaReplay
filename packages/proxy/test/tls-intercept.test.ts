@@ -366,6 +366,15 @@ describe('TLS interception', () => {
       req.on('data', (c: Buffer) => void chunks.push(c));
       req.on('end', () => {
         const body = Buffer.concat(chunks).toString('utf8');
+        if (req.url === '/die-mid-stream') {
+          // Headers, one chunk, then the connection goes without an end. This is a crashing
+          // origin or a network break, not a client that left -- and the difference is the whole
+          // point of the test below.
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          res.write('data: first\n\n');
+          setTimeout(() => res.socket?.destroy(), 30);
+          return;
+        }
         if (req.url === '/stream') {
           res.writeHead(200, { 'content-type': 'text/event-stream' });
           res.write('data: first\n\n');
@@ -1057,6 +1066,44 @@ describe('TLS interception', () => {
     expect(netExchanges[0]!.abandoned).toBe(true);
     expect(netExchanges[0]!.status).toBe(0);
     expect(netExchanges[0]!.requestBody).toContain('gpt-5.2');
+  });
+
+  /**
+   * An origin that dies is not a client that left, and only one of the two may go unanswered.
+   *
+   * The client is still connected and waiting for the rest of a response orca already began
+   * forwarding. Treating the origin's abort as abandonment settles the forward promise, so the
+   * caller's `.catch` -- the only thing that ends the client's response -- never runs, and the
+   * agent's in-flight call waits for a stream that will never continue. Recording it as
+   * `abandoned` compounds it: the field means the agent stopped reading, and here it did not.
+   */
+  it('answers the client when the origin dies mid-response rather than leaving it hanging', async () => {
+    const handle = await startProxy([`127.0.0.1:${model.port}`]);
+
+    const settled = await Promise.race([
+      through({
+        proxyPort: handle.port,
+        host: '127.0.0.1',
+        port: model.port,
+        trust: [runCa.certPem],
+        path: '/die-mid-stream',
+      }).then(
+        () => 'settled' as const,
+        // A transport error is still an answer: the client stops waiting. Hanging is the failure.
+        () => 'settled' as const,
+      ),
+      new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 4_000)),
+    ]);
+    expect(settled).toBe('settled');
+    await settle();
+
+    expect(netExchanges).toHaveLength(1);
+    const captured = netExchanges[0]!;
+    // The prefix the origin did send is worth keeping.
+    expect(captured.responseBody).toContain('first');
+    expect(captured.status).toBe(200);
+    // But not as the agent's doing. `abandoned` says the client stopped reading; it did not.
+    expect(captured.abandoned).not.toBe(true);
   });
 
   it('refuses an origin whose certificate it cannot verify instead of downgrading', async () => {

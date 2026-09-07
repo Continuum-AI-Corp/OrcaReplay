@@ -832,17 +832,34 @@ export function attachTlsIntercept(
             res.once('drain', () => originRes.resume());
           }
         });
-        originRes.on('aborted', abandon);
-        originRes.on('error', (err) => {
+        /**
+         * The origin going away and the client going away arrive on the same two events here, and
+         * they need opposite handling.
+         *
+         * If the client left, this is abandonment: keep the prefix, stop pulling from the origin,
+         * settle. If the *origin* died, the client is still connected and waiting for a stream
+         * orca has already started forwarding -- and abandoning there settles this promise, so the
+         * caller's `.catch`, the only thing that ends the client's response, never runs. The agent
+         * then waits for a continuation that will never come. `originRes.on('aborted', abandon)`
+         * did exactly that: a crashing origin or a dropped network hung every in-flight call on
+         * this path, where before it produced a prompt answer.
+         *
+         * Both are recorded, because a response the origin cut short is still evidence. Only the
+         * first is `abandoned`: that field says the agent stopped reading, and here it did not.
+         *
+         * The h2 path needs none of this -- there `aborted` is on the client's own stream and the
+         * origin reports through `upstream.on('error')`, so the two are already separate objects.
+         */
+        const originGone = (err: Error): void => {
           if (res.destroyed) {
             abandon();
             return;
           }
-          // Recorded before rejecting: the response headers are already in hand, and an origin
-          // that dies mid-stream is exactly the run worth having the prefix of.
-          emit(true);
+          emit(false);
           reject(err);
-        });
+        };
+        originRes.on('aborted', () => originGone(new Error('origin aborted mid-response')));
+        originRes.on('error', originGone);
         originRes.on('end', () => {
           if (recorded) return;
           // Recorded before the response is closed out, so that the `close` listener above cannot
