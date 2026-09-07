@@ -28,7 +28,10 @@ git checkout package-lock.json
 rm -rf node_modules packages/*/node_modules && npm install   # one clean re-resolve
 grep -c 'registry.npmjs.org/@orcareplay' package-lock.json   # must be 0: every one is a link
 npm run check                       # what the workflow will run anyway, but faster to find here
-git commit -am "release 0.3.0" && git tag v0.3.0 && git push --follow-tags
+git commit -am "release 0.3.0"
+# -a, not a lightweight tag: `--follow-tags` pushes only annotated ones, and a tag that
+# stays local fires nothing.
+git tag -a v0.3.0 -m "0.3.0" && git push --follow-tags
 ```
 
 > **Why both the sed and the `git checkout`.** When a workspace sits at the new version and its
