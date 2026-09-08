@@ -249,16 +249,30 @@ describe('end to end: record → replay → fork', () => {
     // removed — one per `orca replay`, growing with the size of your checkout, in a directory
     // `orca gc` deliberately will not sweep because it only reclaims fork worktrees. Replay owns
     // it, so replay has to clean it up.
+    //
+    // Watched in a temp directory of this test's own, not in the machine's. Diffing a listing of
+    // the whole OS temp dir before and after cannot tell a directory *this* replay created from
+    // one another test's replay created in the same window, so under the parallel suite it failed
+    // with nothing wrong. `replay.ts` calls `tmpdir()` at the moment it mkdtemps, so redirecting
+    // it here is enough, and leaves the product's own output alone.
+    const isolatedTmp = await mkdtemp(join(tmpdir(), 'orca-e2e-tmp-'));
+    const outerTmp = { TEMP: process.env.TEMP, TMP: process.env.TMP, TMPDIR: process.env.TMPDIR };
+    process.env.TEMP = isolatedTmp;
+    process.env.TMP = isolatedTmp;
+    process.env.TMPDIR = isolatedTmp;
     process.env.FAKE_AGENT_READ = 'auth.ts';
     try {
-      const before = await readdir(tmpdir());
       await record();
       await replayCommand(parseArgs(['replay', 'last']), out, workspace);
-      const after = await readdir(tmpdir());
-      const leaked = after.filter((e) => e.startsWith('orca-safety-') && !before.includes(e));
+      const leaked = (await readdir(isolatedTmp)).filter((e) => e.startsWith('orca-safety-'));
       expect(leaked, 'the pre-replay snapshot store must not outlive the replay').toEqual([]);
     } finally {
       delete process.env.FAKE_AGENT_READ;
+      for (const [key, value] of Object.entries(outerTmp)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      await rm(isolatedTmp, { recursive: true, force: true });
     }
   });
 

@@ -633,7 +633,17 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     // dialect's own path — and the incoming path cannot be trusted to be it: a bare base url
     // (no `/v1`) reaches this proxy as `/chat/completions`, and a gateway handed that without the
     // version segment answers 404.
-    const upstreamPath = relaying && forwardBase !== undefined ? path : target.requestPath;
+    //
+    // The query survives the substitution either way, because it is not part of the endpoint's
+    // shape. A path says which endpoint; a query says how to call it, and the client set it —
+    // `?api-version=` is required on every Azure OpenAI call, and dropping it turns a working
+    // configuration into `404 Resource not found` with nothing in the run explaining why.
+    // Replacing a path is orca normalising an address it chose; replacing the parameters would
+    // be orca editing the request.
+    const queryAt = path.indexOf('?');
+    const query = queryAt === -1 ? '' : path.slice(queryAt);
+    const upstreamPath =
+      relaying && forwardBase !== undefined ? path : `${target.requestPath}${query}`;
 
     // Spec §2: "a gateway chose a model". Orca *is* the gateway on this path — it substitutes the
     // model, picks the wire format that serves it, and picks the origin — and it was making all
@@ -932,7 +942,17 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const startedAt = Date.now();
-    const path = (req.url ?? '/').split('?')[0] ?? '/';
+    // Split, not discarded. Two different questions are asked of a request line here and they
+    // want different halves of it: *which endpoint is this* is answered by the path alone —
+    // `selectDialect` matches an endpoint and a query is not part of one — while *what do I
+    // send upstream* wants the line as the client wrote it. Dropping the query at the top answered
+    // the first question and silently lost the second: a client calling
+    // `<base>/chat/completions?api-version=2026-02-01` reached its origin as
+    // `/v1/chat/completions`, which is `404 Resource not found` on Azure OpenAI, where that
+    // parameter is required on every call. The trace lost it too, so nothing in the run said why.
+    const rawPath = req.url ?? '/';
+    const path = rawPath.split('?')[0] ?? '/';
+    const query = rawPath.slice(path.length);
 
     if (path === '/__orca/health') {
       json(res, 200, { ok: true, ...stats });
@@ -945,6 +965,8 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     // envelope orca wrapped it in.
     const forward: ForwardPath | undefined = decodeForwardPath(path);
     const dialectPath = forward?.path ?? path;
+    /** What goes upstream and into the trace: the endpoint orca resolved, called the way it was. */
+    const requestedPath = `${dialectPath}${query}`;
 
     const dialect = selectDialect(dialects, dialectPath);
     // Only a POST is ever a model call. Relaxing this to `!dialect && …` let a PUT or a DELETE on
@@ -971,7 +993,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
 
     if (!dialect) {
       await passThrough(
-        dialectPath,
+        requestedPath,
         rawBody,
         headers,
         recordableHeaders,
@@ -1000,7 +1022,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     if (options.mode === 'record') {
       await goLive(
         dialect,
-        dialectPath,
+        requestedPath,
         rawBody,
         headers,
         recordableHeaders,
@@ -1091,7 +1113,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
 
     await goLive(
       dialect,
-      dialectPath,
+      requestedPath,
       rawBody,
       headers,
       recordableHeaders,
