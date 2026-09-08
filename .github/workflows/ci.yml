@@ -45,6 +45,26 @@ jobs:
       # budgets live beside the corpus in the script; a change that costs fidelity fails here.
       - run: node scripts/fidelity.mjs --check
 
+  integrations:
+    name: framework integrations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci
+      - run: npx tsc --build
+      # The frameworks this speaks for. A check whose package is missing is skipped rather than
+      # failed, so a contributor can run the suite without all of them — which makes installing
+      # them here the thing that turns a skip into a failure.
+      - run: pip install openai anthropic litellm langgraph langchain-openai
+      - run: node test/integrations/run.mjs
+
   python-sdk:
     name: python sdk
     runs-on: ubuntu-latest
