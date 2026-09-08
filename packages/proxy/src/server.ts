@@ -33,7 +33,7 @@ import {
 import { decodeForwardPath, type ForwardPath } from './forward.js';
 import {
   attachTlsIntercept,
-  decodeRequestBody,
+  decodeBody,
   type InterceptResponse,
   type NetExchange,
   type NetRequest,
@@ -447,7 +447,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
 
     let rawBody: string;
     try {
-      rawBody = decodeRequestBody(request.requestBytes, request.requestHeaders['content-encoding']);
+      rawBody = decodeBody(request.requestBytes, request.requestHeaders['content-encoding']);
     } catch (err) {
       if (options.mode !== 'replay' || !options.loose) {
         stats.unmatched += 1;

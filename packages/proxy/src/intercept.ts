@@ -76,8 +76,18 @@ export interface NetExchange {
   requestBody: string;
   requestTruncated: boolean;
   status: number;
+  /**
+   * Auth headers removed, and -- when orca decoded the body -- the two headers that described the
+   * encoding it removed. See {@link headersWithoutEncoding}.
+   */
   responseHeaders: Record<string, string>;
   responseBody: string;
+  /**
+   * The `content-encoding` orca decoded away, when there was one. Absent when the recorded body is
+   * exactly the bytes that arrived, which is the ordinary case: `accept-encoding` is stripped from
+   * every intercepted request so an origin that honours it answers in plaintext.
+   */
+  responseDecodedFrom?: string;
   responseTruncated: boolean;
   /** The full size on the wire, even where the captured body was truncated. */
   responseBytes: number;
@@ -122,7 +132,6 @@ export interface InterceptResponse {
   body: string;
 }
 
-/** Decode a request body for model-dialect parsing while leaving forwarding byte-for-byte. */
 /** Decode a recorded body, whichever of the two forms it was stored in. */
 export function readRecordedBody(body: string): Buffer {
   return body.startsWith(BINARY_BODY_PREFIX)
@@ -130,7 +139,13 @@ export function readRecordedBody(body: string): Buffer {
     : Buffer.from(body, 'utf8');
 }
 
-export function decodeRequestBody(bytes: Buffer, contentEncoding?: string): string {
+/**
+ * Decode a body for reading while forwarding stays byte-for-byte.
+ *
+ * Named for the body, not for the half of the exchange: responses arrive compressed too, and a
+ * function called `decodeRequestBody` decoding one would be a name that has to be read past.
+ */
+export function decodeBody(bytes: Buffer, contentEncoding?: string): string {
   const encoding = contentEncoding?.split(',')[0]?.trim().toLowerCase();
   // The three Node has always been able to decode. Without them a gzipped model request was
   // recorded as base64 of its compressed bytes, so no dialect could read it, the exchange was
@@ -152,6 +167,48 @@ export function decodeRequestBody(bytes: Buffer, contentEncoding?: string): stri
     return recordableBody(decompress(bytes));
   }
   return recordableBody(bytes);
+}
+
+/**
+ * The response body as the client saw it, plus the encoding orca took off to get there.
+ *
+ * Not attempted on a capture that is a prefix rather than the whole stream: half a deflate member
+ * cannot be inflated, and `truncated` / `abandoned` already say the record is incomplete. Failing
+ * to decode is not fatal either -- the wire bytes are kept and the reason is reported, the same
+ * way an undecodable request body is.
+ */
+function recordableResponseBody(
+  captured: Capture,
+  contentEncoding: string | undefined,
+  whole: boolean,
+): { body: string; decodedFrom?: string; error?: string } {
+  const encoding = contentEncoding?.split(',')[0]?.trim().toLowerCase();
+  if (encoding === undefined || encoding === '' || encoding === 'identity' || !whole) {
+    return { body: captured.text() };
+  }
+  try {
+    return { body: decodeBody(captured.buffer(), contentEncoding), decodedFrom: encoding };
+  } catch (err) {
+    return { body: captured.text(), error: String(err) };
+  }
+}
+
+/**
+ * The headers that describe the body actually recorded.
+ *
+ * `content-encoding: gzip` beside a decoded body is a claim the recording no longer supports, and
+ * a `content-length` counting compressed bytes is another. Neither fact is lost: the wire size is
+ * already on the event as `bytes`, and what orca removed is recorded as `decoded_from`. Only the
+ * recorded copy is touched -- the client is served the origin's own header set, from `outHeaders`
+ * on HTTP/1.1 and `downstream` on h2.
+ */
+function headersWithoutEncoding(headers: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (key === 'content-encoding' || key === 'content-length') continue;
+    out[key] = value;
+  }
+  return out;
 }
 
 /** Text when the bytes are text, base64 behind a marker when they are not. */
@@ -532,13 +589,13 @@ export function attachTlsIntercept(
         if (recorded) return;
         recorded = true;
         counters.intercepted += 1;
-        // A body orca cannot decode is still an exchange worth having. `decodeRequestBody` throws
+        // A body orca cannot decode is still an exchange worth having. `decodeBody` throws
         // for zstd on a runtime without it -- inside `engines`, and why the repo's own zstd test is
         // skipped there -- and an exception in this callback would take the process down with the
         // exchange unrecorded. server.ts already decodes inside a try/catch for the same reason.
         let recordedRequest: string;
         try {
-          recordedRequest = decodeRequestBody(requestBody.buffer(), contentEncoding);
+          recordedRequest = decodeBody(requestBody.buffer(), contentEncoding);
         } catch (err) {
           options.onFailure?.({
             host: target.host,
@@ -546,6 +603,18 @@ export function attachTlsIntercept(
             reason: `request body left opaque: ${String(err)}`,
           });
           recordedRequest = requestBody.text();
+        }
+        const decoded = recordableResponseBody(
+          responseBody,
+          recordableResponse['content-encoding'],
+          !abandoned,
+        );
+        if (decoded.error !== undefined) {
+          options.onFailure?.({
+            host: target.host,
+            port: target.port,
+            reason: `response body left opaque: ${decoded.error}`,
+          });
         }
         options.onNetExchange?.({
           host: target.host,
@@ -557,8 +626,14 @@ export function attachTlsIntercept(
           requestTruncated: requestBody.truncated,
           status,
           alpn: 'h2',
-          responseHeaders: recordableResponse,
-          responseBody: responseBody.text(),
+          responseHeaders:
+            decoded.decodedFrom === undefined
+              ? recordableResponse
+              : headersWithoutEncoding(recordableResponse),
+          responseBody: decoded.body,
+          ...(decoded.decodedFrom === undefined
+            ? {}
+            : { responseDecodedFrom: decoded.decodedFrom }),
           responseTruncated: responseBody.truncated,
           responseBytes: responseBody.bytes,
           abandoned,
@@ -758,7 +833,7 @@ export function attachTlsIntercept(
         // this callback would take the process down with it. Same guard, same reason, as h2.
         let recordedRequest: string;
         try {
-          recordedRequest = decodeRequestBody(
+          recordedRequest = decodeBody(
             requestBody.buffer(),
             typeof req.headers['content-encoding'] === 'string'
               ? req.headers['content-encoding']
@@ -772,6 +847,18 @@ export function attachTlsIntercept(
           });
           recordedRequest = requestBody.text();
         }
+        const decoded = recordableResponseBody(
+          responseBody,
+          responseHeaders['content-encoding'],
+          !abandoned,
+        );
+        if (decoded.error !== undefined) {
+          options.onFailure?.({
+            host: target.host,
+            port: target.port,
+            reason: `response body left opaque: ${decoded.error}`,
+          });
+        }
         options.onNetExchange?.({
           host: target.host,
           port: target.port,
@@ -782,8 +869,14 @@ export function attachTlsIntercept(
           requestTruncated: requestBody.truncated,
           status,
           alpn: alpnOf(req.socket),
-          responseHeaders,
-          responseBody: responseBody.text(),
+          responseHeaders:
+            decoded.decodedFrom === undefined
+              ? responseHeaders
+              : headersWithoutEncoding(responseHeaders),
+          responseBody: decoded.body,
+          ...(decoded.decodedFrom === undefined
+            ? {}
+            : { responseDecodedFrom: decoded.decodedFrom }),
           responseTruncated: responseBody.truncated,
           responseBytes: responseBody.bytes,
           abandoned,
