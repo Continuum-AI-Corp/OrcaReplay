@@ -208,6 +208,17 @@ async function runRecording(
   let commandToolCalls = 0;
   /** Commands the shim actually saw. Zero against a non-zero `commandToolCalls` is the warning. */
   let shellFrames = 0;
+  /**
+   * Exchanges the upstream answered with an error status.
+   *
+   * Counted because a run in which every model call failed is indistinguishable, from the summary
+   * line alone, from one that worked: the harness retries, gives up, exits 0, and orca prints
+   * `recorded … exit=0` over a trace whose every answer is a 503. That happened against a gateway
+   * whose credentials had lapsed, and nothing in the output said so.
+   */
+  let erroredExchanges = 0;
+  /** The status those errors carried, so the warning can name it rather than describe it. */
+  const errorStatuses = new Map<number, number>();
 
   const proxy = await createProxy({
     mode: 'record',
@@ -216,6 +227,10 @@ async function runRecording(
     upstreamHeadersOrigin: plan.headersOrigin,
     onExchange: (exchange: RecordedExchange) => {
       modelExchanges += 1;
+      if (exchange.status >= 400) {
+        erroredExchanges += 1;
+        errorStatuses.set(exchange.status, (errorStatuses.get(exchange.status) ?? 0) + 1);
+      }
       writes.push(() => persist(exchange));
     },
     // A POST on a path no dialect claims is forwarded rather than refused, and lands in the trace
@@ -504,6 +519,30 @@ async function runRecording(
       cause,
       set: baseUrls.join(',') || 'none',
       next: 'orca doctor',
+    });
+  }
+
+  /**
+   * Every model call came back an error.
+   *
+   * `capture.empty` covers the run the proxy never saw. This covers the run it saw all of, where
+   * every answer was a refusal: an expired gateway credential, a model the account cannot reach, a
+   * provider outage. The harness retries, exhausts its attempts, prints its own error and exits 0,
+   * so the summary reads exactly like a successful recording — `recorded events=27 exit=0` — over
+   * a trace that contains no model output at all. Replaying it faithfully reproduces the failures.
+   *
+   * Only when *all* of them failed. A run that retried once and then worked is a run that worked,
+   * and warning about it would train people to ignore the line that matters.
+   */
+  if (modelExchanges > 0 && erroredExchanges === modelExchanges) {
+    const commonest = [...errorStatuses.entries()].sort((a, b) => b[1] - a[1])[0];
+    out.warn('capture.errors', {
+      exchanges: modelExchanges,
+      errors: erroredExchanges,
+      status: commonest ? commonest[0] : 'unknown',
+      cause: 'every model call the proxy forwarded came back an error',
+      effect: 'the trace holds the failures, not any model output — a replay reproduces those',
+      next: 'orca show to read the errors, then check the upstream credential or model id',
     });
   }
 

@@ -1,0 +1,14 @@
+{
+  "adapter": "goose",
+  "harness_versions": ">=1.49.0",
+  "verified_at": "2026-09-08",
+  "command": "goose",
+  "env_vars": ["ANTHROPIC_HOST", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_HOST"],
+  "base_urls": {
+    "OPENAI_HOST": "",
+    "OPENAI_BASE_URL": "/v1",
+    "ANTHROPIC_HOST": ""
+  },
+  "optional_env_vars": ["ANTHROPIC_API_KEY", "GOOSE_MODEL", "GOOSE_PROVIDER", "OPENAI_BASE_PATH"],
+  "note": "Verified against goose 1.49.0 (x86_64-pc-windows-msvc) by pointing it at a sink server and reading the request line back, not by reading its docs. Three things that verification settled, each of which would silently empty a trace if it changed. (1) OPENAI_HOST outranks OPENAI_BASE_URL: openai_def.rs resolves the origin in the order OPENAI_HOST env, OPENAI_BASE_URL, OPENAI_HOST from config, default -- so with only OPENAI_BASE_URL set, a user who already had OPENAI_HOST exported kept it, and the run went to their origin while orca reported a clean recording over an empty trace. Both are set, at the same proxy, so neither the priority order nor a stale value can route around it. (2) goose does not read ANTHROPIC_BASE_URL or ANTHROPIC_API_BASE at all; its Anthropic provider reads ANTHROPIC_HOST (anthropic_def.rs), and a sink addressed by ANTHROPIC_BASE_URL alone received nothing. This is why generic-openai is not enough for goose -- it sets the variable the rest of the ecosystem reads, which here is the one that does nothing. (3) The traffic is the Responses API: with either variable set goose issues POST /v1/responses plus one GET /v1/models on start-up, and the proxy's openai-responses dialect claims it unchanged. Per-process redirection works at all because Config::get_param reads the environment before the config file (config/base.rs), so a persisted ~/.config/goose/config.yaml cannot win. Not captured: goose runs its shell without going through orca's PATH shim, so shell tool calls appear with their output but without the real exit code, duration or stdout/stderr split -- record with --no-shell to claim nothing rather than that."
+}

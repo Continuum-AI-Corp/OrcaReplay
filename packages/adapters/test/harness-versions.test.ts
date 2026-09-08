@@ -26,7 +26,11 @@ const PROXY = 'http://127.0.0.1:51733';
 /** First arg is the command for adapters that take one (generic-openai); the rest is padding. */
 const USER_ARGS = ['my-agent', '--task', 'demo'];
 const FIXTURES = new URL('../fixtures/harness/', import.meta.url);
-const BASE_URL_LIKE = /(?:_BASE_URL|_API_BASE)$/;
+// `_HOST` too: goose reads `OPENAI_HOST` and `ANTHROPIC_HOST` rather than the `_BASE_URL`
+// spellings, and those are the variables its whole capture depends on. Left out, the two that
+// matter most for that adapter were the two nothing checked. `ORCA_INSTRUMENT_HOSTS` is a list
+// of hostnames rather than an origin, and ends `HOSTS`, so it stays out.
+const BASE_URL_LIKE = /(?:_BASE_URL|_API_BASE|_HOST)$/;
 
 interface HarnessFixture {
   adapter: string;

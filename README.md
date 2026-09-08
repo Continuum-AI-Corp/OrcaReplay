@@ -365,6 +365,7 @@ whether orca understands the wire format it speaks once it arrives.
 | **grok-cli** (and its Telegram bot) | `orca record grok` — `GROK_BASE_URL`, plus the hook for its sub-agents | works |
 | **OpenClaw** | `orca record openclaw` — the hook for the gateway, inherited variables for the agents it spawns | works |
 | **opencode** | `orca record opencode` | adapter shipped, both origins redirected |
+| **goose** (Block) | `orca record goose` — `OPENAI_HOST` **and** `OPENAI_BASE_URL`, `ANTHROPIC_HOST` → Responses API | works — driven end to end against goose 1.49.0, [what is different about it](#the-harness-that-reads-different-variables) |
 | **LangGraph / LangChain** | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | should work — it goes through the official clients, but nothing here tests it yet |
 | **Hermes** (Nous Research) | `ORCA_BASE_URL_VARS=… orca record generic-openai -- hermes …` | should work — it overrides per provider; [name the variable](#a-base-url-variable-orca-has-never-heard-of) |
 | **Codex-in-the-IDE** | `orca record exec --tls-intercept -- code .` | works — the extension spawns the agent, and it inherits the capture |
@@ -372,10 +373,44 @@ whether orca understands the wire format it speaks once it arrives.
 | **an agent in a sandbox or on another machine** | `orca attach` | works — orca is reachable and prints what to export, [in detail](#an-agent-that-is-not-on-this-machine) |
 | **anything else** | `orca record generic-openai -- <cmd>` | works if it reads a base-URL variable; `orca record node -- <cmd>` if it does not |
 
-Only Claude Code has been driven end to end against the real harness, and
-[it broke four things doing it](docs/validation.md). The rest are held to the adapter contract and
-to fixtures that record the exact variables each one sets, so a harness that renames the variable
-it reads turns a check red instead of producing an empty trace.
+Claude Code, Hermes and goose have been driven end to end against the real harness, and each of
+them broke something. Claude Code [broke four things](docs/validation.md); Hermes found a streaming
+exchange the proxy was dropping entirely; goose broke two more, and neither was in the adapter —
+one was the replay matcher, one was a run reporting success over a trace of nothing but errors. The
+rest are held to the adapter contract and to fixtures that record the exact variables each one
+sets, so a harness that renames the variable it reads turns a check red instead of producing an
+empty trace.
+
+### The harness that reads different variables
+
+Every other OpenAI-shaped client in this table reads `OPENAI_BASE_URL`. goose reads it too, but it
+reads `OPENAI_HOST` **first** — and for Anthropic it reads `ANTHROPIC_HOST` and nothing else.
+
+That combination is worse than it sounds, because both halves fail silently:
+
+- Setting only `OPENAI_BASE_URL` works right up until the user already has `OPENAI_HOST` exported
+  for something else. Then their value wins, the run goes to their origin, and orca prints a clean
+  recording over an empty trace.
+- `ANTHROPIC_BASE_URL` — the variable `generic-openai` sets, and the one the rest of the ecosystem
+  reads — does nothing at all here. A sink addressed only by it receives no request.
+
+So the adapter sets `OPENAI_HOST`, `OPENAI_BASE_URL` and `ANTHROPIC_HOST`, all at the same proxy,
+and the fixture pins all three. The traffic that arrives is the Responses API — `POST /v1/responses`
+plus one `GET /v1/models` on start-up — which the proxy's `openai-responses` dialect already claims.
+
+```console
+GOOSE_PROVIDER=openai GOOSE_MODEL=<model> orca record goose -- run -t "fix the failing test"
+```
+
+`GOOSE_PROVIDER` and `GOOSE_MODEL` are passed through, never invented: goose has no default for a
+custom endpoint, and choosing one for you would launch a different agent than `goose` does.
+
+Two limits worth knowing before you rely on it. goose runs its shell without going through orca's
+PATH shim, so `shell` tool calls are in the trace with their output but without the real exit code,
+duration or stdout/stderr split — record with `--no-shell` to claim nothing rather than that. And
+goose asks a second model for a session title *while the conversation is already under way*, so
+that call and the first real turn race; the replay matcher handles them arriving in either order,
+which it did not before goose was the first harness to do this.
 
 ### A gateway that launches the coding agent
 

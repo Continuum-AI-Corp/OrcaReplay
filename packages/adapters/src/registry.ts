@@ -7,6 +7,7 @@ import { kiloAdapter } from './kilo.js';
 import { mimoAdapter } from './mimo.js';
 import { execAdapter } from './exec.js';
 import { genericOpenAiAdapter } from './generic-openai.js';
+import { gooseAdapter } from './goose.js';
 import { grokAdapter } from './grok.js';
 import { openClawAdapter } from './openclaw.js';
 import { nodeAdapter } from './node.js';
@@ -95,6 +96,7 @@ export function defaultAdapters(): AdapterRegistry {
   registry.register(mimoAdapter);
   registry.register(kiloAdapter);
   registry.register(cursorAdapter);
+  registry.register(gooseAdapter);
   registry.register(hermesAdapter);
   registry.register(grokAdapter);
   registry.register(openClawAdapter);
