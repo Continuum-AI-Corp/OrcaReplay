@@ -9,6 +9,14 @@ import { createServer } from 'node:http';
 
 export async function startFakeModel(options = {}) {
   const calls = [];
+  /**
+   * Answer every call with this HTTP status instead of a completion.
+   *
+   * A provider that refuses -- an expired credential, a model the account cannot reach -- is not
+   * an exotic case, and from the harness's side it looks like a run that merely went badly. The
+   * recording still happens; every answer in it is the refusal.
+   */
+  const failWith = options.failWith;
   const editContent = options.editContent ?? 'export const fixed = true;\n';
 
   const server = createServer((req, res) => {
@@ -55,6 +63,11 @@ export async function startFakeModel(options = {}) {
             usage: { input_tokens: 100 + turn, output_tokens: 5 },
           };
 
+      if (failWith !== undefined) {
+        res.writeHead(failWith, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { type: 'error', message: 'no auth available' } }));
+        return;
+      }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(reply));
     });

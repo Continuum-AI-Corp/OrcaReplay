@@ -6,6 +6,7 @@ export * from './detect.js';
 export * from './env.js';
 export * from './exec.js';
 export * from './generic-openai.js';
+export * from './goose.js';
 export * from './grok.js';
 export * from './hermes.js';
 export * from './node.js';

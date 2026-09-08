@@ -499,6 +499,7 @@ describe('AdapterRegistry', () => {
       'mimo',
       'kilo',
       'cursor',
+      'goose',
       'hermes',
       'grok',
       'openclaw',

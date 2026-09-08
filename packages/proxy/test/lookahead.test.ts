@@ -27,12 +27,60 @@ describe('RequestMatcher lookahead', () => {
     expect(result.skipped).toBe(1);
   });
 
-  // A skipped exchange that goes unmentioned is a replay claiming to reproduce what it stepped over.
+  // An exchange stepped over without mention is a replay claiming to reproduce what it passed by.
   it('says how many it stepped over, even when the match itself was exact', () => {
     const m = new RequestMatcher([req('quota'), req('ask')]);
     const result = m.match(req('ask'));
     expect(result.skipped).toBe(1);
-    expect(result.divergence?.detail ?? '').toContain('skipping 1 recorded request');
+    expect(result.divergence?.detail ?? '').toContain('holding 1 recorded request');
+  });
+
+  /**
+   * The case that made stepping over reversible.
+   *
+   * goose asks a second model for a session title while the conversation is already under way, so
+   * the title call and the first real turn race and do not land in the same order twice. Stepping
+   * over used to *discard* what it passed, which meant a replay whose title arrived first threw
+   * away the first turn on its way to matching the title — and then halted on the very next
+   * request, against a recording that contained everything it needed.
+   */
+  it('still serves a request it stepped over, when that is what comes next', () => {
+    const m = new RequestMatcher([req('the first turn'), req('name this session')]);
+
+    const title = m.match(req('name this session'));
+    expect(title.index).toBe(1);
+    expect(title.skipped).toBe(1);
+
+    const turn = m.match(req('the first turn'));
+    expect(turn.matched).toBe(true);
+    expect(turn.index).toBe(0);
+    expect(turn.divergence?.detail ?? '').toContain('out of the order it was recorded in');
+  });
+
+  it('serves a held request even after the cursor has run off the end', () => {
+    const m = new RequestMatcher([req('held back'), req('last')]);
+    expect(m.match(req('last')).index).toBe(1);
+    expect(m.match(req('held back')).index).toBe(0);
+  });
+
+  // Held, not forgotten: a request set aside is still owed to the replay, and `reused=x/y` counts
+  // it as unplayed until it is served.
+  it('counts a held request as still remaining', () => {
+    const m = new RequestMatcher([req('held back'), req('asked first')]);
+    m.match(req('asked first'));
+    expect(m.remaining()).toBe(1);
+    m.match(req('held back'));
+    expect(m.remaining()).toBe(0);
+  });
+
+  // The same bar as a step-forward. Below rung 2 the agent would be handed some other turn's
+  // answer, which is worse than halting and saying so.
+  it('does not serve a held request on a weak match', () => {
+    const m = new RequestMatcher([req('a question about billing'), req('asked first')]);
+    m.match(req('asked first'));
+    const result = m.match(req('an unrelated question about deployment'));
+    expect(result.matched).toBe(false);
+    expect(result.rung).toBe(4);
   });
 
   it('does not step over anything when the cursor already matches', () => {

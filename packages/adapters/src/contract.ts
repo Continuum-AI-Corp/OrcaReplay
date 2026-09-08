@@ -59,8 +59,16 @@ export const MODEL_BASE_URL_VARS = [
   'OPENAI_API_BASE',
 ] as const;
 
-/** Anything shaped like an API origin, including variables no harness reads yet. */
-const BASE_URL_LIKE = /(?:_BASE_URL|_API_BASE)$/;
+/**
+ * Anything shaped like an API origin, including variables no harness reads yet.
+ *
+ * `_HOST` is in the set because goose reads `OPENAI_HOST` and `ANTHROPIC_HOST` and neither of the
+ * `_BASE_URL` spellings for the second — an origin is an origin whatever a harness calls it, and a
+ * pattern that only knew two spellings would have let an adapter point one at the provider while
+ * the checks reported it redirected. `ORCA_INSTRUMENT_HOSTS` names hostnames rather than an origin
+ * and ends `HOSTS`, so it is not caught by this.
+ */
+const BASE_URL_LIKE = /(?:_BASE_URL|_API_BASE|_HOST)$/;
 
 /** Anything shaped like a credential. Over-matching here only ever costs a clearer error. */
 const CREDENTIAL_LIKE = /(?:KEY|TOKEN|SECRET|PASSWORD)$/;

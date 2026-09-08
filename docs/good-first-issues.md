@@ -19,11 +19,18 @@ records the env vars you verified against.
 3. **Cline adapter.** Same shape as Continue; if neither can be pointed at a base URL per process,
    there is nothing to fall back on — base-URL injection is the only capture mechanism there is,
    and no CA mode exists. Finding that out is still a result worth writing down.
-4. **Goose adapter.** Block's agent; confirm its provider configuration path.
 
 **Before writing one, answer one question:** does the agent respect a base-URL environment
 variable? That single fact decides whether this is an afternoon, a week, or not possible yet. Put
 the answer in the issue even if you write no code — it is genuinely useful on its own.
+
+**And answer it by running the harness, not by reading its docs.** The goose adapter — which used
+to be item 4 on this list — is the argument for that. goose does respect a base-URL variable, so
+the question above says "an afternoon". What running it revealed is that it reads `OPENAI_HOST`
+*ahead of* `OPENAI_BASE_URL`, and that it does not read `ANTHROPIC_BASE_URL` at all. An adapter
+written from the docs would have set the usual variables, passed every check, and produced empty
+traces for anyone who already had `OPENAI_HOST` exported. Point the harness at a sink server and
+read the request line back; it takes ten minutes and it is the only part of this nobody can guess.
 
 ## Providers — a model you can't currently fork onto
 
