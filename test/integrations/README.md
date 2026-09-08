@@ -41,9 +41,10 @@ a matrix that only exercised a plain completion would have said nothing about ei
 | `litellm` | `OPENAI_API_BASE` through LiteLLM | **CrewAI, Aider, OpenHands** — they route through it |
 | `langgraph-stream` | LangChain's own `OPENAI_API_BASE`, over SSE | LangGraph, LangChain |
 | `langgraph-tools` | the same, with a bound tool | tool-calling graphs |
+| `browser-use` | its own `ChatOpenAI` passes an unset `base_url` through | browser-use, and the pattern any wrapper using the official SDK follows |
 | `fetch-hook` | `NODE_OPTIONS` preload on `globalThis.fetch` | the Vercel AI SDK, and any JS agent with its origin compiled in |
 
-Seven checks, and the third row is the reason the list is shorter than the set of frameworks it
+Eight checks, and the `litellm` row is the reason the list is shorter than the set of frameworks it
 speaks for: covering the layer underneath covers everything standing on it.
 
 ## What the checks are worth, measured
