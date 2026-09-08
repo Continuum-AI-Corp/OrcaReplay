@@ -33,6 +33,15 @@ describe('ExchangeEventDeriver', () => {
     expect(events[1]!.attrs.input_tokens).toBe(10);
   });
 
+  it('links the response back to the request it answered', () => {
+    const events = new ExchangeEventDeriver().derive(exchange(), 0);
+    const requestAt = events.findIndex((e) => e.type === 'model.request');
+    const response = events.find((e) => e.type === 'model.response')!;
+    // Without this edge `orca graph --to <a model.response>` finds nothing to walk and reports
+    // that the run has no causal edges, however many tool calls it has.
+    expect(response.causesIndex).toEqual([requestAt]);
+  });
+
   it('derives a tool.call from a tool_use in the response', () => {
     const events = new ExchangeEventDeriver().derive(
       exchange({

@@ -3,10 +3,11 @@ import { dirname } from 'node:path';
 import type { TraceWriter } from '@orcareplay/core';
 import type { TraceEvent } from '@orcareplay/schema';
 import {
+  DEFAULT_MAX_CAPTURED_BYTES,
   HostPolicy,
   RunCa,
-  type InterceptFailure,
   resolveTlsHosts,
+  type InterceptFailure,
   type NetExchange,
   type TlsInterceptInfo,
   type TunnelRecord,
@@ -151,6 +152,11 @@ export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCaptur
  */
 function warnUnclaimed(out: Output, reported: Set<string>, exchange: NetExchange): void {
   if (exchange.method !== 'POST') return;
+  // No response ever arrived, so this one is not evidence that a path went unrecognised. It is
+  // kept as network traffic because an exchange with nothing to replay cannot be a model exchange
+  // whatever dialect exists -- and telling the operator to write one would not change that. A
+  // harness that opens a call and leaves would otherwise print this on every turn.
+  if (exchange.status === 0) return;
   const body = exchange.requestBody.trim();
   if (!body.startsWith('{')) return;
   // A truncated body cannot parse — it was cut mid-JSON at the capture limit. Requiring a parse
@@ -170,6 +176,22 @@ function warnUnclaimed(out: Output, reported: Set<string>, exchange: NetExchange
   const key = `${exchange.host}:${exchange.port}${path}`;
   if (reported.has(key)) return;
   reported.add(key);
+
+  // A body cut mid-JSON at the capture limit is a different fact from a path nobody claims, and
+  // the advice differs with it: no dialect can read a truncated body, so writing one changes
+  // nothing. Driving a 1.2 MiB request through an intercepted host printed the wrong one of these
+  // -- `no wire dialect claims this path`, about a path the openai dialect had claimed all along.
+  if (exchange.requestTruncated) {
+    out.warn('tls.request_too_large', {
+      host: exchange.host,
+      path: exchange.path,
+      limit_bytes: DEFAULT_MAX_CAPTURED_BYTES,
+      detail: 'the request body was cut at the capture limit, so no dialect could read it',
+      consequence: 'it replays as opaque network traffic and cannot be forked to another model',
+      next: 'orca show <run> reads the prefix that was kept',
+    });
+    return;
+  }
 
   out.warn('tls.unclaimed_path', {
     host: exchange.host,
@@ -308,6 +330,9 @@ export async function persistNetExchange(
       headers: exchange.responseHeaders,
       bytes: exchange.responseBytes,
       truncated: exchange.responseTruncated,
+      // Only when it happened, so a normal exchange carries no field saying it was normal. It
+      // reads differently from `truncated`: the agent stopped reading, orca did not stop keeping.
+      ...(exchange.abandoned ? { abandoned: true } : {}),
       duration_ms: exchange.durationMs,
     },
     payload: exchange.responseBody as never,

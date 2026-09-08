@@ -79,6 +79,22 @@ describe('orca record — a run that captured no model traffic', () => {
     expect(warning).toMatch(/base.?url/i);
   });
 
+  it('does not blame a base-URL variable when the adapter never set one', async () => {
+    // `exec` captures at the transport, so there was never a variable to be ignored -- and the
+    // same line says `set=none`. Blaming one contradicts the run's own output, and points the
+    // reader at a route that was never the route.
+    const args = parseArgs(['record', 'exec', '--', 'node', DEAF_AGENT]);
+    process.env.FAKE_AGENT_TURNS = '2';
+    delete process.env.FAKE_AGENT_CWD;
+    await recordCommand(args, out, workspace);
+
+    const warning = lines.find((l) => l.includes('capture.empty')) ?? '';
+    expect(warning).toContain('set=none');
+    expect(warning).not.toMatch(/base.?url/i);
+    // And it names what this adapter actually depends on instead.
+    expect(warning).toMatch(/transport/i);
+  });
+
   it('points at orca doctor, which is where the answer is', async () => {
     await record(DEAF_AGENT);
     const warning = lines.find((l) => l.includes('capture.empty')) ?? '';

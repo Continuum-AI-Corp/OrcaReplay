@@ -88,12 +88,31 @@ Measured on one machine, and the reason the table is here rather than in a folde
 | `mimo-v2.5` | mimo | `run` | 50,618 chars | 16 | - |
 | `mimo-v2.5-pro` | mimo | `run` | 50,618 chars | 16 | - |
 | `kilo-auto/free` | kilo | `run` | 11,326 chars | 13 | - |
+| `nemotron-3.5-lightning-free` | hermes | `-z` | 14,058 chars | 19 | - |
 
 The five rows below the OpenCode block were missing until now. Three of them carry no prefix
 count: `mimo-v2.5` and `mimo-v2.5-pro` were captured with no valid key, so the server answered
 `invalid_key` and reported no usage -- the prompt is unaffected, since it travels in the request,
 which is why `capture.mjs` files these only under `--allow-failed` and says so. `grok-4.5-high`
-and `kilo-auto/free` completed, but neither response carried a usage block to read.
+and `kilo-auto/free` completed, but neither response carried a usage block to read. Hermes
+completed too, on the same anonymous tier, and its response carried no usage block either.
+
+About 6,300 characters of the Hermes row is an `<available_skills>` block listing 51 skills, and
+they are Hermes' own -- `hermes skills list` reports them as builtin, with none installed by
+anyone. So the catalogue belongs in the capture, and this row is the whole prompt.
+
+Worth saying because it caught me: the same prompt comes out **7,742 characters** when Hermes
+cannot find its own skills directory. `HERMES_HOME` was a persisted user variable pointing at the
+install, and the shell I first captured from had inherited an environment from before the install
+existed, so Hermes fell back to a home with no skills in it. The short capture is not a variant of
+the prompt; it is a broken install. If a Hermes capture comes out near 7,700, run
+`hermes skills list` -- `0 builtin` means the harness cannot find itself, and the same install
+also drops a multi-turn replay from `3/3 exact=3` to `1/3`.
+
+`nemotron-3.5-lightning-free` appears twice, which is the most direct comparison in this
+table: one free model, two harnesses, 9,655 characters and 11 tools from OpenCode against
+7,742 and 19 from Hermes. Same model, same anonymous endpoint, different instructions and a
+different tool surface -- the harness is the variable, and this is the pair that isolates it.
 
 The two MiMo rows are identical on purpose: captured from the same directory, `mimo-v2.5`,
 `mimo-v2.5-pro` and `mimo-v2.5-pro-ultraspeed` send byte-identical prompts and tool sets, same

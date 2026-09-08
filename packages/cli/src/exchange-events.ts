@@ -112,9 +112,16 @@ export class ExchangeEventDeriver {
       // reader has to interpret, and `causes` is optional precisely so it can be left off.
       ...(resultsAt.length > 0 ? { causesIndex: resultsAt } : {}),
     });
+    const requestAt = events.length - 1;
 
     const response = exchange.canonicalResponse;
     events.push({
+      // The edge every other request/response pair already had. Without it `orca graph --to` on a
+      // model.response walks backwards, finds no incoming edge, and reports that the run has no
+      // causal edges at all -- on a run whose graph is otherwise full of them. `net.response`,
+      // `tool.result` and `shell.result` all name what they answered; this is the same fact about
+      // the pair the recorder watched most directly.
+      causesIndex: [requestAt],
       type: 'model.response',
       actor: 'model',
       attrs: {
