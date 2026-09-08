@@ -41,6 +41,9 @@ jobs:
       # Every example trace shipped in the repo must validate against the normative schema.
       # This is what makes the format a format rather than whatever the writer happens to emit.
       - run: node scripts/conformance.mjs
+      # "Replay is reliable" as a number that regresses visibly rather than as a sentence. The
+      # budgets live beside the corpus in the script; a change that costs fidelity fails here.
+      - run: node scripts/fidelity.mjs --check
 
   python-sdk:
     name: python sdk
