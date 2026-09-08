@@ -117,6 +117,18 @@ export interface RecordedExchange {
   canonicalResponse?: CanonicalResponse;
   usage?: Usage;
   requestHeaders?: Record<string, string>;
+  /**
+   * Which application protocol carried it: `h2`, `http/1.1`, or absent where orca did not
+   * establish the connection itself and so cannot say. Only interception knows this -- the
+   * base-URL route hands the call to `fetch`, which chooses for itself and does not report back.
+   */
+  alpn?: string;
+  /**
+   * The `content-encoding` orca decoded away before recording the response, when there was one.
+   * Interception only, for the same reason: on the base-URL route the HTTP client decompresses
+   * before orca sees a body, so there is nothing orca could truthfully claim to have removed.
+   */
+  responseDecodedFrom?: string;
   durationMs?: number;
 }
 
@@ -423,6 +435,11 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
           headers: exchange.requestHeaders,
           seq: captured.length,
           durationMs: exchange.durationMs,
+          // The two things only the interceptor witnessed. Without them a promoted exchange is
+          // indistinguishable from one captured over the base-URL route, which is the point --
+          // except where the difference is the thing being debugged.
+          alpn: exchange.alpn,
+          responseDecodedFrom: exchange.responseDecodedFrom,
         });
         captured.push(built);
         options.onExchange?.(built);
@@ -902,6 +919,8 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     headers: Record<string, string>;
     seq: number;
     durationMs: number;
+    alpn?: string;
+    responseDecodedFrom?: string;
   }): RecordedExchange {
     const canonicalRequest = input.dialect.toCanonicalRequest(JSON.parse(input.rawRequest));
     let canonicalResponse: CanonicalResponse | undefined;
@@ -926,6 +945,10 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       canonicalResponse,
       usage: canonicalResponse?.usage,
       requestHeaders: input.headers,
+      ...(input.alpn === undefined ? {} : { alpn: input.alpn }),
+      ...(input.responseDecodedFrom === undefined
+        ? {}
+        : { responseDecodedFrom: input.responseDecodedFrom }),
       durationMs: input.durationMs,
     };
   }

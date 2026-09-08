@@ -610,6 +610,53 @@ describe('TLS interception', () => {
       expect(exchange.responseHeaders['content-encoding']).toBeUndefined();
     });
 
+    it('carries the protocol onto a model exchange promoted from an h2 call', async () => {
+      // `alpn` has been recorded on `net.request` since the interceptor learned h2, and the
+      // reason given was that "did this run go through the h2 path" has to be answerable from the
+      // trace. On an intercepted run it was not: every model call a dialect claims is promoted,
+      // so no `net.*` event is left to carry the field, and promotion dropped it. Asked over h2
+      // because that is the answer worth having -- and because the HTTP/1.1 test client offers no
+      // ALPN at all, where absent is the honest value.
+      h2Origin = await startH2Origin(originCa, {
+        answer: () => ({
+          contentType: 'application/json',
+          body: JSON.stringify({
+            id: 'chatcmpl-1',
+            object: 'chat.completion',
+            model: 'gpt-5.2',
+            choices: [
+              { index: 0, message: { role: 'assistant', content: 'hi' }, finish_reason: 'stop' },
+            ],
+            usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+          }),
+        }),
+      });
+      const handle = await startProxy([`127.0.0.1:${h2Origin.port}`]);
+
+      const session = await h2Through({
+        proxyPort: handle.port,
+        host: '127.0.0.1',
+        port: h2Origin.port,
+        trust: [runCa.certPem],
+      });
+      const request = session.request({
+        ':method': 'POST',
+        ':path': '/v1/chat/completions',
+        'content-type': 'application/json',
+      });
+      request.setEncoding('utf8');
+      request.on('data', () => undefined);
+      request.end(
+        JSON.stringify({ model: 'gpt-5.2', messages: [{ role: 'user', content: 'hi' }] }),
+      );
+      await once(request, 'close');
+      session.destroy();
+
+      expect(modelExchanges).toHaveLength(1);
+      expect(modelExchanges[0]!.alpn).toBe('h2');
+      expect(netExchanges).toHaveLength(0);
+    });
+
     /**
      * The same guarantee over h2, which is the path that actually matters here: `openrouter.ai`
      * negotiates h2, so every OpenRouter-attributed request reaches the interceptor through
@@ -960,6 +1007,7 @@ describe('TLS interception', () => {
       expect(exchange.rawResponse).not.toContain('orca-base64:');
       expect(exchange.usage?.input_tokens).toBe(3);
       expect(exchange.usage?.output_tokens).toBe(1);
+      expect(exchange.responseDecodedFrom).toBe('gzip');
     });
 
     it('stops claiming an encoding the recorded body no longer has', async () => {
