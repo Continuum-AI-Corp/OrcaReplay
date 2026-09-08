@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { NetExchange } from '../src/intercept.js';
-import { createProxy } from '../src/server.js';
+import { createProxy, defaultDialects } from '../src/server.js';
+import { selectDialect } from '../src/dialects.js';
 
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -44,7 +45,50 @@ async function post(url: string, body: unknown, headers: Record<string, string> 
 
 const EMBEDDING = { object: 'list', data: [{ embedding: [0.1, 0.2] }] };
 
+describe('Anthropic path boundary', () => {
+  it.each(['/v1/messages', '/anthropic/v1/messages', '/coding/v1/messages'])(
+    'recognizes the versioned Anthropic endpoint %s',
+    (path) => {
+      expect(selectDialect(defaultDialects(), path)?.id).toBe('anthropic');
+    },
+  );
+});
+
 describe('record mode — a path no dialect claims', () => {
+  it.each([
+    {
+      path: '/api/v2/chat/messages',
+      body: { model: 'gpt-5.2', messages: [{ role: 'user', content: 'hello' }] },
+    },
+    { path: '/v3/conversations/messages', body: { text: 'hello', channel: 'fixture' } },
+  ])('does not reroute or promote unrelated $path traffic to Anthropic', async ({ path, body }) => {
+    const up = stubUpstream({ ok: true });
+    const seen: NetExchange[] = [];
+    const proxy = await createProxy({
+      mode: 'record',
+      fetchImpl: up.fetchImpl,
+      upstream: { openai: 'https://openai.test', anthropic: 'https://anthropic.test' },
+      passthroughUpstream: 'https://original.test',
+      onNetExchange: (exchange) => void seen.push(exchange),
+    });
+    closers.push(proxy.close);
+
+    const response = await post(`${proxy.url}${path}`, body);
+
+    expect(response.status).toBe(200);
+    expect(up.calls).toHaveLength(1);
+    expect(up.calls[0]!.url).toBe(`https://original.test${path}`);
+    expect(up.calls[0]!.body).toBe(JSON.stringify(body));
+    expect(proxy.exchanges()).toHaveLength(0);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      host: 'original.test',
+      path,
+      requestBody: JSON.stringify(body),
+    });
+    expect(proxy.stats().passedThrough).toBe(1);
+  });
+
   it('forwards it rather than answering 404', async () => {
     const up = stubUpstream(EMBEDDING);
     const proxy = await createProxy({
