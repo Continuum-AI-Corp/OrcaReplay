@@ -16,7 +16,7 @@ ENV NODE_ENV=production
 WORKDIR /work
 
 # Pinned, not `latest`: an image that silently changes what it runs is the opposite of the point.
-RUN npm install -g --omit=dev orcareplay@0.2.2
+RUN npm install -g --omit=dev orcareplay@0.2.3
 
 # stdio transport — the client owns stdin/stdout, so no port is exposed.
 ENTRYPOINT ["orca", "mcp"]
