@@ -414,6 +414,13 @@ describe('TLS interception', () => {
           setTimeout(() => res.socket?.destroy(), 30);
           return;
         }
+        if (req.url === '/not-modified') {
+          // What a cache revalidation answers, and RFC 7232 asks for the header fields a 200
+          // would have carried -- so `content-encoding` is here on a response with no body.
+          res.writeHead(304, { 'content-encoding': 'gzip', etag: '"abc"' });
+          res.end();
+          return;
+        }
         if (req.url === '/stream-gzip') {
           // A compressed stream, handed over in two writes so a client can leave mid-member. What
           // orca keeps is then a prefix of a deflate stream, which cannot be inflated.
@@ -1070,6 +1077,39 @@ describe('TLS interception', () => {
       expect(netExchanges[0]!.responseDecodedFrom).toBeUndefined();
       expect(netExchanges[0]!.responseHeaders['content-encoding']).toBe('gzip');
       expect(failures.some((reason) => reason.startsWith('response body left opaque'))).toBe(true);
+    });
+
+    it('says nothing about a response that carried no body at all', async () => {
+      const failures: string[] = [];
+      const handle = await createProxy({
+        mode: 'record',
+        tls: {
+          ca: runCa,
+          hosts: [`127.0.0.1:${model.port}`],
+          trustedOriginCerts: [originCa.certPem],
+          onNetExchange: (e) => void netExchanges.push(e),
+          onFailure: (f) => void failures.push(f.reason),
+        },
+      });
+      proxy = handle;
+      await through({
+        proxyPort: handle.port,
+        host: '127.0.0.1',
+        port: model.port,
+        trust: [runCa.certPem],
+        method: 'GET',
+        path: '/not-modified',
+      });
+
+      expect(netExchanges).toHaveLength(1);
+      expect(netExchanges[0]!.status).toBe(304);
+      expect(netExchanges[0]!.responseBody).toBe('');
+      expect(netExchanges[0]!.responseDecodedFrom).toBeUndefined();
+      // Every decoder throws "unexpected end of file" on an empty buffer, so attempting one here
+      // reported an opaque body on a response that never had one.
+      expect(failures).toEqual([]);
+      // Nothing was decoded, so the header set still describes what arrived.
+      expect(netExchanges[0]!.responseHeaders['content-encoding']).toBe('gzip');
     });
 
     it('leaves a stream the client walked away from mid-member alone, and says nothing', async () => {

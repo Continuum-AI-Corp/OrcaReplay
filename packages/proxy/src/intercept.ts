@@ -173,9 +173,12 @@ export function decodeBody(bytes: Buffer, contentEncoding?: string): string {
  * The response body as the client saw it, plus the encoding orca took off to get there.
  *
  * Not attempted on a capture that is a prefix rather than the whole stream: half a deflate member
- * cannot be inflated, and `truncated` / `abandoned` already say the record is incomplete. Failing
- * to decode is not fatal either -- the wire bytes are kept and the reason is reported, the same
- * way an undecodable request body is.
+ * cannot be inflated, and `truncated` / `abandoned` already say the record is incomplete. Nor on a
+ * response that carried no body -- RFC 7232 asks a 304 to send the header fields a 200 would have
+ * sent, `content-encoding` among them, and 204 and HEAD arrive the same way; every decoder throws
+ * "unexpected end of file" on an empty buffer, which would have reported an opaque body where
+ * there was no body at all. Failing to decode a body that *is* there is not fatal either -- the
+ * wire bytes are kept and the reason is reported, the same way an undecodable request body is.
  */
 function recordableResponseBody(
   captured: Capture,
@@ -183,7 +186,13 @@ function recordableResponseBody(
   whole: boolean,
 ): { body: string; decodedFrom?: string; error?: string } {
   const encoding = contentEncoding?.split(',')[0]?.trim().toLowerCase();
-  if (encoding === undefined || encoding === '' || encoding === 'identity' || !whole) {
+  if (
+    encoding === undefined ||
+    encoding === '' ||
+    encoding === 'identity' ||
+    captured.bytes === 0 ||
+    !whole
+  ) {
     return { body: captured.text() };
   }
   try {
