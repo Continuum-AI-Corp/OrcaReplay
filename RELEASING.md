@@ -49,6 +49,13 @@ git tag -a v0.3.0 -m "0.3.0" && git push --follow-tags
 > `scripts/publish-order.mjs` catches the manifest mismatch, and the `grep` catches the lockfile
 > one; the manifests can be perfectly consistent while the lockfile is not, so check both.
 
+> **The registry step waits for npm, and has to.** The MCP Registry validates that the npm version
+> it is being told about exists, and npm's own publish output says a tarball "may take a few minutes
+> to become available". 0.2.3 published at `:06` and the registry call ran three seconds later, got
+> a 404 for the version that had just gone out, and failed the release — after npm had succeeded, so
+> re-running the whole workflow was not an option. The step now polls `npm view` for up to five
+> minutes before publishing. `registry-only` exists for the case where it still needs a retry.
+
 The tag fires `.github/workflows/release.yml`, which:
 
 1. runs the full gate — format, build, 1000+ tests, conformance, neutrality;

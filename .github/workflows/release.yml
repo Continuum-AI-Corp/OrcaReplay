@@ -96,5 +96,27 @@ jobs:
           case "$v" in refs/*) v=$(node -p "require('./packages/cli/package.json').version") ;; esac
           node scripts/sync-server-json.mjs "$v"
           ./mcp-publisher validate
+
+          # Wait for npm to serve the version we just pushed.
+          #
+          # The registry validates that the npm package it is being told about actually exists,
+          # and npm's own publish output says the tarball "may take a few minutes to become
+          # available". 0.2.3 published at :06 and the registry call ran three seconds later, so
+          # it got a 404 for a version that had just gone out and failed the whole release over a
+          # race with a CDN. Poll instead of sleeping a fixed amount: propagation took under a
+          # minute that time and there is no reason to spend more than it needs.
+          for i in $(seq 1 30); do
+            if npm view "orcareplay@$v" version >/dev/null 2>&1; then
+              echo "npm is serving orcareplay@$v"
+              break
+            fi
+            if [ "$i" = 30 ]; then
+              echo "orcareplay@$v still not visible on npm after 5 minutes" >&2
+              exit 1
+            fi
+            echo "waiting for npm to serve orcareplay@$v ($i/30)"
+            sleep 10
+          done
+
           ./mcp-publisher login github-oidc
           ./mcp-publisher publish
