@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -261,16 +262,172 @@ describe('scrub — binary safety', () => {
 
     const { BlobStore } = await import('@orcareplay/core');
     const store = new BlobStore(join(writer.runDir, 'blobs'));
-    const ref = await store.put(`prose with NEEDLE inside ${'z'.repeat(100)}`);
+    await store.put(`prose with NEEDLE inside ${'z'.repeat(100)}`);
 
     await scrubCommand(parseArgs(['scrub', 'last', '--match', 'NEEDLE']), out, cwd);
 
-    const after = Buffer.from(await store.get(ref)).toString('utf8');
-    expect(after).not.toContain('NEEDLE');
-    expect(after).toContain('prose with');
+    // Read back by what the scrubbed content hashes to, not by the digest it used to have: a
+    // blob's name is its contents' digest, so scrubbing one moves it. Asking for the old digest
+    // is asking for the material this command exists to destroy.
+    const files = await blobFiles(writer.runDir);
+    expect(files).toHaveLength(1);
+    expect(files[0]!.text).not.toContain('NEEDLE');
+    expect(files[0]!.text).toContain('prose with');
+    expect(Buffer.from(await store.get(files[0]!.name)).toString('utf8')).toBe(files[0]!.text);
     await rm(cwd, { recursive: true, force: true });
   });
 });
+
+/**
+ * A blob's name *is* the sha256 of its contents (spec §2.2), and `BlobStore.put` is built on it:
+ * content already held is recognised by its path existing, and the file is then not written at
+ * all. Scrubbing a blob in place left a store where that no longer held, so the next `put` of the
+ * original material would conclude it was already stored and hand back a reference to scrubbed
+ * content. `orca scrub` says as much already about the workspace snapshots it declines to rewrite
+ * -- git objects are addressed by their own contents. So are these.
+ */
+describe('scrub — the blob store stays content-addressed', () => {
+  let cwd: string;
+  let out: Output;
+  let lines: string[];
+
+  beforeEach(async () => {
+    cwd = await mkdtemp(join(tmpdir(), 'orca-scrub-addr-'));
+    lines = [];
+    out = new Output({ write: (s) => void lines.push(s), isTTY: false });
+  });
+
+  afterEach(async () => {
+    await rm(cwd, { recursive: true, force: true });
+  });
+
+  /** A payload over the 4096-byte inline limit, which is the only way to reach a blob at all. */
+  async function runWithSpilledPayload(text: string): Promise<string> {
+    const writer = await TraceWriter.create(join(cwd, '.orca', 'runs'), {
+      adapter: { id: 'test' },
+      argv: ['test'],
+      cwd,
+      orcaVersion: '0.1.0',
+    });
+    await writer.append({ type: 'run.start', actor: 'orca', turn: 0 });
+    await writer.append({ type: 'note', actor: 'orca', turn: 1, payload: text as never });
+    await writer.append({ type: 'run.end', actor: 'orca', turn: 1 });
+    await writer.close(0);
+    return writer.runDir;
+  }
+
+  it('moves a scrubbed blob to the digest its contents now have, and the reference with it', async () => {
+    const runDir = await runWithSpilledPayload(`NEEDLE and then ${'z'.repeat(5000)}`);
+    const before = await blobFiles(runDir);
+    expect(before).toHaveLength(1);
+    expect(before[0]!.name).toBe(before[0]!.digest);
+
+    await scrubCommand(parseArgs(['scrub', 'last', '--match', 'NEEDLE']), out, cwd);
+
+    const after = await blobFiles(runDir);
+    expect(after).toHaveLength(1);
+    expect(after[0]!.text).not.toContain('NEEDLE');
+    // The invariant: a name is a claim about the contents. And the old file is gone rather than
+    // left behind holding what was removed.
+    expect(after[0]!.name).toBe(after[0]!.digest);
+    expect(after[0]!.name).not.toBe(before[0]!.name);
+
+    const events = (await readFile(join(runDir, 'events.jsonl'), 'utf8'))
+      .split('\n')
+      .filter((line) => line.trim() !== '')
+      .map((line) => JSON.parse(line) as { payload?: { $blob?: string; bytes?: number } });
+    const ref = events.find((event) => event.payload?.$blob !== undefined)?.payload;
+    expect(ref?.$blob).toBe(`sha256:${after[0]!.name}`);
+    // Scrubbing changes a body's length, so a `bytes` left at the old one is the same false claim
+    // in smaller print.
+    expect(ref?.bytes).toBe(Buffer.byteLength(after[0]!.text, 'utf8'));
+  });
+
+  it('moves every reference to a blob two events share', async () => {
+    // Content addressing means one file, two references: every model turn resends the whole
+    // conversation, so identical content arriving twice is the ordinary case rather than a corner
+    // -- and moving the file while updating one of them would leave the other pointing nowhere.
+    const writer = await TraceWriter.create(join(cwd, '.orca', 'runs'), {
+      adapter: { id: 'test' },
+      argv: ['test'],
+      cwd,
+      orcaVersion: '0.1.0',
+    });
+    const shared = `NEEDLE and then ${'z'.repeat(5000)}`;
+    await writer.append({ type: 'run.start', actor: 'orca', turn: 0 });
+    await writer.append({ type: 'note', actor: 'orca', turn: 1, payload: shared as never });
+    await writer.append({ type: 'note', actor: 'orca', turn: 2, payload: shared as never });
+    await writer.append({ type: 'run.end', actor: 'orca', turn: 2 });
+    await writer.close(0);
+    expect(await blobFiles(writer.runDir)).toHaveLength(1);
+
+    await scrubCommand(parseArgs(['scrub', 'last', '--match', 'NEEDLE']), out, cwd);
+
+    const files = await blobFiles(writer.runDir);
+    expect(files).toHaveLength(1);
+    expect(files[0]!.name).toBe(files[0]!.digest);
+    const refs = (await readFile(join(writer.runDir, 'events.jsonl'), 'utf8'))
+      .split('\n')
+      .filter((line) => line.trim() !== '')
+      .map((line) => JSON.parse(line) as { payload?: { $blob?: string } })
+      .flatMap((event) => (event.payload?.$blob === undefined ? [] : [event.payload.$blob]));
+    expect(refs).toHaveLength(2);
+    expect(refs).toEqual([`sha256:${files[0]!.name}`, `sha256:${files[0]!.name}`]);
+  });
+
+  it('leaves the manifest describing the store it now has', async () => {
+    const runDir = await runWithSpilledPayload(`NEEDLE and then ${'z'.repeat(5000)}`);
+
+    await scrubCommand(parseArgs(['scrub', 'last', '--match', 'NEEDLE']), out, cwd);
+
+    const manifest = JSON.parse(await readFile(join(runDir, 'manifest.json'), 'utf8')) as {
+      integrity?: { events_sha256?: string; blob_count?: number };
+      counts?: { blobs?: number };
+    };
+    const files = await blobFiles(runDir);
+    expect(manifest.integrity?.blob_count).toBe(files.length);
+    // Read in `blob_count`'s place by any viewer opening a run sealed before that field existed,
+    // so the same run must not report two different sizes depending on which reader opens it.
+    expect(manifest.counts?.blobs).toBe(files.length);
+    // Still sealed: a scrubbed trace that failed its own integrity check would make people skip
+    // scrubbing.
+    expect(manifest.integrity?.events_sha256).toBe(
+      createHash('sha256')
+        .update(await readFile(join(runDir, 'events.jsonl'), 'utf8'), 'utf8')
+        .digest('hex'),
+    );
+  });
+
+  it('names the move in the plan, rather than a file nobody has yet', async () => {
+    await runWithSpilledPayload(`NEEDLE and then ${'z'.repeat(5000)}`);
+
+    await scrubCommand(parseArgs(['scrub', 'last', '--match', 'NEEDLE', '--dry-run']), out, cwd);
+
+    const plan = lines.join('\n');
+    expect(plan).toContain('and move it to');
+    expect(plan).toContain('which is what its scrubbed contents hash to');
+  });
+});
+
+/** Every file in a run's blob store, with the digest its contents actually have. */
+async function blobFiles(
+  runDir: string,
+): Promise<{ name: string; digest: string; text: string }[]> {
+  const root = join(runDir, 'blobs');
+  const found: { name: string; digest: string; text: string }[] = [];
+  for (const shard of await readdir(root, { withFileTypes: true }).catch(() => [])) {
+    if (!shard.isDirectory()) continue;
+    for (const name of await readdir(join(root, shard.name))) {
+      const bytes = await readFile(join(root, shard.name, name));
+      found.push({
+        name,
+        digest: createHash('sha256').update(bytes).digest('hex'),
+        text: bytes.toString('utf8'),
+      });
+    }
+  }
+  return found;
+}
 
 /**
  * The failure mode that matters for a scrubber is not "removed too little" — it is "reported a

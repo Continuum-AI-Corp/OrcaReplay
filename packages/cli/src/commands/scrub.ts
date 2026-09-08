@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
-import { join, relative } from 'node:path';
+import { mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { basename, dirname, join, relative } from 'node:path';
 import { Redactor, resolveRunSelector } from '@orcareplay/core';
 import { runGit, runGitRaw } from '@orcareplay/fs-capture';
 import { validateEvent, validateManifest } from '@orcareplay/schema';
@@ -8,6 +8,9 @@ import type { ParsedArgs } from '../args.js';
 import type { Output } from '../out.js';
 
 const FILE_MODE = 0o600;
+const DIR_MODE = 0o700;
+
+const BLOB_PREFIX = 'sha256:';
 
 /** Bounds how much object content one `git cat-file --batch` holds in memory at a time. */
 const BATCH_BYTES = 8 * 1024 * 1024;
@@ -30,6 +33,14 @@ export interface ScrubResult {
 interface PendingWrite {
   path: string;
   contents: string;
+  /** Where a moved blob is coming from, so the plan can say so rather than name a new file. */
+  movedFrom?: string;
+}
+
+/** Where a scrubbed blob's content now lives, keyed by the digest it used to be filed under. */
+interface MovedBlob {
+  digest: string;
+  bytes: number;
 }
 
 /** What one pass of the detectors did to a piece of text. */
@@ -99,6 +110,52 @@ export async function scrubCommand(
   const manifest = parseScrubbedManifest(scrubbedManifest.value, runDir);
   removals += scrubbedManifest.removals;
 
+  const pending: PendingWrite[] = [];
+  /** The redaction ledger, which is appended to rather than scrubbed — reported, never counted. */
+  let ledger: string | undefined;
+
+  /**
+   * Blobs hold most of the volume, so most of what needs removing lives there — and they go before
+   * events, because scrubbing a blob *moves* it.
+   *
+   * A blob's name is the sha256 of its contents (spec §2.2), which is not decoration: `put`
+   * recognises content it already holds by that path existing and then does not write the file, and
+   * that is what keeps a trace linear in new content rather than quadratic in turns. Rewriting a
+   * blob under its old name left a store where the name no longer described the contents, so a
+   * later `put` of the original material would conclude it was already stored and hand back a
+   * reference to scrubbed content instead. `orca scrub` says this out loud already, about the
+   * workspace snapshots it declines to rewrite: git objects are addressed by their own contents.
+   * These are too.
+   */
+  const blobsRoot = join(runDir, 'blobs');
+  const blobPaths = await walk(blobsRoot);
+  const moved = new Map<string, MovedBlob>();
+  /** Old blob files, deleted only once every new one is in place. */
+  const stale = new Set<string>();
+  for (const path of blobPaths) {
+    const buf = await readFile(path);
+    // Skip binary. A NUL byte, or a UTF-8 round trip that loses bytes, means rewriting this file
+    // as text would corrupt it — and a secret is not going to be hiding in a PNG anyway.
+    const text = asText(buf);
+    if (text === undefined) continue;
+    const scrubbed = scrubText(text);
+    if (scrubbed.value === text) continue;
+    const digest = createHash('sha256').update(scrubbed.value, 'utf8').digest('hex');
+    moved.set(basename(path), { digest, bytes: Buffer.byteLength(scrubbed.value, 'utf8') });
+    pending.push({
+      path: join(blobsRoot, digest.slice(0, 2), digest),
+      contents: scrubbed.value,
+      movedFrom: path,
+    });
+    stale.add(path);
+    removals += scrubbed.removals;
+    filesChanged += 1;
+  }
+  // Never delete a path something is being written to. Two blobs can scrub to the same content, and
+  // one blob can scrub to content another blob already holds; either way the file that survives is
+  // the one being written, and the name it is written under may be some other blob's old name.
+  for (const write of pending) stale.delete(write.path);
+
   // events.jsonl, line by line, so a truncated final line stays tolerable.
   const eventsPath = join(runDir, 'events.jsonl');
   const original = await readFile(eventsPath, 'utf8');
@@ -108,36 +165,35 @@ export async function scrubCommand(
     lineNumber += 1;
     if (line.trim() === '') continue;
     const scrubbed = scrubText(line);
-    if (scrubbed.value === line) {
-      scrubbedLines.push(line);
-      continue;
+    let kept = line;
+    if (scrubbed.value !== line) {
+      // Never write a line that would no longer parse or validate: a scrub that corrupts the trace
+      // is worse than one that leaves something behind, because it destroys the evidence too. But
+      // putting the original back means the match is still on disk, so it is reported rather than
+      // swallowed — and it is not counted, or `removed=N` would name removals that never happened.
+      const reason = rejectionReason(scrubbed.value);
+      if (reason === undefined) {
+        removals += scrubbed.removals;
+        kept = scrubbed.value;
+      } else {
+        reverted += 1;
+        const seq = seqOf(line);
+        out.warn(
+          'scrub_reverted',
+          seq === undefined ? { line: lineNumber, reason } : { seq, reason },
+        );
+      }
     }
-    // Never write a line that would no longer parse or validate: a scrub that corrupts the trace
-    // is worse than one that leaves something behind, because it destroys the evidence too. But
-    // putting the original back means the match is still on disk, so it is reported rather than
-    // swallowed — and it is not counted, or `removed=N` would name removals that never happened.
-    const reason = rejectionReason(scrubbed.value);
-    if (reason !== undefined) {
-      reverted += 1;
-      const seq = seqOf(line);
-      out.warn(
-        'scrub_reverted',
-        seq === undefined ? { line: lineNumber, reason } : { seq, reason },
-      );
-      scrubbedLines.push(line);
-      continue;
-    }
-    removals += scrubbed.removals;
-    scrubbedLines.push(scrubbed.value);
+    // Applied to whichever text won, a reverted line included: the blob has moved either way, and
+    // a reference left pointing at the old name is a reference to a file that is about to be gone.
+    // It has no revert of its own because it cannot invalidate a line — a digest is replaced by a
+    // digest of the same shape.
+    scrubbedLines.push(moved.size === 0 ? kept : retargetLine(kept, moved));
   }
   if (reverted > 0) {
     out.plain(`  ${reverted} event(s) were put back unchanged — what they matched is STILL here`);
     out.plain('  next: widen the match, or delete the run outright');
   }
-
-  const pending: PendingWrite[] = [];
-  /** The redaction ledger, which is appended to rather than scrubbed — reported, never counted. */
-  let ledger: string | undefined;
 
   const nextEvents = `${scrubbedLines.join('\n')}\n`;
   const eventsRewritten = nextEvents !== original;
@@ -146,27 +202,12 @@ export async function scrubCommand(
     filesChanged += 1;
   }
 
-  // Blobs hold most of the volume, so most of what needs removing lives there.
-  const blobsRoot = join(runDir, 'blobs');
-  for (const path of await walk(blobsRoot)) {
-    const buf = await readFile(path);
-    // Skip binary. A NUL byte, or a UTF-8 round trip that loses bytes, means rewriting this file
-    // as text would corrupt it — and a secret is not going to be hiding in a PNG anyway.
-    const text = asText(buf);
-    if (text === undefined) continue;
-    const scrubbed = scrubText(text);
-    if (scrubbed.value !== text) {
-      pending.push({ path, contents: scrubbed.value });
-      removals += scrubbed.removals;
-      filesChanged += 1;
-    }
-  }
-
   const fs = await handleShadowStore(runDir, args.bool('drop-fs'), dryRun, (text) => {
     return scrubText(text).value !== text;
   });
 
-  if (eventsRewritten) {
+  const integrity = manifest.integrity;
+  if (isRecord(integrity) && (eventsRewritten || moved.size > 0)) {
     // Refresh the digest so `verifyIntegrity` still passes over the scrubbed file. Only when the
     // file was actually rewritten: recomputing it unconditionally would quietly repair a digest
     // that never matched, which is exactly the tampering the digest exists to expose.
@@ -174,13 +215,23 @@ export async function scrubCommand(
     // Hashed from the bytes about to be written rather than re-read from disk, because under
     // `--dry-run` nothing is written — and a digest that depends on the write having happened is
     // a digest that silently means two different things.
-    const integrity = manifest.integrity;
-    if (isRecord(integrity)) {
-      manifest.integrity = {
-        ...integrity,
-        events_sha256: createHash('sha256').update(nextEvents, 'utf8').digest('hex'),
-      };
-    }
+    manifest.integrity = {
+      ...integrity,
+      ...(eventsRewritten
+        ? { events_sha256: createHash('sha256').update(nextEvents, 'utf8').digest('hex') }
+        : {}),
+      // The store changes shape when a blob moves, and not only by renaming: two blobs whose one
+      // difference was the material being removed scrub to the same content and become one file.
+      // A count left describing the store as it was is the same false claim as a stale digest.
+      ...(moved.size === 0 ? {} : { blob_count: blobCountAfter(blobPaths, stale, pending) }),
+    };
+  }
+  const counts = manifest.counts;
+  if (isRecord(counts) && moved.size > 0 && typeof counts['blobs'] === 'number') {
+    // Written from the same number as `integrity.blob_count`, and read in its place by any viewer
+    // opening a run sealed before that field existed. Leaving one refreshed and the other not
+    // would make the same run report two different sizes depending on which reader opened it.
+    manifest.counts = { ...counts, blobs: blobCountAfter(blobPaths, stale, pending) };
   }
   const manifestAfter = `${JSON.stringify(manifest, null, 2)}\n`;
   if (manifestAfter !== manifestBefore) {
@@ -210,13 +261,24 @@ export async function scrubCommand(
     // named three files under a heading that said two.
     for (const write of pending) {
       if (write.path === ledger) continue;
-      out.plain(`  would rewrite ${relative(runDir, write.path)}`);
+      out.plain(
+        write.movedFrom === undefined
+          ? `  would rewrite ${relative(runDir, write.path)}`
+          : `  would rewrite ${relative(runDir, write.movedFrom)} and move it to ` +
+              `${relative(runDir, write.path)}, which is what its scrubbed contents hash to`,
+      );
     }
     if (ledger !== undefined)
       out.plain(`  would record the removals in ${relative(runDir, ledger)}`);
     if (fs.matches > 0) out.plain(`  ${fs.matches} shadow-store object(s) would still match`);
   } else {
     await commit(pending);
+    // Last, and only once every new file is in place. Until then the old blobs are what the
+    // references still reach, so a scrub interrupted before this leaves a run that is whole and
+    // partly unscrubbed rather than one that is scrubbed and unreadable — and re-running the same
+    // command finishes it, because the leftover file is found and scrubbed again to the digest it
+    // already sits under.
+    for (const path of stale) await rm(path, { force: true });
     out.phase('scrubbed', { run: runDir, removed: removals, files: filesChanged });
   }
   if (removals === 0 && reverted === 0 && fs.matches === 0 && fs.unreadable === undefined) {
@@ -251,6 +313,9 @@ export async function scrubCommand(
  */
 async function commit(pending: PendingWrite[]): Promise<void> {
   for (const write of pending) {
+    // A moved blob's digest usually starts with two hex characters no other blob in this run does,
+    // so its shard does not exist yet. Every other write here lands in a directory that does.
+    await mkdir(dirname(write.path), { recursive: true, mode: DIR_MODE });
     const tmp = `${write.path}.${randomBytes(6).toString('hex')}.tmp`;
     try {
       await writeFile(tmp, write.contents, { mode: FILE_MODE });
@@ -284,6 +349,67 @@ function collectLiterals(args: ParsedArgs): string[] {
     literals.push(...values);
   }
   return literals;
+}
+
+/**
+ * Point an event's payload at where its blob now lives.
+ *
+ * Walks the payload rather than substituting over the whole line, so a digest that appears inside
+ * recorded text is left alone; and rewrites `bytes` along with the digest, because scrubbing
+ * changes a body's length and a reference that reports the old one is the same kind of false claim
+ * as the old digest was.
+ */
+function retargetLine(line: string, moved: Map<string, MovedBlob>): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    // A truncated final line, which the text pass leaves alone for the same reason.
+    return line;
+  }
+  if (!isRecord(parsed) || !retargetBlobs(parsed['payload'], moved)) return line;
+  return JSON.stringify(parsed);
+}
+
+/**
+ * Returns whether anything moved, so a line holding no moved reference is written back
+ * byte-for-byte rather than re-serialised.
+ *
+ * Depth-bounded at the same six levels the viewer's own blob walk uses, so the two agree about
+ * where a reference can be.
+ */
+function retargetBlobs(value: unknown, moved: Map<string, MovedBlob>, depth = 0): boolean {
+  if (depth > 6 || value === null || typeof value !== 'object') return false;
+  if (Array.isArray(value)) {
+    let hit = false;
+    for (const item of value) hit = retargetBlobs(item, moved, depth + 1) || hit;
+    return hit;
+  }
+  const record = value as Record<string, unknown>;
+  const ref = record['$blob'];
+  if (typeof ref === 'string') {
+    const target = moved.get(ref.startsWith(BLOB_PREFIX) ? ref.slice(BLOB_PREFIX.length) : ref);
+    if (target === undefined) return false;
+    record['$blob'] = `${BLOB_PREFIX}${target.digest}`;
+    record['bytes'] = target.bytes;
+    return true;
+  }
+  let hit = false;
+  for (const item of Object.values(record)) hit = retargetBlobs(item, moved, depth + 1) || hit;
+  return hit;
+}
+
+/** How many files the blob store will hold once the moves are committed. */
+function blobCountAfter(
+  before: readonly string[],
+  stale: ReadonlySet<string>,
+  pending: readonly PendingWrite[],
+): number {
+  const after = new Set(before.filter((path) => !stale.has(path)));
+  for (const write of pending) {
+    if (write.movedFrom !== undefined) after.add(write.path);
+  }
+  return after.size;
 }
 
 /** Why a scrubbed event line cannot be written, or undefined when it can. */
