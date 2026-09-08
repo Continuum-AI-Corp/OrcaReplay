@@ -30,7 +30,7 @@ try it — because the first thing a viewer does after watching is point it at t
 | Claude Code | `ANTHROPIC_BASE_URL` | `/v1/messages` | **Works.** Adapter shipped, validated against a real bug-fix run. |
 | OpenAI Agents SDK | `OPENAI_BASE_URL` ✓ | `/v1/responses` | **Works** *(was: broke on turn one)*. Recorded, replayed offline, forkable. |
 | Codex CLI | `OPENAI_BASE_URL` ✓ | `/v1/responses` | **Works** *(was: broke on turn one)*. On a ChatGPT subscription it still needs `--tls-intercept` first. |
-| LangGraph / LangChain | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | chat completions | **Should work.** Goes through the official clients, which read both. Still never tested, still undocumented — W3.5. |
+| LangGraph / LangChain | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | chat completions | **Works** *(was: never tested)*. A two-node graph, streaming and with a tool: records, replays at `exact=2` with the origin down, and forks live. Asserted in CI — W3.5. |
 | Vercel AI SDK | none — redirected at `globalThis.fetch` | chat completions / `/v1/responses` | **Works** *(was: silent)*. `orca record node -- node app.mjs` installs a fetch hook; recorded, replayed offline. |
 
 Two failure modes, and the quiet one is worse in the long run.
@@ -111,7 +111,7 @@ land before the things that merely miss them.
 | **W3.2** ✅ | **Shipped.** Warn at the end of `orca record` when zero model exchanges were captured, with the likely cause. The empty-trace failure must never be silent. | Recording an unconfigured Vercel AI SDK app produces a warning, not a clean exit. |
 | **W3.3** ✅ | **Shipped.** A Responses API dialect: matches `/v1/responses`, translators in `providers/src/translate/`, SSE delta parsing, `withModel` so forks work. Unblocks the OpenAI Agents SDK and Codex at once. The dialect interface is already built for exactly this — the proxy is handed a list and knows nothing about which exist. | A Codex run records, replays offline and forks. |
 | **W3.4** ✅ | **Shipped.** `@orcareplay/node-instrument`: a Node `--import` hook rewriting provider origins on `globalThis.fetch`, injected by `orca record` through `NODE_OPTIONS`. Environment variables cannot reach the Vercel AI SDK, so reach the runtime. Covers every JS agent that hardcodes a base URL — a class, not a vendor. | An unmodified `@ai-sdk/openai` app records and replays. |
-| **W3.5** | Prove LangGraph rather than assuming it: a `langgraph` adapter id, an end-to-end test against a stub upstream, a how-to. Check its thread and checkpoint ids survive redaction — the entropy sweep has already eaten round-tripping protocol identifiers twice. | A two-node graph records, replays and forks in CI. |
+| **W3.5** ✅ | **Shipped** — an end-to-end check against a stub upstream and a how-to (`docs/integrations.md`), minus the adapter id. A `langgraph` adapter's `prepare` would be `generic-openai`'s verbatim, because orca launches the user's own script rather than a binary it knows, so the id would have bought a name and nothing else. Two findings worth keeping: the redaction worry did not materialise because an `InMemorySaver` thread id never reaches the wire at all, and removing `OPENAI_API_BASE` breaks none of the LangChain checks — they survive on the official client's `OPENAI_BASE_URL`. | A two-node graph records, replays and forks in CI. |
 | **W3.6** | Run `checkAdapterContract` as a per-integration matrix job and generate the README support table from the result. | "We support X" is a check, not a sentence. |
 
 ## 4. Proof that replay is reliable and traces are safe

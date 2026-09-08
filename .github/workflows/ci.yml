@@ -62,7 +62,7 @@ jobs:
       # The frameworks this speaks for. A check whose package is missing is skipped rather than
       # failed, so a contributor can run the suite without all of them — which makes installing
       # them here the thing that turns a skip into a failure.
-      - run: pip install openai anthropic litellm langgraph langchain-openai
+      - run: pip install openai anthropic litellm langgraph langchain-openai browser-use
       - run: node test/integrations/run.mjs
 
   python-sdk:

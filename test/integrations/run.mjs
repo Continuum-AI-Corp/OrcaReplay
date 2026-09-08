@@ -64,6 +64,10 @@ const CHECKS = [
     run: ['python', 'agents/langgraph_agent.py', 'stream'],
     needs: 'langgraph',
     exchanges: 2,
+    // The one check that also forks. A fork is the third of the three things the README claims,
+    // and it is the only one that leaves the recording behind and asks a model again — so it is
+    // exercised where the stub is still up, which is what keeps it free.
+    forks: true,
   },
   {
     id: 'langgraph-tools',
@@ -71,6 +75,13 @@ const CHECKS = [
     run: ['python', 'agents/langgraph_agent.py', 'tools'],
     needs: 'langgraph',
     exchanges: 2,
+  },
+  {
+    id: 'browser-use',
+    what: "browser-use's own ChatOpenAI, which passes an unset base_url straight through",
+    run: ['python', 'agents/browser_use_agent.py'],
+    needs: 'browser_use',
+    exchanges: 1,
   },
   {
     id: 'fetch-hook',
@@ -163,6 +174,30 @@ async function runCheck(check) {
     const runId = /run=(run_[0-9a-f]+)/.exec(recorded.out)?.[1];
     if (runId === undefined) throw new Error('no run id in the record output');
 
+    // A fork continues live from a checkpoint, so it runs while the stub is still up — which is
+    // also what keeps it free. `replayed=0 live=N` is the shape to look for: nothing served from
+    // the recording past the cursor, every turn after it answered by the origin.
+    if (check.forks) {
+      const forked = await orca(
+        [
+          'replay',
+          runId,
+          '--from',
+          '1',
+          '--model',
+          'stub-2',
+          '--upstream-openai',
+          `http://127.0.0.1:${origin.port}`,
+        ],
+        dir,
+      );
+      if (forked.code !== 0) throw new Error(`fork exited ${forked.code}`);
+      const f = /fork\.done .*live=(\d+) divergences=(\d+)/.exec(forked.out);
+      if (f === null) throw new Error('fork printed no verdict');
+      if (Number(f[1]) === 0) throw new Error('the fork answered nothing live');
+      if (Number(f[2]) !== 0) throw new Error(`${f[2]} divergence(s) in the fork`);
+    }
+
     // From here the recording is on its own. Anything that reaches out now fails.
     origin.stop();
 
@@ -183,7 +218,9 @@ async function runCheck(check) {
     if (divergences !== 0) throw new Error(`${divergences} divergence(s)`);
     if (unmatched !== 0) throw new Error(`${unmatched} unmatched`);
 
-    return { ok: `${total} exchanges, replayed exact with the origin down` };
+    return {
+      ok: `${total} exchanges, replayed exact with the origin down${check.forks ? ', forked live' : ''}`,
+    };
   } finally {
     origin.stop();
     await rm(dir, { recursive: true, force: true });

@@ -378,7 +378,7 @@ whether orca understands the wire format it speaks once it arrives.
 | **OpenClaw** | `orca record openclaw` — the hook for the gateway, inherited variables for the agents it spawns | works |
 | **opencode** | `orca record opencode` | adapter shipped, both origins redirected |
 | **goose** (Block) | `orca record goose` — `OPENAI_HOST` **and** `OPENAI_BASE_URL`, `ANTHROPIC_HOST` → Responses API | works — driven end to end against goose 1.49.0, [what is different about it](#the-harness-that-reads-different-variables) |
-| **LangGraph / LangChain** | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | should work — it goes through the official clients, but nothing here tests it yet |
+| **LangGraph / LangChain** | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | works — a two-node graph, streaming and with a tool, records and replays at `exact=2` and forks live, [in CI](test/integrations/) |
 | **Hermes** (Nous Research) | `ORCA_BASE_URL_VARS=… orca record generic-openai -- hermes …` | should work — it overrides per provider; [name the variable](#a-base-url-variable-orca-has-never-heard-of) |
 | **Codex-in-the-IDE** | `orca record exec --tls-intercept -- code .` | works — the extension spawns the agent, and it inherits the capture |
 | **a bot with a hardcoded origin** | `orca record exec --tls-intercept -- <cmd>` | works — a Grok bot posting to a URL in its own source, [in detail](#an-agent-that-reads-nothing-at-all) |
@@ -776,6 +776,7 @@ interface first, with a second implementation showing it is not shaped around on
 **Reference:**
 
 - [`spec/orca-trace-v0.md`](spec/orca-trace-v0.md) — the normative trace format
+- [`docs/integrations.md`](docs/integrations.md) — recording a framework, one command each, every number asserted in CI
 - [`docs/architecture.md`](docs/architecture.md) — how capture, replay and fork actually work
 - [`docs/validation.md`](docs/validation.md) — what broke the first time this met a real agent
 - [`docs/launch-path.md`](docs/launch-path.md) — what is built, what is not, and what is next
@@ -794,8 +795,9 @@ already written down.
   about twenty lines — [docs/plugins.md](docs/plugins.md). If it does not, `node` may already cover
   it; a recording that comes back empty from a harness not listed [above](#which-agents) is worth
   an issue either way.
-- **Prove LangGraph.** It should work through the official clients and nothing here tests it. An
-  end-to-end test against a stub upstream would turn a "should" into a row that CI can turn red.
+- **Add a framework to the integration checks.** `test/integrations/` records a real framework
+  against a stub origin, kills the origin and replays it. Eight are covered; AutoGen, LlamaIndex,
+  Pydantic AI and smolagents are not. A new one is a script and a row.
 - **Reimplement the reader.** The spec is CC BY 4.0 on purpose. There is already a Python reader;
   Go and Rust are open.
 - **Break the replay.** The matching ladder is the heart of this and the fastest way to improve it
