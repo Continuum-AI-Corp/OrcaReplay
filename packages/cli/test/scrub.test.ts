@@ -375,6 +375,26 @@ describe('scrub — the blob store stays content-addressed', () => {
     expect(refs).toEqual([`sha256:${files[0]!.name}`, `sha256:${files[0]!.name}`]);
   });
 
+  it('scrubs a partial write in place rather than minting a blob out of it', async () => {
+    const runDir = await runWithSpilledPayload(`NEEDLE and then ${'z'.repeat(5000)}`);
+    // What `BlobStore.put` leaves behind when it crashes between its write and its rename.
+    const stray = join(runDir, 'blobs', 'aa', `${'a'.repeat(64)}.deadbeef.tmp`);
+    await mkdir(join(runDir, 'blobs', 'aa'), { recursive: true });
+    await writeFile(stray, `NEEDLE in a partial write ${'y'.repeat(200)}`, 'utf8');
+
+    await scrubCommand(parseArgs(['scrub', 'last', '--match', 'NEEDLE']), out, cwd);
+
+    // Still scrubbed — skipping a file that holds the material is the one failure this command
+    // must not have.
+    expect(await readFile(stray, 'utf8')).not.toContain('NEEDLE');
+    // But not moved: nothing references it, and a hex name would file it in the store proper.
+    expect(await blobFiles(runDir)).toHaveLength(1);
+    const manifest = JSON.parse(await readFile(join(runDir, 'manifest.json'), 'utf8')) as {
+      integrity?: { blob_count?: number };
+    };
+    expect(manifest.integrity?.blob_count).toBe(1);
+  });
+
   it('leaves the manifest describing the store it now has', async () => {
     const runDir = await runWithSpilledPayload(`NEEDLE and then ${'z'.repeat(5000)}`);
 
@@ -409,7 +429,12 @@ describe('scrub — the blob store stays content-addressed', () => {
   });
 });
 
-/** Every file in a run's blob store, with the digest its contents actually have. */
+/**
+ * Every blob in a run's store, with the digest its contents actually have.
+ *
+ * Digest-named files only, which is what `BlobStore` counts as a blob -- a `<digest>.<rand>.tmp`
+ * in the same directory is a `put` that crashed, not an entry in the store.
+ */
 async function blobFiles(
   runDir: string,
 ): Promise<{ name: string; digest: string; text: string }[]> {
@@ -418,6 +443,7 @@ async function blobFiles(
   for (const shard of await readdir(root, { withFileTypes: true }).catch(() => [])) {
     if (!shard.isDirectory()) continue;
     for (const name of await readdir(join(root, shard.name))) {
+      if (!/^[0-9a-f]{64}$/.test(name)) continue;
       const bytes = await readFile(join(root, shard.name, name));
       found.push({
         name,

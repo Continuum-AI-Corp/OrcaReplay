@@ -12,6 +12,9 @@ const DIR_MODE = 0o700;
 
 const BLOB_PREFIX = 'sha256:';
 
+/** What `BlobStore` treats as a blob. Anything else under `blobs/` is a partial write. */
+const BLOB_NAME = /^[0-9a-f]{64}$/;
+
 /** Bounds how much object content one `git cat-file --batch` holds in memory at a time. */
 const BATCH_BYTES = 8 * 1024 * 1024;
 
@@ -140,6 +143,17 @@ export async function scrubCommand(
     if (text === undefined) continue;
     const scrubbed = scrubText(text);
     if (scrubbed.value === text) continue;
+    removals += scrubbed.removals;
+    filesChanged += 1;
+    // A file whose name is not a digest is a `put` that crashed between its write and its
+    // rename. Nothing references it, and its name never claimed anything about its contents,
+    // so it is rewritten where it lies -- moving it would mint a hex-named file no event
+    // points at. It is still scrubbed: a scrubber that skips a file holding the material is
+    // the one failure this command must not have.
+    if (!BLOB_NAME.test(basename(path))) {
+      pending.push({ path, contents: scrubbed.value });
+      continue;
+    }
     const digest = createHash('sha256').update(scrubbed.value, 'utf8').digest('hex');
     moved.set(basename(path), { digest, bytes: Buffer.byteLength(scrubbed.value, 'utf8') });
     pending.push({
@@ -148,8 +162,6 @@ export async function scrubCommand(
       movedFrom: path,
     });
     stale.add(path);
-    removals += scrubbed.removals;
-    filesChanged += 1;
   }
   // Never delete a path something is being written to. Two blobs can scrub to the same content, and
   // one blob can scrub to content another blob already holds; either way the file that survives is
@@ -399,7 +411,12 @@ function retargetBlobs(value: unknown, moved: Map<string, MovedBlob>, depth = 0)
   return hit;
 }
 
-/** How many files the blob store will hold once the moves are committed. */
+/**
+ * How many blobs the store will hold once the moves are committed.
+ *
+ * Counted the way `BlobStore.count()` counts, by digest-named files only, so the manifest
+ * keeps reporting the same number the store itself would.
+ */
 function blobCountAfter(
   before: readonly string[],
   stale: ReadonlySet<string>,
@@ -409,7 +426,7 @@ function blobCountAfter(
   for (const write of pending) {
     if (write.movedFrom !== undefined) after.add(write.path);
   }
-  return after.size;
+  return [...after].filter((path) => BLOB_NAME.test(basename(path))).length;
 }
 
 /** Why a scrubbed event line cannot be written, or undefined when it can. */
