@@ -1,6 +1,6 @@
 {
   "name": "orcareplay",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "mcpName": "io.github.Continuum-AI-Corp/orcareplay",
   "type": "module",
   "license": "Apache-2.0",
@@ -37,15 +37,15 @@
     "directory": "packages/cli"
   },
   "dependencies": {
-    "@orcareplay/schema": "0.2.2",
-    "@orcareplay/plugin-api": "0.2.2",
-    "@orcareplay/core": "0.2.2",
-    "@orcareplay/proxy": "0.2.2",
-    "@orcareplay/providers": "0.2.2",
-    "@orcareplay/adapters": "0.2.2",
-    "@orcareplay/fs-capture": "0.2.2",
-    "@orcareplay/viewer": "0.2.2",
-    "@orcareplay/mcp-shim": "0.2.2",
-    "@orcareplay/shell-shim": "0.2.2"
+    "@orcareplay/schema": "0.2.3",
+    "@orcareplay/plugin-api": "0.2.3",
+    "@orcareplay/core": "0.2.3",
+    "@orcareplay/proxy": "0.2.3",
+    "@orcareplay/providers": "0.2.3",
+    "@orcareplay/adapters": "0.2.3",
+    "@orcareplay/fs-capture": "0.2.3",
+    "@orcareplay/viewer": "0.2.3",
+    "@orcareplay/mcp-shim": "0.2.3",
+    "@orcareplay/shell-shim": "0.2.3"
   }
 }

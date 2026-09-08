@@ -1,6 +1,6 @@
 {
   "name": "@orcareplay/providers",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "type": "module",
   "license": "Apache-2.0",
   "repository": {
@@ -17,7 +17,7 @@
     "dist"
   ],
   "dependencies": {
-    "@orcareplay/plugin-api": "0.2.2",
-    "@orcareplay/schema": "0.2.2"
+    "@orcareplay/plugin-api": "0.2.3",
+    "@orcareplay/schema": "0.2.3"
   }
 }

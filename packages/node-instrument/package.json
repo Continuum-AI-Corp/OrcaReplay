@@ -1,6 +1,6 @@
 {
   "name": "@orcareplay/node-instrument",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "type": "module",
   "license": "Apache-2.0",
   "repository": {
