@@ -77,6 +77,11 @@ for (const name of entries) {
   await checkTrace(dir);
 }
 
+// The quickstart asset is a real recording that ships inside the npm package and is replayed on
+// every `orca quickstart`, so it is held to the format the same way the hand-written examples are.
+// It is not under examples/traces/ because it is not a fixture — it is the product's own demo.
+await checkTrace(join(root, 'packages', 'cli', 'quickstart', 'trace'), 'the quickstart trace');
+
 // A trace this repository's writer produced, checked by the same rules as the examples. Without
 // it the job could stay green while the writer emitted something the schema forbids.
 const scratch = await mkdtemp(join(tmpdir(), 'orca-conformance-'));

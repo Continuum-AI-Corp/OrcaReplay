@@ -48,6 +48,18 @@ from step 4 onward. The model is the only variable, which is what makes the answ
 npm i -g orcareplay
 ```
 
+The three commands at the top need an agent installed, a key, a network and real tokens. If you
+have none of those yet, one command brings its own:
+
+```console
+orca quickstart
+```
+
+It writes a small project with a genuine bug in it and a recording of an agent fixing that bug,
+then replays the recording against the project with the network off: two failing tests before,
+four passing after, three turns served from the trace and nothing spent. `--full` prints the whole
+timeline and the replay as it happened.
+
 ## Read your agent's own system prompt
 
 A proxy that sees the whole loop also sees the prompt the harness assembled before it sent
@@ -606,6 +618,7 @@ Early. `v0` is the walking skeleton of the three commands above. Everything belo
 | Machine-readable output (`--json`) | working — one JSON document on stdout, diagnostics on stderr, failures as JSON |
 | Causal graph (`orca graph`) | working — what caused what, as a table or as JSON. Every edge says whether the trace recorded it or orca derived it just now, and names the rule either way. `--to N` narrows to the chain that produced one event |
 | Shareable cards | working — `orca export --card` draws one causal chain, `--graph-card` draws the whole run with that chain lit, and `compare --share` draws the verdict table. `.svg` always; `.png` and `.gif` when the optional render toolchain is installed, which `orca doctor` reports and `npm ci` never pulls in |
+| First run without an agent (`orca quickstart`) | working — the package carries a real recording and the project it was made against, and replays one over the other offline, so the first look costs no key, no network and no tokens |
 | MCP server (`orca mcp`) | working — six tools over stdio, so an agent can read, explain and replay its own runs |
 | Programmatic API (`Orca`) | working — the commands render what it returns, so the terminal is a view of one source of truth |
 | Replaying a session you typed into | working, and approximate — [what that means](#replaying-a-session-you-typed-into) |

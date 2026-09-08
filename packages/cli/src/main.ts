@@ -4,6 +4,7 @@ import { Orca } from './api.js';
 import { serveMcp } from './mcp-server.js';
 import { Output } from './out.js';
 import { attachCommand } from './commands/attach.js';
+import { quickstartCommand } from './commands/quickstart.js';
 import { recordCommand } from './commands/record.js';
 import { replayCommand } from './commands/replay.js';
 import {
@@ -23,6 +24,10 @@ import { ORCA_VERSION } from './version.js';
 
 const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI agents
 
+  orca quickstart                a project, a recorded run and an offline replay of it —
+                                 no key, no agent installed, no network
+        --dir <path>             where to put it (default: ./orca-quickstart)
+        --full                   the whole timeline and the replay as it happened
   orca record <agent>            run an agent and capture everything
   orca attach                    record an agent orca does not launch — one in a sandbox,
                                  a container, or on another machine
@@ -160,6 +165,10 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
     assertNoStrayPositionals(args);
 
     switch (args.command) {
+      case 'quickstart':
+        // Non-zero when the demo did not actually happen, so a broken environment is a failure a
+        // script can see rather than a wall of green text that says the opposite.
+        return (await quickstartCommand(args, out, cwd)).ok ? 0 : 1;
       case 'record':
         return (await recordCommand(args, out, cwd)).exitCode;
       case 'attach':

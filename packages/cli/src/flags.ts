@@ -22,6 +22,7 @@ const UPSTREAM = ['upstream-anthropic', 'upstream-openai'] as const;
 const TLS = ['tls-intercept', 'tls-hosts'] as const;
 
 export const BY_COMMAND: Record<string, readonly string[]> = {
+  quickstart: ['dir', 'full'],
   record: ['fs', 'shell', 'mcp-config', ...TLS, ...UPSTREAM],
   attach: [
     'for',
@@ -130,6 +131,8 @@ const POSITIONALS: Record<string, number> = {
   export: 1,
   ui: 1,
   scrub: 1,
+  // Configured entirely by `--dir`, like `attach` below it.
+  quickstart: 0,
   attach: 0,
   list: 0,
   gc: 0,

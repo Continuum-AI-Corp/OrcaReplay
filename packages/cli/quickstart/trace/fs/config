@@ -1,0 +1,11 @@
+[core]
+	repositoryformatversion = 0
+	filemode = false
+	bare = true
+	symlinks = false
+	ignorecase = true
+	autocrlf = false
+	eol = lf
+	fsmonitor = false
+[gc]
+	auto = 0
