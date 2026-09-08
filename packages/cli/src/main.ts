@@ -33,6 +33,7 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
         --replay <run>           serve a recording back to that agent instead of recording,
                                  for a run whose agent is not on this machine
   orca replay [run]              reproduce a run exactly, network off
+        --quiet                  discard the replayed agent's own output, keep the verdict
         --ui                     open the timeline when it finishes
   orca replay [run] --from N     fork from a checkpoint and continue live
         --model <id>             continue on a different model
