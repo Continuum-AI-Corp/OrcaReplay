@@ -54,7 +54,8 @@ export function anthropicDialect(translators: {
     id: 'anthropic',
     defaultUpstream: 'https://api.anthropic.com',
     requestPath: '/v1/messages',
-    matches: (p) => p.startsWith('/v1/messages'),
+    // OpenCode catalog providers mount Anthropic under /anthropic/v1, /coding/v1, etc.
+    matches: (p) => p.startsWith('/v1/messages') || p.endsWith('/messages'),
     // Claude is the only family Anthropic serves, so the test is the name rather than a list that
     // would need editing every time a model ships.
     ownsModel: (m) => /^(?:.*\/)?claude[-.]/i.test(m.trim()),

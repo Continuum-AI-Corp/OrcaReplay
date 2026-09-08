@@ -184,10 +184,10 @@ async function setup(oauth: boolean) {
   return { root, writer, proxy, calls, launch, env: { ...env, ...launch.env } };
 }
 
-async function verifyTrace(s: Awaited<ReturnType<typeof setup>>, oauth: boolean) {
+async function verifyTrace(s: Awaited<ReturnType<typeof setup>>, oauth: boolean, api = API) {
   expect(s.calls.length).toBeGreaterThan(0);
   for (const call of s.calls) {
-    expect(call.url).toBe(oauth ? CHATGPT : API);
+    expect(call.url).toBe(oauth ? CHATGPT : api);
     expect(call.headers.get('authorization')).toBe(
       `Bearer ${oauth ? 'fixture-access' : 'fixture-api-key'}`,
     );
@@ -262,6 +262,39 @@ describe('OpenCode capture through emitted plugin, proxy and events.jsonl', () =
 // Opt in with ORCA_TEST_OPENCODE=/absolute/path/to/opencode. Real compiled harness, fake auth,
 // local upstream stub, isolated configuration/data, and a guard against direct external fetches.
 describe.skipIf(!process.env.ORCA_TEST_OPENCODE)('installed OpenCode harness', () => {
+  it.each(['https://api.z.ai/api/coding/paas/v4', 'https://custom-hook-fixture.invalid/prefix/v1'])(
+    'records actual OpenCode calls to %s',
+    async (baseURL) => {
+      const s = await setup(false);
+      const config = JSON.parse(s.env.OPENCODE_CONFIG_CONTENT);
+      config.enabled_providers = ['catalog-fixture'];
+      config.model = `catalog-fixture/${MODEL}`;
+      config.small_model = config.model;
+      config.provider = {
+        'catalog-fixture': {
+          npm: '@ai-sdk/openai',
+          models: { [MODEL]: { name: MODEL } },
+          options: { baseURL, apiKey: 'fixture-api-key' },
+        },
+      };
+      const pending = exec(
+        process.env.ORCA_TEST_OPENCODE!,
+        ['run', '-m', config.model, 'Reply with captured. Do not use tools.'],
+        {
+          env: { ...s.env, OPENCODE_CONFIG_CONTENT: JSON.stringify(config) },
+          cwd: s.root,
+          timeout: 45000,
+          maxBuffer: 2 * 1024 * 1024,
+        },
+      );
+      pending.child.stdin?.end();
+      const result = await pending;
+      expect(result.stdout + result.stderr).toContain('captured');
+      await verifyTrace(s, false, `${baseURL}/responses`);
+    },
+    60000,
+  );
+
   it('reproduces the OAuth bypass without the capture plugin', async () => {
     const s = await setup(true);
     const config = JSON.parse(s.env.OPENCODE_CONFIG_CONTENT);
