@@ -1,0 +1,43 @@
+{
+  "schema_version": "0.1.0",
+  "run_id": "run_35bb6b7dc8a0",
+  "created_at": "2026-09-02T02:52:40.326Z",
+  "orca_version": "0.1.2",
+  "adapter": {
+    "id": "node",
+    "version": "0.1.2"
+  },
+  "argv": ["node", "node", "agent.mjs"],
+  "cwd": "C:\\qs",
+  "env_allowlisted": {
+    "TERM": "xterm-256color",
+    "PATH": "/usr/local/bin:/usr/bin:/bin",
+    "HOME": "/home/you",
+    "SHELL": "/bin/sh",
+    "PWD": "C:\\qs"
+  },
+  "platform": {
+    "os": "win32",
+    "arch": "x64",
+    "node": "v22.23.2"
+  },
+  "ended_at": "2026-09-02T02:53:57.870Z",
+  "counts": {
+    "events": 19,
+    "blobs": 1
+  },
+  "redaction": {
+    "policy_version": 3,
+    "rules_fired": {}
+  },
+  "integrity": {
+    "events_sha256": "7062881f14cd88e4364bc34aa193ff1e4ecda5aa0ae02de29423cf7c1d429461",
+    "blob_count": 1
+  },
+  "git": {
+    "head": "0000000000000000000000000000000000000000",
+    "branch": "main",
+    "dirty": false
+  },
+  "exit_code": 0
+}

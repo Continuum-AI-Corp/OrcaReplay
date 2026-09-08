@@ -15,7 +15,8 @@
     ".": "./dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "quickstart"
   ],
   "engines": {
     "node": ">=20.0.0"
