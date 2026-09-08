@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { parseArgs } from '../src/args.js';
+import { VALUELESS, parseArgs } from '../src/args.js';
 import {
   BY_COMMAND,
   GLOBAL,
@@ -104,6 +104,34 @@ describe('the allowlist against the source it mirrors', () => {
     const unreachable = [...flagsReadInSource()].filter((name) => !allowed.has(name)).sort();
     // A flag the code reads and no command allows can never be passed: the command throws first.
     expect(unreachable).toEqual([]);
+  });
+
+  /**
+   * A flag the code reads as a boolean has to be declared valueless, or the parser hands it the
+   * next word and the positional it belonged to disappears.
+   *
+   * That is the failure `VALUELESS` was written for, and it happened again the moment a flag was
+   * added without an entry: `orca replay --quiet run_a1b2c3` parsed as `quiet="run_a1b2c3"` with an
+   * empty positional list, so replay fell back to `last` and reproduced a different run than the
+   * one named — silently, and `--quiet` had by then suppressed the output that might have given it
+   * away. Reading the source rather than restating the list is the point: the list can only stay
+   * right if adding a flag without registering it fails here.
+   */
+  it('registers every flag the code reads as a boolean, or the parser eats the next word', () => {
+    const asBoolean = new Set<string>();
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) walk(path);
+        else if (entry.name.endsWith('.ts')) {
+          for (const m of readFileSync(path, 'utf8').matchAll(/args\.bool\('([^']+)'/g)) {
+            asBoolean.add(m[1]!);
+          }
+        }
+      }
+    };
+    walk(SRC);
+    expect([...asBoolean].filter((name) => !VALUELESS.has(name)).sort()).toEqual([]);
   });
 
   it('has an entry for every command the dispatcher handles', () => {

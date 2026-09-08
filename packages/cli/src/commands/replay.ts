@@ -460,7 +460,7 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
       launch.args,
       { ...process.env, ...launch.env },
       workspace.dir,
-      args.bool('json'),
+      agentStdoutFor(args),
     );
   } catch (err) {
     // A listening proxy keeps node's event loop alive, so a throw here printed the error and then
@@ -799,7 +799,7 @@ async function replayFork(
       launch.args,
       { ...process.env, ...launch.env },
       worktree,
-      args.bool('json'),
+      agentStdoutFor(args),
     );
   } catch (err) {
     // The same two failures `orca record` had. A listening proxy keeps Node's event loop alive, so
@@ -940,19 +940,31 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
   };
 }
 
+/** Where the replayed agent's own stdout should go, given the flags. */
+function agentStdoutFor(args: ParsedArgs): 'inherit' | 'stderr' | 'ignore' {
+  if (args.bool('quiet')) return 'ignore';
+  return args.bool('json') ? 'stderr' : 'inherit';
+}
+
 /**
  * Launch the agent for a replay or a fork.
  *
- * `quietStdout` is for `--json`: orca's stdout is the result document there, so the replayed
- * agent's own output moves to stderr rather than landing in the middle of it. stdin and stderr
- * stay inherited, so a harness that prompts still can.
+ * Where the replayed agent's own stdout goes:
+ *
+ *   inherit  the default — you asked to watch the run happen again, so you watch it
+ *   stderr   `--json`: orca's stdout is the result document, so the agent's output moves aside
+ *            rather than landing in the middle of it
+ *   ignore   `--quiet`: the run is being replayed for its verdict, not for its narration
+ *
+ * stdin and stderr stay inherited in every case, so a harness that prompts still can and a
+ * harness that fails still says why.
  */
 async function runChild(
   command: string,
   argv: string[],
   env: NodeJS.ProcessEnv,
   cwd = process.cwd(),
-  quietStdout = false,
+  agentStdout: 'inherit' | 'stderr' | 'ignore' = 'inherit',
 ): Promise<number> {
   // Same resolution as record and as detection; see resolveLaunch.
   const target = await resolveLaunch(command, argv);
@@ -961,9 +973,12 @@ async function runChild(
       env,
       cwd,
       shell: target.shell,
-      stdio: quietStdout ? ['inherit', 'pipe', 'inherit'] : 'inherit',
+      stdio:
+        agentStdout === 'inherit'
+          ? 'inherit'
+          : ['inherit', agentStdout === 'ignore' ? 'ignore' : 'pipe', 'inherit'],
     });
-    child.stdout?.pipe(process.stderr);
+    if (agentStdout === 'stderr') child.stdout?.pipe(process.stderr);
     child.on('error', (err) =>
       reject(new Error(`could not launch "${command}": ${String(err)}\n  is it on your PATH?`)),
     );
