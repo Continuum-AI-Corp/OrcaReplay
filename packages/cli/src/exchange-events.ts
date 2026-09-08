@@ -106,6 +106,9 @@ export class ExchangeEventDeriver {
         path: exchange.path,
         messages: exchange.canonicalRequest.messages.length,
         tools: exchange.canonicalRequest.tools?.length ?? 0,
+        // Only where orca established the connection and therefore knows. Absent reads as "not
+        // recorded" rather than as HTTP/1.1, which is why it is left off instead of defaulted.
+        ...(exchange.alpn === undefined ? {} : { alpn: exchange.alpn }),
       },
       payload: exchange.rawRequest,
       // Absent rather than empty when nothing came back: an edge list naming nothing is noise a
@@ -132,6 +135,11 @@ export class ExchangeEventDeriver {
         status: exchange.status,
         duration_ms: exchange.durationMs ?? 0,
         streamed: exchange.streamed,
+        // The payload below is the decoded body, so the encoding it arrived in is recorded here or
+        // nowhere: a promoted exchange keeps no response headers.
+        ...(exchange.responseDecodedFrom === undefined
+          ? {}
+          : { decoded_from: exchange.responseDecodedFrom }),
       },
       payload: exchange.rawResponse,
     });

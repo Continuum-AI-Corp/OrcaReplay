@@ -274,9 +274,15 @@ function parts(event: TraceEvent): RowParts {
       // `abandoned` says the agent stopped reading before the response ended, which is a thing
       // agents do on purpose once a streaming reply has answered them. Named on the row, because
       // that case arrives as `status 0` -- and a bare zero reads like a failure the run never had.
+      //
+      // `decoded_from` is named for the same reason: the payload below is the body the client saw,
+      // while `bytes` is what crossed the wire, and without this the two disagree with nothing on
+      // the row to say why.
+      const decodedFrom = a['decoded_from'];
       const parts = [
         status === undefined ? undefined : `status ${status}`,
         a['abandoned'] === true ? 'client left' : undefined,
+        typeof decodedFrom === 'string' ? `${decodedFrom} decoded` : undefined,
       ].filter((part): part is string => part !== undefined);
       return {
         label: pick(a, 'url', 'host'),

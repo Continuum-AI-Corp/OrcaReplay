@@ -329,6 +329,11 @@ export async function persistNetExchange(
       intercepted: true,
       headers: exchange.responseHeaders,
       bytes: exchange.responseBytes,
+      // What orca decompressed, next to the header set that no longer describes it. `bytes` is
+      // still the wire count, so the two together say how much the encoding was worth.
+      ...(exchange.responseDecodedFrom === undefined
+        ? {}
+        : { decoded_from: exchange.responseDecodedFrom }),
       truncated: exchange.responseTruncated,
       // Only when it happened, so a normal exchange carries no field saying it was normal. It
       // reads differently from `truncated`: the agent stopped reading, orca did not stop keeping.
