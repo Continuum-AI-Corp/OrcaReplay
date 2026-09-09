@@ -23,6 +23,7 @@ import type { ParsedArgs } from '../args.js';
 import { formatCost } from './compare.js';
 import { renderChainCard, renderGraphCard, scopeForCard } from '../share-card.js';
 import { cardTarget, gifFrames, svgToPng, svgsToGif, type CardFormat } from '../rasterize.js';
+import { recordableOrigin } from '@orcareplay/proxy';
 
 /** `orca list` — what runs are here, newest first. */
 export async function listCommand(
@@ -380,9 +381,15 @@ export function upstreamsIn(events: { type: string; attrs?: Record<string, unkno
   for (const event of events) {
     if (event.type !== 'model.response') continue;
     const upstream = event.attrs?.['upstream'];
-    if (typeof upstream === 'string' && upstream !== '' && !seen.includes(upstream)) {
-      seen.push(upstream);
-    }
+    if (typeof upstream !== 'string' || upstream === '') continue;
+    // Sanitised on the way out of the file as well as on the way in, because a trace is something
+    // you are *given*. The write path strips the credential now, but a trace recorded by a build
+    // from before it did carries one — and this is a debugger whose traces get attached to issues,
+    // so the copy that reaches a terminal or an exported run.html has to be clean whatever wrote
+    // it. A value with nothing recoverable in it is dropped: an origin nobody can read is not
+    // worth printing a placeholder for.
+    const safe = recordableOrigin(upstream);
+    if (safe !== undefined && !seen.includes(safe)) seen.push(safe);
   }
   return seen;
 }

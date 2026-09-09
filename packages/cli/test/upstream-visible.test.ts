@@ -147,6 +147,30 @@ describe('upstreamsIn', () => {
     ).toEqual(['https://a.example', 'https://b.example']);
   });
 
+  /**
+   * A trace is something you are given, so it is sanitised on the way out of the file too.
+   *
+   * The write path strips the credential now, but a trace recorded by a build from between the
+   * first commit of this branch and the one that added the stripping carries one — and `orca show`
+   * printed it back. Found by hand-editing an `upstream` attribute and running `orca show`, which
+   * is also what a trace someone hands you looks like.
+   */
+  it('strips a credential out of an upstream a trace already holds', () => {
+    expect(
+      upstreamsIn([
+        { type: 'model.response', attrs: { upstream: 'https://u:TRACELEAK@gw.example/v1' } },
+        { type: 'model.response', attrs: { upstream: 'https://gw.example/v1?key=TRACELEAK' } },
+      ]),
+      'both spellings collapse to the origin, and neither carries the secret',
+    ).toEqual(['https://gw.example/v1']);
+  });
+
+  it('drops an upstream with no readable origin in it at all', () => {
+    // `myuser:PASSWORD@…` parses with the username as the protocol, so there is no origin to
+    // recover — and a placeholder would say less than saying nothing.
+    expect(upstreamsIn([{ type: 'model.response', attrs: { upstream: 'not a url' } }])).toEqual([]);
+  });
+
   it('is empty for a trace recorded before orca wrote this down', () => {
     // Which is why `orca show` prints no line at all rather than "upstream unknown": absence here
     // is an old trace, and a run that reached nothing has no model.response to read anyway.
