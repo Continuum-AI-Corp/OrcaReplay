@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -104,10 +104,10 @@ describe('orca record, when the command line already says what to run', () => {
    * And it still detects when there is nothing else to go on — the case detection was written for,
    * and the one this must not break.
    *
-   * Detection reads `PATH` and `$HOME`, so the test supplies both: a `claude` shim on an otherwise
-   * empty PATH and a home with no agent config in it. That makes the answer the same on every
-   * machine, and — the reason it is written this way — means the run launches the shim instead of
-   * whatever real agent happens to be installed on the machine running the suite.
+   * Detection reads `PATH` and `$HOME`, so the test supplies both: a `claude` shim at the front of
+   * PATH, and a home with no agent config under it. That makes the answer the same on every
+   * machine, and — the reason it is written this way — means the run launches the shim rather than
+   * whatever real agent the machine running the suite happens to have installed.
    */
   it(
     'still detects when no command and no agent name were given',
@@ -122,9 +122,16 @@ describe('orca record, when the command line already says what to run', () => {
       await writeFile(shim, `${script}\n`);
       await chmod(shim, 0o755);
 
+      // Prepended, not replaced. `hasBinary` shells out to `which` on POSIX, and a PATH holding
+      // only the shim dir cannot find `which` itself — detection then answers false for every
+      // adapter and the test fails on Linux for a reason that has nothing to do with the code
+      // under it. Prepending is enough to make the answer deterministic anyway: `claude-code` is
+      // the first adapter the registry tries, and PATH is walked in order, so the shim wins over
+      // any real agent the machine running the suite happens to have installed.
+      const path = `${bin}${delimiter}${process.env.PATH ?? ''}`;
       const { said } = await orca(['record'], {
-        PATH: bin,
-        Path: bin,
+        PATH: path,
+        Path: path,
         HOME: dir,
         USERPROFILE: dir,
       });
