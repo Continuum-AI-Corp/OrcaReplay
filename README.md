@@ -27,6 +27,7 @@ Connect: [X](https://x.com/OrcaRouter) · [Discord](https://discord.com/invite/Y
 [![Node](https://img.shields.io/badge/node-20%2B-brightgreen)](#install)
 [![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Agents%20SDK%20%C2%B7%20AI%20SDK%20%C2%B7%20any-black)](#which-agents)
 [![Good first issues](https://img.shields.io/badge/good%20first%20issues-12-orange)](docs/good-first-issues.md)
+[![Mentioned in Awesome Claude Code](https://awesome.re/mentioned-badge.svg)](https://github.com/hesreallyhim/awesome-claude-code)
 
 ![Recording a Claude Code run, replaying it offline, then forking it onto two models](docs/demo-cli.gif)
 
@@ -374,13 +375,15 @@ whether orca understands the wire format it speaks once it arrives.
 | **Claude Code** | `ANTHROPIC_BASE_URL` | works — validated against a real bug fix, [in detail](docs/validation.md) |
 | **Codex CLI** (API key) | `OPENAI_BASE_URL` → Responses API | works |
 | **Codex CLI** (ChatGPT login) | `--tls-intercept` → Responses API | works, [with a decision to make](#when-the-harness-will-not-be-redirected) |
-| **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | works |
-| **Vercel AI SDK** | fetch hook — `orca record node -- node app.mjs` | works |
+| **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | works — the `AsyncOpenAI` client it is built on records and replays at `exact=1`, [in CI](test/integrations/); [its own tracing is a second egress](docs/integrations.md#openai-agents-sdk) |
+| **Vercel AI SDK** | fetch hook — `orca record node -- node app.mjs` | works — an agent posting to an origin compiled into its source records and replays at `exact=1`, [in CI](test/integrations/) |
 | **grok-cli** (and its Telegram bot) | `orca record grok` — `GROK_BASE_URL`, plus the hook for its sub-agents | works |
 | **OpenClaw** | `orca record openclaw` — the hook for the gateway, inherited variables for the agents it spawns | works |
 | **opencode** | `orca record opencode` | adapter shipped, both origins redirected |
 | **goose** (Block) | `orca record goose` — `OPENAI_HOST` **and** `OPENAI_BASE_URL`, `ANTHROPIC_HOST` → Responses API | works — driven end to end against goose 1.49.0, [what is different about it](#the-harness-that-reads-different-variables) |
 | **LangGraph / LangChain** | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | works — a two-node graph, streaming and with a tool, records and replays at `exact=2` and forks live, [in CI](test/integrations/) |
+| **CrewAI, Aider, OpenHands** | `orca record generic-openai -- python your_crew.py` — all three route through LiteLLM, which reads `OPENAI_API_BASE` | works — the LiteLLM layer records and replays at `exact=1`, [in CI](test/integrations/); [a CrewAI wrinkle worth knowing](docs/integrations.md#crewai-aider-openhands) |
+| **browser-use** | `orca record generic-openai -- python your_task.py` — its `ChatOpenAI` passes an unset `base_url` straight through | works — records and replays at `exact=1`, [in CI](test/integrations/); LLM layer only, [the browser is not driven](docs/integrations.md#browser-use) |
 | **Hermes** (Nous Research) | `ORCA_BASE_URL_VARS=… orca record generic-openai -- hermes …` | should work — it overrides per provider; [name the variable](#a-base-url-variable-orca-has-never-heard-of) |
 | **Codex-in-the-IDE** | `orca record exec --tls-intercept -- code .` | works — the extension spawns the agent, and it inherits the capture |
 | **a bot with a hardcoded origin** | `orca record exec --tls-intercept -- <cmd>` | works — a Grok bot posting to a URL in its own source, [in detail](#an-agent-that-reads-nothing-at-all) |
