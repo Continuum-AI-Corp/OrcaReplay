@@ -348,7 +348,12 @@ export interface RouteDecision {
   target: string;
   /** Dialect the agent's request arrived in. */
   recorded: string;
-  origin: string;
+  /**
+   * Where the call went, sanitised the way an exchange's `upstream` is: userinfo and query out,
+   * path kept. Absent when the configured origin cannot be sanitised into one, because absent
+   * already means "not recorded" — see {@link recordableOrigin}.
+   */
+  origin?: string;
   crossProvider: boolean;
   reason: string;
 }
@@ -797,11 +802,21 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     // did not. Emitted only when a decision was actually taken, so an ordinary recording — where
     // orca forwards what it was given — stays free of an event saying "nothing was chosen".
     if (options.forkModel !== undefined) {
+      // Sanitised here for the reason {@link buildExchange} sanitises the exchange's `upstream`,
+      // and it is the same value: an origin that came from configuration rather than off the wire,
+      // so a gateway that authenticates by URL carries its key in it. This payload is not just
+      // reported — `orca replay --model` and `orca compare --models` write it into the fork's
+      // trace as `route.decision.attrs` unchanged, and the trace redactor cannot help, because it
+      // matches key shapes and field names and this is a password inside a URL under `origin`.
+      // Omitted rather than replaced when it will not parse: no consumer reads it — the viewer
+      // renders model, target and reason — and a placeholder in a field others may parse as a URL
+      // is worse than the field being absent.
+      const recordable = recordableOrigin(origin);
       options.onRoute?.({
         model: options.forkModel,
         target: target.id,
         recorded: dialect.id,
-        origin,
+        ...(recordable === undefined ? {} : { origin: recordable }),
         crossProvider,
         // Deliberately does not open with the model name: the viewer already renders that as the
         // row's label, so a reason that repeats it produces `gpt-5.2  gpt-5.2 is served by…` and

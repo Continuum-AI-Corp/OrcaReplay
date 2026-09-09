@@ -5,10 +5,11 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { TraceReader } from '@orcareplay/core';
+import { TraceReader, listRuns } from '@orcareplay/core';
 import { parseArgs } from '../src/args.js';
 import { Output } from '../src/out.js';
 import { recordCommand } from '../src/commands/record.js';
+import { replayCommand } from '../src/commands/replay.js';
 import { startFakeModel } from './fixtures/fake-model.mjs';
 
 const run = promisify(execFile);
@@ -41,11 +42,13 @@ describe('a trace carries no credential-bearing URL, in any attribute', () => {
   let workspace: string;
   let model: Awaited<ReturnType<typeof startFakeModel>>;
   let out: Output;
+  let lines: string[];
 
   beforeEach(async () => {
     workspace = await mkdtemp(join(tmpdir(), 'orca-cred-'));
     model = await startFakeModel();
-    out = new Output({ write: () => {}, isTTY: false });
+    lines = [];
+    out = new Output({ write: (l) => void lines.push(l), isTTY: false });
     await run('git', ['init', '-q'], { cwd: workspace });
     await run('git', ['config', 'user.email', 'test@example.com'], { cwd: workspace });
     await run('git', ['config', 'user.name', 'Test'], { cwd: workspace });
@@ -134,4 +137,119 @@ describe('a trace carries no credential-bearing URL, in any attribute', () => {
     ).toEqual([]);
     expect(JSON.stringify(events)).not.toContain(secret);
   });
+
+  /**
+   * The fork path — the blind spot in the two cases above, and where this class of leak came back.
+   *
+   * A record run never substitutes a model, so `forkModel` stays undefined and `route.decision` is
+   * never emitted. The two cases above were written against exactly this bug and could not see it
+   * for that reason alone. On a fork orca *is* the gateway, and the decision it emits names the
+   * origin it chose — the resolved upstream, verbatim. `buildExchange` puts that same value through
+   * `recordableOrigin` before it reaches a trace; the `onRoute` payload did not, and replay writes
+   * `attrs: { ...decision }` unchanged.
+   *
+   * Both shapes are forked, because they fail differently and only one of them is loud: undici
+   * rejects userinfo at request time, so that fork errors out — after the decision is appended —
+   * while a `?key=` gateway is an ordinary working configuration whose fork succeeds with the key
+   * written into the trace. Every run in the workspace is scanned rather than the returned fork id,
+   * because a fork that throws never returns one.
+   */
+  const forkGateways = [
+    {
+      what: 'userinfo',
+      secret: 'PASSWORD-ON-A-FORK',
+      of: (url: string, secret: string) => url.replace('http://', `http://someone:${secret}@`),
+    },
+    {
+      what: 'a query',
+      secret: 'TOKEN-ON-A-FORK',
+      of: (url: string, secret: string) => `${url}?key=${secret}`,
+    },
+  ];
+
+  it.each(forkGateways)(
+    'when a fork routes through a gateway carrying its key in $what',
+    async ({ secret, of }) => {
+      const gateway = of(model.url, secret);
+      // Recorded through a clean origin, so anything found below can only have come from the fork.
+      await recordCommand(
+        parseArgs([
+          'record',
+          'generic-openai',
+          '--upstream-anthropic',
+          model.url,
+          '--',
+          'node',
+          FAKE_AGENT,
+        ]),
+        out,
+        workspace,
+      );
+      await replayCommand(
+        parseArgs([
+          'replay',
+          'last',
+          '--from',
+          '1',
+          '--model',
+          'gpt-5.2',
+          '--upstream-anthropic',
+          gateway,
+          '--upstream-openai',
+          gateway,
+        ]),
+        out,
+        workspace,
+      ).catch(() => undefined);
+
+      const offenders: Array<{ at: string; value: string }> = [];
+      let routes = 0;
+      let scanned = 0;
+      for (const { runId, dir } of await listRuns(workspace)) {
+        const events = await (await TraceReader.open(dir)).events();
+        scanned += events.length;
+        for (const event of events) {
+          if (event.type === 'route.decision') routes += 1;
+          offenders.push(
+            ...scalars(event.attrs, `${runId} ${event.type}.attrs`).filter((s) =>
+              looksLikeCredentialUrl(s.value),
+            ),
+          );
+        }
+      }
+
+      // The field is stripped, not deleted: a fork's trace still has to say where the call went,
+      // and "sanitised it away" would pass the check above just as well as sanitising it.
+      const origins = [];
+      for (const { dir } of await listRuns(workspace)) {
+        for (const event of await (await TraceReader.open(dir)).events()) {
+          if (event.type === 'route.decision')
+            origins.push((event.attrs as { origin?: unknown }).origin);
+        }
+      }
+      expect(origins.length).toBeGreaterThan(0);
+      for (const origin of origins) {
+        expect(String(origin), 'the route still has to name where it went').toContain('127.0.0.1');
+      }
+
+      expect(scanned, 'no events to scan').toBeGreaterThan(0);
+      // Without this the case can pass by never having forked at all.
+      expect(
+        routes,
+        `the fork emitted no route.decision, so this proves nothing: ${JSON.stringify(lines)}`,
+      ).toBeGreaterThan(0);
+      expect(
+        offenders.map((o) => o.at),
+        `these attributes carry a credential-bearing URL: ${JSON.stringify(offenders)}`,
+      ).toEqual([]);
+      expect(
+        JSON.stringify(
+          await Promise.all(
+            (await listRuns(workspace)).map(async (r) => (await TraceReader.open(r.dir)).events()),
+          ),
+        ),
+        'the secret itself reached a trace',
+      ).not.toContain(secret);
+    },
+  );
 });
