@@ -59,6 +59,13 @@ const CHECKS = [
     exchanges: 1,
   },
   {
+    id: 'openhands-sdk',
+    what: "the OpenHands SDK's own LLM layer, which wraps LiteLLM",
+    run: ['python', 'agents/openhands_agent.py'],
+    needs: 'openhands.sdk',
+    exchanges: 1,
+  },
+  {
     id: 'langgraph-stream',
     what: 'a two-node LangGraph over streaming SSE',
     run: ['python', 'agents/langgraph_agent.py', 'stream'],
