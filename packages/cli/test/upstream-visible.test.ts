@@ -7,6 +7,8 @@ import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { TraceReader } from '@orcareplay/core';
 import { parseArgs } from '../src/args.js';
+import { upstreamPlan } from '../src/upstream.js';
+import { writeConfig } from '../src/config.js';
 import { Output } from '../src/out.js';
 import { recordCommand, distinctOrigins } from '../src/commands/record.js';
 import { showCommand, upstreamsIn } from '../src/commands/inspect.js';
@@ -175,6 +177,22 @@ describe('distinctOrigins keeps a credential off the line', () => {
     expect(printed).toBe('https://gw.example');
   });
 
+  /**
+   * The shape that is refused rather than stripped, asserted here because this is the filter that
+   * used to be trusted to make it safe.
+   *
+   * A gateway typed without a scheme parses with the username as the protocol, so
+   * `recordableOrigin` returns a value — `myuser://SUPERSECRET@gw.example` — and a filter keeping
+   * everything `!== undefined` kept it. It cannot be sanitised into an origin, because there is no
+   * telling which half of `a:b` was meant as the host, so `upstreamPlan` refuses it before any of
+   * this runs. Kept as a unit assertion too: this filter should not be the only thing standing
+   * between that value and the line.
+   */
+  it('does not pass a scheme-less URL whose username parses as the protocol', () => {
+    const printed = distinctOrigins({ openai: `myuser:${SECRET}@gw.example/v1` }).join(',');
+    expect(printed, 'refused upstream reached the printed line').not.toContain(SECRET);
+  });
+
   it('collapses to one entry once the differing secrets are gone', () => {
     // Two config values that differ only by credential are one destination. Printing them as two
     // would say a run reaches two places when it reaches one.
@@ -184,5 +202,74 @@ describe('distinctOrigins keeps a credential off the line', () => {
         anthropic: 'https://gw.example',
       }),
     ).toEqual(['https://gw.example']);
+  });
+});
+
+/**
+ * An upstream that is not an origin, from each of the three places one can come from.
+ *
+ * `orca setup` refuses one on the way in, and that left three doors open: a config written before
+ * it did, an environment variable, and a flag. On the record path the value is not only sent but
+ * *printed* — on the recording line, and inside undici's TypeError when `doFetch` cannot parse it,
+ * which the proxy hands to the agent as a 500 body. Asserted on the message rather than on a field
+ * because both leaks were "the sanitiser handled the shape it was written against".
+ */
+describe('upstreamPlan refuses an upstream that is not an origin', () => {
+  const SECRET = 'SUPERSECRET';
+  let home: string;
+
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), 'orca-upstream-'));
+  });
+  afterEach(async () => {
+    await rm(home, { recursive: true, force: true });
+  });
+
+  // Only the shapes that cannot be an origin at all. A query-authenticated gateway works and a
+  // userinfo one is sanitisable, so both are sent and stripped from every display rather than
+  // refused — see setup.test.ts, which pins that half.
+  const shapes = [
+    { what: 'no scheme at all', url: `my.gateway.example?key=${SECRET}` },
+    { what: 'no scheme, username read as one', url: `myuser:${SECRET}@gw.example/v1` },
+  ];
+
+  it.each(shapes)('from --upstream-openai: $what', async ({ url }) => {
+    const call = () =>
+      upstreamPlan(parseArgs(['record', '--upstream-openai', url]), { XDG_CONFIG_HOME: home });
+    await expect(call()).rejects.toThrow(/is not an origin orca can use/);
+    await expect(call()).rejects.not.toThrow(new RegExp(SECRET));
+  });
+
+  it.each(shapes)('from ORCA_UPSTREAM_OPENAI: $what', async ({ url }) => {
+    const env = { XDG_CONFIG_HOME: home, ORCA_UPSTREAM_OPENAI: url };
+    await expect(upstreamPlan(parseArgs(['record']), env)).rejects.toThrow(
+      /is not an origin orca can use/,
+    );
+  });
+
+  it.each(shapes)('from the gateway in a hand-edited config: $what', async ({ url }) => {
+    // readConfig deliberately accepts a hand-edited file, and a config written by a pre-change
+    // `orca setup` holds whatever it was handed.
+    const env = { XDG_CONFIG_HOME: home };
+    await writeConfig({ gateway: { url, api_key_env: 'FAKE_KEY' } }, env);
+    await expect(upstreamPlan(parseArgs(['record']), env)).rejects.toThrow(
+      /is not an origin orca can use/,
+    );
+  });
+
+  it('sends a query-authenticated gateway rather than refusing it', async () => {
+    // The regression this narrowing undoes: refusing this broke a configuration that works.
+    const env = { XDG_CONFIG_HOME: home };
+    await writeConfig({ gateway: { url: `https://gw.example/v1?key=${SECRET}` } }, env);
+    const plan = await upstreamPlan(parseArgs(['record']), env);
+    expect(plan.upstream?.openai).toBe(`https://gw.example/v1?key=${SECRET}`);
+    // And it is the display that keeps it quiet, asserted next door in distinctOrigins.
+  });
+
+  it('lets an ordinary gateway through, so the guard is not refusing everything', async () => {
+    const env = { XDG_CONFIG_HOME: home };
+    await writeConfig({ gateway: { url: 'https://gw.example/team-a/v1' } }, env);
+    const plan = await upstreamPlan(parseArgs(['record']), env);
+    expect(plan.upstream?.openai).toBe('https://gw.example/team-a/v1');
   });
 });

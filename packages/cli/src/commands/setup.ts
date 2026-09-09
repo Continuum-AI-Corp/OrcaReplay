@@ -1,5 +1,5 @@
 import { createInterface } from 'node:readline/promises';
-import { bareOriginProblem, recordableOrigin, withoutCredentials } from '@orcareplay/proxy';
+import { unusableOrigin, recordableOrigin, withoutCredentials } from '@orcareplay/proxy';
 import { modelInfoFor } from '@orcareplay/providers';
 import type { ParsedArgs } from '../args.js';
 import type { Output } from '../out.js';
@@ -80,7 +80,7 @@ export async function setupCommand(
   // returns a value that still carries the password and every `?? url` guard downstream sees a
   // success. Nothing refused here could have worked anyway — undici rejects a URL carrying
   // credentials, and a scheme-less one has no host to reach.
-  const problem = bareOriginProblem(url);
+  const problem = unusableOrigin(url);
   if (problem !== undefined) {
     throw new Error(
       `--gateway is not an origin orca can use: ${problem}` +
@@ -216,7 +216,7 @@ export async function modelsCommand(
   // gateway carrying its key in the URL can still turn up — and it is the path whose whole job is
   // to report that the gateway cannot be reached. Refusing before the probe means neither the
   // message nor the fetch error it would have quoted can carry the value.
-  const configured = bareOriginProblem(config.gateway.url);
+  const configured = unusableOrigin(config.gateway.url);
   if (configured !== undefined) {
     out.failure({
       event: 'gateway.unusable',

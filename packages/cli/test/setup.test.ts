@@ -327,7 +327,20 @@ describe('orca setup', () => {
    * carrying credentials, and a scheme-less one has no host to reach.
    */
   describe('a gateway URL that carries a credential', () => {
-    const shapes = [
+    /**
+     * Two groups, because the answer differs and the difference is the point.
+     *
+     * A gateway that authenticates by query is an ordinary working configuration — undici sends it
+     * without complaint — so refusing it would break a setup to close a leak that was never about
+     * sending. Userinfo undici does reject at request time, but it is *sanitisable*, and the
+     * recording path already accepts it and keeps it out of the trace. Both are therefore accepted
+     * and stripped from every display.
+     *
+     * A scheme-less URL is the one with nothing to sanitise: it parses with the username as the
+     * protocol, so the sanitiser answers with a value that still carries the password and a
+     * `?? url` guard never fires. Nothing to strip, and nothing that could have worked.
+     */
+    const sanitised = [
       {
         what: 'a password with an @ in it',
         url: 'https://myuser:p@ssw0rd@gw.example/v1',
@@ -348,6 +361,8 @@ describe('orca setup', () => {
         url: 'https://gw.example/v1?key=SECRETKEY',
         secret: 'SECRETKEY',
       },
+    ];
+    const refused = [
       { what: 'no scheme at all', url: 'my.gateway.example?key=SECRETKEY', secret: 'SECRETKEY' },
       {
         what: 'no scheme, username read as one',
@@ -356,20 +371,35 @@ describe('orca setup', () => {
       },
     ];
 
-    it.each(shapes)('orca setup refuses $what without echoing it', async ({ url, secret }) => {
+    it.each(sanitised)('orca setup takes $what and never prints it', async ({ url, secret }) => {
+      await setupCommand(parseArgs(['setup', '--gateway', url, '--key-env', 'FAKE_KEY']), out, {
+        env,
+        ask: undefined,
+        probe: async () => {
+          // What undici says about a userinfo URL, so the error path is exercised too.
+          throw new Error(
+            `Request cannot be constructed from a URL that includes credentials: ${url}/v1/models`,
+          );
+        },
+      });
+      expect((await readConfig(env)).gateway?.url, 'it still has to be sent').toBe(url);
+      expect(text(), 'and never printed').not.toContain(secret);
+    });
+
+    it.each(refused)('orca setup refuses $what without echoing it', async ({ url, secret }) => {
       await expect(
         setupCommand(parseArgs(['setup', '--gateway', url, '--key-env', 'FAKE_KEY']), out, {
           env,
           ask: undefined,
           probe: async () => [],
         }),
-      ).rejects.toThrow(/not an origin orca can use/);
+      ).rejects.toThrow(/is not an origin orca can use/);
       expect(text(), 'the refusal must not print the value it refused').not.toContain(secret);
       expect(await readConfig(env), 'nothing refused may reach the file').toEqual({});
     });
 
-    it.each(shapes)(
-      'orca models refuses $what from a hand-edited config',
+    it.each([...sanitised, ...refused])(
+      'orca models never prints $what from a hand-edited config',
       async ({ url, secret }) => {
         // readConfig deliberately accepts a hand-edited file, so this is the one way such a URL can
         // still arrive — and modelsCommand exists to report a gateway it cannot reach.
@@ -402,13 +432,6 @@ describe('orca setup', () => {
     });
   });
 
-  /**
-   * The sanitiser that error prose still needs, held to the case that broke it.
-   *
-   * Kept even though the input is now refused at the door: a fetch error can name an origin orca
-   * did not choose — a `/forward/` base a client announced, an upstream from a flag — and this is
-   * the last thing between that string and a terminal.
-   */
   describe('withoutCredentials', () => {
     it('takes the whole userinfo, not up to the first @ inside the password', () => {
       expect(withoutCredentials('https://myuser:p@ssw0rd@gw.example/v1/models')).toBe(

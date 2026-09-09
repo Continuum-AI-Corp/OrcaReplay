@@ -141,25 +141,26 @@ export function recordableOrigin(origin: string | undefined): string | undefined
 }
 
 /**
- * Why an origin is not a bare `http(s)://` base, or nothing if it is.
+ * Why a string cannot be used as an origin at all, or nothing if it can.
  *
- * Sanitising an origin on the way *out* turned out to be the wrong layer to rely on alone, because
- * `new URL` answers confidently for input that is not a URL at all. A gateway typed without a
- * scheme — the commonest way to mistype one — parses with the username as the protocol:
+ * Narrower than it first was, because the first version refused configurations that work. A
+ * gateway that authenticates by query — `https://gw.example/v1?key=…` — is an ordinary way to
+ * configure one, and undici sends it without complaint; refusing it broke a working setup to close
+ * a leak that was never about sending. Userinfo is the same story one step along: undici does
+ * reject `https://u:pw@gw` at request time, but it is *sanitisable* — {@link recordableOrigin}
+ * removes it cleanly — and the recording path already accepts it and keeps it out of the trace.
+ *
+ * What is left is the case where there is nothing to sanitise, because there is no origin. A
+ * gateway typed without a scheme parses with the username as the protocol:
  *
  *     new URL('myuser:PASSWORD@gw.example/v1')   // protocol 'myuser:', pathname the rest
  *
- * so {@link recordableOrigin} returns `myuser://PASSWORD@gw.example/v1` — a value, which means a
- * caller guarding with `?? url` never notices, and the password is on the line anyway. Refusing
- * the input is what closes that, and it costs nothing real: every shape refused here already
- * fails at the first request. undici rejects a URL carrying credentials outright, and a
- * scheme-less one has nowhere to go. The old behaviour was to store it, print it, and then fail.
- *
- * Deliberately the same rule `decodeForwardPath` applies to a base a client announces — protocol
- * `http(s)`, and nothing in userinfo, query or fragment. One standard for "an origin orca will
- * hold onto", whichever end it arrived from.
+ * so {@link recordableOrigin} answers `myuser://PASSWORD@gw.example/v1` — a value, which means a
+ * caller guarding with `?? url` never notices, and the password is on the line anyway. There is no
+ * fixing that by rewriting: with no scheme there is no telling which half of `a:b` was meant as
+ * the host. And nothing refused here could have worked — undici cannot parse it either.
  */
-export function bareOriginProblem(origin: string): string | undefined {
+export function unusableOrigin(origin: string): string | undefined {
   let url: URL;
   try {
     url = new URL(origin);
@@ -170,12 +171,6 @@ export function bareOriginProblem(origin: string): string | undefined {
     // Named without echoing the value: a scheme-less URL puts the username here, so `protocol` is
     // the one part of it that is safe to quote back.
     return `its scheme is "${url.protocol.replace(/:$/, '')}" — an origin has to be http or https`;
-  }
-  if (url.username !== '' || url.password !== '') {
-    return 'it carries a credential in the URL — put the key in --key or --key-env instead';
-  }
-  if (url.search !== '' || url.hash !== '') {
-    return 'it carries a query or fragment — an origin is scheme, host and path only';
   }
   return undefined;
 }
@@ -206,6 +201,13 @@ export function withoutCredentials(text: string): string {
       // path, so an `@` in a path segment (`/v1/@scope/pkg`) is not mistaken for userinfo.
       .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/]*@/gi, '$1')
       .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s?#"']*)\?[^\s#"']*/gi, '$1')
+      // And once more without a scheme. undici reports an origin it could not parse verbatim —
+      // `Failed to parse URL from my.gateway.example?key=…` — and both rules above need a
+      // `scheme://` to fire, so that string went through untouched into the 500 body the agent
+      // prints. A host-shaped token is one with a dot in it and no whitespace. The cost is that
+      // an error naming a file ending in '?' loses the question mark, which is a fair price in
+      // prose nobody reads for punctuation.
+      .replace(/([a-z0-9][a-z0-9.-]*\.[a-z][a-z0-9-]*(?::\d+)?[^\s?#"']*)\?[^\s#"']*/gi, '$1')
   );
 }
 

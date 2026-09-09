@@ -5,6 +5,7 @@ import { TraceWriter, ensureRunsDir } from '@orcareplay/core';
 import { FsCapture } from '@orcareplay/fs-capture';
 import {
   createProxy,
+  unusableOrigin,
   recordableOrigin,
   RunCa,
   type NetExchange,
@@ -704,6 +705,15 @@ async function runChild(
  */
 export function distinctOrigins(upstream: Record<string, string> | undefined): string[] {
   const safe = Object.values(upstream ?? {})
+    // Dropped only where sanitising cannot work, so a gateway configured with its key in the URL
+    // still says *where* the traffic went. `recordableOrigin` removes userinfo and query, which is
+    // enough for every `http(s)://` value — but a scheme-less URL parses with its username as the
+    // protocol, so it comes back as `myuser://PASSWORD@gw.example/v1`, credential intact, and a
+    // filter keeping everything that is not `undefined` kept it. There is no sanitising that: with
+    // no scheme there is no telling which half of `a:b` was meant as the host. `upstreamPlan`
+    // refuses these before a run starts; this is here because the function is exported and one
+    // line from a terminal.
+    .filter((origin) => unusableOrigin(origin) === undefined)
     .map(recordableOrigin)
     .filter((origin): origin is string => origin !== undefined);
   return [...new Set(safe)];
