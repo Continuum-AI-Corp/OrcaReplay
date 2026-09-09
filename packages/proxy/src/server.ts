@@ -103,6 +103,43 @@ function headersForModel(
   return out;
 }
 
+/**
+ * An origin with the parts a credential rides in taken out.
+ *
+ * `orca setup --gateway` accepts whatever URL it is handed and stores it in `~/.orca/config.json`,
+ * and a gateway that authenticates by URL rather than by header is handed one that carries the key:
+ * `https://user:pw@gw.example` or `https://gw.example?key=…`. The proxy has to *send* that — it is
+ * how the request authenticates — but recording it verbatim would have written the key into every
+ * trace made on that machine, breaking the promise stated where the key is read:
+ *
+ *   > the proxy adds it to the outbound request only, while what gets recorded is derived from the
+ *   > *incoming* request with auth stripped, so a gateway key orca injects is invisible to the
+ *   > recording by construction rather than by a rule someone has to remember.
+ *
+ * So the stripping happens here, in the one place an exchange is built, rather than at each call
+ * site — for the same reason that sentence gives.
+ *
+ * The path is kept. It is not a credential, and it is load-bearing: a gateway serving tenants at
+ * `/team-a/v1` and `/team-b/v1` answers from two different places, and the exchange's own `path`
+ * is the *client's* (`/chat/completions`), not the upstream's base. Only userinfo, query and
+ * fragment come out.
+ *
+ * An origin that will not parse is dropped rather than passed through: it cannot be sanitised, and
+ * absent already means "not recorded".
+ */
+export function recordableOrigin(origin: string | undefined): string | undefined {
+  if (origin === undefined) return undefined;
+  try {
+    const url = new URL(origin);
+    const port = url.port === '' ? '' : `:${url.port}`;
+    // `new URL('https://h').pathname` is '/', which is not part of how anyone writes an origin.
+    const path = url.pathname === '/' ? '' : url.pathname.replace(/\/$/, '');
+    return `${url.protocol}//${url.hostname}${port}${path}`;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface RecordedExchange {
   seq: number;
   dialect: string;
@@ -980,7 +1017,9 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       ...(input.responseDecodedFrom === undefined
         ? {}
         : { responseDecodedFrom: input.responseDecodedFrom }),
-      ...(input.upstream === undefined ? {} : { upstream: input.upstream }),
+      ...(recordableOrigin(input.upstream) === undefined
+        ? {}
+        : { upstream: recordableOrigin(input.upstream)! }),
       durationMs: input.durationMs,
     };
   }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createProxy } from '../src/server.js';
+import { createProxy, recordableOrigin } from '../src/server.js';
 import { forwardBasePath } from '../src/forward.js';
 
 const closers: Array<() => Promise<void>> = [];
@@ -119,5 +119,92 @@ describe('the origin that answered is recorded on the exchange', () => {
       'https://api.orcarouter.ai',
       'https://opencode.ai',
     ]);
+  });
+});
+
+/**
+ * And it must not carry the gateway's credential into the trace along the way.
+ *
+ * `orca setup --gateway` accepts whatever URL it is handed, with no check that it is credential-
+ * free, and stores it in `~/.orca/config.json`. A gateway that authenticates by URL rather than by
+ * header is configured as `https://user:pw@gw.example` or `https://gw.example?key=…` — and from
+ * then on every recording on that machine goes through it. Recording the origin verbatim wrote the
+ * key into all of them.
+ *
+ * That is not a general worry about secrets; it breaks a promise this repository states outright,
+ * where the gateway key is read (`config.ts`):
+ *
+ *   > the proxy adds it to the outbound request only, while what gets recorded is derived from the
+ *   > *incoming* request with auth stripped, so a gateway key orca injects is invisible to the
+ *   > recording by construction rather than by a rule someone has to remember.
+ *
+ * The irony is that the configured gateway is exactly the case the `upstream` field was added for
+ * — "a gateway left behind in the config redirects every run and nothing says so" — so the
+ * motivating scenario and the leaking scenario were the same one.
+ *
+ * The `/forward/` route was already guarded: `decodeForwardPath` refuses a base carrying userinfo
+ * or a query. This is the configured route catching up.
+ */
+describe('the recorded origin carries no credential', () => {
+  const SECRET = 'SUPERSECRET';
+
+  for (const [what, gateway] of [
+    ['userinfo', `https://myuser:${SECRET}@gateway.example.com`],
+    ['a query token', `https://gateway.example.com?key=${SECRET}`],
+    ['both', `https://u:${SECRET}@gateway.example.com/v1?key=${SECRET}&x=1#${SECRET}`],
+  ] as const) {
+    it(`strips ${what}`, async () => {
+      const up = stubUpstream();
+      const proxy = await createProxy({
+        mode: 'record',
+        fetchImpl: up.fetchImpl,
+        upstream: { openai: gateway },
+      });
+      closers.push(proxy.close);
+
+      expect(await post(`${proxy.url}/v1/chat/completions`, TURN)).toBe(200);
+
+      // The whole exchange, not just the field: a secret that moved somewhere else is not fixed.
+      expect(JSON.stringify(proxy.exchanges())).not.toContain(SECRET);
+      // Still answers the question it exists to answer.
+      expect(proxy.exchanges()[0]!.upstream).toContain('gateway.example.com');
+    });
+  }
+
+  it('still sends the credential upstream, because that is how the request authenticates', async () => {
+    // The stripping is about what is *kept*, never about what is sent. A fix that quietly stopped
+    // authenticating would turn a leak into an outage.
+    const up = stubUpstream();
+    const proxy = await createProxy({
+      mode: 'record',
+      fetchImpl: up.fetchImpl,
+      upstream: { openai: `https://gateway.example.com?key=${SECRET}` },
+    });
+    closers.push(proxy.close);
+
+    await post(`${proxy.url}/v1/chat/completions`, TURN);
+    expect(up.calls[0]).toContain(SECRET);
+  });
+});
+
+describe('recordableOrigin', () => {
+  it('keeps the base path, which is not a credential and is load-bearing', () => {
+    // A gateway serving tenants at /team-a/v1 and /team-b/v1 answers from two different places,
+    // and the exchange's own `path` is the client's (`/chat/completions`), not the upstream's base.
+    // `new URL(x).origin` would have dropped this.
+    expect(recordableOrigin('https://gw.example/team-a/v1')).toBe('https://gw.example/team-a/v1');
+  });
+
+  it('leaves an ordinary origin exactly as written', () => {
+    // Including no trailing slash: `new URL(x).toString()` adds one, and a value that changes shape
+    // is one that stops matching what a reader configured.
+    expect(recordableOrigin('https://api.openai.com')).toBe('https://api.openai.com');
+    expect(recordableOrigin('http://127.0.0.1:60571')).toBe('http://127.0.0.1:60571');
+  });
+
+  it('drops an origin it cannot parse rather than passing it through', () => {
+    // It cannot be sanitised, and `absent` already means "not recorded".
+    expect(recordableOrigin('not a url')).toBeUndefined();
+    expect(recordableOrigin(undefined)).toBeUndefined();
   });
 });

@@ -151,3 +151,38 @@ describe('upstreamsIn', () => {
     expect(upstreamsIn([{ type: 'model.response', attrs: { model: 'x' } }])).toEqual([]);
   });
 });
+
+/**
+ * And the line must not print the gateway's key back.
+ *
+ * `config.ts` says of the file that holds it: "nothing ever prints it back". A gateway that
+ * authenticates by URL is configured as `https://user:pw@gw.example` or `https://gw.example?key=…`,
+ * so a line rendering the configured upstream verbatim is printing it back — onto a terminal, and
+ * into every CI log that captures one.
+ */
+describe('distinctOrigins keeps a credential off the line', () => {
+  const SECRET = 'SUPERSECRET';
+
+  it('strips userinfo and query from what is printed', () => {
+    const printed = distinctOrigins({
+      openai: `https://u:${SECRET}@gw.example`,
+      'openai-responses': `https://u:${SECRET}@gw.example`,
+      anthropic: `https://gw.example?key=${SECRET}`,
+    }).join(',');
+
+    expect(printed).not.toContain(SECRET);
+    // And still says the thing it is there to say.
+    expect(printed).toBe('https://gw.example');
+  });
+
+  it('collapses to one entry once the differing secrets are gone', () => {
+    // Two config values that differ only by credential are one destination. Printing them as two
+    // would say a run reaches two places when it reaches one.
+    expect(
+      distinctOrigins({
+        openai: `https://gw.example?key=${SECRET}`,
+        anthropic: 'https://gw.example',
+      }),
+    ).toEqual(['https://gw.example']);
+  });
+});

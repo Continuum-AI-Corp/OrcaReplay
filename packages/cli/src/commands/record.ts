@@ -3,7 +3,13 @@ import { readFile } from 'node:fs/promises';
 import { delimiter, resolve } from 'node:path';
 import { TraceWriter, ensureRunsDir } from '@orcareplay/core';
 import { FsCapture } from '@orcareplay/fs-capture';
-import { createProxy, RunCa, type NetExchange, type RecordedExchange } from '@orcareplay/proxy';
+import {
+  createProxy,
+  recordableOrigin,
+  RunCa,
+  type NetExchange,
+  type RecordedExchange,
+} from '@orcareplay/proxy';
 import { captureSession, defaultAdapters, resolveLaunch, snapshotDir } from '@orcareplay/adapters';
 import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
@@ -685,12 +691,20 @@ async function runChild(
 }
 
 /**
- * The origins a configured upstream map actually names, deduplicated.
+ * The origins a configured upstream map actually names, deduplicated and safe to print.
  *
  * `resolveUpstream` writes one entry per dialect and `openai` and `openai-responses` always share
  * a value — so the raw map renders a single gateway three times. What a reader wants is the set of
  * places traffic can go, which is usually one.
+ *
+ * Through `recordableOrigin` for the same reason the trace goes through it, and against the same
+ * sentence: `orca setup --gateway` accepts a URL carrying the key — `https://user:pw@gw.example`,
+ * `https://gw.example?key=…` — and `config.ts` says of that file that "nothing ever prints it
+ * back". A line on the terminal is printing it back, and it is a line that ends up in CI logs.
  */
 export function distinctOrigins(upstream: Record<string, string> | undefined): string[] {
-  return [...new Set(Object.values(upstream ?? {}))];
+  const safe = Object.values(upstream ?? {})
+    .map(recordableOrigin)
+    .filter((origin): origin is string => origin !== undefined);
+  return [...new Set(safe)];
 }
