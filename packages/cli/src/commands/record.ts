@@ -83,6 +83,22 @@ async function runRecording(
   let adapter: Adapter | undefined;
   if (agentName) {
     adapter = registry.get(agentName);
+  } else if (args.passthrough.length > 0) {
+    // A command after `--` is not a hint about the environment; it is the answer. Detection is
+    // machine-wide by construction — every adapter's is `detectAgent(binaries, homePaths)`, which
+    // asks whether a binary is on PATH or a directory exists under `$HOME`, and neither is a fact
+    // about this directory. So on a machine with Claude Code installed,
+    // `orca record -- python my_graph.py` detected `claude-code` and launched *that*, handing it
+    // `python my_graph.py` as arguments. The run recorded, so the failure looked like a bad key
+    // rather than like orca having started the wrong program.
+    //
+    // `generic-openai` rather than `exec`: both decline to guess what the command is, but only one
+    // of them redirects anything. `exec` points the agent nowhere and warns that interception is
+    // required — correct for a Go binary with its origin compiled in, and wrong as a default,
+    // because most things run this way read a base-URL variable and would have been captured by
+    // setting the three that `generic-openai` sets. Sending everyone to `--tls-intercept` to record
+    // a Python script is a worse answer than the bug this replaces.
+    adapter = registry.get('generic-openai');
   } else {
     adapter = await registry.detect(cwd);
     if (!adapter) {
