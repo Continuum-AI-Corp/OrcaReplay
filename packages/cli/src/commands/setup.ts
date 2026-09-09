@@ -1,5 +1,5 @@
 import { createInterface } from 'node:readline/promises';
-import { recordableOrigin } from '@orcareplay/proxy';
+import { recordableOrigin, withoutCredentials } from '@orcareplay/proxy';
 import { modelInfoFor } from '@orcareplay/providers';
 import type { ParsedArgs } from '../args.js';
 import type { Output } from '../out.js';
@@ -143,7 +143,8 @@ export async function setupCommand(
     }
   } catch (err) {
     out.warn('gateway.unreachable', {
-      why: String(err instanceof Error ? err.message : err),
+      // A failed fetch names the URL it was given, credential and all.
+      why: withoutCredentials(String(err instanceof Error ? err.message : err)),
       note: 'the config was saved; fix the URL or key and run orca setup again',
     });
   }
@@ -202,8 +203,8 @@ export async function modelsCommand(
   } catch (err) {
     out.failure({
       event: 'gateway.unreachable',
-      what: `could not reach ${config.gateway.url}`,
-      why: String(err instanceof Error ? err.message : err),
+      what: `could not reach ${recordableOrigin(config.gateway.url) ?? config.gateway.url}`,
+      why: withoutCredentials(String(err instanceof Error ? err.message : err)),
       next: `check the URL and key in ${configPath(env)}, or run orca setup again`,
     });
     return [];

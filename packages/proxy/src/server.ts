@@ -140,6 +140,28 @@ export function recordableOrigin(origin: string | undefined): string | undefined
   }
 }
 
+/**
+ * Free text with the credential taken out of any URL it names.
+ *
+ * For error messages, which nobody composes and everybody prints. A failed `fetch` reports the URL
+ * it was given, so an origin configured as `https://user:pw@gw` or `https://gw?key=…` arrives
+ * inside the exception text and goes straight to a terminal:
+ *
+ *     warn gateway.unreachable why="Request cannot be constructed from a URL that includes
+ *       credentials: http://someone:PASSWORD@127.0.0.1:50164/v1/models"
+ *
+ * {@link recordableOrigin} cannot help there — it takes a URL, and this is prose with a URL in it.
+ *
+ * The query goes as well as the userinfo. That loses the occasional harmless parameter from an
+ * error message, which is the right trade: a key in a query is the commonest way a gateway
+ * authenticates by URL, and an error string is not where anyone should be reading parameters back.
+ */
+export function withoutCredentials(text: string): string {
+  return text
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s@]*@/gi, '$1')
+    .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s?#"']*)\?[^\s#"']*/gi, '$1');
+}
+
 export interface RecordedExchange {
   seq: number;
   dialect: string;
@@ -438,7 +460,9 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
 
   const server = createServer((req, res) => {
     void handle(req, res).catch((err: unknown) => {
-      json(res, 500, { error: { message: String(err) } });
+      // Whatever failed, its message may name the origin it was given — and this body reaches the
+      // agent, which prints it. See {@link withoutCredentials}.
+      json(res, 500, { error: { message: withoutCredentials(String(err)) } });
     });
   });
 

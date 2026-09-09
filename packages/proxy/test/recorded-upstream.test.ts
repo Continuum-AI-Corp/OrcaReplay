@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createProxy, recordableOrigin } from '../src/server.js';
+import { createProxy, recordableOrigin, withoutCredentials } from '../src/server.js';
 import { forwardBasePath } from '../src/forward.js';
 
 const closers: Array<() => Promise<void>> = [];
@@ -206,5 +206,48 @@ describe('recordableOrigin', () => {
     // It cannot be sanitised, and `absent` already means "not recorded".
     expect(recordableOrigin('not a url')).toBeUndefined();
     expect(recordableOrigin(undefined)).toBeUndefined();
+  });
+});
+
+/**
+ * The same class, in the places nobody composes: error text.
+ *
+ * Found by running the end-to-end check rather than by reading the code. A failed `fetch` reports
+ * the URL it was handed, so a gateway configured with its key in the URL arrives inside the
+ * exception string and goes to a terminal verbatim:
+ *
+ *     warn gateway.unreachable why="Request cannot be constructed from a URL that includes
+ *       credentials: http://someone:PASSWORD@127.0.0.1:50164/v1/models"
+ *
+ * and, from the proxy, into a 500 body that the agent itself prints. Both predate the `upstream`
+ * field; both are the same mistake, in prose instead of in a field.
+ */
+describe('withoutCredentials', () => {
+  it('takes userinfo out of a URL inside an error message', () => {
+    expect(
+      withoutCredentials(
+        'Request cannot be constructed from a URL that includes credentials: http://someone:PW@127.0.0.1:50164/v1/models',
+      ),
+    ).toBe(
+      'Request cannot be constructed from a URL that includes credentials: http://127.0.0.1:50164/v1/models',
+    );
+  });
+
+  it('takes the query too, since that is the other place a key rides', () => {
+    expect(withoutCredentials('fetch failed: https://gw.example/v1/models?key=PW')).toBe(
+      'fetch failed: https://gw.example/v1/models',
+    );
+  });
+
+  it('leaves text with no URL in it alone', () => {
+    expect(withoutCredentials('ECONNREFUSED 127.0.0.1:9')).toBe('ECONNREFUSED 127.0.0.1:9');
+  });
+
+  it('stops at the end of the URL rather than eating the rest of the sentence', () => {
+    // A greedy pattern here would swallow the explanation that follows, turning a useful error
+    // into a bare URL.
+    expect(withoutCredentials('could not reach https://u:PW@gw.example — check the key')).toBe(
+      'could not reach https://gw.example — check the key',
+    );
   });
 });
