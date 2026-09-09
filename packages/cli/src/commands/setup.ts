@@ -1,5 +1,5 @@
 import { createInterface } from 'node:readline/promises';
-import { recordableOrigin, withoutCredentials } from '@orcareplay/proxy';
+import { bareOriginProblem, recordableOrigin, withoutCredentials } from '@orcareplay/proxy';
 import { modelInfoFor } from '@orcareplay/providers';
 import type { ParsedArgs } from '../args.js';
 import type { Output } from '../out.js';
@@ -74,6 +74,20 @@ export async function setupCommand(
   // have one already — but anyone who does types over it, and `--gateway` skips the question.
   if (!url && ask) url = await ask(`Gateway URL (serves the model APIs) [${ORCAROUTER_URL}]: `);
   if (!url) url = ORCAROUTER_URL;
+
+  // Refused here, before it is stored or echoed. Sanitising on the way out is not enough on its
+  // own: `new URL` parses a scheme-less URL with the username as the protocol, so the sanitiser
+  // returns a value that still carries the password and every `?? url` guard downstream sees a
+  // success. Nothing refused here could have worked anyway — undici rejects a URL carrying
+  // credentials, and a scheme-less one has no host to reach.
+  const problem = bareOriginProblem(url);
+  if (problem !== undefined) {
+    throw new Error(
+      `--gateway is not an origin orca can use: ${problem}` +
+        '\n  a gateway is scheme, host and path: --gateway https://gateway.example/v1' +
+        '\n  the key goes separately: --key <key>, or --key-env NAME',
+    );
+  }
   if (!key && !keyEnv && ask) {
     if (sameOrigin(url, ORCAROUTER_URL)) {
       out.plain(`  get a key at ${ORCAROUTER_CONSOLE} — OrcaRouter keys start sk-orca-`);
@@ -105,7 +119,7 @@ export async function setupCommand(
   out.info('config.saved', {
     path,
     mode: '0600',
-    gateway: recordableOrigin(url) ?? url,
+    gateway: recordableOrigin(url) ?? '(unprintable)',
     auth: describeKey(gateway),
   });
   // Said rather than silently dropped: someone who typed a long URL and sees a short one back is
@@ -197,13 +211,32 @@ export async function modelsCommand(
     return [];
   }
 
+  // The same standard, applied where a config arrives rather than only where one is typed.
+  // `readConfig` deliberately accepts a hand-edited file, so this is the one path on which a
+  // gateway carrying its key in the URL can still turn up — and it is the path whose whole job is
+  // to report that the gateway cannot be reached. Refusing before the probe means neither the
+  // message nor the fetch error it would have quoted can carry the value.
+  const configured = bareOriginProblem(config.gateway.url);
+  if (configured !== undefined) {
+    out.failure({
+      event: 'gateway.unusable',
+      what: `the gateway in ${configPath(env)} is not an origin orca can use`,
+      why: configured,
+      next: 'orca setup --gateway <url> --key-env NAME',
+    });
+    return [];
+  }
+
   let models: string[];
   try {
     models = await probe(config.gateway.url, gatewayHeaders(config, env));
   } catch (err) {
     out.failure({
       event: 'gateway.unreachable',
-      what: `could not reach ${recordableOrigin(config.gateway.url) ?? config.gateway.url}`,
+      // Never the raw value: this path exists to diagnose a gateway that cannot be reached,
+      // and a hand-edited config carrying its key in the URL is one of the reasons it cannot
+      // be. Naming the file says as much without printing what is in it.
+      what: `could not reach ${recordableOrigin(config.gateway.url) ?? `the gateway configured in ${configPath(env)}`}`,
       why: withoutCredentials(String(err instanceof Error ? err.message : err)),
       next: `check the URL and key in ${configPath(env)}, or run orca setup again`,
     });

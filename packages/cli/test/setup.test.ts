@@ -6,6 +6,7 @@ import { parseArgs } from '../src/args.js';
 import { Output, stripAnsi } from '../src/out.js';
 import { ORCAROUTER_CONSOLE, ORCAROUTER_URL, readConfig } from '../src/config.js';
 import { modelsCommand, setupCommand } from '../src/commands/setup.js';
+import { withoutCredentials } from '@orcareplay/proxy';
 import { writeConfig } from '../src/config.js';
 import { upstreamPlan } from '../src/upstream.js';
 import { startFakeModel } from './fixtures/fake-model.mjs';
@@ -308,6 +309,124 @@ describe('orca setup', () => {
     expect(config.gateway?.api_key, 'a key is never invented').toBeUndefined();
     expect(config.gateway?.api_key_env).toBeUndefined();
     expect(text()).toContain('auth=none');
+  });
+  /**
+   * The credential in a *gateway URL*, in every shape one can be written.
+   *
+   * A table rather than three tests, and asserted on the whole of stdout rather than on a field,
+   * because the two P1s here were both "the sanitiser handled the shape it was written against and
+   * not a neighbouring one". `no-credential-in-attrs.test.ts` guards the same class for trace
+   * attributes; this guards it for the terminal, which is where these leaked:
+   *
+   *   - a password containing '@' — ordinary — ended the userinfo regex early, and the remainder
+   *     stayed in userinfo position: `https://myuser:p@ssw0rd@gw` printed as `https://ssw0rd@gw`.
+   *   - a scheme-less URL made `new URL` read the username as the protocol, so the sanitiser
+   *     returned a value carrying the password and every `?? url` guard saw a success.
+   *
+   * Refused rather than sanitised, because nothing here could have worked: undici rejects a URL
+   * carrying credentials, and a scheme-less one has no host to reach.
+   */
+  describe('a gateway URL that carries a credential', () => {
+    const shapes = [
+      {
+        what: 'a password with an @ in it',
+        url: 'https://myuser:p@ssw0rd@gw.example/v1',
+        secret: 'ssw0rd',
+      },
+      {
+        what: 'a password with several @s',
+        url: 'https://u:p@ss@w0rd@gw.example/v1',
+        secret: 'w0rd',
+      },
+      {
+        what: 'an ordinary password',
+        url: 'https://myuser:PASSWORD@gw.example/v1',
+        secret: 'PASSWORD',
+      },
+      {
+        what: 'a key in the query',
+        url: 'https://gw.example/v1?key=SECRETKEY',
+        secret: 'SECRETKEY',
+      },
+      { what: 'no scheme at all', url: 'my.gateway.example?key=SECRETKEY', secret: 'SECRETKEY' },
+      {
+        what: 'no scheme, username read as one',
+        url: 'myuser:PASSWORD@gw.example/v1',
+        secret: 'PASSWORD',
+      },
+    ];
+
+    it.each(shapes)('orca setup refuses $what without echoing it', async ({ url, secret }) => {
+      await expect(
+        setupCommand(parseArgs(['setup', '--gateway', url, '--key-env', 'FAKE_KEY']), out, {
+          env,
+          ask: undefined,
+          probe: async () => [],
+        }),
+      ).rejects.toThrow(/not an origin orca can use/);
+      expect(text(), 'the refusal must not print the value it refused').not.toContain(secret);
+      expect(await readConfig(env), 'nothing refused may reach the file').toEqual({});
+    });
+
+    it.each(shapes)(
+      'orca models refuses $what from a hand-edited config',
+      async ({ url, secret }) => {
+        // readConfig deliberately accepts a hand-edited file, so this is the one way such a URL can
+        // still arrive — and modelsCommand exists to report a gateway it cannot reach.
+        await writeConfig({ gateway: { url, api_key_env: 'FAKE_KEY' } }, env);
+        const models = await modelsCommand(parseArgs(['models']), out, {
+          env,
+          probe: async () => {
+            throw new Error(`Failed to parse URL from ${url}/v1/models`);
+          },
+        });
+        expect(models).toEqual([]);
+        expect(text(), 'the diagnostic must not print the value it is diagnosing').not.toContain(
+          secret,
+        );
+      },
+    );
+
+    it('a good gateway still passes, so the guard is not simply refusing everything', async () => {
+      await setupCommand(
+        parseArgs(['setup', '--gateway', 'https://gw.example/team-a/v1', '--key-env', 'FAKE_KEY']),
+        out,
+        {
+          env,
+          ask: undefined,
+          probe: async () => ['gpt-5.2'],
+        },
+      );
+      expect((await readConfig(env)).gateway?.url).toBe('https://gw.example/team-a/v1');
+      expect(text()).toContain('https://gw.example/team-a/v1');
+    });
+  });
+
+  /**
+   * The sanitiser that error prose still needs, held to the case that broke it.
+   *
+   * Kept even though the input is now refused at the door: a fetch error can name an origin orca
+   * did not choose — a `/forward/` base a client announced, an upstream from a flag — and this is
+   * the last thing between that string and a terminal.
+   */
+  describe('withoutCredentials', () => {
+    it('takes the whole userinfo, not up to the first @ inside the password', () => {
+      expect(withoutCredentials('https://myuser:p@ssw0rd@gw.example/v1/models')).toBe(
+        'https://gw.example/v1/models',
+      );
+    });
+
+    it('leaves an @ in a path segment alone', () => {
+      expect(withoutCredentials('https://gw.example/v1/@scope/pkg')).toBe(
+        'https://gw.example/v1/@scope/pkg',
+      );
+    });
+
+    it('cleans every URL in one string', () => {
+      expect(withoutCredentials('a https://x:1@p.example/v1 b https://y:2@q.example/v1')).toBe(
+        'a https://p.example/v1 b https://q.example/v1',
+      );
+    });
   });
 });
 

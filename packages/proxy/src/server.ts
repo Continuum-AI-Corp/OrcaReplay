@@ -141,6 +141,46 @@ export function recordableOrigin(origin: string | undefined): string | undefined
 }
 
 /**
+ * Why an origin is not a bare `http(s)://` base, or nothing if it is.
+ *
+ * Sanitising an origin on the way *out* turned out to be the wrong layer to rely on alone, because
+ * `new URL` answers confidently for input that is not a URL at all. A gateway typed without a
+ * scheme — the commonest way to mistype one — parses with the username as the protocol:
+ *
+ *     new URL('myuser:PASSWORD@gw.example/v1')   // protocol 'myuser:', pathname the rest
+ *
+ * so {@link recordableOrigin} returns `myuser://PASSWORD@gw.example/v1` — a value, which means a
+ * caller guarding with `?? url` never notices, and the password is on the line anyway. Refusing
+ * the input is what closes that, and it costs nothing real: every shape refused here already
+ * fails at the first request. undici rejects a URL carrying credentials outright, and a
+ * scheme-less one has nowhere to go. The old behaviour was to store it, print it, and then fail.
+ *
+ * Deliberately the same rule `decodeForwardPath` applies to a base a client announces — protocol
+ * `http(s)`, and nothing in userinfo, query or fragment. One standard for "an origin orca will
+ * hold onto", whichever end it arrived from.
+ */
+export function bareOriginProblem(origin: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(origin);
+  } catch {
+    return 'it is not a URL — an origin needs a scheme, like https://gateway.example';
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    // Named without echoing the value: a scheme-less URL puts the username here, so `protocol` is
+    // the one part of it that is safe to quote back.
+    return `its scheme is "${url.protocol.replace(/:$/, '')}" — an origin has to be http or https`;
+  }
+  if (url.username !== '' || url.password !== '') {
+    return 'it carries a credential in the URL — put the key in --key or --key-env instead';
+  }
+  if (url.search !== '' || url.hash !== '') {
+    return 'it carries a query or fragment — an origin is scheme, host and path only';
+  }
+  return undefined;
+}
+
+/**
  * Free text with the credential taken out of any URL it names.
  *
  * For error messages, which nobody composes and everybody prints. A failed `fetch` reports the URL
@@ -157,9 +197,16 @@ export function recordableOrigin(origin: string | undefined): string | undefined
  * authenticates by URL, and an error string is not where anyone should be reading parameters back.
  */
 export function withoutCredentials(text: string): string {
-  return text
-    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s@]*@/gi, '$1')
-    .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s?#"']*)\?[^\s#"']*/gi, '$1');
+  return (
+    text
+      // Up to the *last* `@` before the path, not the first. `[^/\s@]*` could not cross an `@`, so
+      // an ordinary password containing one — `p@ssw0rd` — ended the match early and the remainder
+      // stayed in userinfo position: `https://myuser:p@ssw0rd@gw` came out as `https://ssw0rd@gw`.
+      // `[^\s/]*` may cross `@` and backtracks to the last one, and still cannot reach past the
+      // path, so an `@` in a path segment (`/v1/@scope/pkg`) is not mistaken for userinfo.
+      .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/]*@/gi, '$1')
+      .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s?#"']*)\?[^\s#"']*/gi, '$1')
+  );
 }
 
 export interface RecordedExchange {
