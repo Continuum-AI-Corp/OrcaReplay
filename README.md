@@ -3,7 +3,7 @@
 
 ### Your agent broke something at 2am. Replay it at 9am — exactly, offline, as many times as you like.
 
-Record any coding agent. Reproduce the run byte-for-byte with the network off. Fork it from any step
+Record any coding agent. Reproduce the run byte-for-byte with no model called. Fork it from any step
 onto a different model and see who gets it right.
 
 <a href="https://www.orcarouter.ai">
@@ -30,7 +30,7 @@ Connect: [X](https://x.com/OrcaRouter) · [Discord](https://discord.com/invite/Y
 
 ![Recording a Claude Code run, replaying it offline, then forking it onto two models](docs/demo-cli.gif)
 
-<sup>Real output from one session — a Claude Code run recorded, replayed with the network off, then
+<sup>Real output from one session — a Claude Code run recorded, replayed against the recording, then
 forked at checkpoint 4 onto two models and graded by `npx tsc --noEmit`. Nothing here is mocked up.</sup>
 
 ## Try it in three commands
@@ -56,7 +56,7 @@ orca quickstart
 ```
 
 It writes a small project with a genuine bug in it and a recording of an agent fixing that bug,
-then replays the recording against the project with the network off: two failing tests before,
+then replays the recording against the project with no model called: two failing tests before,
 four passing after, three turns served from the trace and nothing spent. `--full` prints the whole
 timeline and the replay as it happened.
 
@@ -86,7 +86,7 @@ OrcaReplay answers that by giving you the run back.
 |---|---|---|
 | Tells you what a run cost | ✅ | ✅ |
 | Tells you which tool call deleted the file | sometimes | ✅ |
-| Runs the agent again and gets the same answer | ❌ | ✅ offline, byte-for-byte |
+| Runs the agent again and gets the same answer | ❌ | ✅ from the recording, byte-for-byte |
 | Lets you change the model and re-run from step 4 | ❌ | ✅ |
 | Needs you to modify your agent | usually an SDK wrapper | ❌ two env vars |
 | Works after you close the terminal | ❌ | ✅ it is a file |
@@ -108,6 +108,8 @@ request, each streamed response, every tool call the model emitted, and every to
 harness produced. That one property is what the tool is built on, and it is why **OrcaReplay does
 not patch your agent** — it stands up a local proxy, sets two environment variables, and gets out of
 the way.
+
+**What "egress blocked" means, exactly.** On replay the proxy refuses to forward anything it cannot serve from the trace, so no model is called and no tokens are spent — that run prints `egress=blocked`. `--loose` lifts it deliberately: an unmatched request is then answered by the provider and recorded as a major divergence, and the same line reads `egress=live-on-unmatched`. A replay still *executes the recorded tool calls for real*, and a tool that opens its own socket — a shell command running `curl`, an MCP server fetching something — is outside the guarantee either way. By default it never reaches the proxy and goes to the network as usual. Under `--tls-intercept` it does reach the proxy, because that sets `HTTPS_PROXY` for the whole child: a host off the intercept list is tunnelled through untouched, though its hostname, port and byte counts still land in the trace, and a host on the list is refused there like any other unmatched call. Replay is not a sandbox; if you need one, run it inside one.
 
 Three more layers catch what the protocol cannot see: an exit code, a real duration, which stream a
 byte came out of, a file written without telling anyone. A fifth exists for the agents that read no
