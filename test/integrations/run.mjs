@@ -7,8 +7,9 @@
  * before the replay — a replay that reached the network would fail here by construction rather
  * than by assertion.
  *
- *   node test/integrations/run.mjs            # all of them
- *   node test/integrations/run.mjs litellm    # one
+ *   node test/integrations/run.mjs               # all of them
+ *   node test/integrations/run.mjs litellm       # one
+ *   node test/integrations/run.mjs --require-all # a skip is a failure, which is what CI wants
  */
 import { execFile, spawn } from 'node:child_process';
 import { cp, mkdtemp, rm } from 'node:fs/promises';
@@ -248,7 +249,19 @@ async function runCheck(check) {
   }
 }
 
-const only = process.argv[2];
+/**
+ * `--require-all` turns a skip into a failure.
+ *
+ * A skip is right for a contributor who has not installed every framework, and wrong for CI, where
+ * the whole point is that the check ran. Without a way to say so the two are indistinguishable from
+ * the exit code, and that is not hypothetical: two checks were added, neither was added to the
+ * workflow's `pip install` line, and CI went green on three skips while the README said "in CI"
+ * about all of them. The intent was even written down here — "CI installs them, so a skip there is
+ * a failure" — and nothing enforced it.
+ */
+const args = process.argv.slice(2);
+const requireAll = args.includes('--require-all');
+const only = args.find((a) => !a.startsWith('--'));
 const selected = only ? CHECKS.filter((c) => c.id === only) : CHECKS;
 if (selected.length === 0) {
   console.error(`no check named ${only}. known: ${CHECKS.map((c) => c.id).join(', ')}`);
@@ -265,7 +278,11 @@ for (const check of selected) {
   } catch (e) {
     result = { failed: String(e.message).split('\n')[0] };
   }
-  if (result.skipped) {
+  if (result.skipped && requireAll) {
+    failed += 1;
+    console.log(`FAILED — ${result.skipped}, and --require-all was given`);
+    console.log(`   ${check.what}`);
+  } else if (result.skipped) {
     skipped += 1;
     console.log(`skipped — ${result.skipped}`);
   } else if (result.failed) {

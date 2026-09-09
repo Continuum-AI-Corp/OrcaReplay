@@ -96,10 +96,16 @@ Two notes on the re-measurement rather than the measurement:
 ## Running them
 
 ```console
-node test/integrations/run.mjs            # all of them
-node test/integrations/run.mjs litellm    # one
+node test/integrations/run.mjs                # all of them
+node test/integrations/run.mjs litellm        # one
+node test/integrations/run.mjs --require-all  # a skip is a failure — what CI runs
 ```
 
 Python checks are skipped, not failed, when the package they need is not installed — a contributor
-without `langgraph` on their machine should still be able to run the suite. CI installs them, so a
-skip there is a failure.
+without `langgraph` on their machine should still be able to run the suite.
+
+`--require-all` is what makes a skip a failure, and it exists because the sentence that used to be
+here said CI installing the packages was enough. It was not. Two checks were added without a line
+in the workflow's `pip install`, CI went green on the skips, and the README said "in CI" about both
+— a claim made false by an omission that nothing could fail on. Adding a check now means adding it
+to that line, or this run says so.

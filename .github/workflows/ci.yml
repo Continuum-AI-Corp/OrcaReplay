@@ -60,10 +60,15 @@ jobs:
       - run: npm ci
       - run: npx tsc --build
       # The frameworks this speaks for. A check whose package is missing is skipped rather than
-      # failed, so a contributor can run the suite without all of them — which makes installing
-      # them here the thing that turns a skip into a failure.
-      - run: pip install openai anthropic litellm langgraph langchain-openai browser-use
-      - run: node test/integrations/run.mjs
+      # failed, so a contributor can run the suite without all of them.
+      - run: >
+          pip install openai anthropic litellm langgraph langchain-openai browser-use
+          crewai openai-agents openhands-sdk
+      # `--require-all`, because installing them above was never what enforced it. Two checks were
+      # added without a line here and CI stayed green on the skips, while the README said "in CI"
+      # about both. A skip is now a failure on this runner, so forgetting the line above fails
+      # loudly instead of quietly making a claim untrue.
+      - run: node test/integrations/run.mjs --require-all
 
   python-sdk:
     name: python sdk
