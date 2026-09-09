@@ -26,10 +26,9 @@ export function opencodeHasOwnAuth(): boolean {
  * OpenCode resolves its API origin per model, and only the OpenAI and Anthropic origins can be
  * named with an environment variable — so a run on one of these talked straight to its provider
  * while the proxy saw nothing, and the trace came out empty while the agent answered happily.
- * A config overlay (see `prepare`) points each at the proxy carrying its own destination, which
- * is one mechanism for both and for any later first-party provider, at the cost of this table
- * going stale: a provider added after it was written keeps bypassing capture the way it did
- * before, which the end-of-run `capture.empty` warning is what says out loud.
+ * The existing config overlay points these two at the proxy carrying their own destination.
+ * The final-fetch plugin independently covers the full catalog, including newly added providers
+ * and model-specific API origins; this table is no longer the capture allowlist.
  */
 const OPENCODE_FIRST_PARTY_BASE: Record<string, string> = {
   opencode: 'https://opencode.ai/zen/v1',
@@ -135,8 +134,8 @@ async function withCapturePlugin(
 }
 
 /**
- * Base URL overrides cover ordinary SDK calls and first-party providers. ChatGPT OAuth rewrites
- * the URL again inside its auth fetch, so the run-local plugin captures the final fetch instead.
+ * Base URL overrides retain the existing SDK routing. The run-local plugin captures final fetches
+ * to catalog APIs and ChatGPT OAuth's rewritten URL, retaining each actual destination.
  * NODE_OPTIONS/BUN_OPTIONS preloads do not run in OpenCode's compiled executable.
  */
 export const openCodeAdapter: Adapter = {

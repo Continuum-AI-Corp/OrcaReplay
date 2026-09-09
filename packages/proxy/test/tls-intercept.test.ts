@@ -551,6 +551,34 @@ describe('TLS interception', () => {
     return proxy;
   }
 
+  it.each([
+    {
+      path: '/api/v2/chat/messages',
+      body: { model: 'gpt-5.2', messages: [{ role: 'user', content: 'hello' }] },
+    },
+    { path: '/v3/conversations/messages', body: { text: 'hello', channel: 'fixture' } },
+  ])('keeps intercepted $path traffic opaque', async ({ path, body }) => {
+    const handle = await startProxy([`127.0.0.1:${model.port}`]);
+    const rawBody = JSON.stringify(body);
+    const response = await through({
+      proxyPort: handle.port,
+      host: '127.0.0.1',
+      port: model.port,
+      trust: [runCa.certPem],
+      method: 'POST',
+      path,
+      body: rawBody,
+      headers: { 'content-type': 'application/json' },
+    });
+
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ saw: rawBody, path });
+    expect(modelExchanges).toHaveLength(0);
+    expect(handle.exchanges()).toHaveLength(0);
+    expect(netExchanges).toHaveLength(1);
+    expect(netExchanges[0]).toMatchObject({ path, requestBody: rawBody, status: 200 });
+  });
+
   /**
    * HTTP/2, which reaches a different forwarder inside the interceptor.
    *

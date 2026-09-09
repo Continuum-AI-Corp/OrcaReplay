@@ -444,6 +444,8 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
     userArgs: driveArgs(adapter, ctx, out),
     env: process.env,
   });
+  // Replaying must not introduce a catalog request before the capture plugin is installed.
+  if (adapter.id === 'opencode') launch.env.OPENCODE_DISABLE_MODELS_FETCH = '1';
   if (proxy.tls) await trustRunCa(trace, proxy.tls, proxy.url, launch.env, out);
   if (mcp) {
     pointAtMcpConfig(launch.env, mcp.configPath);
