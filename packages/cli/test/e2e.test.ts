@@ -230,6 +230,37 @@ describe('end to end: record → replay → fork', () => {
     }
   });
 
+  /**
+   * A refusal must not cost you your working tree.
+   *
+   * `upstreamPlan` rejects an upstream that is not an origin, and it used to be resolved *after*
+   * `replayWorkspace` had already replaced the checkout with the recording — so the throw escaped
+   * the `finally` that puts the tree back, which only begins at the child's launch. The operator's
+   * own files were left in an `orca-safety-*` scratch nothing pointed at, on a command that had
+   * just printed "your files are restored when the replay ends".
+   *
+   * Asserted on the file rather than on the error, because the error was never the problem.
+   */
+  it('leaves the working tree alone when it refuses the upstream', async () => {
+    await record();
+    await writeFile(join(workspace, 'auth.ts'), 'MY UNCOMMITTED WORK\n');
+
+    await expect(
+      replayCommand(
+        parseArgs(['replay', 'last', '--upstream-openai', 'myuser:PASSWORD@gw.example/v1']),
+        out,
+        workspace,
+      ),
+    ).rejects.toThrow(/is not an origin orca can use/);
+
+    expect(
+      await readFile(join(workspace, 'auth.ts'), 'utf8'),
+      'a refused replay must not have touched the checkout',
+    ).toBe('MY UNCOMMITTED WORK\n');
+    // And it never claimed to have: the restore line belongs to a replay that got that far.
+    expect(lines.join('\n')).not.toContain('replay.restored');
+  });
+
   it('names the snapshot it can restore from if a replay dies halfway', async () => {
     // The safety net has to be visible before it is needed. If the process is killed between the
     // restore and the put-back, this id is the only way back to the tree you had.

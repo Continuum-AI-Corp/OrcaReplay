@@ -298,13 +298,20 @@ interface Ctx {
 async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<ReplayResult> {
   const divergences: { level: string; detail: string; seq: number }[] = [];
   const unmatched: { seq: number; reason: string }[] = [];
+  // Before `replayWorkspace`, because this refuses an upstream that is not an origin and
+  // `replayWorkspace` replaces the working tree. Resolved after it, a refusal threw with the
+  // checkout holding the recorded run's files and the operator's own tree left behind in an
+  // `orca-safety-*` scratch — the outcome the `finally` below exists to prevent, escaping it
+  // because that `finally` only begins at the child's launch. An invocation that cannot work
+  // should decide so before it touches anything, which is the rule `attach` already follows where
+  // it resolves the advertised URL before making a run directory.
+  const plan = await upstreamPlan(args);
   const workspace = await replayWorkspace(args, out, ctx);
   const trace = await openReplayTrace(args, ctx, workspace.dir);
   // Serial for the same reason the recorder's is: the callbacks fire from the proxy's request
   // handler, and two overlapping appends would interleave lines in events.jsonl.
   const writes = new SerialQueue();
 
-  const plan = await upstreamPlan(args);
   // A subscription-backed harness does not use the ordinary base URL, so exact replay needs the
   // same per-run CA and HTTPS proxy as recording. The proxy's TLS hook then answers Codex's model
   // request from the trace before it can open an origin connection.
