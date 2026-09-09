@@ -230,6 +230,33 @@ describe('end to end: record → replay → fork', () => {
     }
   });
 
+  /**
+   * The one line a reader checks to know whether a run can spend money.
+   *
+   * `egress` was a literal, so `--loose` — which answers an unmatched request from the provider —
+   * still announced `blocked`. Asserted on both spellings rather than only the flag's, because the
+   * bug was that one value was printed for two behaviours; a test that only pins `--loose` would
+   * pass again the moment someone hardcoded the other way round.
+   */
+  it('says egress is blocked only when it is, and says so differently under --loose', async () => {
+    process.env.FAKE_AGENT_READ = 'auth.ts';
+    try {
+      await record();
+
+      await replayCommand(parseArgs(['replay', 'last']), out, workspace);
+      const strict = lines.find((l) => l.includes('info replaying')) ?? '';
+      expect(strict).toContain('egress=blocked');
+
+      lines.length = 0;
+      await replayCommand(parseArgs(['replay', 'last', '--loose']), out, workspace);
+      const loose = lines.find((l) => l.includes('info replaying')) ?? '';
+      expect(loose, `no replaying line in:\n${lines.join('\n')}`).not.toContain('egress=blocked');
+      expect(loose).toContain('egress=live-on-unmatched');
+    } finally {
+      delete process.env.FAKE_AGENT_READ;
+    }
+  });
+
   it('names the snapshot it can restore from if a replay dies halfway', async () => {
     // The safety net has to be visible before it is needed. If the process is killed between the
     // restore and the put-back, this id is the only way back to the tree you had.
