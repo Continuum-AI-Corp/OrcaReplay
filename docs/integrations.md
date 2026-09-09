@@ -100,6 +100,32 @@ and it would need a container runtime the check deliberately does not depend on.
 Pass the origin through the environment rather than `LLM(base_url=…)` in code. Both work here, but
 the environment is the route `orca record` sets up, and it sidesteps the CrewAI wrinkle above.
 
+### A whole session, not in CI
+
+The check above is one call, because that is what can be made free and deterministic. A full
+session was run separately against a real model, and the numbers are worth writing down even
+though nothing re-runs them:
+
+An `Agent` with `get_default_tools()` and a `LocalWorkspace`, told to fix a failing test:
+`1 failed` before, **`1 passed`** after, and the recording holds all of it — 24 events, the
+`terminal` call that located the file, `file_editor view`, `file_editor str_replace`, and the
+`calc.py modified +2 −2` diff with a git tree hash per turn. Replayed with egress blocked:
+`reused=4/4 unmatched=0`.
+
+Two things that session showed which the single-call check cannot:
+
+- **Shell exit codes are not captured.** OpenHands resolves its shell without going through orca's
+  PATH shim, so `terminal` calls carry their output but not the real exit code, duration or
+  stdout/stderr split. The run says so (`warn shell.ineffective`). Same as goose.
+- **Replay is `minor`-divergent rather than exact**, by 36–44 characters per request. OpenHands
+  puts absolute paths and a session id in the prompt, and both move between runs. It still matched
+  every exchange; it is not `exact=` the way a single call is, and claiming otherwise would be
+  wrong.
+
+**Not verified:** OpenHands run as the packaged product, in its container runtime. Recording works
+by wrapping a process on the host, and that does not cross a container boundary — the same limit
+the [Dockerfile](../Dockerfile) documents for orca's own image.
+
 ---
 
 ## OpenAI Agents SDK
