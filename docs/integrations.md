@@ -61,20 +61,44 @@ and is not covered by the checks here.
 
 ---
 
-## CrewAI, Aider, OpenHands
+## CrewAI, Aider
 
 ```console
 orca record generic-openai -- python your_crew.py
 ```
 
-All three route through **LiteLLM**, which reads `OPENAI_API_BASE`. That is the layer the checks
-exercise: one check covers all three, and anything else built on LiteLLM comes with it.
+Both route through **LiteLLM**, which reads `OPENAI_API_BASE`. That is the layer the checks
+exercise: one check covers both, and anything else built on LiteLLM comes with it.
+
+OpenHands used to be listed here for the same reason. It now has [its own check](#openhands),
+because riding on LiteLLM and *reaching* LiteLLM with the environment intact are different claims.
 
 **Measured:** `litellm.completion()` recorded and replayed at `exact=1 divergences=0`.
 
 CrewAI has a known wrinkle worth knowing about even though it does not affect this route:
 `LLM(base_url=…)` does not map to LiteLLM's `api_base`, so passing the URL in code can silently do
 nothing. Going through the environment sidesteps it.
+
+---
+
+## OpenHands
+
+```console
+orca record generic-openai -- python your_agent.py
+```
+
+The OpenHands SDK wraps LiteLLM in its own `LLM` model — retries, usage tracking, a telemetry
+layer — and reads the origin from `OPENAI_API_BASE` like everything else on that transport.
+
+**Measured:** the SDK's `llm.completion()` recorded and replayed at `exact=1 divergences=0`,
+against OpenHands 1.11.0.
+
+The check calls `completion()` once and builds no `Conversation` and no workspace. That is
+deliberate: a task loop would be testing OpenHands rather than testing whether orca can see it,
+and it would need a container runtime the check deliberately does not depend on.
+
+Pass the origin through the environment rather than `LLM(base_url=…)` in code. Both work here, but
+the environment is the route `orca record` sets up, and it sidesteps the CrewAI wrinkle above.
 
 ---
 
