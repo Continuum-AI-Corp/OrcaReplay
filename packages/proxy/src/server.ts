@@ -129,6 +129,19 @@ export interface RecordedExchange {
    * before orca sees a body, so there is nothing orca could truthfully claim to have removed.
    */
   responseDecodedFrom?: string;
+  /**
+   * The origin that actually answered this call.
+   *
+   * A run's destination is not one value that could live in the manifest: the origin is chosen per
+   * request, from an explicit `--upstream-*`, the gateway `orca setup` configured, a `/forward/`
+   * base the client announced, or the dialect's vendor default — and a fork that changes provider
+   * changes it again mid-run. So it is recorded where it is decided, once per exchange.
+   *
+   * The trace could say what was sent and what came back but not who answered it, which is the
+   * question asked first when a recording looks wrong: a gateway left over in `~/.orca/config.json`
+   * redirects every run on the machine, and nothing in the run said so.
+   */
+  upstream?: string;
   durationMs?: number;
 }
 
@@ -440,6 +453,10 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
           // except where the difference is the thing being debugged.
           alpn: exchange.alpn,
           responseDecodedFrom: exchange.responseDecodedFrom,
+          // Under interception orca did not choose this origin, the agent did — which is the
+          // case where "who answered" is least obvious from the command line, and so the one most
+          // worth having in the trace. The port is kept only where https does not imply it.
+          upstream: `https://${exchange.host}${exchange.port === 443 ? '' : `:${exchange.port}`}`,
         });
         captured.push(built);
         options.onExchange?.(built);
@@ -755,6 +772,9 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
         headers: recordableHeaders,
         seq: captured.length,
         durationMs: Date.now() - startedAt,
+        // The origin resolved above, not the one configured: a relayed call keeps the base the
+        // client announced, and a fork's substitution can send it somewhere else again.
+        upstream: origin,
       });
       captured.push(exchange);
       options.onExchange?.(exchange);
@@ -931,6 +951,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     durationMs: number;
     alpn?: string;
     responseDecodedFrom?: string;
+    upstream?: string;
   }): RecordedExchange {
     const canonicalRequest = input.dialect.toCanonicalRequest(JSON.parse(input.rawRequest));
     let canonicalResponse: CanonicalResponse | undefined;
@@ -959,6 +980,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       ...(input.responseDecodedFrom === undefined
         ? {}
         : { responseDecodedFrom: input.responseDecodedFrom }),
+      ...(input.upstream === undefined ? {} : { upstream: input.upstream }),
       durationMs: input.durationMs,
     };
   }

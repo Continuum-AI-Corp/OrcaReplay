@@ -93,6 +93,12 @@ export async function showCommand(
       );
     }
   }
+  // Where the traffic went, which the timeline could not say. `proxy` is orca's own address, and
+  // the origin behind it is chosen per request — from a flag, a configured gateway, a `/forward/`
+  // base the client announced, or the vendor default — so the answer is read back off the
+  // exchanges rather than off the manifest, and a run that reached two origins says both.
+  const origins = upstreamsIn(events);
+  if (origins.length > 0) out.plain(`  upstream ${origins.join(', ')}`);
   out.plain('');
 
   // Both halves of the row. Rendering only `meta` showed token counts for a model response and an
@@ -360,4 +366,23 @@ function totalCost(events: { type: string; attrs?: Record<string, unknown> }[]):
 function nestPrefix(depth: number, previousDepth: number): string {
   if (depth === 0) return '';
   return '  '.repeat(depth - 1) + (depth > previousDepth ? '└─ ' : '   ');
+}
+
+/**
+ * The distinct origins a run's model exchanges actually reached, in the order first seen.
+ *
+ * Read off the events rather than the manifest because there is nothing to read there: the origin
+ * is resolved per request, and a fork that changes provider changes it mid-run. An empty list is
+ * a trace recorded before orca wrote this down — not a run that reached nothing.
+ */
+export function upstreamsIn(events: { type: string; attrs?: Record<string, unknown> }[]): string[] {
+  const seen: string[] = [];
+  for (const event of events) {
+    if (event.type !== 'model.response') continue;
+    const upstream = event.attrs?.['upstream'];
+    if (typeof upstream === 'string' && upstream !== '' && !seen.includes(upstream)) {
+      seen.push(upstream);
+    }
+  }
+  return seen;
 }
