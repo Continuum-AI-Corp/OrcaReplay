@@ -128,6 +128,16 @@ For a script, an agent, or CI — every command below also answers as data:
 Docs: https://github.com/Continuum-AI-Corp/OrcaReplay
 `;
 
+/**
+ * The commands `--json` answers and the terminal does not.
+ *
+ * A set rather than a special case. It holds one name today, and the point of the shape is that
+ * adding a second `--json`-only view does not quietly bring back `orca events` telling a reader
+ * that a command `--help` had just listed does not exist. `json-only.test.ts` derives the same set
+ * from the two switches in this file and fails when this disagrees with them.
+ */
+const JSON_ONLY = new Set(['events']);
+
 export async function main(argv: string[], cwd = process.cwd()): Promise<number> {
   const args = parseArgs(argv);
   if (args.bool('json')) return jsonMain(args, cwd);
@@ -217,6 +227,19 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
         await serveMcp({ orca: new Orca({ cwd }), input: process.stdin, output: process.stdout });
         return 0;
       default:
+        // `--json` answers one view that the terminal does not, and `--help` lists it beside seven
+        // that it does. A reader scanning that line reasonably types `orca events`, and being told
+        // there is no such command — by the same tool that had just named it — reads as the CLI
+        // contradicting itself. Name the route instead.
+        if (JSON_ONLY.has(args.command)) {
+          out.failure({
+            event: 'json_only_command',
+            what: `${args.command} answers as data, not as a table`,
+            why: 'these are the raw trace records; `orca show` is the same events, rendered',
+            next: `orca ${args.command} --json`,
+          });
+          return 2;
+        }
         out.failure({
           event: 'unknown_command',
           what: `there is no "${args.command}" command`,

@@ -428,7 +428,13 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
   out.phase('replaying', {
     run: ctx.manifest.run_id,
     exchanges: ctx.exchanges.length,
-    egress: 'blocked',
+    // Read from the flag, because `--loose` is exactly the run where it is not blocked. It was a
+    // literal, so `orca replay <run> --loose` announced `egress=blocked` and then answered the
+    // first unmatched request from the provider — the one line a reader checks to know whether a
+    // run can spend money, saying the opposite of what the run was about to do. Worse than an
+    // inaccuracy, because `replay halted` recommends `--loose` by name: the reader is following
+    // orca's own advice when the label stops being true.
+    egress: args.bool('loose') ? 'live-on-unmatched' : 'blocked',
     proxy: proxy.url,
     cwd: workspace.dir,
   });
@@ -451,6 +457,8 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
     userArgs: driveArgs(adapter, ctx, out),
     env: process.env,
   });
+  // Replaying must not introduce a catalog request before the capture plugin is installed.
+  if (adapter.id === 'opencode') launch.env.OPENCODE_DISABLE_MODELS_FETCH = '1';
   if (proxy.tls) await trustRunCa(trace, proxy.tls, proxy.url, launch.env, out);
   if (mcp) {
     pointAtMcpConfig(launch.env, mcp.configPath);

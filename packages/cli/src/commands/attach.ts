@@ -235,7 +235,13 @@ async function runAttached(
       proxy: proxyUrl,
       for: adapter.id,
       ...(replaying
-        ? { serving: replaySelector, exchanges: replaying.exchanges.length, egress: 'blocked' }
+        ? {
+            serving: replaySelector,
+            exchanges: replaying.exchanges.length,
+            // Same flag, same reason as `orca replay`: attach takes `--loose` too and passes it
+            // to the same proxy, so the label has to come from it rather than be assumed.
+            egress: args.bool('loose') ? 'live-on-unmatched' : 'blocked',
+          }
         : {}),
     });
     if (proxy.tls) {

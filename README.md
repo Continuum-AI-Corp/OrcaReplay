@@ -3,7 +3,7 @@
 
 ### Your agent broke something at 2am. Replay it at 9am — exactly, offline, as many times as you like.
 
-Record any coding agent. Reproduce the run byte-for-byte with the network off. Fork it from any step
+Record any coding agent. Reproduce the run byte-for-byte with no model called. Fork it from any step
 onto a different model and see who gets it right.
 
 <a href="https://www.orcarouter.ai">
@@ -27,10 +27,11 @@ Connect: [X](https://x.com/OrcaRouter) · [Discord](https://discord.com/invite/Y
 [![Node](https://img.shields.io/badge/node-20%2B-brightgreen)](#install)
 [![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Agents%20SDK%20%C2%B7%20AI%20SDK%20%C2%B7%20any-black)](#which-agents)
 [![Good first issues](https://img.shields.io/badge/good%20first%20issues-12-orange)](docs/good-first-issues.md)
+[![Mentioned in Awesome Claude Code](https://awesome.re/mentioned-badge.svg)](https://github.com/hesreallyhim/awesome-claude-code)
 
 ![Recording a Claude Code run, replaying it offline, then forking it onto two models](docs/demo-cli.gif)
 
-<sup>Real output from one session — a Claude Code run recorded, replayed with the network off, then
+<sup>Real output from one session — a Claude Code run recorded, replayed against the recording, then
 forked at checkpoint 4 onto two models and graded by `npx tsc --noEmit`. Nothing here is mocked up.</sup>
 
 ## Try it in three commands
@@ -56,7 +57,7 @@ orca quickstart
 ```
 
 It writes a small project with a genuine bug in it and a recording of an agent fixing that bug,
-then replays the recording against the project with the network off: two failing tests before,
+then replays the recording against the project with no model called: two failing tests before,
 four passing after, three turns served from the trace and nothing spent. `--full` prints the whole
 timeline and the replay as it happened.
 
@@ -86,7 +87,7 @@ OrcaReplay answers that by giving you the run back.
 |---|---|---|
 | Tells you what a run cost | ✅ | ✅ |
 | Tells you which tool call deleted the file | sometimes | ✅ |
-| Runs the agent again and gets the same answer | ❌ | ✅ offline, byte-for-byte |
+| Runs the agent again and gets the same answer | ❌ | ✅ from the recording, byte-for-byte |
 | Lets you change the model and re-run from step 4 | ❌ | ✅ |
 | Needs you to modify your agent | usually an SDK wrapper | ❌ two env vars |
 | Works after you close the terminal | ❌ | ✅ it is a file |
@@ -108,6 +109,8 @@ request, each streamed response, every tool call the model emitted, and every to
 harness produced. That one property is what the tool is built on, and it is why **OrcaReplay does
 not patch your agent** — it stands up a local proxy, sets two environment variables, and gets out of
 the way.
+
+**What "egress blocked" means, exactly.** On replay the proxy refuses to forward anything it cannot serve from the trace, so no model is called and no tokens are spent — that run prints `egress=blocked`. `--loose` lifts it deliberately: an unmatched request is then answered by the provider and recorded as a major divergence, and the same line reads `egress=live-on-unmatched`. A replay still *executes the recorded tool calls for real*, and a tool that opens its own socket — a shell command running `curl`, an MCP server fetching something — is outside the guarantee either way. By default it never reaches the proxy and goes to the network as usual. Under `--tls-intercept` it does reach the proxy, because that sets `HTTPS_PROXY` for the whole child: a host off the intercept list is tunnelled through untouched, though its hostname, port and byte counts still land in the trace, and a host on the list is refused there like any other unmatched call. Replay is not a sandbox; if you need one, run it inside one.
 
 Three more layers catch what the protocol cannot see: an exit code, a real duration, which stream a
 byte came out of, a file written without telling anyone. A fifth exists for the agents that read no
@@ -372,13 +375,16 @@ whether orca understands the wire format it speaks once it arrives.
 | **Claude Code** | `ANTHROPIC_BASE_URL` | works — validated against a real bug fix, [in detail](docs/validation.md) |
 | **Codex CLI** (API key) | `OPENAI_BASE_URL` → Responses API | works |
 | **Codex CLI** (ChatGPT login) | `--tls-intercept` → Responses API | works, [with a decision to make](#when-the-harness-will-not-be-redirected) |
-| **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | works |
-| **Vercel AI SDK** | fetch hook — `orca record node -- node app.mjs` | works |
+| **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | works — the `AsyncOpenAI` client it is built on records and replays at `exact=1`, [in CI](test/integrations/); [its own tracing is a second egress](docs/integrations.md#openai-agents-sdk) |
+| **Vercel AI SDK** | fetch hook — `orca record node -- node app.mjs` | works — an agent posting to an origin compiled into its source records and replays at `exact=1`, [in CI](test/integrations/) |
 | **grok-cli** (and its Telegram bot) | `orca record grok` — `GROK_BASE_URL`, plus the hook for its sub-agents | works |
 | **OpenClaw** | `orca record openclaw` — the hook for the gateway, inherited variables for the agents it spawns | works |
 | **opencode** | `orca record opencode` | adapter shipped, both origins redirected |
 | **goose** (Block) | `orca record goose` — `OPENAI_HOST` **and** `OPENAI_BASE_URL`, `ANTHROPIC_HOST` → Responses API | works — driven end to end against goose 1.49.0, [what is different about it](#the-harness-that-reads-different-variables) |
 | **LangGraph / LangChain** | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | works — a two-node graph, streaming and with a tool, records and replays at `exact=2` and forks live, [in CI](test/integrations/) |
+| **OpenHands** | `orca record generic-openai -- python your_agent.py` — its SDK wraps LiteLLM and reads `OPENAI_API_BASE` | works — the SDK's own LLM layer records and replays at `exact=1`, [in CI](test/integrations/) |
+| **CrewAI, Aider** | `orca record generic-openai -- python your_crew.py` — both route through LiteLLM, which reads `OPENAI_API_BASE` | works — the LiteLLM layer records and replays at `exact=1`, [in CI](test/integrations/); [a CrewAI wrinkle worth knowing](docs/integrations.md#crewai-aider) |
+| **browser-use** | `orca record generic-openai -- python your_task.py` — its `ChatOpenAI` passes an unset `base_url` straight through | works — records and replays at `exact=1`, [in CI](test/integrations/); LLM layer only, [the browser is not driven](docs/integrations.md#browser-use) |
 | **Hermes** (Nous Research) | `ORCA_BASE_URL_VARS=… orca record generic-openai -- hermes …` | should work — it overrides per provider; [name the variable](#a-base-url-variable-orca-has-never-heard-of) |
 | **Codex-in-the-IDE** | `orca record exec --tls-intercept -- code .` | works — the extension spawns the agent, and it inherits the capture |
 | **a bot with a hardcoded origin** | `orca record exec --tls-intercept -- <cmd>` | works — a Grok bot posting to a URL in its own source, [in detail](#an-agent-that-reads-nothing-at-all) |
