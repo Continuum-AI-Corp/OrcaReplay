@@ -165,10 +165,25 @@ describe('upstreamsIn', () => {
     ).toEqual(['https://gw.example/v1']);
   });
 
-  it('drops an upstream with no readable origin in it at all', () => {
-    // `myuser:PASSWORD@…` parses with the username as the protocol, so there is no origin to
-    // recover — and a placeholder would say less than saying nothing.
-    expect(upstreamsIn([{ type: 'model.response', attrs: { upstream: 'not a url' } }])).toEqual([]);
+  /**
+   * The case the comment above this test used to name while the input tested something else.
+   *
+   * `'not a url'` fails `new URL` and is dropped by any version of this function, so it passed
+   * against a body that had no `unusableOrigin` guard at all. The shape that needed asserting is
+   * the one that *parses*: a scheme-less URL whose username becomes the protocol.
+   */
+  it.each([
+    {
+      what: 'the username parses as the protocol',
+      upstream: 'myuser:PASSWORD@gw.example/v1',
+      secret: 'PASSWORD',
+    },
+    { what: 'the scheme is not http', upstream: 'mailto:someone@gw.example', secret: 'someone' },
+    { what: 'it is not a URL at all', upstream: 'not a url', secret: undefined },
+  ])('drops an upstream with no readable origin: $what', ({ upstream, secret }) => {
+    const out = upstreamsIn([{ type: 'model.response', attrs: { upstream } }]);
+    expect(out).toEqual([]);
+    if (secret !== undefined) expect(JSON.stringify(out)).not.toContain(secret);
   });
 
   it('is empty for a trace recorded before orca wrote this down', () => {

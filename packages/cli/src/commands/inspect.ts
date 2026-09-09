@@ -23,7 +23,7 @@ import type { ParsedArgs } from '../args.js';
 import { formatCost } from './compare.js';
 import { renderChainCard, renderGraphCard, scopeForCard } from '../share-card.js';
 import { cardTarget, gifFrames, svgToPng, svgsToGif, type CardFormat } from '../rasterize.js';
-import { recordableOrigin } from '@orcareplay/proxy';
+import { recordableOrigin, unusableOrigin } from '@orcareplay/proxy';
 
 /** `orca list` — what runs are here, newest first. */
 export async function listCommand(
@@ -388,6 +388,13 @@ export function upstreamsIn(events: { type: string; attrs?: Record<string, unkno
     // so the copy that reaches a terminal or an exported run.html has to be clean whatever wrote
     // it. A value with nothing recoverable in it is dropped: an origin nobody can read is not
     // worth printing a placeholder for.
+    // `unusableOrigin` first, then sanitise — the order `distinctOrigins` uses, and for the
+    // reason its comment gives: `recordableOrigin` alone answers with a *value* for a scheme-less
+    // string, because `new URL('myuser:PASSWORD@gw.example/v1')` reads `myuser:` as the protocol.
+    // A `!== undefined` filter therefore keeps the password. Written the other way round here at
+    // first, with a test whose comment named this case and whose input was `'not a url'` — which
+    // fails to parse, so it exercised the other branch and passed.
+    if (unusableOrigin(upstream) !== undefined) continue;
     const safe = recordableOrigin(upstream);
     if (safe !== undefined && !seen.includes(safe)) seen.push(safe);
   }
