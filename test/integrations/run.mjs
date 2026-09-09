@@ -66,6 +66,20 @@ const CHECKS = [
     exchanges: 1,
   },
   {
+    id: 'openai-agents',
+    what: 'the OpenAI Agents SDK on its default wire format, the Responses API',
+    run: ['python', 'agents/openai_agents_sdk.py'],
+    needs: 'agents',
+    exchanges: 1,
+  },
+  {
+    id: 'crewai',
+    what: 'CrewAI itself — which since 1.x no longer routes through LiteLLM at all',
+    run: ['python', 'agents/crewai_agent.py'],
+    needs: 'crewai',
+    exchanges: 1,
+  },
+  {
     id: 'langgraph-stream',
     what: 'a two-node LangGraph over streaming SSE',
     run: ['python', 'agents/langgraph_agent.py', 'stream'],
