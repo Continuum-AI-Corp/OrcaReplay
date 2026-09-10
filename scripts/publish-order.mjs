@@ -58,7 +58,20 @@ for (const [name, p] of packages) {
     const range = p.ranges[dep];
     // A range resolves to whatever is latest on the registry, so a 0.1.0 CLI would install a
     // 0.9.0 core — and on a first publish it resolves to nothing at all.
-    if (!/^\d+\.\d+\.\d+$/.test(range)) {
+    //
+    // A prerelease is allowed because it is still exactly one version: the `next` channel
+    // publishes `0.2.4-main.g<sha>`, and this check exists to forbid a *range*, not a suffix.
+    //
+    // semver.org's grammar, not a loose `[0-9A-Za-z.-]+`. A numeric prerelease identifier may not
+    // have a leading zero, and `npm publish` does not refuse one: it rewrites the version and
+    // leaves the pins, so twelve packages go out naming a version that does not exist. Build
+    // metadata (`+…`) stays forbidden — npm ignores it when comparing, so two different manifests
+    // could name the same version to the registry, which a publish cannot undo.
+    if (
+      !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?$/.test(
+        range,
+      )
+    ) {
       problems.push(`${name} depends on ${dep} as "${range}" — must be an exact version`);
     } else if (target.version !== range) {
       problems.push(`${name} names ${dep}@${range}, but ${dep} is at ${target.version}`);
@@ -72,6 +85,12 @@ if (problems.length > 0) {
 
 if (process.argv.includes('--json')) {
   console.log(JSON.stringify(order.map((n) => packages.get(n).dir)));
+} else if (process.argv.includes('--names')) {
+  // `name<TAB>dir`, because a publisher that needs to ask the registry about a package needs its
+  // name, and building one in the shell means interpolating a path into a `require` — which is a
+  // string escape on Windows (`packages\node-instrument` becomes a newline). This script already
+  // parsed every manifest, so it can just say.
+  for (const name of order) console.log(`${name}\t${packages.get(name).dir}`);
 } else {
   for (const name of order) console.log(packages.get(name).dir);
 }

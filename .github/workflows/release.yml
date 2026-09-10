@@ -1,14 +1,22 @@
-# Publish every workspace to npm, in dependency order, from a tag.
+# Publish every workspace to npm, in dependency order, as `latest`.
 #
-# Nothing here runs on a push to a branch: it fires on a `v*` tag, or by hand. Publishing is
-# irreversible — npm allows an unpublish only briefly and never a re-publish of the same version —
-# so the whole test suite gates it, and a dry run is available that proves the tarballs are right
-# without sending anything.
+# Two ways in, and a human decides the version in both. A `v*` tag still works. The other is a
+# version bump reaching main: when `packages/cli/package.json` names a version that has no tag yet,
+# that merge *is* the release, and this workflow publishes it and creates the tag. `set-version.mjs`
+# makes the bump one command instead of thirteen hand-edited manifests, so the whole ceremony is a
+# pull request that changes a version number.
+#
+# What this deliberately does not do is publish on every merge. Publishing is irreversible — npm
+# allows an unpublish only briefly and never a re-publish of the same version — so the whole test
+# suite gates it, and a dry run is available that proves the tarballs are right without sending
+# anything. Main is still installable between releases: `publish-next.yml` puts every green commit
+# on the `next` tag, where nobody is opted in by accident.
 name: Release
 
 on:
   push:
     tags: ['v*']
+    branches: [main]
   workflow_dispatch:
     inputs:
       dry-run:
@@ -28,9 +36,68 @@ permissions:
   contents: read
   id-token: write # npm provenance: proves the tarball came from this workflow, from this commit
 
+# One release at a time. The publish loop walks twelve packages in dependency order, and two runs
+# interleaving would put a version on the registry that the rest do not name — which npm will not
+# let anyone re-publish over.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
-  release:
+  # Cheap, so an ordinary merge does not run the whole suite to discover there is nothing to do.
+  # Several pull requests land here a day and almost none of them change a version.
+  decide:
     runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the tags are the state this reads
+      - id: check
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./packages/cli/package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          # A tag push or a hand-run is already someone asking for a release, so the tag rule below
+          # applies to a `push` and nothing else.
+          #
+          # `github.ref_type` is not the test for that: a `workflow_dispatch` is run *from a ref*,
+          # and from main that ref is a branch — so keying on it alone sent every hand-run into the
+          # tag check, where a version that is already tagged means `publish=false` and the release
+          # job is skipped. The workflow would then report success having published nothing.
+          #
+          # That is the one path this must not swallow. `registry-only` exists because the MCP
+          # Registry step can fail *after* npm has gone out — v0.2.2 and v0.2.3 both did — and by
+          # then the tag is on the remote, so the documented retry is a hand-run against an
+          # already-tagged version. The `dry run` rehearsal RELEASING.md describes is the same
+          # shape, and main is normally at a tagged version, which is when it would break.
+          if [ "${{ github.event_name }}" != "push" ] || [ "${{ github.ref_type }}" != "branch" ]; then
+            echo "${{ github.event_name }} from ${{ github.ref_type }} — an explicit request, releasing"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # From main, the tag is the record of what has been released. Asking git rather than
+          # diffing the previous commit means this is idempotent and survives a squash merge, a
+          # direct push, or a re-run: if `v$version` exists, that version is out.
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "main is at $version, which is already tagged — nothing to release"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "main is at $version and v$version does not exist yet — releasing it"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    needs: decide
+    if: needs.decide.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # only to create the tag for a release that came from main
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -64,19 +131,96 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           DRY_RUN: ${{ github.event.inputs.dry-run }}
+          VERSION: ${{ needs.decide.outputs.version }}
         run: |
           set -euo pipefail
+          # The commit that is about to be packed, which is also what npm will write as `gitHead`.
+          PUBLISHING=$(git rev-parse HEAD)
+          echo "publishing $VERSION from $PUBLISHING"
+
           # Computed, never hardcoded: internal deps are pinned to an exact version, so publishing
           # the CLI before the core it names would fail on a version the registry does not have.
-          node scripts/publish-order.mjs | while read -r dir; do
+          #
+          # Resumable for the same reason `publish-next.yml` is, and it matters more here. The loop
+          # stops where it fails, so a transient npm 5xx at package five leaves five versions of a
+          # *release* on the registry permanently — and npm refuses to replace a version, so a
+          # re-run from the top dies on E403 and the only way forward would be to abandon that
+          # version number half-published and bump again. Asking per package makes the retry publish
+          # exactly what is missing.
+          #
+          # A dry run skips the probe and packs all twelve: validating the tarballs is the point.
+          node scripts/publish-order.mjs --names | while IFS="$(printf '\t')" read -r name dir; do
             if [ "${DRY_RUN:-false}" = "true" ]; then
-              echo "── dry run: $dir"
+              echo "── dry run: $name"
               ( cd "$dir" && npm publish --dry-run --provenance --access public )
-            else
-              echo "── publishing: $dir"
-              ( cd "$dir" && npm publish --provenance --access public )
+              continue
             fi
+            # Skip only what this commit already published.
+            #
+            # The probe in `publish-next.yml` can skip on the version alone, because there the
+            # version *is* the tree — `0.2.4-main.g<sha>`. A release version is a number a human
+            # chose, and main can carry it across many commits, so "0.3.0 exists on npm" does not
+            # mean this commit produced it.
+            #
+            # What that allows, without this check: the bump to 0.3.0 merges, the loop publishes
+            # packages 1-5 and dies, no tag is created, so main still looks unreleased. Someone
+            # pushes the fix for that failure — same version, still untagged — and this workflow
+            # runs again: 1-5 are skipped because they are on npm from the *older* commit, 6-12 are
+            # published from the new one, and the tag step then tags the new commit. `orcareplay@0.3.0`
+            # is permanently a mixture of two trees that no commit corresponds to.
+            #
+            # `gitHead` is what npm records at publish time, read out of the checkout's own `.git`;
+            # it is present on the existing releases (0.2.3 carries 2a1311c, the commit `v0.2.3`
+            # points at). If it is missing, this falls through and publishes, which is the loud E403
+            # that used to be the only behaviour.
+            #
+            # Compared against `git rev-parse HEAD` rather than `$GITHUB_SHA`, so both sides come
+            # from the same place: the commit that is checked out and about to be packed. They agree
+            # today even for an annotated tag — all six releases in this repository were annotated
+            # tags and GitHub reported the *commit* as the event sha in every one — but that is a
+            # property of GitHub's event payload, and if it ever reported the tag object instead,
+            # every probe would mismatch and a tag-triggered release that died half way could never
+            # be resumed. Asking git costs nothing and does not depend on knowing that.
+            head=$(npm view "$name@$VERSION" gitHead 2>/dev/null) || head=
+            if [ -n "$head" ]; then
+              if [ "$head" != "$PUBLISHING" ]; then
+                echo "$name@$VERSION was published from $head, not $PUBLISHING." >&2
+                echo "A version cannot be replaced on npm — bump the version instead." >&2
+                exit 1
+              fi
+              echo "── already on npm from this commit, skipping: $name@$VERSION"
+              continue
+            fi
+            echo "── publishing: $name@$VERSION"
+            ( cd "$dir" && npm publish --provenance --access public )
           done
+
+      # Created after the publish, not before it, so the tag means "this went out" rather than
+      # "this was attempted". A release that came in as a `v*` tag already has one.
+      #
+      # It is also what stops the next merge re-releasing the same version: `decide` reads these
+      # tags, so until this exists, main looks unreleased.
+      # Only a merge creates a tag, and only if there is not one already.
+      #
+      # `push` and not merely "a branch ref", because a hand-run from main is now allowed through
+      # `decide` — and the reason it is allowed is the `registry-only` retry, which runs against a
+      # version whose tag already exists. `git tag -a` on an existing tag is a fatal error, so
+      # under `set -e` that retry would have died here instead of reaching the registry step it was
+      # dispatched for. Checked as well as scoped: a re-run of the same merge must not fail either.
+      - name: Tag the release that came from main
+        if: ${{ github.event_name == 'push' && github.ref_type == 'branch' && github.event.inputs.dry-run != 'true' }}
+        env:
+          VERSION: ${{ needs.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "v$VERSION already exists — leaving it alone"
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              tag -a "v$VERSION" -m "release $VERSION"
+          git push origin "v$VERSION"
 
       # The npm packages are the artefact; this makes them findable. Ownership is proved twice at
       # once: `mcpName` in packages/cli/package.json must equal the name in server.json, and GitHub

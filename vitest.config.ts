@@ -24,7 +24,10 @@ export default defineConfig({
     },
   },
   test: {
-    include: ['packages/*/test/**/*.test.ts'],
+    // `scripts/` too, because the release scripts are code with no package to live in, and a test
+    // that is never collected is worse than no test: `set-version.test.ts` guards an edit that is
+    // permanent on npm if it goes wrong, and would have sat here green and unrun.
+    include: ['packages/*/test/**/*.test.ts', 'scripts/**/*.test.ts'],
     environment: 'node',
     testTimeout: 30_000,
     hookTimeout: 30_000,
