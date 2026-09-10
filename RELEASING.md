@@ -15,11 +15,11 @@ sequence of `npm publish` calls run by hand at the end of a long day.
 | | what it is | who gets it |
 | --- | --- | --- |
 | `latest` | a version someone decided to release | `npm i orcareplay` |
-| `next` | main, once a day, as `0.2.4-main.<sha>` | `npm i orcareplay@next` |
+| `next` | main, once a day, as `0.2.4-main.g<sha>` | `npm i orcareplay@next` |
 
 `next` is published by `.github/workflows/publish-next.yml` on a daily schedule — 04:00 UTC, which
 is noon in Beijing — and needs nothing from you. Every version on it is a **prerelease**, which npm
-excludes from `npm i orcareplay` even though `0.2.4-main.abc1234` sorts above `0.2.3`, so main is
+excludes from `npm i orcareplay` even though `0.2.4-main.gabc1234` sorts above `0.2.3`, so main is
 always installable and nobody is opted in to it by accident. `--tag next` never moves `latest`.
 
 It publishes **the newest commit on main that CI passed**, not whatever main happens to be at
@@ -95,9 +95,18 @@ other than main.
 2. runs the full gate — format, build, 1000+ tests, conformance, neutrality;
 3. for a `v*` tag, checks it matches `packages/cli`'s version, so a published version always has a
    tag pointing at it;
-4. publishes every workspace **in dependency order**, with npm provenance;
+4. publishes every workspace **in dependency order**, with npm provenance — skipping any package
+   already on npm at that version *from this commit*, so a run that died half way can be retried;
 5. creates the tag, when the release came from main — *after* the publish, so a tag means "this
    went out" rather than "this was attempted", and so the next merge does not try again.
+
+> **A retry may resume, but only from the same commit.** A release version is a number a human
+> chose, and main can carry it across several commits, so "0.3.0 is on npm" does not mean this
+> commit put it there. If the loop dies at package five and someone then pushes the fix to main —
+> same version, still untagged — resuming would publish 6-12 from the new tree and leave 1-5 from
+> the old one, making `orcareplay@0.3.0` a mixture no commit corresponds to, permanently. So the
+> skip compares npm's recorded `gitHead` with the commit being published and stops the release when
+> they disagree: bump the version instead.
 
 Both publishing workflows are `concurrency`-grouped and queue rather than cancel. The publish loop
 walks twelve packages one at a time, and a run cancelled half way leaves some of them on the

@@ -30,15 +30,32 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('..', import.meta.url));
 
 /**
- * Accepts a prerelease, because that is what the `next` channel publishes.
+ * Accepts a prerelease, because that is what the `next` channel publishes — but only a *legal* one.
  *
- * `0.2.4-main.90fc463` is a legal semver version and npm treats it specially: it is excluded from
+ * `0.2.4-main.g90fc463` is a legal semver version and npm treats it specially: it is excluded from
  * `npm install <pkg>` even though it sorts above `0.2.3`, so a prerelease cannot reach someone who
- * did not ask for it by name. Build metadata (`+…`) is rejected instead of allowed — npm ignores it
- * when comparing versions, so two builds could differ in the manifest and be the same version to
- * the registry, which is the one failure mode a publish cannot recover from.
+ * did not ask for it by name.
+ *
+ * This is semver.org's own grammar rather than a loose `[0-9A-Za-z.-]+`, because the loose form
+ * accepts something npm will not publish as written and does not refuse either. A numeric
+ * prerelease identifier may not have a leading zero, so `0.2.4-main.0123456` is invalid — and
+ * `npm publish` does not fail on it. It runs the manifest through `@npmcli/package-json`'s `fix()`,
+ * which *rewrites* the version to `0.2.4-main.123456` with only a warning, and leaves every
+ * dependency pin naming `0.2.4-main.0123456`. Measured with npm's own library:
+ *
+ *     fix() version : 0.2.4-main.123456
+ *     fix() dep pin : 0.2.4-main.0123456
+ *
+ * Twelve packages would go out at one version while declaring dependencies on another that does not
+ * exist, and npm never lets a version be replaced. The `next` channel would be permanently
+ * unresolvable. A short sha triggers it whenever its first seven characters are all digits and
+ * start with a zero — about one commit in 270.
+ *
+ * Build metadata (`+…`) is left out of the grammar on purpose rather than allowed: npm ignores it
+ * when comparing versions, so two different trees could claim the same version to the registry.
  */
-const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+const VERSION =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?$/;
 
 const DEP_FIELDS = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'];
 

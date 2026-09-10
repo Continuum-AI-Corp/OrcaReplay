@@ -3,14 +3,14 @@
 #     npm i orcareplay          # latest — a tagged release, unchanged by this workflow
 #     npm i orcareplay@next     # whatever main is right now
 #
-# Every version published here is a prerelease — `0.2.4-main.<sha>`. npm excludes a prerelease from
+# Every version published here is a prerelease — `0.2.4-main.g<sha>`. npm excludes a prerelease from
 # `npm install <pkg>` even though it sorts above `0.2.3`, so nothing here can reach someone who did
 # not ask for it by name, and `--tag next` never moves `latest`. That is what makes publishing from
 # main safe at all: main is always available, and no user is opted in to it.
 #
 # The version is derived from the commit, never committed back. Bumping a version in main to publish
 # from main would mean a bot with write access to the default branch and a push race between two
-# merges a minute apart; a `<next-patch>-main.<sha>` needs neither, and is unique by construction —
+# merges a minute apart; a `<next-patch>-main.g<sha>` needs neither, and is unique by construction —
 # which matters because npm never allows re-publishing a version.
 name: Publish next
 
@@ -40,9 +40,13 @@ on:
         type: boolean
         default: true
 
-permissions:
-  contents: read
-  id-token: write # npm provenance: proves the tarball came from this workflow, from this commit
+# Declared per job rather than here, because `permissions:` is not additive: "if you specify the
+# access for any of these permissions, all of those that are not specified are set to `none`". So a
+# block naming only `contents` and `id-token` gives `pick` `actions: none`, and its `gh run list`
+# call — `GET /repos/{owner}/{repo}/actions/runs` — comes back 403. Under `set -euo pipefail` that
+# fails `pick`, and `next` needs it, so nothing would ever reach the `next` tag. Running the same
+# shell locally cannot catch this: a developer's `gh auth` token is full-scope.
+permissions: {}
 
 # Queued, never cancelled. Twelve packages are published one at a time in dependency order, so
 # cancelling half way leaves some of them on the registry at a version the rest do not name — and
@@ -62,6 +66,9 @@ jobs:
   # number is exactly the version-count cost this schedule exists to avoid.
   pick:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout main, and read its history for the ancestry check
+      actions: read # `gh run list`, to find the newest commit on main that CI passed
     outputs:
       sha: ${{ steps.pick.outputs.sha }}
       version: ${{ steps.pick.outputs.version }}
@@ -113,7 +120,16 @@ jobs:
           base=$(git show "$sha:packages/cli/package.json" | node -p \
                    "JSON.parse(require('fs').readFileSync(0,'utf8')).version.split('-')[0]")
           next=$(node -p "const v='$base'.split('.'); v[2]=Number(v[2])+1; v.join('.')")
-          version="$next-main.${sha:0:7}"
+          # `g` before the sha, git-describe style, so the identifier always contains a letter.
+          #
+          # A prerelease identifier that is all digits may not have a leading zero, and about one
+          # commit in 270 has a short sha like `0123456`. `npm publish` does not refuse that
+          # version: it rewrites it to `0.2.4-main.123456` with a warning and leaves every
+          # dependency pin naming `0.2.4-main.0123456`, so twelve packages go out declaring a
+          # version that does not exist — permanently, because npm never replaces a version.
+          # `set-version.mjs` and `publish-order.mjs` now refuse it too, but refusing would only
+          # turn the daily run red; the prefix is what stops it arising.
+          version="$next-main.g${sha:0:7}"
 
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -138,6 +154,9 @@ jobs:
     needs: pick
     if: needs.pick.outputs.publish == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm provenance: proves the tarball came from this workflow, from this commit
     steps:
       # The commit CI passed on, not whatever main has moved to since.
       - uses: actions/checkout@v4

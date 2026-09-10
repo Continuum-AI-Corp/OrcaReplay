@@ -126,6 +126,33 @@ describe('set-version', () => {
   });
 
   /**
+   * A numeric prerelease identifier with a leading zero, which npm rewrites rather than refuses.
+   *
+   * `0.2.4-main.0123456` is invalid semver, and `npm publish` does not say so. It runs the manifest
+   * through `@npmcli/package-json`'s `fix()`, which cleans the *version* to `0.2.4-main.123456`
+   * with a warning and leaves every dependency pin naming `0.2.4-main.0123456`. Measured with
+   * npm's own library:
+   *
+   *     fix() version : 0.2.4-main.123456
+   *     fix() dep pin : 0.2.4-main.0123456
+   *
+   * So twelve packages would go out at one version while declaring dependencies on another that
+   * does not exist, and npm never lets a version be replaced — the channel would be permanently
+   * unresolvable. A short sha does this whenever its first seven characters are all digits and
+   * start with a zero, about one commit in 270, which is why `publish-next.yml` prefixes the sha
+   * with a letter as well.
+   */
+  it('refuses a leading-zero numeric prerelease, which npm would silently rewrite', async () => {
+    for (const bad of ['0.2.4-main.0123456', '0.2.4-01', '1.2.3-0.0123', '01.2.3']) {
+      await expect(setVersion(bad), `"${bad}" should be refused`).rejects.toThrow();
+    }
+    // The shapes that are legal must still pass, or the guard is just refusing prereleases.
+    for (const good of ['0.2.4-main.g0123456', '0.2.4-main.123456', '0.2.4-main.0abc123']) {
+      await expect(setVersion(good), `"${good}" should be accepted`).resolves.toBeTruthy();
+    }
+  });
+
+  /**
    * The lockfile half, asserted on what is committed rather than on a re-resolve.
    *
    * An internal dependency must appear in `package-lock.json` as a link to the workspace, never as

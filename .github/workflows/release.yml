@@ -151,8 +151,31 @@ jobs:
               ( cd "$dir" && npm publish --dry-run --provenance --access public )
               continue
             fi
-            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
-              echo "── already on npm, skipping: $name@$VERSION"
+            # Skip only what this commit already published.
+            #
+            # The probe in `publish-next.yml` can skip on the version alone, because there the
+            # version *is* the tree — `0.2.4-main.g<sha>`. A release version is a number a human
+            # chose, and main can carry it across many commits, so "0.3.0 exists on npm" does not
+            # mean this commit produced it.
+            #
+            # What that allows, without this check: the bump to 0.3.0 merges, the loop publishes
+            # packages 1-5 and dies, no tag is created, so main still looks unreleased. Someone
+            # pushes the fix for that failure — same version, still untagged — and this workflow
+            # runs again: 1-5 are skipped because they are on npm from the *older* commit, 6-12 are
+            # published from the new one, and the tag step then tags the new commit. `orcareplay@0.3.0`
+            # is permanently a mixture of two trees that no commit corresponds to.
+            #
+            # `gitHead` is what npm records at publish time; it is present on the existing releases
+            # (0.2.3 carries 2a1311c, the commit `v0.2.3` points at). If it is missing, this falls
+            # through and publishes, which is the loud E403 that used to be the only behaviour.
+            head=$(npm view "$name@$VERSION" gitHead 2>/dev/null) || head=
+            if [ -n "$head" ]; then
+              if [ "$head" != "$GITHUB_SHA" ]; then
+                echo "$name@$VERSION was published from $head, not $GITHUB_SHA." >&2
+                echo "A version cannot be replaced on npm — bump the version instead." >&2
+                exit 1
+              fi
+              echo "── already on npm from this commit, skipping: $name@$VERSION"
               continue
             fi
             echo "── publishing: $name@$VERSION"
