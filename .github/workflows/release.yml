@@ -61,8 +61,21 @@ jobs:
           version=$(node -p "require('./packages/cli/package.json').version")
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-          # A tag push or a hand-run is already someone asking for a release.
-          if [ "${{ github.ref_type }}" != "branch" ]; then
+          # A tag push or a hand-run is already someone asking for a release, so the tag rule below
+          # applies to a `push` and nothing else.
+          #
+          # `github.ref_type` is not the test for that: a `workflow_dispatch` is run *from a ref*,
+          # and from main that ref is a branch — so keying on it alone sent every hand-run into the
+          # tag check, where a version that is already tagged means `publish=false` and the release
+          # job is skipped. The workflow would then report success having published nothing.
+          #
+          # That is the one path this must not swallow. `registry-only` exists because the MCP
+          # Registry step can fail *after* npm has gone out — v0.2.2 and v0.2.3 both did — and by
+          # then the tag is on the remote, so the documented retry is a hand-run against an
+          # already-tagged version. The `dry run` rehearsal RELEASING.md describes is the same
+          # shape, and main is normally at a tagged version, which is when it would break.
+          if [ "${{ github.event_name }}" != "push" ] || [ "${{ github.ref_type }}" != "branch" ]; then
+            echo "${{ github.event_name }} from ${{ github.ref_type }} — an explicit request, releasing"
             echo "publish=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -137,12 +150,23 @@ jobs:
       #
       # It is also what stops the next merge re-releasing the same version: `decide` reads these
       # tags, so until this exists, main looks unreleased.
+      # Only a merge creates a tag, and only if there is not one already.
+      #
+      # `push` and not merely "a branch ref", because a hand-run from main is now allowed through
+      # `decide` — and the reason it is allowed is the `registry-only` retry, which runs against a
+      # version whose tag already exists. `git tag -a` on an existing tag is a fatal error, so
+      # under `set -e` that retry would have died here instead of reaching the registry step it was
+      # dispatched for. Checked as well as scoped: a re-run of the same merge must not fail either.
       - name: Tag the release that came from main
-        if: ${{ github.ref_type == 'branch' && github.event.inputs.dry-run != 'true' }}
+        if: ${{ github.event_name == 'push' && github.ref_type == 'branch' && github.event.inputs.dry-run != 'true' }}
         env:
           VERSION: ${{ needs.decide.outputs.version }}
         run: |
           set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "v$VERSION already exists — leaving it alone"
+            exit 0
+          fi
           git -c user.name='github-actions[bot]' \
               -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
               tag -a "v$VERSION" -m "release $VERSION"

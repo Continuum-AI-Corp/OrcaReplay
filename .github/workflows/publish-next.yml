@@ -80,11 +80,31 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Newest first, so the first success is the newest one.
-          sha=$(gh run list --workflow=CI --branch=main --status=success \
+          # `--event=push`, and then checked again against main's history.
+          #
+          # `--branch` filters on a run's *head branch*, which for a pull request is the branch the
+          # PR came from — a fork's branch, named whatever its author chose. `ci.yml` runs on
+          # `pull_request`, so a fork PR from a branch called `main` produces a successful CI run
+          # whose head branch is `main`, and `--branch=main --status=success` would return it. This
+          # job would then publish a contributor's unmerged tree to `next` with `NPM_TOKEN` and
+          # provenance, and `npm i orcareplay@next` — which RELEASING.md tells people to use —
+          # would install it.
+          #
+          # `--event=push` is what makes the selection right: CI's push trigger is
+          # `branches: [main]`, and only this repository can push to it. `gh run list` cannot
+          # filter on the head repository (it does not expose the field), so the ancestry check
+          # below is the one that does not depend on reading GitHub's event semantics correctly.
+          sha=$(gh run list --workflow=CI --branch=main --event=push --status=success \
                   --limit 20 --json headSha --jq '.[0].headSha // empty')
           if [ -z "$sha" ]; then
             echo "no successful CI run on main to publish" >&2
+            exit 1
+          fi
+
+          # HEAD is main, checked out above with full history. A commit that is not in main's
+          # history is not main, whatever any filter said about it.
+          if ! git merge-base --is-ancestor "$sha" HEAD; then
+            echo "$sha is not an ancestor of main — refusing to publish it" >&2
             exit 1
           fi
 
