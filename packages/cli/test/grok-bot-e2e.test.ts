@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { TraceReader } from '@orcareplay/core';
+import { TraceReader, listRuns } from '@orcareplay/core';
 import { RunCa } from '@orcareplay/proxy';
 import { parseArgs } from '../src/args.js';
 import { Output } from '../src/out.js';
@@ -304,5 +304,36 @@ if (process.env.ORCA_TEST_RESULT_OUT) {
     expect(replay.exitCode).toBe(0);
     expect(replay.matchedExact).toBe(1);
     expect(replay.unmatched).toBe(0);
+  });
+
+  /**
+   * Issue #49: `orca replay --from 1 --model <other>` on a TLS-intercepted recording accepted
+   * the flag, echoed it, and called the recorded model. `replayed=0 live=0` meant substitution
+   * never ran. Forking from before the only exchange is a legitimate thing to ask for.
+   */
+  it('honours --model on a fork of a TLS-intercepted recording', async () => {
+    const recorded = await record();
+    expect(recorded.modelExchanges).toBe(1);
+    const before = xai.calls.length;
+    lines.length = 0;
+
+    const fork = await replayCommand(
+      parseArgs(['replay', recorded.runId, '--from', '1', '--model', 'grok-4-fast']),
+      out,
+      workspace,
+    );
+
+    expect(fork.exitCode).toBe(0);
+    expect(fork.liveCalls).toBeGreaterThan(0);
+    expect(xai.calls.length).toBeGreaterThan(before);
+    const live = xai.calls[xai.calls.length - 1] as { body: { model?: string } };
+    expect(live.body.model).toBe('grok-4-fast');
+
+    const forkDir = (await listRuns(workspace)).find((r) => r.runId === fork.forkRunId)?.dir;
+    expect(forkDir, 'the fork wrote a run of its own').toBeDefined();
+    const events = await (await TraceReader.open(forkDir!)).events();
+    const request = events.find((e) => e.type === 'model.request');
+    expect(request?.attrs?.model).toBe('grok-4-fast');
+    expect(lines.join('')).toMatch(/live=1/);
   });
 });

@@ -132,6 +132,34 @@ export interface InterceptResponse {
   body: string;
 }
 
+/**
+ * Forward this decrypted request to the origin, but with a different body.
+ *
+ * The CONNECT target stays the recorded host — a TLS-intercepted harness is still talking to the
+ * origin it named — while a fork's `--model` has to change what that origin is asked. Returning a
+ * full {@link InterceptResponse} would answer from orca and never reach the origin; returning
+ * nothing would reach it with the recorded model. This is the third option that `--model` needs.
+ */
+export interface InterceptForward {
+  outboundBody: Buffer;
+}
+
+export type InterceptDecision = InterceptResponse | InterceptForward;
+
+export function isInterceptResponse(decision: InterceptDecision): decision is InterceptResponse {
+  return 'status' in decision;
+}
+
+/**
+ * A rewritten body is uncompressed JSON even when the client sent gzip/zstd. The origin must not
+ * be told the old encoding, or it will try to inflate plaintext and the substitution is lost.
+ */
+function applyRewrittenBody(headers: Record<string, unknown>, body: Buffer): void {
+  delete headers['content-encoding'];
+  delete headers['content-length'];
+  headers['content-length'] = String(body.length);
+}
+
 /** Decode a recorded body, whichever of the two forms it was stored in. */
 export function readRecordedBody(body: string): Buffer {
   return body.startsWith(BINARY_BODY_PREFIX)
@@ -263,10 +291,17 @@ export interface TlsInterceptOptions {
    */
   trustedOriginCerts?: readonly string[];
   maxCapturedBytes?: number;
-  /** Answer a decrypted request from a recording. Undefined falls through to the live origin. */
+  /**
+   * Answer a decrypted request from a recording, or rewrite it before the origin sees it.
+   *
+   * Undefined falls through to the live origin with the client's bytes unchanged. An
+   * {@link InterceptResponse} is served locally and never opens an origin connection. An
+   * {@link InterceptForward} still opens one, with a substituted body — the `--model` path on a
+   * TLS-intercepted fork.
+   */
   onRequest?: (
     request: NetRequest,
-  ) => InterceptResponse | undefined | Promise<InterceptResponse | undefined>;
+  ) => InterceptDecision | undefined | Promise<InterceptDecision | undefined>;
   onNetExchange?: (exchange: NetExchange) => void;
   onTunnel?: (tunnel: TunnelRecord) => void;
   onFailure?: (failure: InterceptFailure) => void;
@@ -543,6 +578,7 @@ export function attachTlsIntercept(
     const responseBody = new Capture(maxCaptured);
     const contentEncoding =
       typeof headers['content-encoding'] === 'string' ? headers['content-encoding'] : undefined;
+    let rewrittenBody: Buffer | undefined;
 
     // Replay answers from the recording and must never reach the origin. The HTTP/1.1 twin has
     // consulted this hook since interception existed; without the same call here, a run recorded
@@ -550,7 +586,7 @@ export function attachTlsIntercept(
     // real model calls, on the caller's own credential, during what the operator ran offline.
     if (options.onRequest) {
       for await (const chunk of stream) requestBody.add(Buffer.from(chunk as Buffer));
-      const reply = await options.onRequest({
+      const decision = await options.onRequest({
         host: target.host,
         port: target.port,
         method,
@@ -559,12 +595,16 @@ export function attachTlsIntercept(
         requestBytes: requestBody.buffer(),
         requestTruncated: requestBody.truncated,
       });
-      if (reply) {
+      if (decision && isInterceptResponse(decision)) {
         if (stream.destroyed) return;
-        stream.respond({ ':status': reply.status, ...(reply.headers ?? {}) });
-        stream.end(reply.body);
+        stream.respond({ ':status': decision.status, ...(decision.headers ?? {}) });
+        stream.end(decision.body);
         counters.intercepted += 1;
         return;
+      }
+      if (decision) {
+        rewrittenBody = decision.outboundBody;
+        applyRewrittenBody(outbound, rewrittenBody);
       }
       // The bounded capture size is also the maximum replayable request size: forwarding a
       // truncated body upstream is worse than refusing clearly, which is what HTTP/1.1 does.
@@ -603,15 +643,19 @@ export function attachTlsIntercept(
         // skipped there -- and an exception in this callback would take the process down with the
         // exchange unrecorded. server.ts already decodes inside a try/catch for the same reason.
         let recordedRequest: string;
-        try {
-          recordedRequest = decodeBody(requestBody.buffer(), contentEncoding);
-        } catch (err) {
-          options.onFailure?.({
-            host: target.host,
-            port: target.port,
-            reason: `request body left opaque: ${String(err)}`,
-          });
-          recordedRequest = requestBody.text();
+        if (rewrittenBody) {
+          recordedRequest = recordableBody(rewrittenBody);
+        } else {
+          try {
+            recordedRequest = decodeBody(requestBody.buffer(), contentEncoding);
+          } catch (err) {
+            options.onFailure?.({
+              host: target.host,
+              port: target.port,
+              reason: `request body left opaque: ${String(err)}`,
+            });
+            recordedRequest = requestBody.text();
+          }
         }
         const decoded = recordableResponseBody(
           responseBody,
@@ -668,7 +712,7 @@ export function attachTlsIntercept(
 
       if (options.onRequest) {
         // The hook above consumed the body, so replay the bytes it read rather than the stream.
-        upstream.end(requestBody.buffer());
+        upstream.end(rewrittenBody ?? requestBody.buffer());
       } else {
         stream.on('data', (chunk: Buffer) => {
           requestBody.add(chunk);
@@ -770,12 +814,13 @@ export function attachTlsIntercept(
     outboundHeaders.host = req.headers.host ?? target.host;
 
     const requestBody = new Capture(maxCaptured);
+    let rewrittenBody: Buffer | undefined;
 
     // Replay has to decide before opening an origin connection. Buffer only when that hook is in
     // use; the recording path below retains the original streaming behaviour and bounded capture.
     if (options.onRequest) {
       for await (const chunk of req) requestBody.add(Buffer.from(chunk as Buffer));
-      const reply = await options.onRequest({
+      const decision = await options.onRequest({
         host: target.host,
         port: target.port,
         method: req.method ?? 'GET',
@@ -784,11 +829,15 @@ export function attachTlsIntercept(
         requestBytes: requestBody.buffer(),
         requestTruncated: requestBody.truncated,
       });
-      if (reply) {
-        res.writeHead(reply.status, reply.headers ?? {});
-        res.end(reply.body);
+      if (decision && isInterceptResponse(decision)) {
+        res.writeHead(decision.status, decision.headers ?? {});
+        res.end(decision.body);
         counters.intercepted += 1;
         return;
+      }
+      if (decision) {
+        rewrittenBody = decision.outboundBody;
+        applyRewrittenBody(outboundHeaders, rewrittenBody);
       }
     }
 
@@ -810,7 +859,7 @@ export function attachTlsIntercept(
       if (requestBody.truncated) {
         upstream.destroy(new Error(`request exceeded capture limit of ${maxCaptured} bytes`));
       } else {
-        upstream.end(requestBody.buffer());
+        upstream.end(rewrittenBody ?? requestBody.buffer());
       }
     } else {
       req.on('data', (chunk: Buffer) => requestBody.add(chunk));
@@ -841,20 +890,24 @@ export function attachTlsIntercept(
         // A body orca cannot decode is still an exchange worth having, and an exception thrown in
         // this callback would take the process down with it. Same guard, same reason, as h2.
         let recordedRequest: string;
-        try {
-          recordedRequest = decodeBody(
-            requestBody.buffer(),
-            typeof req.headers['content-encoding'] === 'string'
-              ? req.headers['content-encoding']
-              : undefined,
-          );
-        } catch (err) {
-          options.onFailure?.({
-            host: target.host,
-            port: target.port,
-            reason: `request body left opaque: ${String(err)}`,
-          });
-          recordedRequest = requestBody.text();
+        if (rewrittenBody) {
+          recordedRequest = recordableBody(rewrittenBody);
+        } else {
+          try {
+            recordedRequest = decodeBody(
+              requestBody.buffer(),
+              typeof req.headers['content-encoding'] === 'string'
+                ? req.headers['content-encoding']
+                : undefined,
+            );
+          } catch (err) {
+            options.onFailure?.({
+              host: target.host,
+              port: target.port,
+              reason: `request body left opaque: ${String(err)}`,
+            });
+            recordedRequest = requestBody.text();
+          }
         }
         const decoded = recordableResponseBody(
           responseBody,

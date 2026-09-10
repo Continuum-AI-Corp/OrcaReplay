@@ -388,6 +388,8 @@ describe('TLS interception', () => {
   let originSawAuth: string | undefined;
   /** The same, for the headers a provider attributes traffic by. */
   let originSawAttribution: Record<string, string | undefined>;
+  /** Body of a `/v1/chat/completions` the origin received, for `--model` substitution. */
+  let originSawChatBody: string | undefined;
 
   beforeEach(async () => {
     runDir = await mkdtemp(join(tmpdir(), 'orca-mitm-run-'));
@@ -399,6 +401,7 @@ describe('TLS interception', () => {
     modelExchanges = [];
     originSawAuth = undefined;
     originSawAttribution = {};
+    originSawChatBody = undefined;
 
     model = await startOrigin(originCa, (req, res) => {
       const chunks: Buffer[] = [];
@@ -492,6 +495,7 @@ describe('TLS interception', () => {
           return;
         }
         if (req.url === '/v1/chat/completions') {
+          originSawChatBody = body;
           res.writeHead(200, { 'content-type': 'application/json' });
           res.end(
             JSON.stringify({
@@ -1543,5 +1547,109 @@ describe('TLS interception', () => {
     });
     expect(handle.stats().intercepted).toBe(1);
     expect(handle.stats().tunnelled).toBe(1);
+  });
+
+  /**
+   * `--model` on a TLS-intercepted fork. Issue #49: the flag was accepted and echoed, then the
+   * intercepted live path forwarded the recorded model unchanged, and `live=0` because `goLive`
+   * never ran. Same-provider substitution has to rewrite the body and still talk to the CONNECT
+   * target — that origin's credential cannot follow us to a vendor default.
+   */
+  const interceptedChat = {
+    model: 'grok-4',
+    messages: [{ role: 'user', content: 'hello' }],
+  };
+
+  async function postInterceptedChat(
+    handle: ProxyHandle,
+    body: typeof interceptedChat = interceptedChat,
+  ): Promise<ProxiedResponse> {
+    return through({
+      proxyPort: handle.port,
+      host: '127.0.0.1',
+      port: model.port,
+      trust: [runCa.certPem],
+      method: 'POST',
+      path: '/v1/chat/completions',
+      body: JSON.stringify(body),
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+
+  it('substitutes --model on a TLS-intercepted live call and counts it as live', async () => {
+    const routes: Array<{ model: string; origin?: string }> = [];
+    proxy = await createProxy({
+      mode: 'hybrid',
+      exchanges: [],
+      forkAt: 0,
+      forkModel: 'grok-4-fast',
+      onExchange: (e) => void modelExchanges.push(e),
+      onRoute: (d) => void routes.push(d),
+      tls: {
+        ca: runCa,
+        hosts: [`127.0.0.1:${model.port}`],
+        trustedOriginCerts: [originCa.certPem],
+        onNetExchange: (e) => void netExchanges.push(e),
+      },
+    });
+
+    const response = await postInterceptedChat(proxy);
+    expect(response.status).toBe(200);
+    expect(JSON.parse(originSawChatBody ?? '{}').model).toBe('grok-4-fast');
+    expect(proxy.stats().liveCalls).toBe(1);
+    expect(modelExchanges[0]?.canonicalRequest.model).toBe('grok-4-fast');
+    expect(routes).toEqual([
+      expect.objectContaining({
+        model: 'grok-4-fast',
+        recorded: 'openai',
+        target: 'openai',
+        crossProvider: false,
+        origin: `https://127.0.0.1:${model.port}`,
+      }),
+    ]);
+  });
+
+  it('counts a TLS-intercepted live call even when --model is unchanged', async () => {
+    proxy = await createProxy({
+      mode: 'hybrid',
+      exchanges: [],
+      forkAt: 0,
+      onExchange: (e) => void modelExchanges.push(e),
+      tls: {
+        ca: runCa,
+        hosts: [`127.0.0.1:${model.port}`],
+        trustedOriginCerts: [originCa.certPem],
+        onNetExchange: (e) => void netExchanges.push(e),
+      },
+    });
+
+    const response = await postInterceptedChat(proxy);
+    expect(response.status).toBe(200);
+    expect(JSON.parse(originSawChatBody ?? '{}').model).toBe('grok-4');
+    expect(proxy.stats().liveCalls).toBe(1);
+    expect(modelExchanges).toHaveLength(1);
+  });
+
+  it('refuses a cross-provider --model on a TLS-intercepted fork instead of calling the old one', async () => {
+    proxy = await createProxy({
+      mode: 'hybrid',
+      exchanges: [],
+      forkAt: 0,
+      forkModel: 'claude-haiku-4-5',
+      onExchange: (e) => void modelExchanges.push(e),
+      tls: {
+        ca: runCa,
+        hosts: [`127.0.0.1:${model.port}`],
+        trustedOriginCerts: [originCa.certPem],
+        onNetExchange: (e) => void netExchanges.push(e),
+      },
+    });
+
+    const response = await postInterceptedChat(proxy);
+    expect(response.status).toBe(400);
+    expect(response.body).toMatch(/claude-haiku-4-5/);
+    expect(response.body).toMatch(/cannot leave the host/i);
+    expect(originSawChatBody).toBeUndefined();
+    expect(proxy.stats().liveCalls).toBe(0);
   });
 });
