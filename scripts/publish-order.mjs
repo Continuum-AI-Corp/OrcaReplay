@@ -77,6 +77,12 @@ if (problems.length > 0) {
 
 if (process.argv.includes('--json')) {
   console.log(JSON.stringify(order.map((n) => packages.get(n).dir)));
+} else if (process.argv.includes('--names')) {
+  // `name<TAB>dir`, because a publisher that needs to ask the registry about a package needs its
+  // name, and building one in the shell means interpolating a path into a `require` — which is a
+  // string escape on Windows (`packages\node-instrument` becomes a newline). This script already
+  // parsed every manifest, so it can just say.
+  for (const name of order) console.log(`${name}\t${packages.get(name).dir}`);
 } else {
   for (const name of order) console.log(packages.get(name).dir);
 }

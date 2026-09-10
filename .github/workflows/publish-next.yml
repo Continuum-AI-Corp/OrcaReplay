@@ -118,9 +118,14 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-          # Asking npm rather than tracking state: it is the thing that would reject a duplicate,
-          # and it stays right across a re-run, a hand-run minutes after the schedule, and a day
-          # with no merges.
+          # `orcareplay` is published *last*, so its presence means the previous run got all the
+          # way through: this is a completion check, not a progress one. An unfinished run looks
+          # identical to one that never started, which is fine here and is why the publish step
+          # asks about each package for itself.
+          #
+          # Asking npm rather than keeping state, because npm is the thing that would reject a
+          # duplicate — so the answer stays right across a re-run, a hand-run minutes after the
+          # schedule, and a day on which nothing merged.
           if npm view "orcareplay@$version" version >/dev/null 2>&1; then
             echo "orcareplay@$version is already published — nothing new on main"
             echo "publish=false" >> "$GITHUB_OUTPUT"
@@ -157,20 +162,40 @@ jobs:
       # be wrong in a way npm cannot undo.
       - run: node scripts/publish-order.mjs
 
+      # Resumable, because a partial publish cannot be undone.
+      #
+      # Twelve packages go one at a time and the loop stops where it fails, so a transient npm 5xx
+      # at package five leaves five versions on the registry permanently. Restarting from the top
+      # then dies immediately on E403 — npm refuses to replace a version, which is the property this
+      # whole design leans on — and every later run fails the same way, so that commit never reaches
+      # `next` at all. `pick` cannot see it either: it asks about `orcareplay`, which is published
+      # *last*, so any unfinished run looks exactly like one that never started.
+      #
+      # Asking per package makes a retry publish only what is missing. `--names` rather than
+      # deriving the name in the shell: that means interpolating a path into a `require`, which is a
+      # string escape on Windows and something this script already knows the answer to.
+      #
+      # A dry run skips the probe entirely and packs all twelve, because validating the tarballs is
+      # the whole point of one.
       - name: Publish in dependency order
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           DRY_RUN: ${{ github.event.inputs.dry-run }}
+          VERSION: ${{ needs.pick.outputs.version }}
         run: |
           set -euo pipefail
-          node scripts/publish-order.mjs | while read -r dir; do
+          node scripts/publish-order.mjs --names | while IFS="$(printf '\t')" read -r name dir; do
             if [ "${DRY_RUN:-false}" = "true" ]; then
-              echo "── dry run: $dir"
+              echo "── dry run: $name"
               ( cd "$dir" && npm publish --dry-run --provenance --access public --tag next )
-            else
-              echo "── publishing: $dir"
-              ( cd "$dir" && npm publish --provenance --access public --tag next )
+              continue
             fi
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+              echo "── already on npm, skipping: $name@$VERSION"
+              continue
+            fi
+            echo "── publishing: $name@$VERSION"
+            ( cd "$dir" && npm publish --provenance --access public --tag next )
           done
 
       - name: Say what to install

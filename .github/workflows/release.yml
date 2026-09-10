@@ -131,18 +131,32 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           DRY_RUN: ${{ github.event.inputs.dry-run }}
+          VERSION: ${{ needs.decide.outputs.version }}
         run: |
           set -euo pipefail
           # Computed, never hardcoded: internal deps are pinned to an exact version, so publishing
           # the CLI before the core it names would fail on a version the registry does not have.
-          node scripts/publish-order.mjs | while read -r dir; do
+          #
+          # Resumable for the same reason `publish-next.yml` is, and it matters more here. The loop
+          # stops where it fails, so a transient npm 5xx at package five leaves five versions of a
+          # *release* on the registry permanently — and npm refuses to replace a version, so a
+          # re-run from the top dies on E403 and the only way forward would be to abandon that
+          # version number half-published and bump again. Asking per package makes the retry publish
+          # exactly what is missing.
+          #
+          # A dry run skips the probe and packs all twelve: validating the tarballs is the point.
+          node scripts/publish-order.mjs --names | while IFS="$(printf '\t')" read -r name dir; do
             if [ "${DRY_RUN:-false}" = "true" ]; then
-              echo "── dry run: $dir"
+              echo "── dry run: $name"
               ( cd "$dir" && npm publish --dry-run --provenance --access public )
-            else
-              echo "── publishing: $dir"
-              ( cd "$dir" && npm publish --provenance --access public )
+              continue
             fi
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+              echo "── already on npm, skipping: $name@$VERSION"
+              continue
+            fi
+            echo "── publishing: $name@$VERSION"
+            ( cd "$dir" && npm publish --provenance --access public )
           done
 
       # Created after the publish, not before it, so the tag means "this went out" rather than
