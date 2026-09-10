@@ -5,8 +5,8 @@
 #
 # Every version published here is a prerelease — `0.2.4-main.<sha>`. npm excludes a prerelease from
 # `npm install <pkg>` even though it sorts above `0.2.3`, so nothing here can reach someone who did
-# not ask for it by name, and `--tag next` never moves `latest`. That is what makes publishing on
-# every merge safe: main is always available, and no user is opted in to it.
+# not ask for it by name, and `--tag next` never moves `latest`. That is what makes publishing from
+# main safe at all: main is always available, and no user is opted in to it.
 #
 # The version is derived from the commit, never committed back. Bumping a version in main to publish
 # from main would mean a bot with write access to the default branch and a push race between two
@@ -14,18 +14,25 @@
 # which matters because npm never allows re-publishing a version.
 name: Publish next
 
-# After CI, not on the push itself.
+# Once a day, not once a merge.
 #
-# CI already runs fmt, tsc, the suite on node 20 and 22, conformance, the framework integrations,
-# the Python SDK and plugin neutrality on every push to main. Re-running that here would double it
-# on a repository that merges several pull requests a day, and a second copy of the gate is a second
-# thing to keep in step. `workflow_run` also makes the rule structural rather than remembered:
-# nothing is published unless the checks for that exact commit went green.
+# A version is not free: npm serves a *packument* — the metadata document for every version of a
+# package — on every install, and it grows with the version count. `orcareplay` is 20 KB at seven
+# versions; `typescript` is 15.6 MB at 3820, which is roughly 4 KB each and is a real install-time
+# cost paid by everyone, including people who only ever ask for `latest`. Publishing on every merge
+# at eight pull requests a day would add ~2900 versions a year and put this package in that
+# territory inside twelve months. Daily is an eighth of that, and it is what `typescript` itself
+# does for its own `-dev` builds.
+#
+# The cost is that `next` can be up to a day behind main. `workflow_dispatch` covers the case where
+# that is not good enough: run it by hand and main is on npm in a couple of minutes.
+#
+# 04:00 UTC is noon in Beijing. GitHub's cron is UTC only, and it is best-effort — a scheduled run
+# is commonly minutes late and can be dropped under load, so treat this as "some time after noon"
+# rather than as a clock. For noon UTC instead, this is `0 12 * * *`.
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
-    branches: [main]
+  schedule:
+    - cron: '0 4 * * *'
   workflow_dispatch:
     inputs:
       dry-run:
@@ -39,25 +46,78 @@ permissions:
 
 # Queued, never cancelled. Twelve packages are published one at a time in dependency order, so
 # cancelling half way leaves some of them on the registry at a version the rest do not name — and
-# npm will not let that version be re-published to fix it. A burst of merges therefore publishes a
-# prerelease each, in order, rather than racing.
+# npm will not let that version be re-published to fix it. A hand-run that overlaps the schedule
+# therefore waits rather than racing it.
 concurrency:
   group: publish-next
   cancel-in-progress: false
 
 jobs:
-  next:
-    # A failed or cancelled CI run must publish nothing. `workflow_run` fires for those too.
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+  # Which commit, and whether it is worth publishing at all.
+  #
+  # A schedule knows neither, and both matter. `main` at 04:00 may be a commit whose checks are
+  # still running or already red, so this asks for the newest commit on main that CI actually
+  # passed — the guarantee `workflow_run` would have given for free. And on a day when nothing
+  # merged, that commit is the one already on `next`: republishing an identical tree under a new
+  # number is exactly the version-count cost this schedule exists to avoid.
+  pick:
     runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.pick.outputs.sha }}
+      version: ${{ steps.pick.outputs.version }}
+      publish: ${{ steps.pick.outputs.publish }}
     steps:
-      # The commit CI passed on, not whatever main has moved to since. `workflow_run` checks out
-      # the default branch by default, which would publish code the green tick did not cover.
+      # Full history: the newest green commit is usually main's tip but need not be, and a shallow
+      # clone would not contain it for the `git show` below.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: main
+          fetch-depth: 0
+
+      - id: pick
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Newest first, so the first success is the newest one.
+          sha=$(gh run list --workflow=CI --branch=main --status=success \
+                  --limit 20 --json headSha --jq '.[0].headSha // empty')
+          if [ -z "$sha" ]; then
+            echo "no successful CI run on main to publish" >&2
+            exit 1
+          fi
+
+          # The next patch, so a prerelease sorts *above* the release it follows: main is ahead of
+          # `latest`, and `0.2.3-main.x` would sort below `0.2.3` and say the opposite.
+          base=$(git show "$sha:packages/cli/package.json" | node -p \
+                   "JSON.parse(require('fs').readFileSync(0,'utf8')).version.split('-')[0]")
+          next=$(node -p "const v='$base'.split('.'); v[2]=Number(v[2])+1; v.join('.')")
+          version="$next-main.${sha:0:7}"
+
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          # Asking npm rather than tracking state: it is the thing that would reject a duplicate,
+          # and it stays right across a re-run, a hand-run minutes after the schedule, and a day
+          # with no merges.
+          if npm view "orcareplay@$version" version >/dev/null 2>&1; then
+            echo "orcareplay@$version is already published — nothing new on main"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publishing $version from ${sha:0:7}"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  next:
+    needs: pick
+    if: needs.pick.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      # The commit CI passed on, not whatever main has moved to since.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.pick.outputs.sha }}
 
       - uses: actions/setup-node@v4
         with:
@@ -69,21 +129,8 @@ jobs:
       # The published tarballs contain `dist/`, which is not committed.
       - run: npx tsc --build
 
-      - name: Work out the prerelease version
-        id: version
-        run: |
-          set -euo pipefail
-          sha="${{ github.event.workflow_run.head_sha || github.sha }}"
-          # The next patch, so a prerelease always sorts *above* the release it follows: main is
-          # ahead of `latest`, and `0.2.3-main.x` would sort below `0.2.3` and say the opposite.
-          base=$(node -p "require('./packages/cli/package.json').version.split('-')[0]")
-          next=$(node -p "const v='$base'.split('.'); v[2]=Number(v[2])+1; v.join('.')")
-          version="$next-main.${sha:0:7}"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "publishing $version from ${sha:0:7}"
-
-      - name: Set it across every workspace
-        run: node scripts/set-version.mjs "${{ steps.version.outputs.version }}"
+      - name: Set the version across every workspace
+        run: node scripts/set-version.mjs "${{ needs.pick.outputs.version }}"
 
       # The same gate the tagged release runs: it recomputes the publish order and fails if an
       # internal pin was left naming the old version, which is the one way `set-version.mjs` could
@@ -109,7 +156,7 @@ jobs:
       - name: Say what to install
         if: ${{ github.event.inputs.dry-run != 'true' }}
         run: |
-          echo "### \`orcareplay@next\` is now ${{ steps.version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### \`orcareplay@next\` is now ${{ needs.pick.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
           echo '' >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo 'npm i orcareplay@next' >> "$GITHUB_STEP_SUMMARY"

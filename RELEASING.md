@@ -15,12 +15,28 @@ sequence of `npm publish` calls run by hand at the end of a long day.
 | | what it is | who gets it |
 | --- | --- | --- |
 | `latest` | a version someone decided to release | `npm i orcareplay` |
-| `next` | every green commit on main, as `0.2.4-main.<sha>` | `npm i orcareplay@next` |
+| `next` | main, once a day, as `0.2.4-main.<sha>` | `npm i orcareplay@next` |
 
-`next` is published by `.github/workflows/publish-next.yml` after CI passes on main, and needs
-nothing from you. Every version on it is a **prerelease**, which npm excludes from
-`npm i orcareplay` even though `0.2.4-main.abc1234` sorts above `0.2.3` — so main is always
-installable and nobody is opted in to it by accident. `--tag next` never moves `latest`.
+`next` is published by `.github/workflows/publish-next.yml` on a daily schedule — 04:00 UTC, which
+is noon in Beijing — and needs nothing from you. Every version on it is a **prerelease**, which npm
+excludes from `npm i orcareplay` even though `0.2.4-main.abc1234` sorts above `0.2.3`, so main is
+always installable and nobody is opted in to it by accident. `--tag next` never moves `latest`.
+
+It publishes **the newest commit on main that CI passed**, not whatever main happens to be at
+04:00, and it skips a day on which nothing merged — the version it would publish is already on the
+registry, and it asks npm rather than keeping state. Needing main on npm sooner than tomorrow is
+what **Actions → Publish next → Run workflow** is for; uncheck *dry run*.
+
+> **Why daily rather than on every merge.** A version is not free. npm serves a *packument* — the
+> metadata for every version of a package — on each install, and it grows with the version count:
+> `orcareplay` is 20 KB at seven versions, `typescript` is 15.6 MB at 3820. That is roughly 4 KB
+> each, paid by everyone who installs, including people who only ever ask for `latest`. Publishing
+> per merge at this repository's rate would add ~2900 versions a year and land in that territory
+> inside twelve months. Daily is an eighth of it, and it is what `typescript` does for its own
+> `-dev` builds.
+>
+> GitHub's cron is UTC only and best-effort — a scheduled run is commonly minutes late and can be
+> dropped under load — so read the schedule as "some time after noon", not as a clock.
 
 That is what keeps the rest of this page short: releasing is no longer the only way to get main
 into someone's hands, so it can stay deliberate.
