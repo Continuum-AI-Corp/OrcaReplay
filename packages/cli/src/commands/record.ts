@@ -20,7 +20,7 @@ import { SerialQueue } from '../serial.js';
 import { appendSnapshot } from '../fs-events.js';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
-import { persistNetExchange, setupTlsCapture, trustRunCa } from '../tls-capture.js';
+import { persistNetExchange, planTlsCapture, setupTlsCapture, trustRunCa } from '../tls-capture.js';
 import { upstreamPlan } from '../upstream.js';
 import { ORCA_VERSION } from '../version.js';
 
@@ -118,6 +118,16 @@ async function runRecording(
     out.info('adapter.detected', { id: adapter.id });
   }
 
+  // Before the run directory exists, because both of these refuse: `upstreamPlan` an upstream that
+  // is not an origin, `planTlsCapture` a `--tls-hosts` list that names `*` or contradicts itself
+  // and an `ORCA_TLS_UPSTREAM_CA` that cannot be read. Resolved after it, a typo in any of them
+  // left an empty run behind for `orca list` to show. Neither depends on more than the arguments,
+  // the environment and a file the run was going to read anyway, so there is no reason for either
+  // to run later — and `planTlsCapture` is the refusing half of `setupTlsCapture` alone, so the
+  // certificate authority is still minted below, once the run has a directory to mint it into.
+  const plan = await upstreamPlan(args);
+  await planTlsCapture(args);
+
   const dir = await ensureRunsDir(cwd);
 
   const writer = await TraceWriter.create(dir, {
@@ -187,8 +197,6 @@ async function runRecording(
   // Serial, not parallel: each persist snapshots the workspace, and two overlapping `git add`
   // calls collide on index.lock. It also keeps seq in the order exchanges actually happened.
   const writes = new SerialQueue();
-
-  const plan = await upstreamPlan(args);
 
   /**
    * TLS interception, off unless the flag is present.

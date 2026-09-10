@@ -12,7 +12,7 @@ import {
   TraceWriter,
 } from '@orcareplay/core';
 import { FsCapture } from '@orcareplay/fs-capture';
-import { createProxy, defaultDialects, type RecordedExchange } from '@orcareplay/proxy';
+import { createProxy, defaultDialects, type RecordedExchange, type RunCa } from '@orcareplay/proxy';
 import { defaultAdapters, resolveLaunch } from '@orcareplay/adapters';
 import { serveViewer } from '@orcareplay/viewer';
 import { isBlobRef, type TraceEvent } from '@orcareplay/schema';
@@ -22,8 +22,8 @@ import type { ParsedArgs } from '../args.js';
 import { SerialQueue } from '../serial.js';
 import { appendSnapshot } from '../fs-events.js';
 import { drainMcpFrames, mcpForReplay, pointAtMcpConfig } from '../mcp.js';
-import { recordedTlsHosts, setupTlsCapture, trustRunCa } from '../tls-capture.js';
-import { upstreamPlan } from '../upstream.js';
+import { planTlsCapture, recordedTlsHosts, setupTlsCapture, trustRunCa } from '../tls-capture.js';
+import { upstreamPlan, type UpstreamPlan } from '../upstream.js';
 import { ORCA_VERSION } from '../version.js';
 
 export interface ReplayResult {
@@ -296,201 +296,92 @@ interface Ctx {
  * rather than letting the agent edit it a second time.
  */
 async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<ReplayResult> {
+  // Before `replayWorkspace`, because these refuse and `replayWorkspace` replaces the working
+  // tree. Resolved after it, a refusal threw with the checkout holding the recorded run's files
+  // and the operator's own tree left behind in an `orca-safety-*` scratch whose path nothing
+  // prints — the outcome the release exists to prevent, escaping it because it only ran at the
+  // child's launch. An invocation that cannot work should decide so before it touches anything,
+  // which is the rule `attach` already follows where it resolves the advertised URL before making
+  // a run directory.
+  //
+  // Two refusals, not one. `upstreamPlan` rejects an upstream that is not an origin;
+  // `planTlsCapture` rejects a `--tls-hosts` list that names `*` or contradicts itself, and an
+  // `ORCA_TLS_UPSTREAM_CA` that cannot be read. It is the refusing half of `setupTlsCapture` on
+  // its own — it mints nothing, so the certificate authority is still created down where the run
+  // is, after the workspace exists.
+  const plan = await upstreamPlan(args);
+  // A run recorded through interception is reproduced through it, without the operator having to
+  // remember which hosts they named. See `setupTlsCapture`.
+  const interceptedHosts = recordedTlsHosts(ctx.events);
+  await planTlsCapture(args, interceptedHosts);
+
+  // Armed on the line after the call, which is only sound because `replayWorkspace` owns its own
+  // destructive step: it either returns with the tree replaced and a `release` that undoes that,
+  // or it throws having already put the tree back. Arming here without that guarantee would have
+  // read as covering the restore while missing it entirely — the restore is inside the call, so a
+  // `materialize` that failed part-way rejected before `workspace` was ever assigned.
+  const workspace = await replayWorkspace(args, out, ctx);
+  try {
+    return await replayRestored(args, out, ctx, { plan, interceptedHosts, workspace });
+  } finally {
+    // The outermost of three, and the one that needs no list to be right. Hoisting a refusal is
+    // only ever as complete as the list of refusals somebody thought of, and that list has been
+    // wrong twice; `replayRestored` has its own `finally` for the span it owns; this covers what
+    // is left, which is `openReplayTrace` throwing before that span begins. `release` is
+    // idempotent, so the ordinary path still puts the tree back where it always did — before the
+    // run reports itself done — and this is a no-op behind it.
+    await workspace.release();
+  }
+}
+
+/**
+ * The replay itself, once the filesystem it needs is in place.
+ *
+ * Split from `replayExact` for one reason: everything in here happens with the recording's files
+ * over the operator's checkout, so it has to run inside something that puts them back.
+ */
+async function replayRestored(
+  args: ParsedArgs,
+  out: Output,
+  ctx: Ctx,
+  prepared: {
+    plan: UpstreamPlan;
+    interceptedHosts: readonly string[] | undefined;
+    workspace: Workspace;
+  },
+): Promise<ReplayResult> {
+  const { plan, interceptedHosts, workspace } = prepared;
   const divergences: { level: string; detail: string; seq: number }[] = [];
   const unmatched: { seq: number; reason: string }[] = [];
-  // Before `replayWorkspace`, because this refuses an upstream that is not an origin and
-  // `replayWorkspace` replaces the working tree. Resolved after it, a refusal threw with the
-  // checkout holding the recorded run's files and the operator's own tree left behind in an
-  // `orca-safety-*` scratch — the outcome the `finally` below exists to prevent, escaping it
-  // because that `finally` only begins at the child's launch. An invocation that cannot work
-  // should decide so before it touches anything, which is the rule `attach` already follows where
-  // it resolves the advertised URL before making a run directory.
-  const plan = await upstreamPlan(args);
-  const workspace = await replayWorkspace(args, out, ctx);
   const trace = await openReplayTrace(args, ctx, workspace.dir);
   // Serial for the same reason the recorder's is: the callbacks fire from the proxy's request
   // handler, and two overlapping appends would interleave lines in events.jsonl.
   const writes = new SerialQueue();
 
-  // A subscription-backed harness does not use the ordinary base URL, so exact replay needs the
-  // same per-run CA and HTTPS proxy as recording. The proxy's TLS hook then answers Codex's model
-  // request from the trace before it can open an origin connection.
-  // A run recorded through interception is reproduced through it, without the operator having to
-  // remember which hosts they named. See `setupTlsCapture`.
-  const interceptedHosts = recordedTlsHosts(ctx.events);
-  const tls = await setupTlsCapture({
-    args,
-    out,
-    ...(interceptedHosts ? { recordedHosts: interceptedHosts } : {}),
-    writer: trace,
-    runDir: ctx.runDir,
-    writes,
-    turn: () => 0,
-  });
+  /**
+   * The two things a failed replay would otherwise leave running or on disk.
+   *
+   * Filled as each is built, because what needs cleaning up depends on how far the run got:
+   * `createProxy` throwing has a key to remove and no socket, and everything after it has both.
+   */
+  let mintedCa: RunCa | undefined;
+  let openProxy: { close: () => Promise<void> } | undefined;
 
-  const proxy = await createProxy({
-    mode: 'replay',
-    exchanges: ctx.exchanges,
-    loose: args.bool('loose'),
-    upstream: plan.upstream,
-    upstreamHeaders: plan.headers,
-    upstreamHeadersOrigin: plan.headersOrigin,
-    ...tls.proxyOptions,
-    onDivergence: (d) => {
-      divergences.push(d);
-      if (!trace) return;
-      writes.push(async () => {
-        await trace.append({
-          type: 'divergence',
-          actor: 'orca',
-          // Turn 0 for everything in this trace, and deliberately not a running count. An exact
-          // match produces no callback, so a counter here would number the third divergence as
-          // turn 1 and claim a position in the conversation that it does not have. `source_seq`
-          // is the honest coordinate: it points straight at the parent's own event.
-          turn: 0,
-          attrs: { level: d.level, rung: d.rung, detail: d.detail, source_seq: d.seq },
-        });
-      });
-    },
-    // Printed as it happens rather than tallied at the end. A halted replay stops the agent, so
-    // the count in `replay.done` arrives after the operator has already seen the run die — and a
-    // bare `unmatched=1` with no reason is indistinguishable from a bug in orca itself.
-    //
-    // The two directories are on the line because a distance in the hundreds of thousands is true
-    // and unactionable. Harnesses put absolute paths in their tool calls, so a replay running
-    // anywhere but the recording's own directory gets a permission refusal where the recording has
-    // file contents — by far the most common cause of a halt, and invisible from the number alone.
-    onUnmatched: (u) => {
-      unmatched.push(u);
-      // A halt inside a delegation is not a corrupt trace and not a bug, and looks like both. The
-      // harness writes the delegate's prompt itself, fresh on every run, so the request really is
-      // a different question — which is exactly what the matcher refuses to serve from a
-      // recording. Without this the operator sees `distance 54` and goes looking for the fault.
-      const delegation = enclosingDelegation(ctx.events, u.seq);
-      out.warn('replay.unmatched', {
-        seq: u.seq,
-        index: u.index,
-        reason: u.reason,
-        ...(delegation === undefined
-          ? {}
-          : {
-              inside: `${delegation.subagent} delegated at seq ${delegation.seq}`,
-              why: 'the harness writes a delegate prompt of its own each run, so this request is a different question rather than a drifted one',
-            }),
-        recorded_in: ctx.manifest.cwd,
-        replayed_in: workspace.dir,
-        next:
-          workspace.dir === ctx.manifest.cwd
-            ? 'orca replay <run> --loose'
-            : `cd ${ctx.manifest.cwd} && orca replay <run> --in-place   # or --loose to continue live`,
-      });
-      if (!trace) return;
-      // `error`, not `divergence`: nothing was served and the run is over, so calling it an
-      // inexact match would put a rung on a ladder the request never climbed. It is also the one
-      // finding here that exists nowhere else — a matched exchange is already in the parent, but
-      // "the agent asked for something this recording cannot answer" is new, and until now it
-      // lived only in the operator's scrollback.
-      writes.push(async () => {
-        await trace.append({
-          type: 'error',
-          actor: 'orca',
-          turn: 0,
-          attrs: {
-            rule: 'replay_unmatched',
-            rung: 4,
-            reason: u.reason,
-            index: u.index,
-            source_seq: u.seq,
-            recorded_in: ctx.manifest.cwd,
-            replayed_in: workspace.dir,
-          },
-        });
-      });
-    },
-  });
-
-  await trace?.append({
-    type: 'run.start',
-    actor: 'orca',
-    turn: 0,
-    attrs: {
-      adapter: ctx.manifest.adapter.id,
-      cwd: workspace.dir,
-      proxy: proxy.url,
-      mode: 'replay',
-      // Also on the manifest, which is what an out-of-process reader sees first. Here as well
-      // because a trace read on its own should say what it is a replay of.
-      parent_run: ctx.manifest.run_id,
-      exchanges: ctx.exchanges.length,
-    },
-  });
-
-  out.phase('replaying', {
-    run: ctx.manifest.run_id,
-    exchanges: ctx.exchanges.length,
-    // Read from the flag, because `--loose` is exactly the run where it is not blocked. It was a
-    // literal, so `orca replay <run> --loose` announced `egress=blocked` and then answered the
-    // first unmatched request from the provider — the one line a reader checks to know whether a
-    // run can spend money, saying the opposite of what the run was about to do. Worse than an
-    // inaccuracy, because `replay halted` recommends `--loose` by name: the reader is following
-    // orca's own advice when the label stops being true.
-    egress: args.bool('loose') ? 'live-on-unmatched' : 'blocked',
-    proxy: proxy.url,
-    cwd: workspace.dir,
-  });
-
-  // The agent runs live for everything that is not a model call, MCP included. Without a config it
-  // talks to servers orca cannot see — or, for a harness that requires the variable, does not start
-  // at all, which is how a replay of a working recording exits non-zero for a reason that has
-  // nothing to do with the recording.
-  const mcp =
-    trace === undefined
-      ? undefined
-      : await mcpForReplay(args, ctx.events, trace, out, join(ctx.runDir, 'mcp-frames.jsonl'));
-
-  const adapter = defaultAdapters().get(ctx.manifest.adapter.id);
-  const launch = await adapter.prepare({
-    runId: ctx.manifest.run_id,
-    cwd: workspace.dir,
-    proxyUrl: proxy.url,
-    runDir: ctx.runDir,
-    userArgs: driveArgs(adapter, ctx, out),
-    env: process.env,
-  });
-  // Replaying must not introduce a catalog request before the capture plugin is installed.
-  if (adapter.id === 'opencode') launch.env.OPENCODE_DISABLE_MODELS_FETCH = '1';
-  if (proxy.tls) await trustRunCa(trace, proxy.tls, proxy.url, launch.env, out);
-  if (mcp) {
-    pointAtMcpConfig(launch.env, mcp.configPath);
-    // Same as record: the path has to reach the harness the way the harness actually reads it, or
-    // a replay re-instruments a config nothing opens and every recorded MCP call goes unmatched.
-    const mcpArgs = adapter.mcpConfigArgs?.(mcp.configPath);
-    if (mcpArgs !== undefined) launch.args = [...mcpArgs, ...launch.args];
-  }
-
-  let exitCode: number;
-  try {
-    exitCode = await runChild(
-      launch.command,
-      launch.args,
-      { ...process.env, ...launch.env },
-      workspace.dir,
-      agentStdoutFor(args),
-    );
-  } catch (err) {
-    // A listening proxy keeps node's event loop alive, so a throw here printed the error and then
-    // hung forever. The agent that was recorded is not always installed where the recording is
-    // replayed — that is half the point of a trace — and `spawn <agent> ENOENT` is what that looks
-    // like from in here.
-    //
-    // The fork path below already does this, and `orca record` does it too. This was the third of
-    // the three and the one still missing it, which is visible from the outside as `orca replay`
-    // being the one command of the three that has to be killed.
-    //
-    // The replay's own trace is sealed rather than abandoned, for the reason the fork gives: a run
-    // that failed to launch is still a run someone will want to read, and an unsealed trace has no
-    // `ended_at` or `integrity`, so `verifyIntegrity` calls it tampered with rather than unfinished.
-    await proxy.close().catch(() => undefined);
+  /**
+   * Give up on a replay that has already built something, then re-throw. `orca record`'s
+   * `abandon` is the same function for the same two reasons.
+   *
+   * A listening proxy keeps Node's event loop alive, so a throw printed the error and then hung
+   * forever — `orca replay` was the one command of the three that had to be killed. And an
+   * unsealed trace has no `ended_at` or `integrity`, so `verifyIntegrity` reports the run as
+   * *tampered* rather than as unfinished.
+   *
+   * Sealing rather than discarding, for the reason the fork gives: a run that failed to launch is
+   * still a run someone will want to read. The CA is not disposed here because the `finally`
+   * below does it on both paths.
+   */
+  async function abandon(err: unknown): Promise<never> {
+    await openProxy?.close().catch(() => undefined);
     await writes.drain().catch(() => undefined);
     if (trace) {
       await trace
@@ -499,71 +390,268 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
       await trace.close().catch(() => undefined);
     }
     throw err;
-  } finally {
-    // In a finally because the whole justification for restoring over the working tree is that it
-    // is put back — a throw between here and there would leave someone's checkout holding a
-    // recorded run's files.
-    await workspace.release();
-    await tls.ca?.dispose();
   }
 
-  await writes.drain();
-  const stats = proxy.stats();
-  await proxy.close();
+  /*
+   * Everything from here to the child's exit mints a key and then opens a socket, so everything
+   * from here to the child's exit has to come back through `abandon` — the rule `orca record`
+   * states in the same words, having learned it the same way.
+   *
+   * The guard used to start at the spawn, which covered the failure it was written for and missed
+   * the four that happen first. `RunCa.create` writes `tls/ca.key`; `createProxy` binds; then
+   * `mcpForReplay` rewrites a config and `adapter.prepare` runs a harness's own validation, which
+   * is where `orca replay` on a trace naming an adapter this build does not have ended up — the
+   * right error message, printed, and then a process that never exited with a private key left
+   * behind in the run directory.
+   */
+  try {
+    // A subscription-backed harness does not use the ordinary base URL, so exact replay needs the
+    // same per-run CA and HTTPS proxy as recording. The proxy's TLS hook then answers Codex's
+    // model request from the trace before it can open an origin connection.
+    // The hosts were resolved before the workspace was restored, where anything refusable about
+    // them was refused; this is the half that mints.
+    const tls = await setupTlsCapture({
+      args,
+      out,
+      ...(interceptedHosts ? { recordedHosts: interceptedHosts } : {}),
+      writer: trace,
+      runDir: ctx.runDir,
+      writes,
+      turn: () => 0,
+    });
+    // Handed to `abandon` the moment it exists, not once the run is under way: `createProxy` on
+    // the next line is one of the throws this key has to survive being disposed by.
+    mintedCa = tls.ca;
 
-  for (const d of divergences) {
-    out.warn('divergence', { seq: d.seq, level: d.level, detail: d.detail });
-  }
+    const proxy = await createProxy({
+      mode: 'replay',
+      exchanges: ctx.exchanges,
+      loose: args.bool('loose'),
+      upstream: plan.upstream,
+      upstreamHeaders: plan.headers,
+      upstreamHeadersOrigin: plan.headersOrigin,
+      ...tls.proxyOptions,
+      onDivergence: (d) => {
+        divergences.push(d);
+        if (!trace) return;
+        writes.push(async () => {
+          await trace.append({
+            type: 'divergence',
+            actor: 'orca',
+            // Turn 0 for everything in this trace, and deliberately not a running count. An exact
+            // match produces no callback, so a counter here would number the third divergence as
+            // turn 1 and claim a position in the conversation that it does not have. `source_seq`
+            // is the honest coordinate: it points straight at the parent's own event.
+            turn: 0,
+            attrs: { level: d.level, rung: d.rung, detail: d.detail, source_seq: d.seq },
+          });
+        });
+      },
+      // Printed as it happens rather than tallied at the end. A halted replay stops the agent, so
+      // the count in `replay.done` arrives after the operator has already seen the run die — and a
+      // bare `unmatched=1` with no reason is indistinguishable from a bug in orca itself.
+      //
+      // The two directories are on the line because a distance in the hundreds of thousands is true
+      // and unactionable. Harnesses put absolute paths in their tool calls, so a replay running
+      // anywhere but the recording's own directory gets a permission refusal where the recording has
+      // file contents — by far the most common cause of a halt, and invisible from the number alone.
+      onUnmatched: (u) => {
+        unmatched.push(u);
+        // A halt inside a delegation is not a corrupt trace and not a bug, and looks like both. The
+        // harness writes the delegate's prompt itself, fresh on every run, so the request really is
+        // a different question — which is exactly what the matcher refuses to serve from a
+        // recording. Without this the operator sees `distance 54` and goes looking for the fault.
+        const delegation = enclosingDelegation(ctx.events, u.seq);
+        out.warn('replay.unmatched', {
+          seq: u.seq,
+          index: u.index,
+          reason: u.reason,
+          ...(delegation === undefined
+            ? {}
+            : {
+                inside: `${delegation.subagent} delegated at seq ${delegation.seq}`,
+                why: 'the harness writes a delegate prompt of its own each run, so this request is a different question rather than a drifted one',
+              }),
+          recorded_in: ctx.manifest.cwd,
+          replayed_in: workspace.dir,
+          next:
+            workspace.dir === ctx.manifest.cwd
+              ? 'orca replay <run> --loose'
+              : `cd ${ctx.manifest.cwd} && orca replay <run> --in-place   # or --loose to continue live`,
+        });
+        if (!trace) return;
+        // `error`, not `divergence`: nothing was served and the run is over, so calling it an
+        // inexact match would put a rung on a ladder the request never climbed. It is also the one
+        // finding here that exists nowhere else — a matched exchange is already in the parent, but
+        // "the agent asked for something this recording cannot answer" is new, and until now it
+        // lived only in the operator's scrollback.
+        writes.push(async () => {
+          await trace.append({
+            type: 'error',
+            actor: 'orca',
+            turn: 0,
+            attrs: {
+              rule: 'replay_unmatched',
+              rung: 4,
+              reason: u.reason,
+              index: u.index,
+              source_seq: u.seq,
+              recorded_in: ctx.manifest.cwd,
+              replayed_in: workspace.dir,
+            },
+          });
+        });
+      },
+    });
+    // Listening from here on, so from here on a throw that does not close it is a process that
+    // does not exit.
+    openProxy = proxy;
 
-  // A halted replay is a failed replay even if the harness chose to exit 0 on the error. The exit
-  // code is what a script reads, so it has to reflect what happened rather than what the agent
-  // decided to do about it — and the trace records the same verdict for the same reason.
-  const verdict = exitCode === 0 && unmatched.length > 0 ? 1 : exitCode;
-
-  if (trace) {
-    // What the replay discovered rather than repeated: these calls really happened just now, and
-    // exist nowhere in the parent.
-    if (mcp) await drainMcpFrames(mcp, trace, () => 0, 0);
-    await trace.append({
-      type: 'run.end',
+    await trace?.append({
+      type: 'run.start',
       actor: 'orca',
       turn: 0,
       attrs: {
-        exit_code: verdict,
-        agent_exit_code: exitCode,
-        matched: stats.matchedExact,
-        divergences: stats.divergences,
-        unmatched: stats.unmatched,
+        adapter: ctx.manifest.adapter.id,
+        cwd: workspace.dir,
+        proxy: proxy.url,
+        mode: 'replay',
+        // Also on the manifest, which is what an out-of-process reader sees first. Here as well
+        // because a trace read on its own should say what it is a replay of.
+        parent_run: ctx.manifest.run_id,
+        exchanges: ctx.exchanges.length,
       },
     });
-    await trace.close(verdict);
+
+    out.phase('replaying', {
+      run: ctx.manifest.run_id,
+      exchanges: ctx.exchanges.length,
+      // Read from the flag, because `--loose` is exactly the run where it is not blocked. It was a
+      // literal, so `orca replay <run> --loose` announced `egress=blocked` and then answered the
+      // first unmatched request from the provider — the one line a reader checks to know whether a
+      // run can spend money, saying the opposite of what the run was about to do. Worse than an
+      // inaccuracy, because `replay halted` recommends `--loose` by name: the reader is following
+      // orca's own advice when the label stops being true.
+      egress: args.bool('loose') ? 'live-on-unmatched' : 'blocked',
+      proxy: proxy.url,
+      cwd: workspace.dir,
+    });
+
+    // The agent runs live for everything that is not a model call, MCP included. Without a config it
+    // talks to servers orca cannot see — or, for a harness that requires the variable, does not start
+    // at all, which is how a replay of a working recording exits non-zero for a reason that has
+    // nothing to do with the recording.
+    const mcp =
+      trace === undefined
+        ? undefined
+        : await mcpForReplay(args, ctx.events, trace, out, join(ctx.runDir, 'mcp-frames.jsonl'));
+
+    const adapter = defaultAdapters().get(ctx.manifest.adapter.id);
+    const launch = await adapter.prepare({
+      runId: ctx.manifest.run_id,
+      cwd: workspace.dir,
+      proxyUrl: proxy.url,
+      runDir: ctx.runDir,
+      userArgs: driveArgs(adapter, ctx, out),
+      env: process.env,
+    });
+    // Replaying must not introduce a catalog request before the capture plugin is installed.
+    if (adapter.id === 'opencode') launch.env.OPENCODE_DISABLE_MODELS_FETCH = '1';
+    if (proxy.tls) await trustRunCa(trace, proxy.tls, proxy.url, launch.env, out);
+    if (mcp) {
+      pointAtMcpConfig(launch.env, mcp.configPath);
+      // Same as record: the path has to reach the harness the way the harness actually reads it, or
+      // a replay re-instruments a config nothing opens and every recorded MCP call goes unmatched.
+      const mcpArgs = adapter.mcpConfigArgs?.(mcp.configPath);
+      if (mcpArgs !== undefined) launch.args = [...mcpArgs, ...launch.args];
+    }
+
+    const exitCode = await runChild(
+      launch.command,
+      launch.args,
+      { ...process.env, ...launch.env },
+      workspace.dir,
+      agentStdoutFor(args),
+    );
+
+    await writes.drain();
+    const stats = proxy.stats();
+    await proxy.close();
+
+    for (const d of divergences) {
+      out.warn('divergence', { seq: d.seq, level: d.level, detail: d.detail });
+    }
+
+    // A halted replay is a failed replay even if the harness chose to exit 0 on the error. The exit
+    // code is what a script reads, so it has to reflect what happened rather than what the agent
+    // decided to do about it — and the trace records the same verdict for the same reason.
+    const verdict = exitCode === 0 && unmatched.length > 0 ? 1 : exitCode;
+
+    if (trace) {
+      // What the replay discovered rather than repeated: these calls really happened just now, and
+      // exist nowhere in the parent.
+      if (mcp) await drainMcpFrames(mcp, trace, () => 0, 0);
+      await trace.append({
+        type: 'run.end',
+        actor: 'orca',
+        turn: 0,
+        attrs: {
+          exit_code: verdict,
+          agent_exit_code: exitCode,
+          matched: stats.matchedExact,
+          divergences: stats.divergences,
+          unmatched: stats.unmatched,
+        },
+      });
+      await trace.close(verdict);
+    }
+
+    out.phase('replay.done', {
+      // `matched=1 total=13` was the old shape, and on a healthy replay of a real harness it read as
+      // a failure: rung 1 is only reachable when nothing in the request was redacted, so a run whose
+      // every request was served from disk still reported one match. What someone wants to know here
+      // is how much of the recording was reused, and how much of that reuse was exact.
+      reused: `${stats.matchedExact + stats.matchedInexact}/${ctx.exchanges.length}`,
+      exact: stats.matchedExact,
+      divergences: stats.divergences,
+      unmatched: stats.unmatched,
+      exit: exitCode,
+      // Omitted entirely under --no-trace: `Output` drops undefined fields, so the line stays the
+      // shape it has always been for anyone who opted out.
+      trace: trace?.runId,
+    });
+
+    return {
+      runId: ctx.manifest.run_id,
+      mode: 'exact',
+      ...(trace === undefined ? {} : { traceRunId: trace.runId }),
+      matchedExact: stats.matchedExact,
+      divergences: stats.divergences,
+      unmatched: stats.unmatched,
+      liveCalls: stats.liveCalls,
+      exitCode: verdict,
+    };
+  } catch (err) {
+    // `return await`, not the bare `return abandon(err)` that `orca record` can afford. The
+    // difference is the `finally` below: a promise returned out of a `catch` is not adopted by
+    // the caller until the `finally` has finished, and this one awaits real I/O, so the
+    // rejection sits with no handler attached for as long as that takes. Node reports it as an
+    // unhandled rejection and kills the process on the spot — the operator got a raw stack trace
+    // where `orca replay` had always printed `error replay.failed`, and `main`'s catch never ran
+    // at all. Awaiting here turns it back into a throw *inside* the catch, before the finally,
+    // which is what every frame above expects.
+    return await abandon(err);
+  } finally {
+    // Both paths, which is why these two are here and the proxy is not: a replay that ran
+    // closes its own proxy after reading `stats()`, and one that did not comes through
+    // `abandon`. These do not divide that way. The whole justification for restoring over
+    // the working tree is that it is put back, and `tls-capture.ts` asks the caller to own
+    // the run CA on every exit path — `replayCommand` had no equivalent of the `minted`
+    // wrapper `recordCommand` and `attachCommand` use, so a key outlived every failure
+    // between the mint and the launch.
+    await workspace.release();
+    await mintedCa?.dispose();
   }
-
-  out.phase('replay.done', {
-    // `matched=1 total=13` was the old shape, and on a healthy replay of a real harness it read as
-    // a failure: rung 1 is only reachable when nothing in the request was redacted, so a run whose
-    // every request was served from disk still reported one match. What someone wants to know here
-    // is how much of the recording was reused, and how much of that reuse was exact.
-    reused: `${stats.matchedExact + stats.matchedInexact}/${ctx.exchanges.length}`,
-    exact: stats.matchedExact,
-    divergences: stats.divergences,
-    unmatched: stats.unmatched,
-    exit: exitCode,
-    // Omitted entirely under --no-trace: `Output` drops undefined fields, so the line stays the
-    // shape it has always been for anyone who opted out.
-    trace: trace?.runId,
-  });
-
-  return {
-    runId: ctx.manifest.run_id,
-    mode: 'exact',
-    ...(trace === undefined ? {} : { traceRunId: trace.runId }),
-    matchedExact: stats.matchedExact,
-    divergences: stats.divergences,
-    unmatched: stats.unmatched,
-    liveCalls: stats.liveCalls,
-    exitCode: verdict,
-  };
 }
 
 /**
@@ -642,6 +730,18 @@ async function replayFork(
   // requests happened at or before the checkpoint.
   const forkAt = ctx.exchanges.filter((e) => e.seq <= checkpoint.seq).length;
 
+  // Before the worktree and the fork's own run directory, because both of these refuse:
+  // `upstreamPlan` an upstream that is not an origin, `planTlsCapture` a `--tls-hosts` list that
+  // names `*` or contradicts itself and an `ORCA_TLS_UPSTREAM_CA` that cannot be read. Resolved
+  // after them, a typo in any of them left a restored temp tree in `$TMPDIR` that `orca gc` will
+  // not reclaim — no manifest points at it — and an empty fork in `orca list`, reading
+  // `FROM <parent>@<n>` as though it had run.
+  const plan = await upstreamPlan(args);
+  // A fork continues a recorded conversation, so it is intercepted on the same terms the
+  // recording was; see `setupTlsCapture` below, which this is the refusing half of.
+  const forkInterceptedHosts = recordedTlsHosts(ctx.events);
+  await planTlsCapture(args, forkInterceptedHosts);
+
   const worktree = await mkdtemp(join(tmpdir(), `orca-${checkpoint.seq}-`));
   if (checkpoint.fsTree) {
     // Restore from the ORIGINAL run's shadow store: that is the only place the tree object
@@ -700,15 +800,39 @@ async function replayFork(
     }
   }
 
-  const plan = await upstreamPlan(args);
-
   // A fork runs a real agent live, so it has exactly the same blind spot `orca record` does: a
   // harness that talks to its own backend over TLS reads no base-URL variable and is invisible
   // without interception. The flag was parsed here and silently discarded, which is the worse
   // half — the operator believes they captured that traffic.
   // Same for a fork: it continues a recorded conversation, so its prefix is replayed and the
   // requests carrying it arrive by the same intercepted transport they were recorded on.
-  const forkInterceptedHosts = recordedTlsHosts(ctx.events);
+
+  /** Filled as each is built; see the exact path's pair, which this mirrors. */
+  let mintedCa: RunCa | undefined;
+  let openProxy: { close: () => Promise<void> } | undefined;
+
+  /**
+   * The same two failures `orca record` had. A listening proxy keeps Node's event loop alive, so
+   * a throw printed the error and then hung; and a fork that mints a certificate authority must
+   * not leave the private key on disk when it dies. The trace is sealed either way, because a
+   * fork that failed to launch is still a fork someone will want to read.
+   *
+   * This used to guard the spawn alone, which is one throw out of five: `RunCa.create` writes the
+   * key, `mcpForReplay` rewrites a config, `createProxy` binds, and `adapter.prepare` runs a
+   * harness's own validation — all of them before the child, all of them leaving the key, the
+   * socket, or both.
+   */
+  async function abandon(err: unknown): Promise<never> {
+    await openProxy?.close().catch(() => undefined);
+    await writes.drain().catch(() => undefined);
+    await mintedCa?.dispose().catch(() => undefined);
+    await writer
+      .append({ type: 'run.end', actor: 'orca', turn, attrs: { error: String(err) } })
+      .catch(() => undefined);
+    await writer.close().catch(() => undefined);
+    throw err;
+  }
+
   const tls = await setupTlsCapture({
     args,
     out,
@@ -716,11 +840,12 @@ async function replayFork(
     writer,
     writes,
     turn: () => turn,
-  });
+  }).catch(abandon);
+  mintedCa = tls.ca;
 
   // A fork continues the run live past the checkpoint, so its MCP traffic is new and belongs in the
   // fork's own trace. Without this the layer simply stopped at the fork point.
-  const mcp = await mcpForReplay(args, ctx.events, writer, out);
+  const mcp = await mcpForReplay(args, ctx.events, writer, out).catch(abandon);
 
   const proxy = await createProxy({
     mode: 'hybrid',
@@ -761,6 +886,8 @@ async function replayFork(
       });
     },
   });
+  // Listening from here on — see the exact path.
+  openProxy = proxy;
 
   await writer.append({
     type: 'fork',
@@ -786,50 +913,41 @@ async function replayFork(
     worktree,
   });
 
-  const adapter = defaultAdapters().get(ctx.manifest.adapter.id);
-  const launch = await adapter.prepare({
-    runId: writer.runId,
-    cwd: worktree,
-    proxyUrl: proxy.url,
-    runDir: writer.runDir,
-    userArgs: driveArgs(adapter, ctx, out),
-    env: process.env,
-  });
+  // `defaultAdapters().get` refuses a manifest naming an adapter this build does not have, which
+  // is what replaying a newer orca's recording looks like from here, and `prepare` is where a
+  // harness validates its own invocation. Both are throws with the proxy already listening.
+  const launch = await (async () => {
+    const adapter = defaultAdapters().get(ctx.manifest.adapter.id);
+    const prepared = await adapter.prepare({
+      runId: writer.runId,
+      cwd: worktree,
+      proxyUrl: proxy.url,
+      runDir: writer.runDir,
+      userArgs: driveArgs(adapter, ctx, out),
+      env: process.env,
+    });
 
-  if (proxy.tls) {
-    await trustRunCa(writer, proxy.tls, proxy.url, launch.env, out);
-  }
-  if (mcp) {
-    pointAtMcpConfig(launch.env, mcp.configPath);
-    // Same as record: the path has to reach the harness the way the harness actually reads it, or
-    // a replay re-instruments a config nothing opens and every recorded MCP call goes unmatched.
-    const mcpArgs = adapter.mcpConfigArgs?.(mcp.configPath);
-    if (mcpArgs !== undefined) launch.args = [...mcpArgs, ...launch.args];
-  }
+    if (proxy.tls) {
+      await trustRunCa(writer, proxy.tls, proxy.url, prepared.env, out);
+    }
+    if (mcp) {
+      pointAtMcpConfig(prepared.env, mcp.configPath);
+      // Same as record: the path has to reach the harness the way the harness actually reads it,
+      // or a replay re-instruments a config nothing opens and every recorded MCP call goes
+      // unmatched.
+      const mcpArgs = adapter.mcpConfigArgs?.(mcp.configPath);
+      if (mcpArgs !== undefined) prepared.args = [...mcpArgs, ...prepared.args];
+    }
+    return prepared;
+  })().catch(abandon);
 
-  let exitCode: number;
-  try {
-    exitCode = await runChild(
-      launch.command,
-      launch.args,
-      { ...process.env, ...launch.env },
-      worktree,
-      agentStdoutFor(args),
-    );
-  } catch (err) {
-    // The same two failures `orca record` had. A listening proxy keeps Node's event loop alive, so
-    // a throw here printed the error and then hung; and a fork that mints a certificate authority
-    // must not leave the private key on disk when it dies. The trace is sealed either way, because
-    // a fork that failed to launch is still a fork someone will want to read.
-    await proxy.close().catch(() => undefined);
-    await writes.drain().catch(() => undefined);
-    await tls.ca?.dispose().catch(() => undefined);
-    await writer
-      .append({ type: 'run.end', actor: 'orca', turn, attrs: { error: String(err) } })
-      .catch(() => undefined);
-    await writer.close().catch(() => undefined);
-    throw err;
-  }
+  const exitCode = await runChild(
+    launch.command,
+    launch.args,
+    { ...process.env, ...launch.env },
+    worktree,
+    agentStdoutFor(args),
+  ).catch(abandon);
   await writes.drain();
   if (mcp) await drainMcpFrames(mcp, writer, turnAtFork, turn);
 
@@ -865,6 +983,12 @@ async function replayFork(
 /** Where an exact replay runs, and how to put the directory back afterwards. */
 interface Workspace {
   dir: string;
+  /**
+   * Put the working tree back. Idempotent, and called from two places for that reason: once at
+   * the child's launch, where it belongs on the ordinary path, and once from a `finally` around
+   * the whole restored span, which is what makes the guarantee hold for a throw that never
+   * reaches the launch at all.
+   */
   release: () => Promise<void>;
 }
 
@@ -935,24 +1059,46 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
     note: 'your files are restored when the replay ends',
   });
 
-  await recorded.restore(initial.fsTree, ctx.cwd);
-
-  return {
-    dir: ctx.cwd,
-    release: async () => {
-      await safety.restore(before.tree, ctx.cwd);
-      // Only after the restore succeeded. This store holds the only copy of your working tree as
-      // it was before the replay overwrote it, so removing it on the failure path would delete the
-      // thing the failure means you still need — better a directory to clean up by hand than the
-      // one that had your uncommitted work in it.
-      //
-      // Left behind on every run until now: a whole workspace per `orca replay`, in a directory
-      // `orca gc` deliberately will not touch because it only reclaims scratch worktrees belonging
-      // to forks. Owning its lifetime here is the fix; teaching gc to delete unknown temp
-      // directories is how gc ends up removing someone's work.
-      await rm(scratch, { recursive: true, force: true });
-    },
+  // Two callers, on purpose — see `Workspace.release`. Restoring twice would be wrong rather than
+  // merely wasteful: the second pass would write the pre-replay tree back over whatever the
+  // caller has done since, and the `rm` would take the scratch with it.
+  let released = false;
+  const release = async (): Promise<void> => {
+    if (released) return;
+    released = true;
+    await safety.restore(before.tree, ctx.cwd);
+    // Only after the restore succeeded. This store holds the only copy of your working tree as
+    // it was before the replay overwrote it, so removing it on the failure path would delete the
+    // thing the failure means you still need — better a directory to clean up by hand than the
+    // one that had your uncommitted work in it.
+    //
+    // Left behind on every run until now: a whole workspace per `orca replay`, in a directory
+    // `orca gc` deliberately will not touch because it only reclaims scratch worktrees belonging
+    // to forks. Owning its lifetime here is the fix; teaching gc to delete unknown temp
+    // directories is how gc ends up removing someone's work.
+    await rm(scratch, { recursive: true, force: true });
   };
+
+  // The destructive step, inside the thing that undoes it.
+  //
+  // A caller cannot guard this one: it happens here, and the `release` that undoes it does not
+  // exist outside this function until this function returns. So a `materialize` that failed
+  // part-way — it is `read-tree` + `checkout-index -a -f` with no rollback of its own, and a
+  // path conflict, EACCES or ENOSPC stops it mid-tree — left the operator holding a mixture of
+  // their files and the recording's, with the only copy of the original in a scratch directory
+  // whose path nothing prints, and no release attempted anywhere.
+  //
+  // With this, the function has one postcondition either way: it returns with the tree replaced
+  // and a `release` that puts it back, or it throws with the tree as it found it. That is what
+  // lets the caller arm its own guard on the line after the call rather than before it.
+  try {
+    await recorded.restore(initial.fsTree, ctx.cwd);
+  } catch (err) {
+    await release();
+    throw err;
+  }
+
+  return { dir: ctx.cwd, release };
 }
 
 /** Where the replayed agent's own stdout should go, given the flags. */
