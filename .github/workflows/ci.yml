@@ -86,6 +86,12 @@ jobs:
       # `pip install orca-trace` actually works, which is how anyone will really get it.
       - run: pip install ./python[dev]
       - run: python -m pytest python/ -q
+      # The second Python distribution in this tree. It was added with tests and with a `pip install
+      # -e` in the integrations job, and nothing ran them — the same shape as the skipped checks
+      # that job now fails on, one layer out. Its `[dev]` extra brings the Agents SDK, because two
+      # of its tests are about how `install()` registers with it.
+      - run: pip install ./python-openai-agents[dev]
+      - run: python -m pytest python-openai-agents/ -q
 
   plugin-api-neutrality:
     name: plugin API neutrality
