@@ -262,6 +262,57 @@ describe('end to end: record → replay → fork', () => {
   });
 
   /**
+   * Nor may a refusal leave a run behind.
+   *
+   * The same misordering as above, in its quiet form. `upstreamPlan` throws for an upstream that is
+   * not an origin, and every command resolved it *after* creating the run directory — `record`,
+   * `attach`, and the fork path, which also restores a temp worktree first. So a typo in
+   * `--upstream-*` left an empty run for `orca list` to show, reading `FROM <parent>@<n>` on a fork
+   * as though it had run, plus a restored tree abandoned in `$TMPDIR`. Nothing was lost, which is
+   * why it went unnoticed; it is the same rule, and the rule is that an invocation which cannot
+   * work decides so before it touches anything.
+   */
+  it('leaves no run behind when it refuses the upstream', async () => {
+    const BAD = 'myuser:PASSWORD@gw.example/v1';
+
+    const before = (await listRuns(workspace)).length;
+    await expect(
+      recordCommand(
+        parseArgs(['record', 'generic-openai', '--upstream-openai', BAD, '--', 'node', FAKE_AGENT]),
+        out,
+        workspace,
+      ),
+    ).rejects.toThrow(/is not an origin orca can use/);
+    expect((await listRuns(workspace)).length, 'a refused record must not have created a run').toBe(
+      before,
+    );
+
+    // The fork path gets there by a different route: a checkpoint restored into a temp worktree and
+    // a second run directory, both made before the upstream was ever looked at.
+    await record();
+    const afterGood = (await listRuns(workspace)).length;
+    await expect(
+      replayCommand(
+        parseArgs([
+          'replay',
+          'last',
+          '--from',
+          '1',
+          '--model',
+          'gpt-5.2',
+          '--upstream-openai',
+          BAD,
+        ]),
+        out,
+        workspace,
+      ),
+    ).rejects.toThrow(/is not an origin orca can use/);
+    expect((await listRuns(workspace)).length, 'a refused fork must not have created a run').toBe(
+      afterGood,
+    );
+  });
+
+  /**
    * The one line a reader checks to know whether a run can spend money.
    *
    * `egress` was a literal, so `--loose` — which answers an unmatched request from the provider —

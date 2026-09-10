@@ -118,6 +118,11 @@ async function runRecording(
     out.info('adapter.detected', { id: adapter.id });
   }
 
+  // Before the run directory exists, because this refuses an upstream that is not an origin: resolved after it, a
+  // typo in `--upstream-*` left an empty run behind for `orca list` to show. It depends on nothing
+  // but the arguments and the environment, so there is no reason for it to run any later.
+  const plan = await upstreamPlan(args);
+
   const dir = await ensureRunsDir(cwd);
 
   const writer = await TraceWriter.create(dir, {
@@ -187,8 +192,6 @@ async function runRecording(
   // Serial, not parallel: each persist snapshots the workspace, and two overlapping `git add`
   // calls collide on index.lock. It also keeps seq in the order exchanges actually happened.
   const writes = new SerialQueue();
-
-  const plan = await upstreamPlan(args);
 
   /**
    * TLS interception, off unless the flag is present.

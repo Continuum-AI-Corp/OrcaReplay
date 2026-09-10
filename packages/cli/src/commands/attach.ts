@@ -141,6 +141,11 @@ async function runAttached(
   // — so the next command someone types operates on the session that never happened.
   planTlsCapture(args, replaying?.hosts);
 
+  // Before the run directory exists, because this refuses an upstream that is not an origin: resolved after it, a
+  // typo in `--upstream-*` left an empty run behind for `orca list` to show. It depends on nothing
+  // but the arguments and the environment, so there is no reason for it to run any later.
+  const plan = await upstreamPlan(args);
+
   const dir = await ensureRunsDir(cwd);
   const writer = await TraceWriter.create(dir, {
     adapter: { id: adapter.id, version: ORCA_VERSION, harness_version: adapter.harnessVersions },
@@ -154,7 +159,6 @@ async function runAttached(
   let unmatched = 0;
 
   const writes = new SerialQueue();
-  const plan = await upstreamPlan(args);
   const tls = await setupTlsCapture({
     args,
     out,

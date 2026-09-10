@@ -642,6 +642,11 @@ async function replayFork(
   // requests happened at or before the checkpoint.
   const forkAt = ctx.exchanges.filter((e) => e.seq <= checkpoint.seq).length;
 
+  // Before the worktree and the fork's own run directory, because this refuses an upstream that
+  // is not an origin: resolved after them, a typo in `--upstream-*` left a restored temp tree in
+  // `$TMPDIR` and an empty fork in `orca list`, reading `FROM <parent>@<n>` as though it had run.
+  const plan = await upstreamPlan(args);
+
   const worktree = await mkdtemp(join(tmpdir(), `orca-${checkpoint.seq}-`));
   if (checkpoint.fsTree) {
     // Restore from the ORIGINAL run's shadow store: that is the only place the tree object
@@ -699,8 +704,6 @@ async function replayFork(
       out.warn('fs.unavailable', { reason: String(err) });
     }
   }
-
-  const plan = await upstreamPlan(args);
 
   // A fork runs a real agent live, so it has exactly the same blind spot `orca record` does: a
   // harness that talks to its own backend over TLS reads no base-URL variable and is invisible
