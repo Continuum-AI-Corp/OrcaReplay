@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { join } from 'node:path';
 import type { BlobRef, Manifest, TraceEvent } from '@orcareplay/schema';
-import { INLINE_PAYLOAD_LIMIT, RUN_ID_PATTERN, validateManifest } from '@orcareplay/schema';
+import {
+  INLINE_PAYLOAD_LIMIT,
+  RUN_ID_PATTERN,
+  SCHEMA_VERSION,
+  validateManifest,
+} from '@orcareplay/schema';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { BlobStore } from '../src/blobs.js';
 import { TraceWriter } from '../src/writer.js';
@@ -363,7 +368,10 @@ describe('TraceWriter.close', () => {
     expect(m.exit_code).toBe(3);
     expect(m.counts).toEqual({ events: 2, blobs: 0 });
     expect(m.integrity?.blob_count).toBe(0);
-    expect(m.schema_version).toBe('0.1.0');
+    // Against the constant, not a literal. What this seals is that a sealed manifest *carries* the
+    // schema version — pinning the number here only means the next MINOR bump fails a test that was
+    // never about the number.
+    expect(m.schema_version).toBe(SCHEMA_VERSION);
     expect(m.platform?.node).toBe(process.version);
   });
 

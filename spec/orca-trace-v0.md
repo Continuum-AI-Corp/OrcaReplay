@@ -72,6 +72,9 @@ Because every model turn resends the whole conversation, content addressing is w
 | `shell.exec` / `shell.result` | A shell command, from the PATH shim. |
 | `fs.snapshot` / `fs.change` | A workspace tree id, and a diff against the previous tree. |
 | `net.request` / `net.response` | Non-model HTTP seen by the proxy. |
+| `agent.start` | An agent began a turn: its name, the tools and handoffs it was given. From a harness's own tracing, not from the wire. |
+| `agent.handoff` | One agent handed control to another, naming both. A proxy sees the transfer as an ordinary tool call and cannot say which agent it came *from*. |
+| `agent.guardrail` | A guardrail ran, and whether it tripped. Guardrails need not make any request, so this can have no trace on the wire at all. |
 | `session.snapshot` | The harness's own transcript, captured at the point the run ended. Carries what the run was *asked*, which a hand-driven run leaves nowhere on the wire. |
 | `error` | A failure derived from another event or reported by the harness. |
 | `divergence` | Replay matched inexactly. See §4. |
@@ -79,6 +82,12 @@ Because every model turn resends the whole conversation, content addressing is w
 | `fork` | A run forked from this point into a child run. |
 | `route.decision` | A gateway chose a model. **Generic** — any gateway may emit it. |
 | `note` | Derived annotation from an analyzer (e.g. loop detection). |
+
+The three `agent.*` types are the first that cannot come from the proxy at all. Every other type
+above is something orca observed itself; these are reported by the harness through its own tracing
+interface, and a trace that has none of them is not missing anything — it is a run whose harness
+either has no such interface or was not asked to use it. Readers must treat them as optional, like
+any other type they do not find.
 
 Adding a type is a MINOR version bump. Removing or changing the meaning of one is MAJOR.
 
