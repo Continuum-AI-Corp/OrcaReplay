@@ -82,23 +82,29 @@ caught that, which is why CrewAI has its own check now.
 
 ### Two things that changed with it
 
-**A prefixed model name is validated; a bare one is not.** This matters here because pointing an
-agent at a gateway usually means naming a model the provider has never heard of, which is exactly
-the case the two forms treat differently:
+**A bare model name is unconditional; a prefixed one depends on what is installed.** This matters
+here because pointing an agent at a gateway usually means naming a model the vendor never published.
 
 | `LLM(model=…)` | resolves |
 |---|---|
-| `gpt-4o-mini`, `o3-mini` | yes — native OpenAI provider |
-| `openai/gpt-4o-mini`, `openai/o3-mini` | yes — same provider |
-| `my-gateway-model` | **yes** — a bare name always reaches the native provider |
-| `openai/my-gateway-model` | **no** — `ImportError: ... did not match any supported native provider` |
+| `gpt-4o-mini`, `my-gateway-model` | always — a bare name goes to the native OpenAI provider whatever it is called |
+| `openai/gpt-4o-mini`, `openai/o3-mini` | always — a native provider claims it |
+| `openai/my-gateway-model`, `foo/anything` | **only where LiteLLM is installed** |
 
-So use the bare form when the model name is your gateway's rather than the vendor's. The prefixed
-form is checked against a known-model list, and a name that is not on it falls through to the
-LiteLLM path, which a default 1.x install no longer has.
+A prefixed name no native provider claims falls through to LiteLLM, and CrewAI 1.x does not install
+LiteLLM by default (`crewai[litellm]` adds it). So the same line resolves on one machine and raises
+`ImportError: ... and the LiteLLM fallback package is not installed` on another. **Use the bare form
+for a gateway's own model names** and the question does not arise.
 
-It fails before any request is made, so orca records three events and reports `capture.empty` —
-accurate, and easy to misread as a capture problem when it is a model-name problem.
+When it does raise, it raises while the `LLM` is being built — before any request — so orca records
+three events and reports `capture.empty`, which is accurate and easy to misread as a capture problem.
+
+> This paragraph has been wrong twice. First it said a prefixed name never resolves on 1.x, from a
+> measurement that used `openai/stub-1` and blamed the prefix for what `stub-1` had done. Then the
+> correction said a prefixed *unknown* name always raises, from a machine whose LiteLLM install was
+> broken — which `crewai.llm._ensure_litellm()` cannot tell from an absent one. CI, where LiteLLM
+> works, disagreed. `test/integrations/agents/crewai_model_names.py` now pins both halves and checks
+> the conditional one against whichever way LiteLLM actually is.
 
 **`LLM(base_url=…)` is now honoured.** It used not to be: passing the origin in code did nothing,
 because it never reached LiteLLM's `api_base`. Measured again on 1.15.20 against a listener with the

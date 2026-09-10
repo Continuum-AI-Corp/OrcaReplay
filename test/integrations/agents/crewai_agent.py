@@ -10,10 +10,10 @@ Two things this pins that the LiteLLM route cannot:
 
   - the native provider reads `OPENAI_API_BASE` *and* `OPENAI_BASE_URL`, both of which
     `generic-openai` sets — so the capture survived the change even though the reason for it did not
-  - a bare model name always reaches the native provider, whatever the name. A prefixed one is
-    checked against a known-model list, so `LLM(model="openai/stub-1")` raises `ImportError` while
-    the bare `stub-1` does not — which is why this check uses the bare form, and which is the same
-    distinction anyone pointing CrewAI at a gateway runs into
+  - a bare model name always reaches the native provider, whatever the name. A prefixed one that no
+    native provider claims falls through to LiteLLM, which 1.x does not install by default — so
+    `LLM(model="openai/stub-1")` resolves or raises depending on the machine. The bare form is used
+    here for that reason, and `crewai_model_names.py` pins both halves
 """
 
 import os
