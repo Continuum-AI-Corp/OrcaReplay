@@ -58,6 +58,36 @@ function stream(seen) {
   return `${frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join('')}data: [DONE]\n\n`;
 }
 
+/**
+ * The Responses API shape.
+ *
+ * Here because it is the OpenAI Agents SDK's *default* — not an option it offers — so a check that
+ * quietly switched the SDK to chat completions would prove the wrong path works. orca has carried a
+ * `responses` dialect since early on; until this, nothing end to end exercised it.
+ */
+function responses(seen) {
+  return {
+    id: 'resp_stub_1',
+    object: 'response',
+    created_at: 1756000000,
+    status: 'completed',
+    model: seen.model ?? 'stub-1',
+    output: [
+      {
+        id: 'msg_stub_1',
+        type: 'message',
+        role: 'assistant',
+        status: 'completed',
+        content: [{ type: 'output_text', text: REPLY, annotations: [] }],
+      },
+    ],
+    usage: { input_tokens: 9, output_tokens: 4, total_tokens: 13 },
+    parallel_tool_calls: false,
+    tool_choice: 'auto',
+    tools: [],
+  };
+}
+
 function anthropic(seen) {
   return {
     id: 'msg_stub_1',
@@ -82,6 +112,13 @@ const server = createServer((req, res) => {
       // whether orca captured it, not whether the client sent valid JSON.
     }
 
+    // Before the generic branch: a Responses request wants Responses output back, not a
+    // chat.completion the SDK cannot parse.
+    if (req.url?.includes('/responses')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(responses(seen)));
+      return;
+    }
     if (req.url?.includes('/messages')) {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(anthropic(seen)));

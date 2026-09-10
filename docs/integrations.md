@@ -61,23 +61,52 @@ and is not covered by the checks here.
 
 ---
 
-## CrewAI, Aider
+## CrewAI
 
 ```console
 orca record generic-openai -- python your_crew.py
 ```
 
-Both route through **LiteLLM**, which reads `OPENAI_API_BASE`. That is the layer the checks
-exercise: one check covers both, and anything else built on LiteLLM comes with it.
+**Measured:** a real `Agent`, `Task` and `Crew` recorded and replayed at `exact=1 divergences=0`,
+against CrewAI 1.15.20.
 
-OpenHands used to be listed here for the same reason. It now has [its own check](#openhands),
-because riding on LiteLLM and *reaching* LiteLLM with the environment intact are different claims.
+CrewAI was listed with Aider and OpenHands here, on the grounds that all three route through
+LiteLLM. **That stopped being true in CrewAI 1.x.** LiteLLM is now an optional extra
+(`crewai[litellm]`) and CrewAI ships native providers, so a default install reaches OpenAI through
+its own `crewai.llms.providers.openai.completion` and never loads LiteLLM at all.
+
+Capture survived the change; the reason for it did not. The native provider reads **both**
+`OPENAI_API_BASE` and `OPENAI_BASE_URL`, and `generic-openai` sets both — so this went on working
+while the sentence explaining why went quietly wrong. Running the LiteLLM layer could never have
+caught that, which is why CrewAI has its own check now.
+
+### Two things that changed with it
+
+**A prefixed model name no longer resolves.** `LLM(model="openai/gpt-4o-mini")` is the LiteLLM
+spelling, and on a default 1.x install it raises `ImportError: ... did not match any supported
+native provider ... and the LiteLLM fallback package is not installed`. The bare form,
+`LLM(model="gpt-4o-mini")`, is what the native provider takes. This is the shape of breakage an
+upgrade from 0.x hits, and it happens before any request is made — so orca records a run of three
+events and reports `capture.empty`, which is accurate and easy to misread as a capture problem.
+
+**`LLM(base_url=…)` is now honoured.** It used not to be: passing the origin in code did nothing,
+because it never reached LiteLLM's `api_base`. Measured again on 1.15.20 against a listener with the
+environment cleared — the listener was hit. Going through the environment is still the better route,
+because it is the one `orca record` sets up and it needs no edit to your code, but the old warning
+no longer applies.
+
+---
+
+## Aider
+
+```console
+orca record generic-openai -- python your_agent.py
+```
+
+Routes through **LiteLLM**, which reads `OPENAI_API_BASE`. That is the layer the check exercises,
+and anything else built on LiteLLM comes with it.
 
 **Measured:** `litellm.completion()` recorded and replayed at `exact=1 divergences=0`.
-
-CrewAI has a known wrinkle worth knowing about even though it does not affect this route:
-`LLM(base_url=…)` does not map to LiteLLM's `api_base`, so passing the URL in code can silently do
-nothing. Going through the environment sidesteps it.
 
 ---
 
@@ -98,7 +127,7 @@ deliberate: a task loop would be testing OpenHands rather than testing whether o
 and it would need a container runtime the check deliberately does not depend on.
 
 Pass the origin through the environment rather than `LLM(base_url=…)` in code. Both work here, but
-the environment is the route `orca record` sets up, and it sidesteps the CrewAI wrinkle above.
+the environment is the route `orca record` sets up and it needs no edit to your own code.
 
 ### A whole session, not in CI
 
@@ -136,7 +165,14 @@ orca record generic-openai -- python your_agent.py
 
 The default provider reads `OPENAI_BASE_URL`, and the SDK is built on `AsyncOpenAI` — both covered.
 
-**Measured:** `AsyncOpenAI` recorded and replayed at `exact=1 divergences=0`.
+**Measured:** the SDK itself — an `Agent` run through `Runner` — recorded and replayed at
+`exact=1 divergences=0`, against openai-agents 0.20.0.
+
+The check runs the SDK on the **Responses API**, which is what it reaches for unless told otherwise:
+the recorded exchange comes back as `dialect=openai-responses path=/v1/responses`. That is worth
+stating because the older check covered `AsyncOpenAI` on chat completions — the client underneath,
+on a wire format the SDK does not use by default. Both are covered now; only one of them is the
+path an Agents SDK user takes.
 
 Two things to decide before a long run:
 

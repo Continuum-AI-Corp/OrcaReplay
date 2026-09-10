@@ -375,7 +375,7 @@ whether orca understands the wire format it speaks once it arrives.
 | **Claude Code** | `ANTHROPIC_BASE_URL` | works — validated against a real bug fix, [in detail](docs/validation.md) |
 | **Codex CLI** (API key) | `OPENAI_BASE_URL` → Responses API | works |
 | **Codex CLI** (ChatGPT login) | `--tls-intercept` → Responses API | works, [with a decision to make](#when-the-harness-will-not-be-redirected) |
-| **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | works — the `AsyncOpenAI` client it is built on records and replays at `exact=1`, [in CI](test/integrations/); [its own tracing is a second egress](docs/integrations.md#openai-agents-sdk) |
+| **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | works — the SDK itself, on the Responses API it defaults to, records and replays at `exact=1`, [in CI](test/integrations/); [its own tracing is a second egress](docs/integrations.md#openai-agents-sdk) |
 | **Vercel AI SDK** | fetch hook — `orca record node -- node app.mjs` | works — an agent posting to an origin compiled into its source records and replays at `exact=1`, [in CI](test/integrations/) |
 | **grok-cli** (and its Telegram bot) | `orca record grok` — `GROK_BASE_URL`, plus the hook for its sub-agents | works |
 | **OpenClaw** | `orca record openclaw` — the hook for the gateway, inherited variables for the agents it spawns | works |
@@ -383,7 +383,8 @@ whether orca understands the wire format it speaks once it arrives.
 | **goose** (Block) | `orca record goose` — `OPENAI_HOST` **and** `OPENAI_BASE_URL`, `ANTHROPIC_HOST` → Responses API | works — driven end to end against goose 1.49.0, [what is different about it](#the-harness-that-reads-different-variables) |
 | **LangGraph / LangChain** | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | works — a two-node graph, streaming and with a tool, records and replays at `exact=2` and forks live, [in CI](test/integrations/) |
 | **OpenHands** | `orca record generic-openai -- python your_agent.py` — its SDK wraps LiteLLM and reads `OPENAI_API_BASE` | works — the SDK's own LLM layer records and replays at `exact=1`, [in CI](test/integrations/) |
-| **CrewAI, Aider** | `orca record generic-openai -- python your_crew.py` — both route through LiteLLM, which reads `OPENAI_API_BASE` | works — the LiteLLM layer records and replays at `exact=1`, [in CI](test/integrations/); [a CrewAI wrinkle worth knowing](docs/integrations.md#crewai-aider) |
+| **CrewAI** | `orca record generic-openai -- python your_crew.py` — since 1.x its own provider, reading `OPENAI_API_BASE` and `OPENAI_BASE_URL` | works — a real `Agent`, `Task` and `Crew` records and replays at `exact=1`, [in CI](test/integrations/); [what 1.x changed](docs/integrations.md#crewai) |
+| **Aider** | `orca record generic-openai -- python your_agent.py` — routes through LiteLLM, which reads `OPENAI_API_BASE` | works — the LiteLLM layer records and replays at `exact=1`, [in CI](test/integrations/) |
 | **browser-use** | `orca record generic-openai -- python your_task.py` — its `ChatOpenAI` passes an unset `base_url` straight through | works — records and replays at `exact=1`, [in CI](test/integrations/); LLM layer only, [the browser is not driven](docs/integrations.md#browser-use) |
 | **Hermes** (Nous Research) | `ORCA_BASE_URL_VARS=… orca record generic-openai -- hermes …` | should work — it overrides per provider; [name the variable](#a-base-url-variable-orca-has-never-heard-of) |
 | **Codex-in-the-IDE** | `orca record exec --tls-intercept -- code .` | works — the extension spawns the agent, and it inherits the capture |
