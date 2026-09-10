@@ -140,6 +140,14 @@ export class ExchangeEventDeriver {
         ...(exchange.responseDecodedFrom === undefined
           ? {}
           : { decoded_from: exchange.responseDecodedFrom }),
+        // Who answered. The trace said what was sent and what came back and never this, which is
+        // the first question asked of a recording that looks wrong — a gateway left behind in
+        // `~/.orca/config.json` redirects every run on the machine, and nothing in the run said so.
+        // On the response because it is a fact about the answer, and per exchange rather than in
+        // the manifest because the origin is chosen per request: a fork that changes provider
+        // changes it again mid-run. Absent means an older orca did not record it, never "the
+        // vendor's own API".
+        ...(exchange.upstream === undefined ? {} : { upstream: exchange.upstream }),
       },
       payload: exchange.rawResponse,
     });

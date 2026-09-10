@@ -103,6 +103,114 @@ function headersForModel(
   return out;
 }
 
+/**
+ * An origin with the parts a credential rides in taken out.
+ *
+ * `orca setup --gateway` accepts whatever URL it is handed and stores it in `~/.orca/config.json`,
+ * and a gateway that authenticates by URL rather than by header is handed one that carries the key:
+ * `https://user:pw@gw.example` or `https://gw.example?key=…`. The proxy has to *send* that — it is
+ * how the request authenticates — but recording it verbatim would have written the key into every
+ * trace made on that machine, breaking the promise stated where the key is read:
+ *
+ *   > the proxy adds it to the outbound request only, while what gets recorded is derived from the
+ *   > *incoming* request with auth stripped, so a gateway key orca injects is invisible to the
+ *   > recording by construction rather than by a rule someone has to remember.
+ *
+ * So the stripping happens here, in the one place an exchange is built, rather than at each call
+ * site — for the same reason that sentence gives.
+ *
+ * The path is kept. It is not a credential, and it is load-bearing: a gateway serving tenants at
+ * `/team-a/v1` and `/team-b/v1` answers from two different places, and the exchange's own `path`
+ * is the *client's* (`/chat/completions`), not the upstream's base. Only userinfo, query and
+ * fragment come out.
+ *
+ * An origin that will not parse is dropped rather than passed through: it cannot be sanitised, and
+ * absent already means "not recorded".
+ */
+export function recordableOrigin(origin: string | undefined): string | undefined {
+  if (origin === undefined) return undefined;
+  try {
+    const url = new URL(origin);
+    const port = url.port === '' ? '' : `:${url.port}`;
+    // `new URL('https://h').pathname` is '/', which is not part of how anyone writes an origin.
+    const path = url.pathname === '/' ? '' : url.pathname.replace(/\/$/, '');
+    return `${url.protocol}//${url.hostname}${port}${path}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Why a string cannot be used as an origin at all, or nothing if it can.
+ *
+ * Narrower than it first was, because the first version refused configurations that work. A
+ * gateway that authenticates by query — `https://gw.example/v1?key=…` — is an ordinary way to
+ * configure one, and undici sends it without complaint; refusing it broke a working setup to close
+ * a leak that was never about sending. Userinfo is the same story one step along: undici does
+ * reject `https://u:pw@gw` at request time, but it is *sanitisable* — {@link recordableOrigin}
+ * removes it cleanly — and the recording path already accepts it and keeps it out of the trace.
+ *
+ * What is left is the case where there is nothing to sanitise, because there is no origin. A
+ * gateway typed without a scheme parses with the username as the protocol:
+ *
+ *     new URL('myuser:PASSWORD@gw.example/v1')   // protocol 'myuser:', pathname the rest
+ *
+ * so {@link recordableOrigin} answers `myuser://PASSWORD@gw.example/v1` — a value, which means a
+ * caller guarding with `?? url` never notices, and the password is on the line anyway. There is no
+ * fixing that by rewriting: with no scheme there is no telling which half of `a:b` was meant as
+ * the host. And nothing refused here could have worked — undici cannot parse it either.
+ */
+export function unusableOrigin(origin: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(origin);
+  } catch {
+    return 'it is not a URL — an origin needs a scheme, like https://gateway.example';
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    // Named without echoing the value: a scheme-less URL puts the username here, so `protocol` is
+    // the one part of it that is safe to quote back.
+    return `its scheme is "${url.protocol.replace(/:$/, '')}" — an origin has to be http or https`;
+  }
+  return undefined;
+}
+
+/**
+ * Free text with the credential taken out of any URL it names.
+ *
+ * For error messages, which nobody composes and everybody prints. A failed `fetch` reports the URL
+ * it was given, so an origin configured as `https://user:pw@gw` or `https://gw?key=…` arrives
+ * inside the exception text and goes straight to a terminal:
+ *
+ *     warn gateway.unreachable why="Request cannot be constructed from a URL that includes
+ *       credentials: http://someone:PASSWORD@127.0.0.1:50164/v1/models"
+ *
+ * {@link recordableOrigin} cannot help there — it takes a URL, and this is prose with a URL in it.
+ *
+ * The query goes as well as the userinfo. That loses the occasional harmless parameter from an
+ * error message, which is the right trade: a key in a query is the commonest way a gateway
+ * authenticates by URL, and an error string is not where anyone should be reading parameters back.
+ */
+export function withoutCredentials(text: string): string {
+  return (
+    text
+      // Up to the *last* `@` before the path, not the first. `[^/\s@]*` could not cross an `@`, so
+      // an ordinary password containing one — `p@ssw0rd` — ended the match early and the remainder
+      // stayed in userinfo position: `https://myuser:p@ssw0rd@gw` came out as `https://ssw0rd@gw`.
+      // `[^\s/]*` may cross `@` and backtracks to the last one, and still cannot reach past the
+      // path, so an `@` in a path segment (`/v1/@scope/pkg`) is not mistaken for userinfo.
+      .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/]*@/gi, '$1')
+      .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s?#"']*)\?[^\s#"']*/gi, '$1')
+      // And once more without a scheme. undici reports an origin it could not parse verbatim —
+      // `Failed to parse URL from my.gateway.example?key=…` — and both rules above need a
+      // `scheme://` to fire, so that string went through untouched into the 500 body the agent
+      // prints. A host-shaped token is one with a dot in it and no whitespace. The cost is that
+      // an error naming a file ending in '?' loses the question mark, which is a fair price in
+      // prose nobody reads for punctuation.
+      .replace(/([a-z0-9][a-z0-9.-]*\.[a-z][a-z0-9-]*(?::\d+)?[^\s?#"']*)\?[^\s#"']*/gi, '$1')
+  );
+}
+
 export interface RecordedExchange {
   seq: number;
   dialect: string;
@@ -129,6 +237,19 @@ export interface RecordedExchange {
    * before orca sees a body, so there is nothing orca could truthfully claim to have removed.
    */
   responseDecodedFrom?: string;
+  /**
+   * The origin that actually answered this call.
+   *
+   * A run's destination is not one value that could live in the manifest: the origin is chosen per
+   * request, from an explicit `--upstream-*`, the gateway `orca setup` configured, a `/forward/`
+   * base the client announced, or the dialect's vendor default — and a fork that changes provider
+   * changes it again mid-run. So it is recorded where it is decided, once per exchange.
+   *
+   * The trace could say what was sent and what came back but not who answered it, which is the
+   * question asked first when a recording looks wrong: a gateway left over in `~/.orca/config.json`
+   * redirects every run on the machine, and nothing in the run said so.
+   */
+  upstream?: string;
   durationMs?: number;
 }
 
@@ -227,7 +348,12 @@ export interface RouteDecision {
   target: string;
   /** Dialect the agent's request arrived in. */
   recorded: string;
-  origin: string;
+  /**
+   * Where the call went, sanitised the way an exchange's `upstream` is: userinfo and query out,
+   * path kept. Absent when the configured origin cannot be sanitised into one, because absent
+   * already means "not recorded" — see {@link recordableOrigin}.
+   */
+  origin?: string;
   crossProvider: boolean;
   reason: string;
 }
@@ -388,7 +514,9 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
 
   const server = createServer((req, res) => {
     void handle(req, res).catch((err: unknown) => {
-      json(res, 500, { error: { message: String(err) } });
+      // Whatever failed, its message may name the origin it was given — and this body reaches the
+      // agent, which prints it. See {@link withoutCredentials}.
+      json(res, 500, { error: { message: withoutCredentials(String(err)) } });
     });
   });
 
@@ -440,6 +568,10 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
           // except where the difference is the thing being debugged.
           alpn: exchange.alpn,
           responseDecodedFrom: exchange.responseDecodedFrom,
+          // Under interception orca did not choose this origin, the agent did — which is the
+          // case where "who answered" is least obvious from the command line, and so the one most
+          // worth having in the trace. The port is kept only where https does not imply it.
+          upstream: `https://${exchange.host}${exchange.port === 443 ? '' : `:${exchange.port}`}`,
         });
         captured.push(built);
         options.onExchange?.(built);
@@ -670,11 +802,21 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     // did not. Emitted only when a decision was actually taken, so an ordinary recording — where
     // orca forwards what it was given — stays free of an event saying "nothing was chosen".
     if (options.forkModel !== undefined) {
+      // Sanitised here for the reason {@link buildExchange} sanitises the exchange's `upstream`,
+      // and it is the same value: an origin that came from configuration rather than off the wire,
+      // so a gateway that authenticates by URL carries its key in it. This payload is not just
+      // reported — `orca replay --model` and `orca compare --models` write it into the fork's
+      // trace as `route.decision.attrs` unchanged, and the trace redactor cannot help, because it
+      // matches key shapes and field names and this is a password inside a URL under `origin`.
+      // Omitted rather than replaced when it will not parse: no consumer reads it — the viewer
+      // renders model, target and reason — and a placeholder in a field others may parse as a URL
+      // is worse than the field being absent.
+      const recordable = recordableOrigin(origin);
       options.onRoute?.({
         model: options.forkModel,
         target: target.id,
         recorded: dialect.id,
-        origin,
+        ...(recordable === undefined ? {} : { origin: recordable }),
         crossProvider,
         // Deliberately does not open with the model name: the viewer already renders that as the
         // row's label, so a reason that repeats it produces `gpt-5.2  gpt-5.2 is served by…` and
@@ -755,6 +897,9 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
         headers: recordableHeaders,
         seq: captured.length,
         durationMs: Date.now() - startedAt,
+        // The origin resolved above, not the one configured: a relayed call keeps the base the
+        // client announced, and a fork's substitution can send it somewhere else again.
+        upstream: origin,
       });
       captured.push(exchange);
       options.onExchange?.(exchange);
@@ -931,6 +1076,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     durationMs: number;
     alpn?: string;
     responseDecodedFrom?: string;
+    upstream?: string;
   }): RecordedExchange {
     const canonicalRequest = input.dialect.toCanonicalRequest(JSON.parse(input.rawRequest));
     let canonicalResponse: CanonicalResponse | undefined;
@@ -959,6 +1105,9 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       ...(input.responseDecodedFrom === undefined
         ? {}
         : { responseDecodedFrom: input.responseDecodedFrom }),
+      ...(recordableOrigin(input.upstream) === undefined
+        ? {}
+        : { upstream: recordableOrigin(input.upstream)! }),
       durationMs: input.durationMs,
     };
   }

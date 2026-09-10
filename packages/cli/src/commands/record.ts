@@ -3,7 +3,14 @@ import { readFile } from 'node:fs/promises';
 import { delimiter, resolve } from 'node:path';
 import { TraceWriter, ensureRunsDir } from '@orcareplay/core';
 import { FsCapture } from '@orcareplay/fs-capture';
-import { createProxy, RunCa, type NetExchange, type RecordedExchange } from '@orcareplay/proxy';
+import {
+  createProxy,
+  unusableOrigin,
+  recordableOrigin,
+  RunCa,
+  type NetExchange,
+  type RecordedExchange,
+} from '@orcareplay/proxy';
 import { captureSession, defaultAdapters, resolveLaunch, snapshotDir } from '@orcareplay/adapters';
 import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
@@ -365,6 +372,17 @@ async function runRecording(
     run: writer.runId,
     adapter: adapter.id,
     proxy: proxy.url,
+    // `proxy` is orca's own address, so the line said where the agent would call and never where
+    // the call would go on to. A gateway left behind in `~/.orca/config.json` redirects every run
+    // on the machine, and the first sign of it used to be an answer from a model nobody asked for.
+    //
+    // Only when something was configured. Left alone, each dialect has its own vendor default and
+    // there is no single value to print — and `upstream=default` on every ordinary run is noise
+    // that would teach people to stop reading the line. The trace records the origin either way,
+    // per exchange, because that is where it is actually decided.
+    ...(distinctOrigins(plan.upstream).length > 0
+      ? { upstream: distinctOrigins(plan.upstream).join(',') }
+      : {}),
     fs: fs ? 'on' : 'off',
     shell: shell ? 'on' : 'off',
   });
@@ -671,4 +689,32 @@ async function runChild(
       resolve(code ?? 0);
     });
   });
+}
+
+/**
+ * The origins a configured upstream map actually names, deduplicated and safe to print.
+ *
+ * `resolveUpstream` writes one entry per dialect and `openai` and `openai-responses` always share
+ * a value — so the raw map renders a single gateway three times. What a reader wants is the set of
+ * places traffic can go, which is usually one.
+ *
+ * Through `recordableOrigin` for the same reason the trace goes through it, and against the same
+ * sentence: `orca setup --gateway` accepts a URL carrying the key — `https://user:pw@gw.example`,
+ * `https://gw.example?key=…` — and `config.ts` says of that file that "nothing ever prints it
+ * back". A line on the terminal is printing it back, and it is a line that ends up in CI logs.
+ */
+export function distinctOrigins(upstream: Record<string, string> | undefined): string[] {
+  const safe = Object.values(upstream ?? {})
+    // Dropped only where sanitising cannot work, so a gateway configured with its key in the URL
+    // still says *where* the traffic went. `recordableOrigin` removes userinfo and query, which is
+    // enough for every `http(s)://` value — but a scheme-less URL parses with its username as the
+    // protocol, so it comes back as `myuser://PASSWORD@gw.example/v1`, credential intact, and a
+    // filter keeping everything that is not `undefined` kept it. There is no sanitising that: with
+    // no scheme there is no telling which half of `a:b` was meant as the host. `upstreamPlan`
+    // refuses these before a run starts; this is here because the function is exported and one
+    // line from a terminal.
+    .filter((origin) => unusableOrigin(origin) === undefined)
+    .map(recordableOrigin)
+    .filter((origin): origin is string => origin !== undefined);
+  return [...new Set(safe)];
 }

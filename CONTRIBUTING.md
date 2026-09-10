@@ -75,6 +75,15 @@ The highest-value contributions, in order:
   debugger that quietly guesses is worse than no debugger, because you will believe it.
 - **Secrets never reach disk or a TTY.** Redaction lives in the write path. If you add a new sink,
   it goes through the redactor.
+- **A new field is a new sink.** The redactor works on payloads derived from the incoming request,
+  so a value sourced from anywhere else — configuration, a flag, an environment variable — arrives
+  having bypassed it. Adding an attribute, ask where its value comes from and whether that source
+  can carry a credential; `orca setup --gateway` accepts any URL, and `https://user:pw@gw` and
+  `https://gw?key=…` are both ordinary ways to configure a gateway. This was learned the hard way:
+  a field naming the origin that answered each call was verified four ways, all of them asking
+  whether the value was *correct* and none asking what else could be in it. Review caught it.
+  `packages/cli/test/no-credential-in-attrs.test.ts` is the part that cannot be forgotten — it
+  walks every attribute of every event and fails on the shape, whatever the field is called.
 
 ## Sign your commits
 
