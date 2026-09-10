@@ -96,12 +96,19 @@ describe('BlobStore.put', () => {
     expect(ref.bytes).toBe(3);
   });
 
-  it('writes blobs unreadable by other users — a trace is sensitive material', async () => {
-    const ref = await store.put('secret-ish');
-    const hex = ref.$blob.slice('sha256:'.length);
-    const s = await stat(join(dir, 'blobs', hex.slice(0, 2), hex));
-    expect(s.mode & 0o777).toBe(0o600);
-  });
+  // POSIX only. Windows has no mode bits: `chmod 0o600` is a no-op on NTFS and `stat` answers
+  // 0o666 whatever was asked for, so this asserts something the platform cannot provide. Skipped
+  // rather than loosened — the guarantee is real where it can be made, and a test that accepted
+  // 0o666 would stop noticing if it were lost on Linux too.
+  it.skipIf(process.platform === 'win32')(
+    'writes blobs unreadable by other users — a trace is sensitive material',
+    async () => {
+      const ref = await store.put('secret-ish');
+      const hex = ref.$blob.slice('sha256:'.length);
+      const s = await stat(join(dir, 'blobs', hex.slice(0, 2), hex));
+      expect(s.mode & 0o777).toBe(0o600);
+    },
+  );
 
   it('stores an empty blob', async () => {
     const ref = await store.put('');
