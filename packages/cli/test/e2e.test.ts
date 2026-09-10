@@ -25,6 +25,34 @@ const here = dirname(fileURLToPath(import.meta.url));
 const FAKE_AGENT = join(here, 'fixtures', 'fake-agent.mjs');
 
 /**
+ * Run `body` with the temp directory pointed somewhere only this test can reach, and hand back
+ * what was left in it.
+ *
+ * A replay's safety scratch goes to `os.tmpdir()`, so asserting on what it leaves there means
+ * asserting on a directory the whole machine shares — the other suites replay too, and a test
+ * that diffed the real `$TMPDIR` failed under `vitest run` while passing on its own. Moving the
+ * directory for the duration makes "nothing was left behind" a statement about this replay.
+ */
+async function withIsolatedTmp<T>(
+  body: () => Promise<T>,
+): Promise<{ result: T; leftBehind: string[] }> {
+  const isolated = await mkdtemp(join(tmpdir(), 'orca-tmproot-'));
+  const saved = { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP };
+  process.env.TMPDIR = isolated;
+  process.env.TMP = isolated;
+  process.env.TEMP = isolated;
+  try {
+    const result = await body();
+    return { result, leftBehind: await readdir(isolated) };
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+/**
  * The acceptance test for the whole project.
  *
  *   orca record <agent>
@@ -435,6 +463,83 @@ describe('end to end: record → replay → fork', () => {
     expect((await listRuns(workspace)).length, 'a refused fork must not have created a run').toBe(
       afterGood,
     );
+  });
+
+  /**
+   * The restore is inside the thing that undoes it, so the caller cannot guard it.
+   *
+   * `replayWorkspace` snapshots the checkout, then overwrites it, then returns the `release` that
+   * puts it back — so a `materialize` that fails rejects before its caller has anything to call.
+   * The guard in `replayExact` is armed on the next line and never ran; the scratch holding the
+   * only copy of the operator's tree was abandoned in `$TMPDIR` with nothing printing its path.
+   *
+   * The store is emptied of its objects rather than deleted, so `FsCapture.start` still opens it
+   * and the failure lands where it matters: on `read-tree`, inside the restore. `orca gc` on a
+   * half-copied trace gets there the same way.
+   */
+  it('puts the working tree back when the restore itself fails', async () => {
+    const recorded = await record();
+    await writeFile(join(workspace, 'auth.ts'), 'MY UNCOMMITTED WORK\n');
+
+    // A shadow store that opens and holds nothing: every loose-object directory removed.
+    const objects = join(recorded.runDir, 'fs', 'objects');
+    for (const entry of await readdir(objects)) {
+      if (/^[0-9a-f]{2}$/.test(entry)) await rm(join(objects, entry), { recursive: true });
+    }
+
+    const { leftBehind } = await withIsolatedTmp(async () => {
+      await expect(replayCommand(parseArgs(['replay', 'last']), out, workspace)).rejects.toThrow();
+    });
+
+    expect(
+      await readFile(join(workspace, 'auth.ts'), 'utf8'),
+      'a replay whose restore failed must not have kept the operator out of their own tree',
+    ).toBe('MY UNCOMMITTED WORK\n');
+    // The release ran, which is the whole assertion: it is the only thing that removes the
+    // scratch, and it removes it only once the tree is back.
+    expect(leftBehind, 'nor left the only copy of it in a temp directory nothing names').toEqual(
+      [],
+    );
+  });
+
+  /**
+   * A replay that dies after minting a certificate authority must take the key with it.
+   *
+   * `tls-capture.ts` puts it in writing — "the caller owns the CA's lifetime and must dispose it
+   * on every exit path" — and `replayCommand` had no equivalent of the `minted` wrapper that
+   * `recordCommand` and `attachCommand` use. Between `RunCa.create` and the child's launch sit
+   * `createProxy`, `mcpForReplay` and `adapter.prepare`, and a throw from any of them left
+   * `tls/ca.key` on disk.
+   *
+   * The throw here is a trace naming an adapter this build does not have, which is what replaying
+   * a newer orca's recording looks like. It also pins the other half: the proxy is listening by
+   * then, and a proxy that is not closed keeps Node's event loop alive — so a regression shows up
+   * as this test timing out rather than as a hang nobody notices until a user reports it.
+   */
+  it('takes the run CA with it when the replay dies after minting one', async () => {
+    const recorded = await record();
+    const manifestPath = join(recorded.runDir, 'manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
+      adapter: { id: string };
+    };
+    manifest.adapter.id = 'agent-from-the-future';
+    await writeFile(manifestPath, JSON.stringify(manifest));
+
+    await expect(
+      replayCommand(
+        parseArgs(['replay', 'last', '--tls-intercept', '--tls-hosts', 'api.openai.com']),
+        out,
+        workspace,
+      ),
+    ).rejects.toThrow(/unknown adapter/);
+
+    const withKey: string[] = [];
+    const runsRoot = join(workspace, '.orca', 'runs');
+    for (const run of await readdir(runsRoot)) {
+      const entries = await readdir(join(runsRoot, run)).catch(() => [] as string[]);
+      if (entries.includes('tls')) withKey.push(run);
+    }
+    expect(withKey, 'a replay that refused after minting must not leave the key').toEqual([]);
   });
 
   /**
