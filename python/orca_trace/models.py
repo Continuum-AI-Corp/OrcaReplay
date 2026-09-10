@@ -56,6 +56,9 @@ EVENT_TYPES: Final[frozenset[str]] = frozenset(
         "divergence",
         "checkpoint",
         "fork",
+        "agent.start",
+        "agent.handoff",
+        "agent.guardrail",
         "route.decision",
         "note",
     }
