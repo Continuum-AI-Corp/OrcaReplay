@@ -1,0 +1,118 @@
+# Publish main to npm under the `next` tag, so what is on main is always installable.
+#
+#     npm i orcareplay          # latest — a tagged release, unchanged by this workflow
+#     npm i orcareplay@next     # whatever main is right now
+#
+# Every version published here is a prerelease — `0.2.4-main.<sha>`. npm excludes a prerelease from
+# `npm install <pkg>` even though it sorts above `0.2.3`, so nothing here can reach someone who did
+# not ask for it by name, and `--tag next` never moves `latest`. That is what makes publishing on
+# every merge safe: main is always available, and no user is opted in to it.
+#
+# The version is derived from the commit, never committed back. Bumping a version in main to publish
+# from main would mean a bot with write access to the default branch and a push race between two
+# merges a minute apart; a `<next-patch>-main.<sha>` needs neither, and is unique by construction —
+# which matters because npm never allows re-publishing a version.
+name: Publish next
+
+# After CI, not on the push itself.
+#
+# CI already runs fmt, tsc, the suite on node 20 and 22, conformance, the framework integrations,
+# the Python SDK and plugin neutrality on every push to main. Re-running that here would double it
+# on a repository that merges several pull requests a day, and a second copy of the gate is a second
+# thing to keep in step. `workflow_run` also makes the rule structural rather than remembered:
+# nothing is published unless the checks for that exact commit went green.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Pack and verify without publishing'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write # npm provenance: proves the tarball came from this workflow, from this commit
+
+# Queued, never cancelled. Twelve packages are published one at a time in dependency order, so
+# cancelling half way leaves some of them on the registry at a version the rest do not name — and
+# npm will not let that version be re-published to fix it. A burst of merges therefore publishes a
+# prerelease each, in order, rather than racing.
+concurrency:
+  group: publish-next
+  cancel-in-progress: false
+
+jobs:
+  next:
+    # A failed or cancelled CI run must publish nothing. `workflow_run` fires for those too.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      # The commit CI passed on, not whatever main has moved to since. `workflow_run` checks out
+      # the default branch by default, which would publish code the green tick did not cover.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+      # The published tarballs contain `dist/`, which is not committed.
+      - run: npx tsc --build
+
+      - name: Work out the prerelease version
+        id: version
+        run: |
+          set -euo pipefail
+          sha="${{ github.event.workflow_run.head_sha || github.sha }}"
+          # The next patch, so a prerelease always sorts *above* the release it follows: main is
+          # ahead of `latest`, and `0.2.3-main.x` would sort below `0.2.3` and say the opposite.
+          base=$(node -p "require('./packages/cli/package.json').version.split('-')[0]")
+          next=$(node -p "const v='$base'.split('.'); v[2]=Number(v[2])+1; v.join('.')")
+          version="$next-main.${sha:0:7}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publishing $version from ${sha:0:7}"
+
+      - name: Set it across every workspace
+        run: node scripts/set-version.mjs "${{ steps.version.outputs.version }}"
+
+      # The same gate the tagged release runs: it recomputes the publish order and fails if an
+      # internal pin was left naming the old version, which is the one way `set-version.mjs` could
+      # be wrong in a way npm cannot undo.
+      - run: node scripts/publish-order.mjs
+
+      - name: Publish in dependency order
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DRY_RUN: ${{ github.event.inputs.dry-run }}
+        run: |
+          set -euo pipefail
+          node scripts/publish-order.mjs | while read -r dir; do
+            if [ "${DRY_RUN:-false}" = "true" ]; then
+              echo "── dry run: $dir"
+              ( cd "$dir" && npm publish --dry-run --provenance --access public --tag next )
+            else
+              echo "── publishing: $dir"
+              ( cd "$dir" && npm publish --provenance --access public --tag next )
+            fi
+          done
+
+      - name: Say what to install
+        if: ${{ github.event.inputs.dry-run != 'true' }}
+        run: |
+          echo "### \`orcareplay@next\` is now ${{ steps.version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo 'npm i orcareplay@next' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo '`latest` is unchanged — it only moves on a tagged release.' >> "$GITHUB_STEP_SUMMARY"

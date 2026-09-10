@@ -1,14 +1,22 @@
-# Publish every workspace to npm, in dependency order, from a tag.
+# Publish every workspace to npm, in dependency order, as `latest`.
 #
-# Nothing here runs on a push to a branch: it fires on a `v*` tag, or by hand. Publishing is
-# irreversible — npm allows an unpublish only briefly and never a re-publish of the same version —
-# so the whole test suite gates it, and a dry run is available that proves the tarballs are right
-# without sending anything.
+# Two ways in, and a human decides the version in both. A `v*` tag still works. The other is a
+# version bump reaching main: when `packages/cli/package.json` names a version that has no tag yet,
+# that merge *is* the release, and this workflow publishes it and creates the tag. `set-version.mjs`
+# makes the bump one command instead of thirteen hand-edited manifests, so the whole ceremony is a
+# pull request that changes a version number.
+#
+# What this deliberately does not do is publish on every merge. Publishing is irreversible — npm
+# allows an unpublish only briefly and never a re-publish of the same version — so the whole test
+# suite gates it, and a dry run is available that proves the tarballs are right without sending
+# anything. Main is still installable between releases: `publish-next.yml` puts every green commit
+# on the `next` tag, where nobody is opted in by accident.
 name: Release
 
 on:
   push:
     tags: ['v*']
+    branches: [main]
   workflow_dispatch:
     inputs:
       dry-run:
@@ -28,9 +36,55 @@ permissions:
   contents: read
   id-token: write # npm provenance: proves the tarball came from this workflow, from this commit
 
+# One release at a time. The publish loop walks twelve packages in dependency order, and two runs
+# interleaving would put a version on the registry that the rest do not name — which npm will not
+# let anyone re-publish over.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
-  release:
+  # Cheap, so an ordinary merge does not run the whole suite to discover there is nothing to do.
+  # Several pull requests land here a day and almost none of them change a version.
+  decide:
     runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the tags are the state this reads
+      - id: check
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./packages/cli/package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          # A tag push or a hand-run is already someone asking for a release.
+          if [ "${{ github.ref_type }}" != "branch" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # From main, the tag is the record of what has been released. Asking git rather than
+          # diffing the previous commit means this is idempotent and survives a squash merge, a
+          # direct push, or a re-run: if `v$version` exists, that version is out.
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "main is at $version, which is already tagged — nothing to release"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "main is at $version and v$version does not exist yet — releasing it"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    needs: decide
+    if: needs.decide.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # only to create the tag for a release that came from main
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -77,6 +131,22 @@ jobs:
               ( cd "$dir" && npm publish --provenance --access public )
             fi
           done
+
+      # Created after the publish, not before it, so the tag means "this went out" rather than
+      # "this was attempted". A release that came in as a `v*` tag already has one.
+      #
+      # It is also what stops the next merge re-releasing the same version: `decide` reads these
+      # tags, so until this exists, main looks unreleased.
+      - name: Tag the release that came from main
+        if: ${{ github.ref_type == 'branch' && github.event.inputs.dry-run != 'true' }}
+        env:
+          VERSION: ${{ needs.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              tag -a "v$VERSION" -m "release $VERSION"
+          git push origin "v$VERSION"
 
       # The npm packages are the artefact; this makes them findable. Ownership is proved twice at
       # once: `mcpName` in packages/cli/package.json must equal the name in server.json, and GitHub

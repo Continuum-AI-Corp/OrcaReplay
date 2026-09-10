@@ -58,7 +58,12 @@ for (const [name, p] of packages) {
     const range = p.ranges[dep];
     // A range resolves to whatever is latest on the registry, so a 0.1.0 CLI would install a
     // 0.9.0 core — and on a first publish it resolves to nothing at all.
-    if (!/^\d+\.\d+\.\d+$/.test(range)) {
+    //
+    // A prerelease is allowed because it is still exactly one version: the `next` channel
+    // publishes `0.2.4-main.<sha>`, and this check exists to forbid a *range*, not a suffix.
+    // Build metadata (`+…`) stays forbidden — npm ignores it when comparing, so two different
+    // manifests could name the same version to the registry, which a publish cannot undo.
+    if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(range)) {
       problems.push(`${name} depends on ${dep} as "${range}" — must be an exact version`);
     } else if (target.version !== range) {
       problems.push(`${name} names ${dep}@${range}, but ${dep} is at ${target.version}`);
