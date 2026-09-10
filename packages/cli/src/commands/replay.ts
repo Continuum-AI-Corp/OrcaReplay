@@ -22,8 +22,8 @@ import type { ParsedArgs } from '../args.js';
 import { SerialQueue } from '../serial.js';
 import { appendSnapshot } from '../fs-events.js';
 import { drainMcpFrames, mcpForReplay, pointAtMcpConfig } from '../mcp.js';
-import { recordedTlsHosts, setupTlsCapture, trustRunCa } from '../tls-capture.js';
-import { upstreamPlan } from '../upstream.js';
+import { planTlsCapture, recordedTlsHosts, setupTlsCapture, trustRunCa } from '../tls-capture.js';
+import { upstreamPlan, type UpstreamPlan } from '../upstream.js';
 import { ORCA_VERSION } from '../version.js';
 
 export interface ReplayResult {
@@ -296,17 +296,61 @@ interface Ctx {
  * rather than letting the agent edit it a second time.
  */
 async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<ReplayResult> {
+  // Before `replayWorkspace`, because these refuse and `replayWorkspace` replaces the working
+  // tree. Resolved after it, a refusal threw with the checkout holding the recorded run's files
+  // and the operator's own tree left behind in an `orca-safety-*` scratch whose path nothing
+  // prints — the outcome the release exists to prevent, escaping it because it only ran at the
+  // child's launch. An invocation that cannot work should decide so before it touches anything,
+  // which is the rule `attach` already follows where it resolves the advertised URL before making
+  // a run directory.
+  //
+  // Two refusals, not one. `upstreamPlan` rejects an upstream that is not an origin;
+  // `planTlsCapture` rejects a `--tls-hosts` list that names `*` or contradicts itself, and an
+  // `ORCA_TLS_UPSTREAM_CA` that cannot be read. It is the refusing half of `setupTlsCapture` on
+  // its own — it mints nothing, so the certificate authority is still created down where the run
+  // is, after the workspace exists.
+  const plan = await upstreamPlan(args);
+  // A run recorded through interception is reproduced through it, without the operator having to
+  // remember which hosts they named. See `setupTlsCapture`.
+  const interceptedHosts = recordedTlsHosts(ctx.events);
+  await planTlsCapture(args, interceptedHosts);
+
+  const workspace = await replayWorkspace(args, out, ctx);
+  try {
+    return await replayRestored(args, out, ctx, { plan, interceptedHosts, workspace });
+  } finally {
+    // The safety net behind both refusals above, and behind every one nobody has enumerated. The
+    // list of things that can throw between the restore and the child's launch is not closed:
+    // `createProxy` binds a socket, `RunCa.create` writes a key, `adapter.prepare` runs a
+    // harness's own setup, `mcpForReplay` rewrites a config — and each one of them would
+    // otherwise end with a recording's files in someone's checkout. Enumerating refusals is what
+    // failed twice already, and hoisting them is only ever as complete as the list; this is the
+    // half that does not depend on the list being right. `release` is idempotent, so the one at
+    // the child's launch still owns the ordinary path and still puts the tree back before the
+    // run reports itself done.
+    await workspace.release();
+  }
+}
+
+/**
+ * The replay itself, once the filesystem it needs is in place.
+ *
+ * Split from `replayExact` for one reason: everything in here happens with the recording's files
+ * over the operator's checkout, so it has to run inside something that puts them back.
+ */
+async function replayRestored(
+  args: ParsedArgs,
+  out: Output,
+  ctx: Ctx,
+  prepared: {
+    plan: UpstreamPlan;
+    interceptedHosts: readonly string[] | undefined;
+    workspace: Workspace;
+  },
+): Promise<ReplayResult> {
+  const { plan, interceptedHosts, workspace } = prepared;
   const divergences: { level: string; detail: string; seq: number }[] = [];
   const unmatched: { seq: number; reason: string }[] = [];
-  // Before `replayWorkspace`, because this refuses an upstream that is not an origin and
-  // `replayWorkspace` replaces the working tree. Resolved after it, a refusal threw with the
-  // checkout holding the recorded run's files and the operator's own tree left behind in an
-  // `orca-safety-*` scratch — the outcome the `finally` below exists to prevent, escaping it
-  // because that `finally` only begins at the child's launch. An invocation that cannot work
-  // should decide so before it touches anything, which is the rule `attach` already follows where
-  // it resolves the advertised URL before making a run directory.
-  const plan = await upstreamPlan(args);
-  const workspace = await replayWorkspace(args, out, ctx);
   const trace = await openReplayTrace(args, ctx, workspace.dir);
   // Serial for the same reason the recorder's is: the callbacks fire from the proxy's request
   // handler, and two overlapping appends would interleave lines in events.jsonl.
@@ -315,9 +359,8 @@ async function replayExact(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Rep
   // A subscription-backed harness does not use the ordinary base URL, so exact replay needs the
   // same per-run CA and HTTPS proxy as recording. The proxy's TLS hook then answers Codex's model
   // request from the trace before it can open an origin connection.
-  // A run recorded through interception is reproduced through it, without the operator having to
-  // remember which hosts they named. See `setupTlsCapture`.
-  const interceptedHosts = recordedTlsHosts(ctx.events);
+  // The hosts were resolved before the workspace was restored, where anything refusable about
+  // them was refused; this is the half that mints.
   const tls = await setupTlsCapture({
     args,
     out,
@@ -642,10 +685,17 @@ async function replayFork(
   // requests happened at or before the checkpoint.
   const forkAt = ctx.exchanges.filter((e) => e.seq <= checkpoint.seq).length;
 
-  // Before the worktree and the fork's own run directory, because this refuses an upstream that
-  // is not an origin: resolved after them, a typo in `--upstream-*` left a restored temp tree in
-  // `$TMPDIR` and an empty fork in `orca list`, reading `FROM <parent>@<n>` as though it had run.
+  // Before the worktree and the fork's own run directory, because both of these refuse:
+  // `upstreamPlan` an upstream that is not an origin, `planTlsCapture` a `--tls-hosts` list that
+  // names `*` or contradicts itself and an `ORCA_TLS_UPSTREAM_CA` that cannot be read. Resolved
+  // after them, a typo in any of them left a restored temp tree in `$TMPDIR` that `orca gc` will
+  // not reclaim — no manifest points at it — and an empty fork in `orca list`, reading
+  // `FROM <parent>@<n>` as though it had run.
   const plan = await upstreamPlan(args);
+  // A fork continues a recorded conversation, so it is intercepted on the same terms the
+  // recording was; see `setupTlsCapture` below, which this is the refusing half of.
+  const forkInterceptedHosts = recordedTlsHosts(ctx.events);
+  await planTlsCapture(args, forkInterceptedHosts);
 
   const worktree = await mkdtemp(join(tmpdir(), `orca-${checkpoint.seq}-`));
   if (checkpoint.fsTree) {
@@ -711,7 +761,6 @@ async function replayFork(
   // half — the operator believes they captured that traffic.
   // Same for a fork: it continues a recorded conversation, so its prefix is replayed and the
   // requests carrying it arrive by the same intercepted transport they were recorded on.
-  const forkInterceptedHosts = recordedTlsHosts(ctx.events);
   const tls = await setupTlsCapture({
     args,
     out,
@@ -868,6 +917,12 @@ async function replayFork(
 /** Where an exact replay runs, and how to put the directory back afterwards. */
 interface Workspace {
   dir: string;
+  /**
+   * Put the working tree back. Idempotent, and called from two places for that reason: once at
+   * the child's launch, where it belongs on the ordinary path, and once from a `finally` around
+   * the whole restored span, which is what makes the guarantee hold for a throw that never
+   * reaches the launch at all.
+   */
   release: () => Promise<void>;
 }
 
@@ -940,9 +995,15 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
 
   await recorded.restore(initial.fsTree, ctx.cwd);
 
+  // Two callers, on purpose — see `Workspace.release`. Restoring twice would be wrong rather than
+  // merely wasteful: the second pass would write the pre-replay tree back over whatever the
+  // caller has done since, and the `rm` would take the scratch with it.
+  let released = false;
   return {
     dir: ctx.cwd,
     release: async () => {
+      if (released) return;
+      released = true;
       await safety.restore(before.tree, ctx.cwd);
       // Only after the restore succeeded. This store holds the only copy of your working tree as
       // it was before the replay overwrote it, so removing it on the failure path would delete the

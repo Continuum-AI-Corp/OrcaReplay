@@ -313,6 +313,131 @@ describe('end to end: record → replay → fork', () => {
   });
 
   /**
+   * The same rule, for the other refusal in the same window.
+   *
+   * `--tls-hosts` is refused by `resolveTlsHosts`/`HostPolicy.from`, and that happened inside
+   * `setupTlsCapture` — reached after `replayWorkspace` had already written the recording over the
+   * checkout, and after the replay's own run directory existed. The throw escaped the `finally`
+   * that puts the tree back for the same reason the upstream one did: that `finally` only begins
+   * at the child's launch. So the operator was left holding the recording's files, with their own
+   * work in an `orca-safety-*` scratch whose path nothing prints.
+   *
+   * `planTlsCapture` is the refusing half on its own and mints nothing; `attach` already calls it
+   * before its run directory for exactly this reason.
+   */
+  it('leaves the working tree alone when it refuses the tls host list', async () => {
+    await record();
+    await writeFile(join(workspace, 'auth.ts'), 'MY UNCOMMITTED WORK\n');
+    const before = (await listRuns(workspace)).length;
+
+    await expect(
+      replayCommand(
+        parseArgs(['replay', 'last', '--tls-intercept', '--tls-hosts', '*']),
+        out,
+        workspace,
+      ),
+    ).rejects.toThrow(/would intercept every host/);
+
+    expect(
+      await readFile(join(workspace, 'auth.ts'), 'utf8'),
+      'a refused replay must not have touched the checkout',
+    ).toBe('MY UNCOMMITTED WORK\n');
+    // And it never claimed to have: the restore line belongs to a replay that got that far.
+    expect(lines.join('\n')).not.toContain('replay.restored');
+    expect((await listRuns(workspace)).length, 'nor created a run for it').toBe(before);
+  });
+
+  /**
+   * The refusal that hoisting alone would still have missed.
+   *
+   * `ORCA_TLS_UPSTREAM_CA` is read from disk, so it cannot be decided from the arguments the way
+   * a host list can — `setupTlsCapture` opens it, past the restore. Two things now stand between
+   * that and the operator's checkout: `planTlsCapture` reads the roots too, so the refusal
+   * happens before `replayWorkspace`; and the release is armed for the whole restored span, so a
+   * throw that gets past the first still puts the tree back.
+   *
+   * Worth its own test because it is the one that proves the rule generalises. `createProxy`,
+   * `RunCa.create` and `adapter.prepare` all sit in the same window and are not on any list.
+   */
+  it('leaves the working tree alone when the upstream CA cannot be read', async () => {
+    await record();
+    await writeFile(join(workspace, 'auth.ts'), 'MY UNCOMMITTED WORK\n');
+
+    process.env.ORCA_TLS_UPSTREAM_CA = join(workspace, 'no-such-root.pem');
+    try {
+      await expect(
+        replayCommand(
+          parseArgs(['replay', 'last', '--tls-intercept', '--tls-hosts', 'api.openai.com']),
+          out,
+          workspace,
+        ),
+      ).rejects.toThrow(/ENOENT|no such file/);
+    } finally {
+      delete process.env.ORCA_TLS_UPSTREAM_CA;
+    }
+
+    expect(
+      await readFile(join(workspace, 'auth.ts'), 'utf8'),
+      'a refused replay must not have touched the checkout',
+    ).toBe('MY UNCOMMITTED WORK\n');
+    expect(lines.join('\n')).not.toContain('replay.restored');
+  });
+
+  /**
+   * And the same on the two paths where only scratch is at stake.
+   *
+   * A fork restores its checkpoint into a temp worktree and opens its own run before it reaches
+   * `setupTlsCapture`, and `record` opens its run first too — so a refused host list left an empty
+   * run for `orca list` to show, plus a worktree in `$TMPDIR` that `orca gc` will not reclaim
+   * because no manifest points at it. Cheaper than the checkout, the same rule.
+   */
+  it('leaves no run behind when it refuses the tls host list', async () => {
+    const before = (await listRuns(workspace)).length;
+    await expect(
+      recordCommand(
+        parseArgs([
+          'record',
+          'generic-openai',
+          '--tls-intercept',
+          '--tls-hosts',
+          '*',
+          '--',
+          'node',
+          FAKE_AGENT,
+        ]),
+        out,
+        workspace,
+      ),
+    ).rejects.toThrow(/would intercept every host/);
+    expect((await listRuns(workspace)).length, 'a refused record must not have created a run').toBe(
+      before,
+    );
+
+    await record();
+    const afterGood = (await listRuns(workspace)).length;
+    await expect(
+      replayCommand(
+        parseArgs([
+          'replay',
+          'last',
+          '--from',
+          '1',
+          '--model',
+          'gpt-5.2',
+          '--tls-intercept',
+          '--tls-hosts',
+          '*',
+        ]),
+        out,
+        workspace,
+      ),
+    ).rejects.toThrow(/would intercept every host/);
+    expect((await listRuns(workspace)).length, 'a refused fork must not have created a run').toBe(
+      afterGood,
+    );
+  });
+
+  /**
    * The one line a reader checks to know whether a run can spend money.
    *
    * `egress` was a literal, so `--loose` — which answers an unmatched request from the provider —

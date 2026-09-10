@@ -20,7 +20,7 @@ import { SerialQueue } from '../serial.js';
 import { appendSnapshot } from '../fs-events.js';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
-import { persistNetExchange, setupTlsCapture, trustRunCa } from '../tls-capture.js';
+import { persistNetExchange, planTlsCapture, setupTlsCapture, trustRunCa } from '../tls-capture.js';
 import { upstreamPlan } from '../upstream.js';
 import { ORCA_VERSION } from '../version.js';
 
@@ -118,10 +118,15 @@ async function runRecording(
     out.info('adapter.detected', { id: adapter.id });
   }
 
-  // Before the run directory exists, because this refuses an upstream that is not an origin: resolved after it, a
-  // typo in `--upstream-*` left an empty run behind for `orca list` to show. It depends on nothing
-  // but the arguments and the environment, so there is no reason for it to run any later.
+  // Before the run directory exists, because both of these refuse: `upstreamPlan` an upstream that
+  // is not an origin, `planTlsCapture` a `--tls-hosts` list that names `*` or contradicts itself
+  // and an `ORCA_TLS_UPSTREAM_CA` that cannot be read. Resolved after it, a typo in any of them
+  // left an empty run behind for `orca list` to show. Neither depends on more than the arguments,
+  // the environment and a file the run was going to read anyway, so there is no reason for either
+  // to run later — and `planTlsCapture` is the refusing half of `setupTlsCapture` alone, so the
+  // certificate authority is still minted below, once the run has a directory to mint it into.
   const plan = await upstreamPlan(args);
+  await planTlsCapture(args);
 
   const dir = await ensureRunsDir(cwd);
 

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { TraceReader } from '@orcareplay/core';
+import { TraceReader, listRuns } from '@orcareplay/core';
 import { RunCa } from '@orcareplay/proxy';
 import { validateEvent } from '@orcareplay/schema';
 import { parseArgs } from '../src/args.js';
@@ -230,6 +230,12 @@ describe('orca record --tls-intercept', () => {
     // Rejected before `RunCa.create`, so the run that is not going to happen leaves no private key
     // anywhere under the runs root — the same guarantee `--tls-hosts '*'` already has.
     expect(await grepRunDir(join(workspace, '.orca'), 'PRIVATE KEY')).toEqual([]);
+    // And before `ensureRunsDir`, so there is no runs root either. The key was the urgent half;
+    // this is the rest of it — a refused host list used to leave an empty run for `orca list` to
+    // show, the same way a refused upstream did.
+    expect(await listRuns(workspace), 'a refused host list must not have created a run').toEqual(
+      [],
+    );
   });
 
   /**
@@ -495,11 +501,19 @@ describe('orca record --tls-intercept', () => {
   });
 });
 
-/** Every file under a run directory that contains `needle`. */
+/**
+ * Every file under a run directory that contains `needle`.
+ *
+ * A directory that is not there holds no files, and answering `[]` for it is the honest reading
+ * rather than a convenience: the callers ask whether a refused run left a key behind, and a runs
+ * root that was never created is the strongest possible no. It used to throw ENOENT instead, so
+ * moving the refusal ahead of `ensureRunsDir` failed the very test that asked for it.
+ */
 async function grepRunDir(runDir: string, needle: string): Promise<string[]> {
   const hits: string[] = [];
   const walk = async (dir: string): Promise<void> => {
-    for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
       const full = join(dir, entry.name);
       if (entry.isDirectory()) {
         await walk(full);
