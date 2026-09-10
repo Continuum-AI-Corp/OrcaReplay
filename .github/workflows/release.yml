@@ -134,6 +134,10 @@ jobs:
           VERSION: ${{ needs.decide.outputs.version }}
         run: |
           set -euo pipefail
+          # The commit that is about to be packed, which is also what npm will write as `gitHead`.
+          PUBLISHING=$(git rev-parse HEAD)
+          echo "publishing $VERSION from $PUBLISHING"
+
           # Computed, never hardcoded: internal deps are pinned to an exact version, so publishing
           # the CLI before the core it names would fail on a version the registry does not have.
           #
@@ -165,13 +169,22 @@ jobs:
             # published from the new one, and the tag step then tags the new commit. `orcareplay@0.3.0`
             # is permanently a mixture of two trees that no commit corresponds to.
             #
-            # `gitHead` is what npm records at publish time; it is present on the existing releases
-            # (0.2.3 carries 2a1311c, the commit `v0.2.3` points at). If it is missing, this falls
-            # through and publishes, which is the loud E403 that used to be the only behaviour.
+            # `gitHead` is what npm records at publish time, read out of the checkout's own `.git`;
+            # it is present on the existing releases (0.2.3 carries 2a1311c, the commit `v0.2.3`
+            # points at). If it is missing, this falls through and publishes, which is the loud E403
+            # that used to be the only behaviour.
+            #
+            # Compared against `git rev-parse HEAD` rather than `$GITHUB_SHA`, so both sides come
+            # from the same place: the commit that is checked out and about to be packed. They agree
+            # today even for an annotated tag — all six releases in this repository were annotated
+            # tags and GitHub reported the *commit* as the event sha in every one — but that is a
+            # property of GitHub's event payload, and if it ever reported the tag object instead,
+            # every probe would mismatch and a tag-triggered release that died half way could never
+            # be resumed. Asking git costs nothing and does not depend on knowing that.
             head=$(npm view "$name@$VERSION" gitHead 2>/dev/null) || head=
             if [ -n "$head" ]; then
-              if [ "$head" != "$GITHUB_SHA" ]; then
-                echo "$name@$VERSION was published from $head, not $GITHUB_SHA." >&2
+              if [ "$head" != "$PUBLISHING" ]; then
+                echo "$name@$VERSION was published from $head, not $PUBLISHING." >&2
                 echo "A version cannot be replaced on npm — bump the version instead." >&2
                 exit 1
               fi
