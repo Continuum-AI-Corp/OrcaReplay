@@ -82,12 +82,23 @@ caught that, which is why CrewAI has its own check now.
 
 ### Two things that changed with it
 
-**A prefixed model name no longer resolves.** `LLM(model="openai/gpt-4o-mini")` is the LiteLLM
-spelling, and on a default 1.x install it raises `ImportError: ... did not match any supported
-native provider ... and the LiteLLM fallback package is not installed`. The bare form,
-`LLM(model="gpt-4o-mini")`, is what the native provider takes. This is the shape of breakage an
-upgrade from 0.x hits, and it happens before any request is made — so orca records a run of three
-events and reports `capture.empty`, which is accurate and easy to misread as a capture problem.
+**A prefixed model name is validated; a bare one is not.** This matters here because pointing an
+agent at a gateway usually means naming a model the provider has never heard of, which is exactly
+the case the two forms treat differently:
+
+| `LLM(model=…)` | resolves |
+|---|---|
+| `gpt-4o-mini`, `o3-mini` | yes — native OpenAI provider |
+| `openai/gpt-4o-mini`, `openai/o3-mini` | yes — same provider |
+| `my-gateway-model` | **yes** — a bare name always reaches the native provider |
+| `openai/my-gateway-model` | **no** — `ImportError: ... did not match any supported native provider` |
+
+So use the bare form when the model name is your gateway's rather than the vendor's. The prefixed
+form is checked against a known-model list, and a name that is not on it falls through to the
+LiteLLM path, which a default 1.x install no longer has.
+
+It fails before any request is made, so orca records three events and reports `capture.empty` —
+accurate, and easy to misread as a capture problem when it is a model-name problem.
 
 **`LLM(base_url=…)` is now honoured.** It used not to be: passing the origin in code did nothing,
 because it never reached LiteLLM's `api_base`. Measured again on 1.15.20 against a listener with the

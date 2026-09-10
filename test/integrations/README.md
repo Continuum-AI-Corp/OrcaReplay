@@ -56,8 +56,8 @@ gives, and in CrewAI 1.x it is no longer true: LiteLLM became an optional extra 
 native providers, so a default install never loads it. Capture survived — the native provider reads
 both variables `generic-openai` sets — but the stated reason had been wrong for a whole major
 version, and nothing here could have noticed. Running CrewAI also turned up two changes worth
-documenting: `LLM(model="openai/…")` no longer resolves, and `LLM(base_url=…)`, long documented as
-silently ignored, is now honoured.
+documenting: a prefixed model name is validated against a known-model list where a bare one is not,
+and `LLM(base_url=…)`, long documented as silently ignored, is now honoured.
 
 **`openai-agents` is not a duplicate of `openai-async` either.** The Agents SDK defaults to the
 Responses API; `AsyncOpenAI` in that check uses chat completions. So the older check covered the

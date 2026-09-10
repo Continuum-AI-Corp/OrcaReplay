@@ -10,9 +10,10 @@ Two things this pins that the LiteLLM route cannot:
 
   - the native provider reads `OPENAI_API_BASE` *and* `OPENAI_BASE_URL`, both of which
     `generic-openai` sets — so the capture survived the change even though the reason for it did not
-  - a bare model name is what the native provider takes. `LLM(model="openai/stub-1")` is the
-    LiteLLM spelling and now raises `ImportError` on a default install, which is the shape of
-    breakage a CrewAI user upgrading from 0.x will hit
+  - a bare model name always reaches the native provider, whatever the name. A prefixed one is
+    checked against a known-model list, so `LLM(model="openai/stub-1")` raises `ImportError` while
+    the bare `stub-1` does not — which is why this check uses the bare form, and which is the same
+    distinction anyone pointing CrewAI at a gateway runs into
 """
 
 import os
@@ -25,7 +26,7 @@ os.environ["OTEL_SDK_DISABLED"] = "true"
 
 from crewai import Agent, Crew, LLM, Process, Task  # noqa: E402
 
-# Bare, not `openai/…`. See the note above: the prefixed form is LiteLLM's and no longer resolves.
+# Bare, not `openai/…`: see above — a prefixed name is validated, and `stub-1` is on no list.
 llm = LLM(model="stub-1")
 
 agent = Agent(

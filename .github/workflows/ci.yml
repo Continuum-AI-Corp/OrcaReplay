@@ -69,6 +69,14 @@ jobs:
       # about both. A skip is now a failure on this runner, so forgetting the line above fails
       # loudly instead of quietly making a claim untrue.
       - run: node test/integrations/run.mjs --require-all
+      # Not part of the matrix: this records nothing and replays nothing. It asks CrewAI which model
+      # names it resolves and fails if the answer has drifted from what `docs/integrations.md` says.
+      # It exists because that claim was wrong once — the measurement behind it used a model name no
+      # known-model list contains, and read the refusal as being about the prefix.
+      - run: python test/integrations/agents/crewai_model_names.py
+        working-directory: .
+        env:
+          OPENAI_API_KEY: unused-but-crewai-wants-one
 
   python-sdk:
     name: python sdk
