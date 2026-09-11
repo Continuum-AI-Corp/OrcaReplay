@@ -64,6 +64,9 @@ jobs:
       - run: >
           pip install openai anthropic litellm langgraph langchain-openai browser-use
           crewai openai-agents openhands-sdk
+      # From the tree, not PyPI: the `openai-agents-handoff` check exists to prove the tracing layer
+      # in *this* commit works, and installing a published copy would test the last release instead.
+      - run: pip install -e python-openai-agents
       # `--require-all`, because installing them above was never what enforced it. Two checks were
       # added without a line here and CI stayed green on the skips, while the README said "in CI"
       # about both. A skip is now a failure on this runner, so forgetting the line above fails
@@ -91,6 +94,12 @@ jobs:
       # `pip install orca-trace` actually works, which is how anyone will really get it.
       - run: pip install ./python[dev]
       - run: python -m pytest python/ -q
+      # The second Python distribution in this tree. It was added with tests and with a `pip install
+      # -e` in the integrations job, and nothing ran them — the same shape as the skipped checks
+      # that job now fails on, one layer out. Its `[dev]` extra brings the Agents SDK, because two
+      # of its tests are about how `install()` registers with it.
+      - run: pip install ./python-openai-agents[dev]
+      - run: python -m pytest python-openai-agents/ -q
 
   plugin-api-neutrality:
     name: plugin API neutrality
