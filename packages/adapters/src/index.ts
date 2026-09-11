@@ -9,6 +9,7 @@ export * from './generic-openai.js';
 export * from './goose.js';
 export * from './grok.js';
 export * from './hermes.js';
+export * from './indexrag.js';
 export * from './node.js';
 export * from './openclaw.js';
 export * from './mcp-config.js';

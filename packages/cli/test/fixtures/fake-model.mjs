@@ -68,6 +68,27 @@ export async function startFakeModel(options = {}) {
         res.end(JSON.stringify({ error: { type: 'error', message: 'no auth available' } }));
         return;
       }
+      // Embeddings, for the tests that record a run whose only calls are retrieval. Deterministic
+      // for the same reason every other answer here is: a replay is judged on matching what was
+      // recorded, so a varying answer would make a correct replay indistinguishable from a lucky
+      // one.
+      if (req.url?.endsWith('/embeddings')) {
+        const inputs = Array.isArray(body.input) ? body.input : [body.input ?? ''];
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            object: 'list',
+            data: inputs.map((text, index) => ({
+              object: 'embedding',
+              index,
+              embedding: [String(text).length / 10, index / 10],
+            })),
+            model: body.model ?? 'stub-embedding',
+            usage: { prompt_tokens: inputs.length, total_tokens: inputs.length },
+          }),
+        );
+        return;
+      }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(reply));
     });

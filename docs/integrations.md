@@ -250,6 +250,154 @@ divergences=0`.
 
 ---
 
+## RAG and retrieval frameworks
+
+A retrieval pipeline is not a conversational agent with extra steps. It breaks four assumptions
+the rest of this file takes for granted, and each one needed its own answer. They are listed here
+as four layers because that is how they are implemented: only the third is specific to any one
+project, and a second RAG adapter should be able to declare two things and stop.
+
+| Layer | What it answers | Where it lives |
+|---|---|---|
+| **L0 — matching** | under concurrency, does each request get *its own* answer back? | `packages/proxy/src/matching.ts` |
+| **L1 — the adapter** | start the pipeline, take over **two** model origins | `packages/adapters/src/indexrag.ts` |
+| **L2 — retrieval** | replay embeddings and rerank, which no dialect claims | `packages/proxy/src/retrieval.ts` |
+| **L3 — state** | capture the index, and reset to the recording's starting point | `fs-capture`, `orca replay` |
+
+### L0 — the answer has to be the right one
+
+Every index-building pipeline sends the *same message* many times over: the prompt template is
+fixed and the document that varies rides in the **system** prompt. The matching ladder was built
+for a conversation, where the trailing message is the question — so it read every extraction
+request as "the same ask, drifted a little", and served each document whichever answer the cursor
+happened to be on. Measured on 30 real paragraphs at concurrency 10: 24 of them got another
+paragraph's extraction, `unmatched=0`, `exit=0`. The knowledge base built from a replay of that
+recording is a knowledge base of mismatched answers, and nothing in the run says so.
+
+Two changes fix it, and both are about *ordering* rather than about adding a guard:
+
+- an exact match anywhere in the recording outranks an approximate one at the cursor;
+- rung 3 requires the history to actually differ, which is what the rung was written for.
+
+A consequence worth knowing: requests answered from a position other than the cursor are reported
+as `reordered=N`, not as divergences. A worker pool reorders; that is not an approximation, and
+calling it one made `exact=N/N` unreachable for any concurrent run.
+
+### L1 — two model origins in one run
+
+Chat goes to a gateway; embeddings go to a dedicated provider or a local Ollama. Orca's upstream
+map is keyed by *wire dialect*, so `--upstream-openai` cannot express "the same dialect at two
+origins". The second origin is redirected through `/forward/<encoded base>` instead, so the
+request carries its own destination and nothing has to be guessed:
+
+```console
+ORCA_BASE_URL_VARS=MY_EMBEDDING_BASE_URL orca record generic-openai -- python build_index.py
+```
+
+`orca record indexrag` does this for you, reading `INDEXRAG_EMBEDDING_BASE_URL` from the
+environment or from the project's own `.env` — which is where IndexRAG documents it, and which an
+adapter that only read the environment would have missed, silently recording none of that half.
+
+### L2 — embeddings and rerank replay
+
+An embedding is a **function**: the same text through the same model gives the same vector. That
+is a stronger property than a chat completion has, and it is what lets these calls be replayed
+without any translator — looked up by their own request rather than by a position in a
+conversation they are not part of.
+
+| Endpoint | Rule | Replayable | Forkable |
+|---|---|:--:|:--:|
+| `…/embeddings` | `openai-embeddings` | ✅ | ❌ |
+| `…/embed` | `cohere-embed` | ✅ | ❌ |
+| `…/rerank` | `rerank` (Cohere, Jina, Voyage) | ✅ | ❌ |
+
+They are never forkable, and the type says so rather than a comment: changing the embedding model
+changes the vector space the index was built in. That is a rebuild, not a fork — and it is exactly
+why keeping retrieval on the recording is what makes `orca replay <run> --from N --model <other>`
+useful. The chat model changes; the index does not.
+
+Two numbers, deliberately on separate axes:
+
+```
+info replay.done reused=11/11 exact=11 divergences=0 unmatched=0 reordered=6 retrieval=3/3 exit=0
+```
+
+`exact` is about a matching ladder these calls never climb. Folding them in would make a recording
+look more faithfully reproduced the more embeddings it happened to make.
+
+**Batches whose order differs.** A pipeline assembles its embedding batch from a worker pool, so
+the same texts arrive in a different sequence on every run — two replays of one real recording
+produced two different keys and neither matched what was recorded. Where the endpoint's own
+contract says `data[i]` answers `input[i]` (OpenAI embeddings does, and says so in the body), the
+recorded answer for each text is handed back against that text's new position. That is not an
+approximation; anything short of an exact permutation halts instead.
+
+**Size.** Six paragraphs at 768 dimensions is 98 KB of JSON floats, and an index build makes
+thousands of those calls. `orca record --retrieval-store=digest` keeps a sha256 of each response
+instead of the response: enough to prove a later run agreed, not enough to replay it.
+
+**What is not here.** `top-k` and retrieval **scores** are not on the wire. A prompt carries the
+passages that survived truncation, in the order they were pasted, with no numbers attached — so
+orca does not report a count as though it were `top-k`, which would be a measurement nobody made.
+Getting those needs an instrument inside the Python process; orca has a JS one
+(`packages/node-instrument`) and no Python equivalent. That is separate work.
+
+What *is* derivable is the evidence itself. A `Context: … Question: …` prompt yields a
+`retrieval.context` event — the query and each passage — reconstructed from the request the same
+way `tool.call` always has been, with no new capture mechanism.
+
+### L3 — the index is the product, and the pipeline resumes
+
+Two failures, both silent:
+
+- **The product is outside the snapshot.** `vector_store/`, `cache/` and `dataset/` are the first
+  three data lines of IndexRAG's own `.gitignore`, so a recording held every call that built an
+  index and no trace of the index — nor of the corpus it was built from.
+- **A replay reproduces nothing.** Run the pipeline again over a finished cache and it skips every
+  item and asks nothing: `reused=0/6`, `exit=0`, over a recording that was perfectly good.
+
+An adapter declares both, and orca does the rest:
+
+```ts
+artifacts: {
+  capture: ['cache', 'vector_store', 'dataset', 'test_results_*.json'],
+  resetBeforeReplay: ['cache', 'vector_store'],
+  concurrencyFlag: { flag: '--concurrency', serialValue: '1' },
+}
+```
+
+`capture` is forced past the workspace's ignore rules and **cannot** reach a credential: the
+sensitive pathspecs are applied to it too, so an adapter declaring `.` still captures no `.env`.
+`resetBeforeReplay` deletes whole paths rather than "the invalid parts" — IndexRAG's resume skips
+by `chunk_id` including entries it recorded as *failures*, so keeping what looks valid promotes
+the last run's failures to completed work. Orca deletes only where it restores afterwards; with
+`--in-place` it says so and leaves them alone.
+
+`concurrencyFlag` is declared and never applied on its own. `orca replay <run> --serialize` is
+what reaches for it, because clamping concurrency changes the run being replayed — useful for
+answering "is this a concurrency problem?", wrong as a default.
+
+### Reusing this for another pipeline
+
+L0, L2 and L3 are general. A second RAG adapter should need its product paths and its concurrency
+flag, and nothing else:
+
+| Project | `artifacts.capture` | Concurrency |
+|---|---|---|
+| IndexRAG | `cache`, `vector_store`, `dataset` | `--concurrency` |
+| LlamaIndex | `storage` | `IngestionPipeline(num_workers=)` |
+| Microsoft GraphRAG | `output`, `cache` | `settings.yaml: concurrent_requests` |
+| LightRAG | the working directory | `llm_model_max_async` |
+
+### Remote vector databases
+
+Not covered, on purpose. Qdrant, Weaviate and Milvus are stateful and their writes are not
+idempotent, so replaying the wire traffic to one would re-apply an index build against whatever
+that server holds now. The right answer for state is L3's file snapshot, which is what this does
+for FAISS — and a remote service is not a file. Point the pipeline at a local store to record it.
+
+---
+
 ## When none of this works
 
 **The trace comes back empty.** `orca record` says so rather than exiting quietly:

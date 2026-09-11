@@ -1,3 +1,5 @@
+import { forwardBasePath } from '@orcareplay/proxy';
+
 /**
  * Placeholder key for runs where the user has no credential in the environment. The proxy is
  * holding the real one (or serving from a trace), but SDK clients refuse to start without
@@ -50,6 +52,16 @@ export function passThrough(
  * normal case, so it gets a mechanism rather than a pull request.
  *
  * The variable is consumed, never forwarded: it names other variables and means nothing downstream.
+ *
+ * Where the variable already held an origin and the user did not spell out a path, the rewrite
+ * goes through `/forward/` so the request arrives carrying the destination orca took it away
+ * from. That matters as soon as a run has two of them. A retrieval stack is the ordinary case —
+ * chat through a gateway, embeddings at a dedicated provider or a local Ollama — and orca's
+ * upstream map is keyed by wire dialect, so "the same dialect at two origins" is a configuration
+ * `--upstream-openai` cannot express. Without the original target the second origin's calls were
+ * forwarded to the first one's, or, with no override configured at all, to `api.openai.com`
+ * carrying the second provider's credential. With it, `passthroughOrigin` restores the address
+ * the client announced and nothing has to be guessed.
  */
 export function applyNamedBaseUrls(
   target: Record<string, string>,
@@ -60,6 +72,14 @@ export function applyNamedBaseUrls(
     const [rawName, rawPath] = entry.split('=');
     const name = (rawName ?? '').trim();
     if (name === '') continue;
+    const original = readEnv(env, name);
+    // An explicit `=<path>` is the user saying where on the proxy this variable should point, and
+    // it still wins: it is how someone names a non-OpenAI-shaped origin, and rewriting it as a
+    // forward would silently ignore what they typed.
+    if (rawPath === undefined && original !== undefined) {
+      target[name] = proxyBase(proxyUrl, forwardBasePath(original));
+      continue;
+    }
     // A path of `/` means the bare origin. `proxyBase` would otherwise leave the separator behind
     // and hand the harness `http://host:port/`, which some clients then join into a double slash.
     const path = (rawPath ?? 'v1').trim().replace(/^\/+|\/+$/g, '');

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { RecordContext } from '@orcareplay/plugin-api';
 import { HOOK_FILENAME } from '@orcareplay/node-instrument';
+import { decodeForwardPath } from '@orcareplay/proxy';
 import { checkAdapterContract, formatContractResult } from '../src/contract.js';
 import { defaultAdapters } from '../src/registry.js';
 import { grokAdapter } from '../src/grok.js';
@@ -187,5 +188,41 @@ describe('ORCA_BASE_URL_VARS — naming a base-URL variable orca does not know',
       .get('node')
       .prepare({ ...ctx, env: { ORCA_BASE_URL_VARS: 'LLM_BASE_URL' } });
     expect(launch.env.LLM_BASE_URL).toBe('http://127.0.0.1:44100/v1');
+  });
+
+  /**
+   * The variable that already pointed somewhere keeps pointing there, through `/forward/`.
+   *
+   * A retrieval run is the case: chat goes to a gateway and embeddings to a dedicated provider,
+   * and orca's upstream map is keyed by wire dialect — so two origins of the same dialect cannot
+   * be named by any `--upstream-*`. Rewritten to a bare `/v1`, the embedding calls arrived with
+   * nothing saying where they had been headed, and `passthroughOrigin` sent them to the chat
+   * origin, or to `api.openai.com` with the embedding provider's key on them.
+   */
+  it('keeps the origin a set variable already named, as a forward path', async () => {
+    const launch = await generic().prepare({
+      ...ctx,
+      env: {
+        ORCA_BASE_URL_VARS: 'MY_URL',
+        MY_URL: 'https://embeddings.example/v1',
+      },
+    });
+    expect(launch.env.MY_URL).toBe(
+      `http://127.0.0.1:44100/forward/${encodeURIComponent('https://embeddings.example/v1')}`,
+    );
+    // And it decodes back to what the client was originally given, path included.
+    const decoded = decodeForwardPath(new URL(launch.env.MY_URL!).pathname);
+    expect(decoded?.base).toBe('https://embeddings.example/v1');
+  });
+
+  it('still honours an explicit path, which is the user saying where to point it', async () => {
+    const launch = await generic().prepare({
+      ...ctx,
+      env: {
+        ORCA_BASE_URL_VARS: 'MY_URL=v2',
+        MY_URL: 'https://embeddings.example/v1',
+      },
+    });
+    expect(launch.env.MY_URL).toBe('http://127.0.0.1:44100/v2');
   });
 });

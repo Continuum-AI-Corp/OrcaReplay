@@ -83,6 +83,7 @@ const KIND_BY_TYPE: Record<string, string> = {
   'mcp.response': 'MCP',
   'net.request': 'NET',
   'net.response': 'NET',
+  'retrieval.context': 'RETR',
   error: 'ERROR',
   divergence: 'DIVERGE',
   note: 'NOTE',
@@ -289,6 +290,22 @@ function parts(event: TraceEvent): RowParts {
         detail: parts.join(' · '),
         // Still not attention: the agent leaving early is its own behaviour, not orca's problem.
         tone: status !== undefined && status >= 400 ? 'attention' : 'normal',
+      };
+    }
+    case 'retrieval.context': {
+      // The query is the row, because that is what a reader is scanning for: which question got
+      // which evidence. The counts are the detail, and `passages` is deliberately not called
+      // `top_k` -- the prompt holds what survived truncation, not what the retriever returned.
+      const passages = num(a['passages']);
+      const chars = num(a['chars']);
+      return {
+        label: pick(a, 'query'),
+        detail: [
+          passages === undefined ? undefined : `${passages} passage${passages === 1 ? '' : 's'}`,
+          chars === undefined ? undefined : `${chars} chars`,
+        ]
+          .filter((part): part is string => part !== undefined)
+          .join(' · '),
       };
     }
     case 'error':

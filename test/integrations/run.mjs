@@ -12,7 +12,7 @@
  *   node test/integrations/run.mjs --require-all # a skip is a failure, which is what CI wants
  */
 import { execFile, spawn } from 'node:child_process';
-import { cp, mkdtemp, rm } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -112,6 +112,33 @@ const CHECKS = [
     run: ['node', 'agents/hardcoded_origin.mjs'],
     exchanges: 1,
   },
+  {
+    id: 'rag-index',
+    what: 'a retrieval pipeline: concurrent indexing, an embedding batch, then one answer',
+    run: ['python', 'agents/rag_pipeline.py'],
+    needs: 'openai',
+    // Four indexing calls plus the answer. The four are the ones that used to be served each
+    // other's extraction under a `minor` label, because their only message is a fixed template
+    // and the document rides in the system prompt.
+    exchanges: 5,
+    // Two embedding calls: the batch, and the question. Neither is a model exchange, and before
+    // `RetrievalRule` a strict replay answered 502 at the first of them.
+    retrieval: 2,
+    // What the retriever put in the prompt, derived rather than captured.
+    retrievalContexts: 1,
+  },
+  {
+    id: 'rag-split-origin',
+    what: 'the same pipeline with embeddings at a second origin of the same wire dialect',
+    run: ['python', 'agents/rag_pipeline.py'],
+    needs: 'openai',
+    exchanges: 5,
+    retrieval: 2,
+    // The configuration `--upstream-openai` cannot express: chat at one origin and embeddings at
+    // another, both OpenAI-shaped. Redirected through `/forward/`, the request carries its own
+    // destination and the proxy has nothing to guess at.
+    secondOrigin: 'EMBEDDING_BASE_URL',
+  },
 ];
 
 /** Whether the framework this check speaks for is installed at all. */
@@ -144,13 +171,14 @@ function startOrigin() {
 }
 
 /** Run the CLI, returning what it printed whether or not it succeeded. */
-async function orca(argv, cwd) {
+async function orca(argv, cwd, extraEnv = {}) {
   const env = {
     ...process.env,
     NO_COLOR: '1',
     // A key has to be present or the SDKs refuse to build a client; it never leaves the machine.
     OPENAI_API_KEY: 'stub-key',
     ANTHROPIC_API_KEY: 'stub-key',
+    ...extraEnv,
   };
   try {
     const { stdout, stderr } = await exec(process.execPath, [cli, ...argv], {
@@ -170,10 +198,22 @@ async function runCheck(check) {
 
   const dir = await mkdtemp(join(tmpdir(), `orca-int-${check.id}-`));
   const origin = await startOrigin();
+  // A second stub, only for the checks that split their traffic across two origins of the same
+  // wire dialect — the shape `--upstream-openai` cannot express, and the ordinary shape of a
+  // retrieval stack.
+  const second = check.secondOrigin ? await startOrigin() : undefined;
   try {
     await cp(join(here, 'agents'), join(dir, 'agents'), { recursive: true });
 
     const adapter = check.adapter ?? 'generic-openai';
+    // The variable that names the second origin is redirected by name, which is what an adapter
+    // for a known harness does for itself.
+    const splitEnv = second
+      ? {
+          [check.secondOrigin]: `http://127.0.0.1:${second.port}/v1`,
+          ORCA_BASE_URL_VARS: check.secondOrigin,
+        }
+      : {};
     const recorded = await orca(
       [
         'record',
@@ -186,6 +226,7 @@ async function runCheck(check) {
         ...check.run,
       ],
       dir,
+      splitEnv,
     );
     if (recorded.code !== 0) throw new Error(`record exited ${recorded.code}`);
     if (!recorded.out.includes('GOT:')) throw new Error('the agent did not produce its answer');
@@ -220,10 +261,53 @@ async function runCheck(check) {
       if (Number(f[2]) !== 0) throw new Error(`${f[2]} divergence(s) in the fork`);
     }
 
+    // What the trace says it captured, before the origins go down.
+    const events = (await readFile(join(dir, '.orca', 'runs', runId, 'events.jsonl'), 'utf8'))
+      .split('\n')
+      .filter((line) => line.trim() !== '')
+      .map((line) => JSON.parse(line));
+
+    // `retrieval.context` exists nowhere on the wire — it is derived from the prompt — so nothing
+    // but the trace can show whether it was derived at all.
+    if (check.retrievalContexts !== undefined) {
+      const found = events.filter((e) => e.type === 'retrieval.context');
+      if (found.length !== check.retrievalContexts) {
+        throw new Error(
+          `${found.length} retrieval.context event(s), wanted ${check.retrievalContexts}`,
+        );
+      }
+      // Derived means derived: the passages have to be the ones that were in the prompt.
+      if (!(found[0].attrs?.passages > 0)) throw new Error('retrieval.context named no passages');
+    }
+
+    // Where the second origin's traffic actually went. This is the assertion the check exists for
+    // — without it, "two origins" is indistinguishable from one, which is precisely the failure
+    // being guarded against: the embeddings were forwarded to the *chat* origin, or to
+    // `api.openai.com`, carrying the embedding provider's credential.
+    if (second) {
+      const retrievalCalls = events.filter(
+        (e) => e.type === 'net.request' && e.attrs?.replay_key !== undefined,
+      );
+      const stray = retrievalCalls.filter((e) => e.attrs?.port !== second.port);
+      if (retrievalCalls.length === 0) throw new Error('no retrieval call reached the trace');
+      if (stray.length > 0) {
+        const where = stray.map((e) => `${e.attrs?.host}:${e.attrs?.port}`).join(', ');
+        throw new Error(
+          `${stray.length} retrieval call(s) went to ${where}, not the second origin`,
+        );
+      }
+      // And the chat half stayed where it was. Both halves, or the check proves only one of them.
+      const chat = events.filter((e) => e.type === 'model.response');
+      if (chat.some((e) => !String(e.attrs?.upstream ?? '').includes(`:${origin.port}`))) {
+        throw new Error('a model exchange left the chat origin');
+      }
+    }
+
     // From here the recording is on its own. Anything that reaches out now fails.
     origin.stop();
+    second?.stop();
 
-    const replayed = await orca(['replay', runId, '--in-place'], dir);
+    const replayed = await orca(['replay', runId, '--in-place'], dir, splitEnv);
     if (replayed.code !== 0) throw new Error(`replay exited ${replayed.code}`);
 
     const m = /reused=(\d+)\/(\d+) exact=(\d+) divergences=(\d+) unmatched=(\d+)/.exec(
@@ -240,11 +324,28 @@ async function runCheck(check) {
     if (divergences !== 0) throw new Error(`${divergences} divergence(s)`);
     if (unmatched !== 0) throw new Error(`${unmatched} unmatched`);
 
+    // Retrieval is a separate axis and asserted separately, for the reason it is reported
+    // separately: `exact` is about a matching ladder these calls never climb, and a check that
+    // read only `exact` would call a replay faithful while every embedding in it went unserved.
+    if (check.retrieval !== undefined) {
+      const r = /retrieval=(\d+)\/(\d+)/.exec(replayed.out);
+      if (r === null) throw new Error('replay printed no retrieval count');
+      const [, served, recordedCalls] = r.map(Number);
+      if (recordedCalls !== check.retrieval)
+        throw new Error(`recorded ${recordedCalls} retrieval calls, wanted ${check.retrieval}`);
+      if (served !== recordedCalls)
+        throw new Error(
+          `${recordedCalls - served} retrieval call(s) not served from the recording`,
+        );
+    }
+
+    const retrievalNote = check.retrieval === undefined ? '' : `, ${check.retrieval} retrieval`;
     return {
-      ok: `${total} exchanges, replayed exact with the origin down${check.forks ? ', forked live' : ''}`,
+      ok: `${total} exchanges${retrievalNote}, replayed exact with the origin down${check.forks ? ', forked live' : ''}`,
     };
   } finally {
     origin.stop();
+    second?.stop();
     await rm(dir, { recursive: true, force: true });
   }
 }

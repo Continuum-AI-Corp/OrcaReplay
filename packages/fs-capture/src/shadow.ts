@@ -30,6 +30,13 @@ export interface FileChange {
 export interface ShadowIndexOptions {
   gitDir: string;
   workTree: string;
+  /**
+   * Paths to stage even though the workspace's own ignore rules exclude them.
+   *
+   * See {@link ShadowIndex.snapshot}. The sensitive pathspecs still apply, so this widens what a
+   * snapshot covers without widening what it may ever contain.
+   */
+  forced?: readonly string[];
 }
 
 export interface MaterializeOptions {
@@ -113,6 +120,8 @@ export class ShadowIndex {
   private constructor(
     readonly gitDir: string,
     readonly workTree: string,
+    /** See {@link ShadowIndexOptions.forced}. Empty for every ordinary workspace. */
+    readonly forced: readonly string[] = [],
   ) {}
 
   static async isAvailable(): Promise<boolean> {
@@ -121,7 +130,7 @@ export class ShadowIndex {
 
   static async create(opts: ShadowIndexOptions): Promise<ShadowIndex> {
     if (!(await gitAvailable())) throw new Error(GIT_MISSING_MESSAGE);
-    const { gitDir, workTree } = opts;
+    const { gitDir, workTree, forced = [] } = opts;
     await mkdir(gitDir, { recursive: true });
     const init = await runGit(['init', '--bare', '-q', gitDir]);
     if (init.code !== 0) {
@@ -139,7 +148,7 @@ export class ShadowIndex {
     }
     await mkdir(join(gitDir, 'info'), { recursive: true });
     await writeFile(join(gitDir, 'info', 'exclude'), `${SENSITIVE_PATTERNS.join('\n')}\n`, 'utf8');
-    return new ShadowIndex(gitDir, workTree);
+    return new ShadowIndex(gitDir, workTree, [...forced]);
   }
 
   private opts(extra: GitOptions = {}): GitOptions {
@@ -160,10 +169,45 @@ export class ShadowIndex {
     return res.stdout;
   }
 
-  /** Stages the whole work tree and returns the resulting tree id. No commit is created. */
+  /**
+   * Stages the whole work tree and returns the resulting tree id. No commit is created.
+   *
+   * A second `add -f` covers the paths an adapter declared, and only those. `-f` is what overrides
+   * the workspace's `.gitignore`, which is otherwise honoured — right for a coding agent, where
+   * the ignored paths are build output, and wrong for a pipeline, where the ignored directory is
+   * the whole product. IndexRAG's first three ignore lines are `vector_store/`, `cache/` and
+   * `dataset/`; without this a recording of an indexing run holds every call that built the index
+   * and not one byte of the index.
+   *
+   * `SENSITIVE_PATHSPECS` is repeated on the forced add deliberately: a pathspec exclusion is
+   * applied by `git add` itself and no `-f` overrides it, so an adapter that declares `.` to try
+   * to sweep a secret in still cannot stage `.env`. That is what makes this safe to hand to
+   * third-party plugin code.
+   */
   async snapshot(): Promise<string> {
     await this.run(['add', '-A', '--', '.', ...SENSITIVE_PATHSPECS]);
+    if (this.forced.length > 0) await this.addForced();
     return (await this.run(['write-tree'])).trim();
+  }
+
+  /**
+   * Stage the declared paths, tolerating the ones that do not exist yet.
+   *
+   * `git add` refuses a pathspec that matches nothing — "did not match any files" — and every
+   * run's snapshot 0 is taken before the harness has written anything, so one missing directory
+   * would fail the whole add and lose the paths that *were* there. One call in the ordinary case;
+   * the retry only runs while the product is still being built, and a pathspec that never matches
+   * anything stages nothing, which is the honest outcome rather than an aborted snapshot.
+   */
+  private async addForced(): Promise<void> {
+    const together = await runGit(
+      ['add', '-f', '--', ...this.forced, ...SENSITIVE_PATHSPECS],
+      this.opts(),
+    );
+    if (together.code === 0) return;
+    for (const path of this.forced) {
+      await runGit(['add', '-f', '--', path, ...SENSITIVE_PATHSPECS], this.opts());
+    }
   }
 
   async diff(fromTree: string, toTree: string): Promise<FileChange[]> {

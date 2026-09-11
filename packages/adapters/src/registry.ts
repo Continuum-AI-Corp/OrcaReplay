@@ -8,6 +8,7 @@ import { mimoAdapter } from './mimo.js';
 import { execAdapter } from './exec.js';
 import { genericOpenAiAdapter } from './generic-openai.js';
 import { gooseAdapter } from './goose.js';
+import { indexRagAdapter } from './indexrag.js';
 import { grokAdapter } from './grok.js';
 import { openClawAdapter } from './openclaw.js';
 import { nodeAdapter } from './node.js';
@@ -100,6 +101,9 @@ export function defaultAdapters(): AdapterRegistry {
   registry.register(hermesAdapter);
   registry.register(grokAdapter);
   registry.register(openClawAdapter);
+  // Before the three that decline to detect: its detector reads *this directory* rather than the
+  // machine, so it is the one adapter here that can honestly claim a workspace.
+  registry.register(indexRagAdapter);
   registry.register(nodeAdapter);
   registry.register(genericOpenAiAdapter);
   // Last: it detects nothing, and it is the fallback someone reaches for by name.

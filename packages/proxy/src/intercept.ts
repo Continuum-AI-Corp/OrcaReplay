@@ -110,6 +110,37 @@ export interface NetExchange {
    * recorded this way is the only evidence such a run leaves behind.
    */
   abandoned?: boolean;
+  /**
+   * Whether orca held the plaintext because it terminated TLS, or because the call arrived in
+   * plaintext to begin with.
+   *
+   * Absent means intercepted, which is what every exchange this module produces is. The proxy's
+   * own passthrough route reports the same shape for a POST on a path no dialect claims — orca
+   * did not decrypt anything there, the harness dialled a local http origin — and the trace said
+   * `intercepted=true` over it, claiming a capability that was never used on a host it was never
+   * used against.
+   */
+  intercepted?: boolean;
+  /**
+   * The retrieval rule that claimed this call, when one did.
+   *
+   * A `net.*` pair carrying this and {@link replayKey} is not opaque traffic: it is a call whose
+   * answer is a function of its request, and a replay can serve it back. See `retrieval.ts`.
+   */
+  rule?: string;
+  /** What a replay looks this call up by. Its presence is what makes the pair replayable. */
+  replayKey?: string;
+  /**
+   * A second key that ignores the order of a batch, where the rule offers one. It is what lets a
+   * pipeline whose worker pool assembles its batch differently on every run still replay; see
+   * `BatchRetrieval`.
+   */
+  batchKey?: string;
+  /**
+   * SHA-256 of the response body, present when `--retrieval-store=digest` kept the digest instead
+   * of the bytes. Enough to prove a later run got the same answer; not enough to serve one.
+   */
+  responseDigest?: string;
   durationMs: number;
 }
 
