@@ -15,6 +15,14 @@ import { captureSession, defaultAdapters, resolveLaunch, snapshotDir } from '@or
 import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
 import { installShellShim, readShellFrames } from '@orcareplay/shell-shim';
+import {
+  eventForSpan,
+  installAgentSpans,
+  pythonPathWith,
+  readAgentSpans,
+  SPANS_ENV,
+  type AgentSpanCapture,
+} from '../agent-spans.js';
 import { drainMcpFrames, pointAtMcpConfig, setupMcpCapture, type McpCapture } from '../mcp.js';
 import { SerialQueue } from '../serial.js';
 import { appendSnapshot } from '../fs-events.js';
@@ -189,6 +197,21 @@ async function runRecording(
     }
   }
 
+  // Agent-level structure, for a harness that reports it. The proxy sees `POST /v1/responses` and
+  // cannot say which agent sent it, that a handoff happened, or that a guardrail ran — the last of
+  // which need make no request at all. A `sitecustomize.py` on PYTHONPATH attaches the OpenAI Agents
+  // SDK's tracing to a run without editing the agent, the same trick as the fetch hook's
+  // NODE_OPTIONS. Silent and free where the SDK is absent, which is most runs.
+  let agentSpans: AgentSpanCapture | undefined;
+  if (args.bool('agent-spans', true)) {
+    try {
+      agentSpans = await installAgentSpans(writer.runDir);
+    } catch (err) {
+      // Same posture as the other optional layers: degrade the trace, never abort the run.
+      out.warn('agent_spans.unavailable', { reason: String(err) });
+    }
+  }
+
   const deriver = new ExchangeEventDeriver();
   let turn = 0;
   // When each turn began, so an out-of-band frame can be attributed to the turn it happened during
@@ -239,6 +262,7 @@ async function runRecording(
   let commandToolCalls = 0;
   /** Commands the shim actually saw. Zero against a non-zero `commandToolCalls` is the warning. */
   let shellFrames = 0;
+  let agentSpanEvents = 0;
   /**
    * Exchanges the upstream answered with an error status.
    *
@@ -349,6 +373,16 @@ async function runRecording(
       if (shell) {
         prepared.env.PATH = `${shell.dir}${delimiter}${process.env.PATH ?? ''}`;
       }
+      if (agentSpans) {
+        // Both, or neither works: PYTHONPATH is how Python finds the bootstrap, and the variable is
+        // what tells the bootstrap this is a recording rather than an ordinary Python process.
+        prepared.env.PYTHONPATH = pythonPathWith(
+          agentSpans.pythonPath,
+          process.env.PYTHONPATH,
+          delimiter,
+        );
+        prepared.env[SPANS_ENV] = agentSpans.spansPath;
+      }
       if (mcp) {
         pointAtMcpConfig(prepared.env, mcp.configPath);
         // The variables above are belt and braces for a harness orca has not met. What actually
@@ -453,6 +487,27 @@ async function runRecording(
           stdout_bytes: frame.stdoutBytes,
           stderr_bytes: frame.stderrBytes,
         },
+      });
+    }
+  }
+
+  if (agentSpans) {
+    // Timestamped from the span, like the shell frames above and for the same reason: these are
+    // read off disk after the agent exited, so stamping them now would file every handoff at the
+    // end of the run rather than between the turns it happened between.
+    for (const span of await readAgentSpans(agentSpans.spansPath)) {
+      const derived = eventForSpan(span);
+      if (derived === undefined) continue;
+      const startedAt = Date.parse(String(span.started_at ?? ''));
+      const at = Number.isNaN(startedAt) ? undefined : new Date(startedAt);
+      agentSpanEvents += 1;
+      await writer.append({
+        type: derived.type as 'agent.start',
+        // `harness`, not `orca`: we did not observe this, we were told it.
+        actor: 'harness',
+        turn: at === undefined ? turn : turnAt(startedAt),
+        ...(at === undefined ? {} : { occurredAt: at }),
+        attrs: derived.attrs,
       });
     }
   }
