@@ -12,7 +12,7 @@
  *   node test/integrations/run.mjs --require-all # a skip is a failure, which is what CI wants
  */
 import { execFile, spawn } from 'node:child_process';
-import { cp, mkdtemp, rm } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -106,6 +106,25 @@ const CHECKS = [
     exchanges: 1,
   },
   {
+    id: 'vision-repaint',
+    what: 'an agent with eyes: a screenshot recorded intact, and replayed against a different one',
+    run: ['python', 'agents/vision_agent.py'],
+    needs: 'openai',
+    exchanges: 1,
+    /**
+     * Two assertions the other checks cannot make, because none of them sends an image.
+     *
+     * `imageIntact` reads the trace and looks for the exact base64 the agent printed. The entropy
+     * sweep used to shred it — 47,314 placeholders in one real browser-use run — and every one of
+     * those was recorded in `redactions.json` as though a secret had been removed.
+     *
+     * `repaint` re-runs the agent with a different image, which is the only thing a browser can
+     * do. The match must survive it, and must say that it did.
+     */
+    imageIntact: true,
+    repaint: true,
+  },
+  {
     id: 'fetch-hook',
     what: 'a JS agent with its origin compiled in',
     adapter: 'node',
@@ -113,6 +132,18 @@ const CHECKS = [
     exchanges: 1,
   },
 ];
+
+/** Everything a run wrote, events and spilled bodies alike — a large body is not in events.jsonl. */
+async function traceText(runDir) {
+  let text = await readFile(join(runDir, 'events.jsonl'), 'utf8');
+  const blobs = join(runDir, 'blobs');
+  for (const shard of await readdir(blobs).catch(() => [])) {
+    for (const name of await readdir(join(blobs, shard))) {
+      text += await readFile(join(blobs, shard, name), 'utf8');
+    }
+  }
+  return text;
+}
 
 /** Whether the framework this check speaks for is installed at all. */
 async function installed(module) {
@@ -144,13 +175,16 @@ function startOrigin() {
 }
 
 /** Run the CLI, returning what it printed whether or not it succeeded. */
-async function orca(argv, cwd) {
+async function orca(argv, cwd, extraEnv = {}) {
   const env = {
     ...process.env,
     NO_COLOR: '1',
     // A key has to be present or the SDKs refuse to build a client; it never leaves the machine.
     OPENAI_API_KEY: 'stub-key',
     ANTHROPIC_API_KEY: 'stub-key',
+    // Reaches the replayed agent too, which is how a check makes the replay behave differently
+    // from the recording — the only way to test a match that is not byte equality.
+    ...extraEnv,
   };
   try {
     const { stdout, stderr } = await exec(process.execPath, [cli, ...argv], {
@@ -220,10 +254,29 @@ async function runCheck(check) {
       if (Number(f[2]) !== 0) throw new Error(`${f[2]} divergence(s) in the fork`);
     }
 
+    if (check.imageIntact) {
+      const sent = /^IMAGE: (\S+)$/m.exec(recorded.out)?.[1];
+      if (sent === undefined) throw new Error('the agent did not print the image it sent');
+      const trace = await traceText(join(dir, '.orca', 'runs', runId));
+      // Byte for byte. A near-miss is the failure this exists for: the sweep replaced runs *inside*
+      // the payload, so a substring check on the first hundred characters would have passed.
+      if (!trace.includes(sent))
+        throw new Error('the recorded image is not the image that was sent');
+      const holes = trace.match(/<secret:high_entropy:/g)?.length ?? 0;
+      if (holes > 0)
+        throw new Error(
+          `${holes} entropy placeholder(s) in a trace whose only high-entropy value is a PNG`,
+        );
+    }
+
     // From here the recording is on its own. Anything that reaches out now fails.
     origin.stop();
 
-    const replayed = await orca(['replay', runId, '--in-place'], dir);
+    const replayed = await orca(
+      ['replay', runId, '--in-place'],
+      dir,
+      check.repaint ? { ORCA_CHECK_REPAINT: '1' } : {},
+    );
     if (replayed.code !== 0) throw new Error(`replay exited ${replayed.code}`);
 
     const m = /reused=(\d+)\/(\d+) exact=(\d+) divergences=(\d+) unmatched=(\d+)/.exec(
@@ -236,9 +289,24 @@ async function runCheck(check) {
       throw new Error(`recorded ${total} exchanges, wanted ${check.exchanges}`);
     if (reused !== total)
       throw new Error(`${total - reused} turn(s) could not be served from the recording`);
+    if (unmatched !== 0) throw new Error(`${unmatched} unmatched`);
+
+    if (check.repaint) {
+      // The opposite assertion to every other check, and deliberately so. A repaint that came back
+      // `exact` would mean the agent had not in fact changed its image, and the check would be
+      // passing without testing anything. A repaint that came back silent would mean the matcher
+      // folded the pixels away without saying so, which the spec forbids.
+      if (exact !== 0)
+        throw new Error(`${exact} turn(s) matched byte for byte despite the repaint`);
+      if (divergences !== total)
+        throw new Error(`${divergences} divergence(s) for ${total} repainted turn(s)`);
+      if (!/pixels are not compared/.test(replayed.out))
+        throw new Error('the replay did not say the pixels had been set aside');
+      return { ok: `${total} exchange, image intact on disk, replayed against a repaint` };
+    }
+
     if (exact !== total) throw new Error(`${exact}/${total} matched byte for byte`);
     if (divergences !== 0) throw new Error(`${divergences} divergence(s)`);
-    if (unmatched !== 0) throw new Error(`${unmatched} unmatched`);
 
     return {
       ok: `${total} exchanges, replayed exact with the origin down${check.forks ? ', forked live' : ''}`,

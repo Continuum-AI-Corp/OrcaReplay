@@ -145,6 +145,55 @@ function foldPlaceholders(text: string): string {
   return text.replace(PLACEHOLDER_DIGEST, '$1>');
 }
 
+/**
+ * A rendered image is the second value a replay can never reproduce, for the same reason as a
+ * salted placeholder and with the same consequence: rung 1 is unreachable for any request carrying
+ * one. A replay drives the *real* browser — orca does not intercept the world — so the screenshot
+ * arriving now was rendered a second time, and two renders of one page are not the same bytes. A
+ * caret blinked, a font landed a frame later, the article was edited.
+ *
+ * Measured on a browser-use run against Wikipedia, recorded and then replayed:
+ *
+ *     turn 1   distance 545,134   —   with the pixels set aside: 171
+ *
+ * 99.97% of the distance was one PNG, and no threshold reachable from here can absorb that: the
+ * screenshot is 94% of the request body, so a rung-2 budget generous enough to admit it would
+ * admit a wholly different conversation too.
+ *
+ * The fold is safe because it is not the pixels that identify such a request. A browser agent
+ * sends its element tree, the page URL and its own memory in the same message, in text, and that
+ * text stays fully compared — in the same measurement, two runs that genuinely diverged scored
+ * 14,191, 19,409 and 57,519 with the pixels already set aside. Blinding the payload does not make
+ * everything match; it stops one unreproducible field from drowning out everything that does.
+ *
+ * Below rung 1 only. Rung 1 compares the payload, so an exact match still means exact.
+ */
+function foldImages(form: Record<string, unknown>): Record<string, unknown> {
+  const messages = ((form.messages ?? []) as Record<string, unknown>[]).map((m) => ({
+    ...m,
+    content: ((m.content ?? []) as Record<string, unknown>[]).map((c) =>
+      c?.type === 'image' ? { ...c, data: '' } : c,
+    ),
+  }));
+  return { ...form, messages };
+}
+
+/** How the fold is named wherever it is reported. */
+function imageNote(n: number): string {
+  return `${n} ${n === 1 ? 'image' : 'images'}, whose pixels are not compared below rung 1`;
+}
+
+/** For that message: a fold nobody is told about is a replay that quietly approximates. */
+function countImages(form: Record<string, unknown>): number {
+  let n = 0;
+  for (const m of (form.messages ?? []) as Record<string, unknown>[]) {
+    for (const c of (m.content ?? []) as Record<string, unknown>[]) {
+      if (c?.type === 'image') n += 1;
+    }
+  }
+  return n;
+}
+
 /** Deep map over string leaves, structure untouched. */
 function mapStrings<T>(value: T, f: (s: string) => string): T {
   if (typeof value === 'string') return f(value) as unknown as T;
@@ -171,15 +220,16 @@ function redactedForm(req: CanonicalRequest, redactor?: Redactor): Record<string
 }
 
 /**
- * What rungs 2 and below compare: the redacted form with placeholder digests folded away, so what
- * survives is *which kind of secret sat here*. That is the most a trace can honestly claim to know
- * about a value it deliberately destroyed.
+ * What rungs 2 and below compare: the redacted form with the two unreproducible things folded
+ * away — a placeholder's digest, so what survives is *which kind of secret sat here*, and an
+ * image's payload, so what survives is *an image of this media type sat here*. In both cases that
+ * is the most a trace can honestly claim about a value the replay cannot produce again.
  */
 export function comparableRequest(
   req: CanonicalRequest,
   redactor?: Redactor,
 ): Record<string, unknown> {
-  return mapStrings(redactedForm(req, redactor), foldPlaceholders);
+  return foldImages(mapStrings(redactedForm(req, redactor), foldPlaceholders));
 }
 
 function hashOf(value: unknown): string {
@@ -375,6 +425,8 @@ export class RequestMatcher {
   readonly #comparable: Record<string, unknown>[];
   /** Counted before the fold, which is the only point at which the digests are still there. */
   readonly #secrets: number[];
+  /** Likewise for images, so a match that only held because the pixels were set aside says so. */
+  readonly #images: number[];
   readonly #redactor?: Redactor;
   #cursor = 0;
   /**
@@ -401,7 +453,8 @@ export class RequestMatcher {
     const normalized = recorded.map((r) => normalizeRequest(r));
     this.#strict = normalized.map(hashOf);
     this.#secrets = normalized.map(countPlaceholders);
-    this.#comparable = normalized.map((n) => mapStrings(n, foldPlaceholders));
+    this.#images = normalized.map(countImages);
+    this.#comparable = normalized.map((n) => foldImages(mapStrings(n, foldPlaceholders)));
   }
 
   remaining(): number {
@@ -491,6 +544,26 @@ export class RequestMatcher {
     return undefined;
   }
 
+  /**
+   * What had to be folded away for this request to compare equal — said in full, because "identical
+   * apart from 0 redacted values" is what a message reads like when it names only one of two folds.
+   */
+  #foldedNote(index: number): string {
+    const secrets = this.#secrets[index]!;
+    const images = this.#images[index]!;
+    const parts: string[] = [];
+    if (secrets > 0) {
+      parts.push(
+        `${secrets} redacted ${secrets === 1 ? 'value' : 'values'}, ` +
+          'whose digests are salted per run',
+      );
+    }
+    if (images > 0) parts.push(imageNote(images));
+    // Unreachable in practice — with neither fold applied the two forms are the hash rung 1
+    // compared — but a matcher that prints "identical apart from " is worse than one that says so.
+    return parts.length === 0 ? 'nothing this matcher can name' : parts.join(' and ');
+  }
+
   /** How far ahead a skip may reach. Bounded: past this, a match is more likely a coincidence. */
   #lookaheadLimit(): number {
     return Math.min(this.#cursor + LOOKAHEAD, this.#recorded.length - 1);
@@ -509,13 +582,13 @@ export class RequestMatcher {
     const live = comparableRequest(incoming, this.#redactor);
     const distance = leafDistance(live, recorded);
     const size = JSON.stringify(recorded).length;
+    const images = this.#images[index]!;
 
-    // Rung 2a — identical everywhere the trace kept a value. The digests differ because they are
-    // salted per run, which is the one difference orca can neither reproduce nor rule out, so it
-    // is reported rather than waved through: this is the ordinary shape of replaying a real
-    // harness, whose own prompt carries a session id.
+    // Rung 2a — identical everywhere the trace kept a comparable value. What differs is only what
+    // orca can neither reproduce nor rule out: a placeholder digest, salted per run, and an image,
+    // rendered again. Both are named rather than waved through — this is the ordinary shape of
+    // replaying a real harness, whose own prompt carries a session id and whose eyes are a camera.
     if (distance === 0) {
-      const secrets = this.#secrets[index]!;
       return {
         matched: true,
         rung: 2,
@@ -524,9 +597,7 @@ export class RequestMatcher {
           level: 'minor',
           rung: 2,
           distance: 0,
-          detail:
-            `request ${index} is identical apart from ${secrets} redacted ` +
-            `${secrets === 1 ? 'value' : 'values'}, whose digests are salted per run`,
+          detail: `request ${index} is identical apart from ${this.#foldedNote(index)}`,
         },
       };
     }
@@ -557,7 +628,8 @@ export class RequestMatcher {
           detail:
             `request ${index} differs by ${distance} ${distance === 1 ? 'char' : 'chars'} ` +
             `with an identical message count` +
-            (askDrift > 0 ? `, ${askDrift} of them in the trailing message` : ''),
+            (askDrift > 0 ? `, ${askDrift} of them in the trailing message` : '') +
+            (images === 0 ? '' : `, not counting ${imageNote(images)}`),
         },
       };
     }
