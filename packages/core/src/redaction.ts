@@ -82,6 +82,31 @@ const RULES: Rule[] = [
   { kind: 'google_api_key', pattern: /AIza[0-9A-Za-z_-]{35}/g },
 ];
 
+/**
+ * A `data:` URI's payload, which is base64 by construction and therefore one long high-entropy run.
+ *
+ * The same reasoning `#scan` already skips a base64-encoded body on, arriving through a different
+ * door — there the proxy did the encoding, here the agent did. A browser-using agent puts a
+ * screenshot of the page in every request it makes, and the entropy
+ * sweep shredded one Wikipedia run's six screenshots into **47,314 placeholders** — 1.96 MB of the
+ * 3.39 MB trace, rewritten into holes.
+ *
+ * That protects nothing and costs three things:
+ *
+ *   - the recorded bytes stop being the bytes that were sent, so a request carrying an image can
+ *     never match on replay, whatever else is true of it
+ *   - `redactions.json` fills with tens of thousands of records that are not secrets, which is the
+ *     one file a reader consults to find out what *was* removed
+ *   - a credential is no safer for it: one visible in a screenshot is pixels, not a token, and
+ *     entropy cannot see it either way
+ *
+ * Excluded from the entropy sweep only. The named rules still run over the whole value, so an
+ * `sk-…` that happens to sit in a data URI is still caught by shape.
+ */
+// The trailing `\\` is not decoration: a body reaches the trace JSON-encoded, so the payload can
+// carry escaped characters and the span has to cover them or it stops one byte early.
+const DATA_URI = /data:[a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\\]+/g;
+
 const TOKEN = /[A-Za-z0-9_-]{20,}/g;
 const PLACEHOLDER = /<secret:[a-z_]+:[0-9a-f]{8}>/g;
 const MIN_ENTROPY_LENGTH = 20;
@@ -155,6 +180,7 @@ function spansOf(value: string): [number, number][] {
   for (const m of value.matchAll(PROTOCOL_SIGNATURE_VALUE)) {
     spans.push([m.index, m.index + m[0].length]);
   }
+  for (const m of value.matchAll(DATA_URI)) spans.push([m.index, m.index + m[0].length]);
   return spans;
 }
 
