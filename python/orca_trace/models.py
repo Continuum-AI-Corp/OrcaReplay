@@ -31,7 +31,12 @@ __all__ = [
     "TraceFormatError",
 ]
 
-SCHEMA_VERSION: Final = "0.1.0"
+#: The trace format version this SDK implements. Kept equal to the TypeScript writer's own
+#: constant — `test_schema_version_matches_the_typescript_constant` reads that file rather than
+#: restating the number, because two SDKs quietly disagreeing about what the format *is* is the
+#: exact drift these constants exist to prevent. It is not a floor on what can be read: a MINOR
+#: bump only adds event types, and an older trace reads the same as it always did.
+SCHEMA_VERSION: Final = "0.2.0"
 
 #: Spec §2.3. Adding a type is a MINOR bump, so a reader that meets an unknown one skips the
 #: event rather than failing the trace — see `TraceReader.problems`.
@@ -51,6 +56,7 @@ EVENT_TYPES: Final[frozenset[str]] = frozenset(
         "fs.change",
         "net.request",
         "net.response",
+        "retrieval.context",
         "session.snapshot",
         "error",
         "divergence",
