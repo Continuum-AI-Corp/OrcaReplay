@@ -21,9 +21,15 @@ const UPSTREAM = ['upstream-anthropic', 'upstream-openai'] as const;
 /** Read by `tls-capture.ts`, which record, replay and compare all set up. */
 const TLS = ['tls-intercept', 'tls-hosts'] as const;
 
+/**
+ * How much of a retrieval call's answer to keep. Only the commands that *make* one have it:
+ * replay serves what a recording already holds, and cannot change what was stored then.
+ */
+const RETRIEVAL = ['retrieval-store'] as const;
+
 export const BY_COMMAND: Record<string, readonly string[]> = {
   quickstart: ['dir', 'full'],
-  record: ['fs', 'shell', 'mcp-config', ...TLS, ...UPSTREAM],
+  record: ['fs', 'shell', 'mcp-config', ...RETRIEVAL, ...TLS, ...UPSTREAM],
   attach: [
     'for',
     'bind',
@@ -32,6 +38,7 @@ export const BY_COMMAND: Record<string, readonly string[]> = {
     'remote-ca-path',
     'replay',
     'loose',
+    ...RETRIEVAL,
     ...TLS,
     ...UPSTREAM,
   ],
@@ -46,6 +53,7 @@ export const BY_COMMAND: Record<string, readonly string[]> = {
     'port',
     'ui',
     'mcp-config',
+    'serialize',
     ...TLS,
     ...UPSTREAM,
     'quiet',

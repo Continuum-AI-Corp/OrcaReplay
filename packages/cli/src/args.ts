@@ -69,6 +69,7 @@ export const VALUELESS = new Set([
   // without an entry here fails a test rather than a user.
   'quiet',
   'full',
+  'serialize',
   'h',
 ]);
 

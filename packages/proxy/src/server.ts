@@ -1,7 +1,13 @@
+import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { AUTH_REQUEST_HEADERS, Redactor } from '@orcareplay/core';
-import type { CanonicalRequest, CanonicalResponse, Usage } from '@orcareplay/plugin-api';
+import type {
+  CanonicalRequest,
+  CanonicalResponse,
+  RetrievalRule,
+  Usage,
+} from '@orcareplay/plugin-api';
 import {
   anthropicToCanonicalRequest,
   anthropicToCanonicalResponse,
@@ -31,6 +37,14 @@ import {
   type Dialect,
 } from './dialects.js';
 import { decodeForwardPath, type ForwardPath } from './forward.js';
+import {
+  consume,
+  defaultRetrievalRules,
+  indexRetrievals,
+  selectRetrievalRule,
+  type RecordedRetrieval,
+  type RetrievalStore,
+} from './retrieval.js';
 import {
   attachTlsIntercept,
   decodeBody,
@@ -311,6 +325,23 @@ export interface ProxyOptions {
    */
   onNetExchange?: (e: NetExchange) => void;
   /**
+   * Endpoints whose answer is a function of their request — embeddings, rerank — so a recording
+   * can serve them back without a dialect. Defaults to {@link defaultRetrievalRules}; pass an
+   * empty array to turn the whole mechanism off and have these calls pass through as before.
+   */
+  retrievalRules?: RetrievalRule[];
+  /** Recorded retrieval calls, for replay and hybrid. See {@link RecordedRetrieval}. */
+  retrievals?: RecordedRetrieval[];
+  /**
+   * Whether a recorded retrieval call keeps its response body or only a digest of it.
+   *
+   * `full` is the default and the only one that can be replayed. `digest` exists because the
+   * bodies are large in a way chat responses are not — six paragraphs at 768 dimensions is 98 KB
+   * of JSON floats, and an index build makes thousands of those calls — so a run recorded to
+   * check consistency rather than to reproduce can keep the hash and none of the vectors.
+   */
+  retrievalStore?: RetrievalStore;
+  /**
    * Terminate TLS for a named set of hosts, for a harness that ignores base-URL variables.
    *
    * Absent by default, and absence is the whole safety story: with no `tls` block the server
@@ -335,6 +366,31 @@ export interface ProxyStats {
   tunnelled: number;
   /** Requests forwarded on a path no dialect claims — captured, but not replayable. */
   passedThrough: number;
+  /**
+   * Retrieval calls served from the recording, and how many the recording holds.
+   *
+   * A separate axis from `matchedExact` on purpose. `exact` is a statement about a matching
+   * ladder these calls never climb — they are looked up by their own request, because the answer
+   * is a function of it — and folding them in would make a recording look more faithfully
+   * reproduced the more embeddings it happened to make. Reported as `retrieval=served/total`.
+   */
+  retrievalServed: number;
+  retrievalTotal: number;
+  /** Retrieval calls the recording could not answer and the run had to make live. */
+  retrievalLive: number;
+  /**
+   * Retrieval calls served from a recorded batch whose items arrived in a different order.
+   *
+   * Counted apart from the rest because the bytes were rebuilt rather than handed back: each text
+   * got the vector recorded for that exact text, at its new position. Exact, and worth saying.
+   */
+  retrievalReordered: number;
+  /**
+   * Exchanges served from a position other than the cursor — held from earlier, or stepped over
+   * to. Not a fidelity loss: either the request was byte-identical or it carried a divergence of
+   * its own. It says the run's *order* differed, which is what a worker pool does.
+   */
+  reordered: number;
 }
 
 /** What a run needs to tell the operator, and to tell the child process, about interception. */
@@ -500,27 +556,64 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     intercepted: 0,
     tunnelled: 0,
     passedThrough: 0,
+    retrievalServed: 0,
+    retrievalTotal: 0,
+    retrievalLive: 0,
+    retrievalReordered: 0,
+    reordered: 0,
   };
 
   // In hybrid mode only the exchanges below the fork point are replayable; everything at or above
   // it must go live, which is exactly what makes a fork a fork.
   const replayable =
     options.mode === 'hybrid' ? recorded.slice(0, options.forkAt ?? recorded.length) : recorded;
+  /**
+   * The most requests this proxy has had open at once, and the count it is derived from.
+   *
+   * Only the proxy can know this, and the matcher needs it: a pipeline that issues ten requests
+   * together is answered in whatever order the origin finished them, so a replay's request can
+   * arrive up to nine positions from the cursor. See {@link LOOKAHEAD}.
+   */
+  let inFlight = 0;
+  let peakInFlight = 0;
+  function opened(): void {
+    inFlight += 1;
+    if (inFlight > peakInFlight) peakInFlight = inFlight;
+  }
+  function closed(): void {
+    if (inFlight > 0) inFlight -= 1;
+  }
+
   // The recorded requests carry placeholders where secrets were; a live replay request carries the
   // secrets themselves. Without a redactor on this side the two are never in the same
   // representation, and a recording of any real harness — whose own system prompt carries a
   // session id — cannot match itself.
   const matcher = new RequestMatcher(
     replayable.map((e) => e.canonicalRequest),
-    { redactor: new Redactor() },
+    { redactor: new Redactor(), concurrency: () => peakInFlight },
   );
 
+  /**
+   * The recording's retrieval calls, by key, ready to be consumed one at a time.
+   *
+   * Not filtered by the fork point. A fork keeps replaying these past the cursor on purpose: the
+   * vector for a paragraph does not depend on which chat model answers the question afterwards,
+   * so re-embedding it live would spend money to recompute an identical value and leave the
+   * fork's index differing from its parent's for no reason. See `RetrievalRule.forkable`.
+   */
+  const retrievalRules = options.retrievalRules ?? defaultRetrievalRules();
+  const retrievalIndex = indexRetrievals(options.retrievals ?? []);
+  stats.retrievalTotal = (options.retrievals ?? []).length;
+
   const server = createServer((req, res) => {
-    void handle(req, res).catch((err: unknown) => {
-      // Whatever failed, its message may name the origin it was given — and this body reaches the
-      // agent, which prints it. See {@link withoutCredentials}.
-      json(res, 500, { error: { message: withoutCredentials(String(err)) } });
-    });
+    opened();
+    void handle(req, res)
+      .catch((err: unknown) => {
+        // Whatever failed, its message may name the origin it was given — and this body reaches
+        // the agent, which prints it. See {@link withoutCredentials}.
+        json(res, 500, { error: { message: withoutCredentials(String(err)) } });
+      })
+      .finally(closed);
   });
 
   /**
@@ -702,6 +795,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     const result = matcher.match(canonical);
     if (result.matched) {
       const exchange = replayable[result.index]!;
+      if (result.reordered) stats.reordered += 1;
       if (result.divergence) {
         stats.matchedInexact += 1;
         stats.divergences += 1;
@@ -996,7 +1090,235 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     // Anthropic's client is the one that announces itself, so absence of a signal means OpenAI.
     const anthropic =
       names.has('anthropic-version') || names.has('anthropic-beta') || names.has('x-api-key');
+    // The origin configured for the family this request belongs to, before any vendor default.
+    // Two configured values only means the run has more than one destination — not that this
+    // request's own destination is unknown — and picking a vendor default over an origin the
+    // operator named is how a run configured with `--upstream-openai <stub>` alongside a gateway
+    // left in `~/.orca/config.json` sent its embedding calls to `api.openai.com`: a third place,
+    // neither of the two configured, carrying the agent's own credential. For a team whose
+    // gateway is the point of the gateway, that is every retrieval call bypassing it silently.
+    const forFamily = anthropic ? options.upstream?.['anthropic'] : options.upstream?.['openai'];
+    if (forFamily !== undefined) return forFamily;
     return anthropic ? 'https://api.anthropic.com' : 'https://api.openai.com';
+  }
+
+  /**
+   * Serve a retrieval call: from the recording where there is one, live where there is not.
+   *
+   * The lookup is by the request itself rather than by a cursor. Two reasons, and both matter.
+   * The answer is a function of the request, so position carries no information — the same text
+   * embedded on turn 3 and on turn 40 has the same vector. And an index build issues these
+   * hundreds at a time from a worker pool, so there is no order for a cursor to follow.
+   *
+   * A recorded call is consumed once, earliest first, so a run that asked the same thing twice
+   * gets both of its answers back and `retrieval=N/N` means every recorded call was reused —
+   * rather than one of them being served twice while another was never asked for.
+   */
+  async function serveRetrieval(
+    rule: RetrievalRule,
+    path: string,
+    rawBody: string,
+    headers: Record<string, string>,
+    recordableHeaders: Record<string, string>,
+    res: ServerResponse,
+    startedAt: number,
+    forwardBase?: string,
+  ): Promise<void> {
+    let key: string;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawBody);
+      key = rule.key(parsed);
+    } catch (err) {
+      // A body this rule cannot key is a body orca cannot promise anything about. Passthrough is
+      // the honest fallback: forward it, record the bytes, say it is not replayable.
+      if (options.mode === 'replay') {
+        stats.unmatched += 1;
+        const reason = `${path} could not be keyed for replay: ${String(err)}`;
+        options.onUnmatched?.({ seq: -1, index: -1, reason });
+        json(res, 502, { error: { message: `orca replay cannot reproduce ${path}: ${reason}` } });
+        return;
+      }
+      await passThrough(path, rawBody, headers, recordableHeaders, res, startedAt, forwardBase);
+      return;
+    }
+
+    // Across the fork cursor deliberately, in every mode that has a recording. A fork asks the
+    // same documents about a different chat model; re-embedding them live would spend money to
+    // recompute a value that cannot have changed, and would make the fork's index differ from the
+    // parent's for no reason anyone asked for. `RetrievalRule.forkable` is `false` for the same
+    // reason, one level up.
+    //
+    // Exact first, then the batch. A pipeline assembles its batch from a worker pool, so the same
+    // set of texts arrives in a different order on every run and an exact key alone found nothing
+    // — measured: two replays of one recording, two different keys, neither recorded. Where the
+    // endpoint's own contract says `data[i]` answers `input[i]`, the recorded answer for each
+    // text can be handed back against that text's new position, which is not an approximation.
+    // See {@link BatchRetrieval}.
+    let match = retrievalIndex.byKey.get(key)?.[0];
+    let rebuilt: string | undefined;
+    if (match === undefined) {
+      const batchKey = rule.batch?.key(parsed);
+      const candidate =
+        batchKey === undefined ? undefined : retrievalIndex.byBatch.get(batchKey)?.[0];
+      if (candidate !== undefined && candidate.rawResponse !== '') {
+        rebuilt = rule.batch?.reorder(
+          safeParse(candidate.rawRequest),
+          candidate.rawResponse,
+          parsed,
+        );
+        // An inexact reorder is no match at all. Filling the gaps would put another document's
+        // vector in the index, and nothing downstream could tell.
+        if (rebuilt !== undefined) match = candidate;
+      } else if (candidate !== undefined) {
+        match = candidate;
+      }
+    }
+    if (match !== undefined) {
+      // Consumed only where it is actually served. A recorded call orca cannot serve is still the
+      // answer to this request, and dropping it turned a client's retry — langchain retries a 502
+      // — into "no recorded retrieval call matches this request", which is false and sends the
+      // reader looking for a mismatch that is not there.
+      if (rebuilt !== undefined) {
+        consume(retrievalIndex, match);
+        stats.retrievalServed += 1;
+        stats.retrievalReordered += 1;
+        res.writeHead(match.status, { 'content-type': match.contentType });
+        res.end(rebuilt);
+        return;
+      }
+      if (match.rawResponse === '') {
+        // Recorded with `--retrieval-store=digest`: orca kept proof of the answer, not the answer.
+        const reason =
+          `${path} was recorded with --retrieval-store=digest, so the trace holds a digest of ` +
+          'the response and not the response. Re-record with the default (full) to replay it';
+        if (options.mode === 'replay' && !options.loose) {
+          stats.unmatched += 1;
+          options.onUnmatched?.({ seq: match.seq, index: -1, reason });
+          json(res, 502, { error: { message: `orca replay cannot reproduce ${path}: ${reason}` } });
+          return;
+        }
+      } else {
+        consume(retrievalIndex, match);
+        stats.retrievalServed += 1;
+        res.writeHead(match.status, { 'content-type': match.contentType });
+        res.end(match.rawResponse);
+        return;
+      }
+    }
+
+    if (options.mode === 'replay' && !options.loose) {
+      stats.unmatched += 1;
+      const reason =
+        `no recorded retrieval call matches this request (rule ${rule.id}, key ` +
+        `${key.slice(0, 12)}…). The recording holds ${stats.retrievalTotal} retrieval ` +
+        `call${stats.retrievalTotal === 1 ? '' : 's'}, and this is not one of them`;
+      options.onUnmatched?.({ seq: -1, index: -1, reason });
+      json(res, 502, { error: { message: `orca replay cannot reproduce ${path}: ${reason}` } });
+      return;
+    }
+
+    // Record, a fork past what it can serve, or a loose replay: make the call and keep the answer.
+    if (options.mode !== 'record') stats.retrievalLive += 1;
+    await forwardRetrieval(
+      rule,
+      key,
+      rule.batch?.key(parsed),
+      path,
+      rawBody,
+      headers,
+      recordableHeaders,
+      res,
+      startedAt,
+      forwardBase,
+    );
+  }
+
+  /** A body that has already parsed once. Undefined rather than a throw where it has not. */
+  function safeParse(raw: string): unknown {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Make a retrieval call for real, and file it as a replayable `net.*` pair. */
+  async function forwardRetrieval(
+    rule: RetrievalRule,
+    key: string,
+    batchKey: string | undefined,
+    path: string,
+    rawBody: string,
+    headers: Record<string, string>,
+    recordableHeaders: Record<string, string>,
+    res: ServerResponse,
+    startedAt: number,
+    forwardBase?: string,
+  ): Promise<void> {
+    stats.passedThrough += 1;
+    // On a recording, the count of retrieval calls *captured*. It is the same field replay uses
+    // for "how many the recording holds", which is the same quantity one command later — and it
+    // is what lets `capture.empty` tell an index build, whose every call is a retrieval call and
+    // every one of them replayable, apart from a run that captured nothing at all.
+    if (options.mode === 'record') stats.retrievalTotal += 1;
+    const origin = passthroughOrigin(headers, forwardBase);
+    const upstreamRes = await doFetch(`${origin}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers, ...headersForOrigin(origin) },
+      body: rawBody,
+    });
+
+    const responseHeaders: Record<string, string> = {};
+    upstreamRes.headers.forEach((value, key2) => {
+      responseHeaders[key2.toLowerCase()] = value;
+    });
+    res.writeHead(upstreamRes.status, {
+      'content-type': responseHeaders['content-type'] ?? 'application/json',
+    });
+    const body = await pipeThrough(upstreamRes, res);
+
+    const digest = createHash('sha256').update(body).digest('hex');
+    const keepBody = (options.retrievalStore ?? 'full') === 'full';
+    const { host, port } = originParts(origin);
+    options.onNetExchange?.({
+      host,
+      port,
+      method: 'POST',
+      path,
+      intercepted: false,
+      rule: rule.id,
+      replayKey: key,
+      // Only where the rule offers one. Its absence in a trace means exactly what it says: this
+      // call can be found again by its own body and by nothing else.
+      ...(batchKey === undefined ? {} : { batchKey }),
+      requestHeaders: recordableHeaders,
+      requestBody: rawBody,
+      requestTruncated: false,
+      status: upstreamRes.status,
+      responseHeaders,
+      // Dropped rather than trimmed under `digest`: half a vector is not a smaller answer, it is
+      // a wrong one, and the digest already says whether a later run agreed.
+      responseBody: keepBody ? body : '',
+      responseDigest: digest,
+      responseTruncated: false,
+      responseBytes: Buffer.byteLength(body),
+      durationMs: Date.now() - startedAt,
+    });
+  }
+
+  /** Split a configured origin into the host and port an exchange records. */
+  function originParts(origin: string): { host: string; port: number } {
+    try {
+      const url = new URL(origin);
+      return {
+        host: url.hostname,
+        port: url.port !== '' ? Number(url.port) : url.protocol === 'http:' ? 80 : 443,
+      };
+    } catch {
+      // An origin that does not parse is still worth recording under the string we were given.
+      return { host: origin, port: 443 };
+    }
   }
 
   /**
@@ -1070,6 +1392,10 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       port,
       method: 'POST',
       path,
+      // Orca decrypted nothing here: the harness sent this in plaintext to the local proxy, and
+      // orca relayed it. Saying otherwise puts a claim about TLS termination in the trace over a
+      // host orca never terminated TLS for.
+      intercepted: false,
       // `recordableHeaders`, never `headers`: the auth material was forwarded a moment ago and
       // must not now be written down. §7 says never write it, which is not the same as never relay it.
       requestHeaders: recordableHeaders,
@@ -1082,6 +1408,22 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       responseBytes: Buffer.byteLength(body),
       durationMs: Date.now() - startedAt,
     });
+  }
+
+  /**
+   * The host a `/forward/` path names, for a rule that wants to tell two vendors apart.
+   *
+   * Only where the request announced its own destination. On an ordinary redirected call orca knows
+   * where it is *sending* the request but not where the client thought it was going, and inventing
+   * a host would let a rule claim an endpoint on evidence that does not exist.
+   */
+  function forwardHost(forward: ForwardPath | undefined): string | undefined {
+    if (forward === undefined) return undefined;
+    try {
+      return new URL(forward.base).hostname;
+    } catch {
+      return undefined;
+    }
   }
 
   /** Did the agent ask for a stream? Both dialects spell it the same way. */
@@ -1229,6 +1571,23 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     }
 
     if (!dialect) {
+      // Before passthrough, and only where no dialect claims the path: a dialect is the richer
+      // reading of a call — replayable, forkable, counted in `exact` — and a rule that outranked
+      // one would turn a chat completion into opaque bytes keyed by their own body.
+      const rule = selectRetrievalRule(retrievalRules, dialectPath, forwardHost(forward));
+      if (rule && isReadable(rawBody)) {
+        await serveRetrieval(
+          rule,
+          requestedPath,
+          rawBody,
+          headers,
+          recordableHeaders,
+          res,
+          startedAt,
+          forward?.base,
+        );
+        return;
+      }
       await passThrough(
         requestedPath,
         rawBody,
@@ -1286,6 +1645,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       const result = matcher.match(canonical);
       if (result.matched) {
         const exchange = replayable[result.index]!;
+        if (result.reordered) stats.reordered += 1;
         if (result.divergence) {
           stats.matchedInexact += 1;
           stats.divergences += 1;

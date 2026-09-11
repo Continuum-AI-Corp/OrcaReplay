@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 from conftest import repo_root
@@ -49,8 +50,23 @@ class TestSchemaParity:
         required = set(schema("event.schema.json")["required"])
         assert required == {"seq", "ts", "mono_us", "turn", "type", "actor"}
 
-    def test_schema_version_matches_the_example_manifest(self) -> None:
-        assert SCHEMA_VERSION == "0.1.0"
+    def test_schema_version_matches_the_typescript_constant(self) -> None:
+        """The one constant with no JSON to mirror, so it is read from the source that owns it.
+
+        Pinning it to a literal — or to the shipped example's manifest, which is what it used to
+        be — meant the two SDKs could disagree about what version of the format they implement
+        the moment either moved. The example is a *trace*, written once by whichever writer made
+        it, and a reader that only accepts traces of its own exact version is not a reader.
+        """
+        root = repo_root()
+        if root is None:
+            pytest.skip("not running inside an OrcaReplay checkout")
+        source = (root / "packages" / "schema" / "src" / "constants.ts").read_text(
+            encoding="utf-8"
+        )
+        found = re.search(r"SCHEMA_VERSION\s*=\s*'([^']+)'", source)
+        assert found is not None, "SCHEMA_VERSION is no longer declared where this test looks"
+        assert SCHEMA_VERSION == found.group(1)
 
 
 class TestBlobRef:

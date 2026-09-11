@@ -44,6 +44,21 @@ export interface MatchResult {
    * match, and is reported here because a silently skipped exchange is a replay that lies.
    */
   skipped?: number;
+  /**
+   * This request was answered from a position other than the cursor: stepped over to, or held
+   * from earlier. Reported separately from {@link divergence} because the two say different
+   * things.
+   *
+   * Spec §4: "Anything below rung 1 produces a divergence the caller must record." A rung-1 match
+   * approximates nothing — it is byte-identical after redaction — so arriving out of order is not
+   * a divergence, it is a fact about order. Calling it one made `exact=N/N` unreachable for any
+   * concurrent workload: a pipeline with ten workers replays every request perfectly and reported
+   * `exact=1 divergences=7`, which reads as a broken recording. What is *not* reproduced is still
+   * reported, by `reused=x/y`, which counts anything never asked for.
+   *
+   * A skip onto an inexact match keeps its divergence, and the skip is named inside it.
+   */
+  reordered?: boolean;
 }
 
 /** Fields that change every run and say nothing about what was asked. */
@@ -61,11 +76,20 @@ const VOLATILE_METADATA = new Set([
 const MINOR_DISTANCE_RATIO = 0.15;
 
 /**
- * How many unplayed recorded requests a live one may step over.
+ * How many unplayed recorded requests a live one may step over, at least.
  *
  * Small on purpose. The calls a harness makes for itself cluster at the start of a session — a
  * quota probe, a title — so a handful is enough for the case this exists for, and a wide window
  * turns a coincidental near-match into a wrong answer served under a `minor` label.
+ *
+ * It is a floor rather than the whole answer because a second workload reorders on a different
+ * scale. An indexing pipeline issues N requests at once — IndexRAG defaults to ten workers,
+ * Microsoft GraphRAG to `concurrent_requests`, LightRAG to `llm_model_max_async` — and the order
+ * they are answered in is the order the origin happened to finish them, so a replay of the same
+ * pipeline can arrive up to N-1 positions away from the cursor. A fixed 8 against a window of 10
+ * refuses the ones that drifted furthest, and refuses them for a reason that has nothing to do
+ * with the recording. {@link MatcherOptions.concurrency} lets the proxy raise the ceiling to what
+ * it actually observed, which is a number only it can know.
  */
 const LOOKAHEAD = 8;
 
@@ -282,6 +306,21 @@ function spanDistance(a: string, b: string): number {
   return Math.max(a.length, b.length) - prefix - suffix;
 }
 
+/**
+ * How good a candidate is, lower being better: the rung first, then the distance, then how far it
+ * is from the cursor.
+ *
+ * The rung leads because the rungs are already ordered by how much was approximated — a rung-2
+ * match really is better evidence than a rung-3 one, whatever the raw character counts say, since
+ * rung 3 means the conversation itself differs. Distance separates candidates at the same rung.
+ * The last term is the tie-break, and it points at the cursor: with nothing else to choose
+ * between two equally good answers, the one the recording expected next is the honest pick.
+ */
+function rank(result: MatchResult, cursor: number): number {
+  const distance = result.divergence?.distance ?? 0;
+  return result.rung * 1e12 + distance * 1e3 + Math.abs(result.index - cursor);
+}
+
 function trailingMessage(form: Record<string, unknown>): unknown {
   const messages = (form.messages ?? []) as unknown[];
   return messages[messages.length - 1];
@@ -347,6 +386,15 @@ export interface MatcherOptions {
    * which only ever matches a recording that had nothing redacted in it at all.
    */
   redactor?: Redactor;
+  /**
+   * The most requests the caller has ever had in flight at once, read each time a skip is
+   * considered.
+   *
+   * A function rather than a number because the peak is not known when the matcher is built: the
+   * proxy learns it from the run it is watching. See {@link LOOKAHEAD} for why the window has to
+   * follow the workload's own concurrency rather than a constant.
+   */
+  concurrency?: () => number;
 }
 
 /**
@@ -376,6 +424,7 @@ export class RequestMatcher {
   /** Counted before the fold, which is the only point at which the digests are still there. */
   readonly #secrets: number[];
   readonly #redactor?: Redactor;
+  readonly #concurrency?: () => number;
   #cursor = 0;
   /**
    * Recorded requests the cursor stepped over that have not been played yet.
@@ -394,14 +443,28 @@ export class RequestMatcher {
    * `reused=x/y` already reports.
    */
   readonly #deferred: number[] = [];
+  /**
+   * Recorded positions by strict hash, ascending — the index behind {@link #exactAhead}.
+   *
+   * A map rather than a scan because the scan is what the window was protecting against: looking
+   * for an exact match by walking the recording is O(n) per request and O(n²) over a run, and a
+   * pipeline recording is exactly the shape with thousands of them.
+   */
+  readonly #byStrictHash = new Map<string, number[]>();
 
   constructor(recorded: CanonicalRequest[], options: MatcherOptions = {}) {
     this.#recorded = recorded;
     this.#redactor = options.redactor;
+    this.#concurrency = options.concurrency;
     const normalized = recorded.map((r) => normalizeRequest(r));
     this.#strict = normalized.map(hashOf);
     this.#secrets = normalized.map(countPlaceholders);
     this.#comparable = normalized.map((n) => mapStrings(n, foldPlaceholders));
+    for (const [index, hash] of this.#strict.entries()) {
+      const at = this.#byStrictHash.get(hash);
+      if (at) at.push(index);
+      else this.#byStrictHash.set(hash, [index]);
+    }
   }
 
   remaining(): number {
@@ -413,9 +476,40 @@ export class RequestMatcher {
   }
 
   match(incoming: CanonicalRequest): MatchResult {
+    const hash = hashOf(redactedForm(incoming, this.#redactor));
+
+    // The ordinary case, and the only one that needs no judgement: the request at the cursor is
+    // byte-identical to the one being asked for.
+    if (this.#cursor < this.#recorded.length && this.#strict[this.#cursor] === hash) {
+      const at = this.#matchAt(incoming, this.#cursor);
+      this.#cursor = at.index + 1;
+      return at;
+    }
+
+    // An exact match somewhere else outranks an approximate one here.
+    //
+    // This ordering is load-bearing, and having it the other way round is how an indexing
+    // pipeline came to be served another document's answer. Rung 2 exists for drift *around* a
+    // stable question — a regenerated id, a different working directory in the system prompt —
+    // and it measures that drift as a share of the request's own size. An extraction prompt
+    // carries the document in the *system* prompt and a fixed template as its only message, so
+    // two different paragraphs are `sameAsk` by construction and differ by a few hundred
+    // characters in a request of several thousand: comfortably inside tolerance. Taking the
+    // cursor's near-match first meant paragraph 2's request was answered with paragraph 1's
+    // extraction, under a `minor` label, while paragraph 2's own answer sat unplayed three
+    // positions along — and the knowledge base built from that replay was a knowledge base of
+    // mismatched answers.
+    //
+    // Nothing is lost by looking first. An exact match is a hash lookup, and where there is none
+    // the ladder runs exactly as it did before.
+    const heldExact = this.#matchDeferred(incoming, hash);
+    if (heldExact) return heldExact;
+    const aheadExact = this.#exactAhead(hash);
+    if (aheadExact !== undefined) return this.#skipTo(incoming, aheadExact);
+
     if (this.#cursor >= this.#recorded.length) {
-      // The cursor is past the end, but a request stepped over on the way there may be exactly
-      // what is being asked for now — the out-of-order pair whose second half arrives last.
+      // The cursor is past the end, and nothing held is an exact answer to this. A near one still
+      // might be: the out-of-order pair whose second half arrives last.
       const held = this.#matchDeferred(incoming);
       if (held) return held;
       return {
@@ -426,60 +520,111 @@ export class RequestMatcher {
       };
     }
 
-    const at = this.#matchAt(incoming, this.#cursor);
-    if (at.matched) {
-      this.#cursor = at.index + 1;
-      return at;
+    // No exact answer anywhere, so the ladder has to approximate — and the question becomes
+    // *which* recorded request it approximates against. Taking the cursor's, because it is the
+    // cursor's, is the other half of the same mistake: a request that is a rung-2 match against
+    // the cursor is frequently a much better rung-2 match against one three positions along, and
+    // `leafDistance` already says which, by how much. The exact path above covers an indexing
+    // pipeline whose requests repeat byte for byte; this covers the same pipeline once anything
+    // per-run is in the prompt — a session id, a timestamp — so that nothing is byte-equal and
+    // every comparison lands on rung 2 against several neighbours at once.
+    //
+    // "Nearest" means lowest rung first and then least distance, because the rungs are ordered by
+    // how much was approximated and a rung-2 match elsewhere really is better evidence than a
+    // rung-3 at the cursor. Ties go to the cursor, which is where a well-behaved run always is.
+    const best = this.#nearest(incoming);
+    if (best !== undefined) {
+      if (best.index === this.#cursor) {
+        this.#cursor = best.index + 1;
+        return best;
+      }
+      const held = this.#matchDeferred(incoming, undefined, best.index);
+      if (held) return held;
+      return this.#skipTo(incoming, best.index);
     }
 
-    // Nothing at the cursor. Before looking further along, try what the cursor has already stepped
-    // over: this is the second half of a pair that arrived in the other order, and its answer is
-    // sitting in the recording unplayed. Held to the same rung-2 bar as a step-forward, and for
-    // the same reason — below that the agent would be handed some other turn's answer.
-    const out = this.#matchDeferred(incoming);
-    if (out) return out;
-
-    // Still nothing. Look for this request further along: a recording made through a terminal
-    // carries calls the harness made for itself — a quota probe, a request to name the session —
-    // and a replay driven from a transcript never repeats them. Only an exact or near-exact match
-    // is worth stepping over an unplayed exchange for.
-    for (let ahead = this.#cursor + 1; ahead <= this.#lookaheadLimit(); ahead += 1) {
-      const later = this.#matchAt(incoming, ahead);
-      if (!later.matched || later.rung > 2) continue;
-      const skipped = ahead - this.#cursor;
-      // Set aside rather than dropped. They may yet be asked for — see `#deferred`.
-      for (let i = this.#cursor; i < ahead; i += 1) this.#deferred.push(i);
-      this.#cursor = ahead + 1;
-      const skippedNote =
-        `, holding ${skipped} recorded ${skipped === 1 ? 'request' : 'requests'} ` +
-        'the replay has not asked for yet';
-      return {
-        ...later,
-        skipped,
-        // Always said, even when the match had a divergence of its own: an exchange stepped over
-        // without mention is a replay claiming to have reproduced something it passed by.
-        divergence: {
-          level: later.divergence?.level ?? 'minor',
-          rung: later.rung,
-          distance: later.divergence?.distance ?? 0,
-          detail: `${later.divergence?.detail ?? `matched request ${ahead}`}${skippedNote}`,
-        },
-      };
-    }
-
-    return at;
+    return this.#matchAt(incoming, this.#cursor);
   }
 
-  /** Serve a request the cursor stepped over earlier, when this is the one it was waiting for. */
-  #matchDeferred(incoming: CanonicalRequest): MatchResult | undefined {
+  /**
+   * The best approximate match available: the cursor, anything held, and the window ahead.
+   *
+   * The cursor is allowed to match at any rung — rung 3 is what a compacted conversation lands on
+   * and it is only ever legitimate in place. Everything else is held to rung 2, for the reason a
+   * step-forward always has been: below that the agent would be handed some other turn's answer.
+   */
+  #nearest(incoming: CanonicalRequest): MatchResult | undefined {
+    const candidates: MatchResult[] = [];
+    const atCursor = this.#matchAt(incoming, this.#cursor);
+    if (atCursor.matched) candidates.push(atCursor);
+    for (const index of [...this.#deferred, ...this.#nearAhead()]) {
+      const other = this.#matchAt(incoming, index);
+      if (other.matched && other.rung <= 2) candidates.push(other);
+    }
+
+    let best: MatchResult | undefined;
+    for (const candidate of candidates) {
+      if (best === undefined || rank(candidate, this.#cursor) < rank(best, this.#cursor)) {
+        best = candidate;
+      }
+    }
+    return best;
+  }
+
+  /** Move the cursor to `index`, holding what it stepped over, and report what was passed by. */
+  #skipTo(incoming: CanonicalRequest, index: number): MatchResult {
+    const later = this.#matchAt(incoming, index);
+    const skipped = index - this.#cursor;
+    // Set aside rather than dropped. They may yet be asked for — see `#deferred`.
+    for (let i = this.#cursor; i < index; i += 1) this.#deferred.push(i);
+    this.#cursor = index + 1;
+    const skippedNote =
+      `, holding ${skipped} recorded ${skipped === 1 ? 'request' : 'requests'} ` +
+      'the replay has not asked for yet';
+    // A rung-1 skip is reported as a reordering, not a divergence — see `MatchResult.reordered`.
+    // Nothing is hidden by that: the requests stepped over are held, and anything still held at
+    // the end was never asked for, which is exactly what `reused=x/y` counts.
+    if (later.rung === 1) return { ...later, skipped, reordered: true };
+    return {
+      ...later,
+      skipped,
+      reordered: true,
+      // Said even when the match had a divergence of its own: an inexact exchange stepped over
+      // without mention is a replay claiming to have reproduced something it passed by.
+      divergence: {
+        level: later.divergence?.level ?? 'minor',
+        rung: later.rung,
+        distance: later.divergence?.distance ?? 0,
+        detail: `${later.divergence?.detail ?? `matched request ${index}`}${skippedNote}`,
+      },
+    };
+  }
+
+  /**
+   * Serve a request the cursor stepped over earlier, when this is the one it was waiting for.
+   *
+   * With `exactHash`, only a byte-identical one counts. That pass runs before the ladder is
+   * allowed to approximate anything, so a held request that *is* the answer is served rather than
+   * a near-match at the cursor that merely resembles it.
+   */
+  #matchDeferred(
+    incoming: CanonicalRequest,
+    exactHash?: string,
+    only?: number,
+  ): MatchResult | undefined {
     for (let slot = 0; slot < this.#deferred.length; slot += 1) {
       const index = this.#deferred[slot]!;
+      if (only !== undefined && index !== only) continue;
+      if (exactHash !== undefined && this.#strict[index] !== exactHash) continue;
       const held = this.#matchAt(incoming, index);
       if (!held.matched || held.rung > 2) continue;
       this.#deferred.splice(slot, 1);
+      // As in `#skipTo`: byte-identical is byte-identical, whichever order it arrived in.
+      if (held.rung === 1) return { ...held, reordered: true };
       const note = ', matched out of the order it was recorded in';
       return {
         ...held,
+        reordered: true,
         divergence: {
           level: held.divergence?.level ?? 'minor',
           rung: held.rung,
@@ -491,9 +636,30 @@ export class RequestMatcher {
     return undefined;
   }
 
-  /** How far ahead a skip may reach. Bounded: past this, a match is more likely a coincidence. */
-  #lookaheadLimit(): number {
-    return Math.min(this.#cursor + LOOKAHEAD, this.#recorded.length - 1);
+  /**
+   * The first unplayed recorded position this request is byte-identical to, if there is one.
+   *
+   * Reached by hash rather than by walking, so "anywhere ahead" costs the same as one comparison.
+   * The earliest candidate is taken: a recording that asked the same thing twice owes the answers
+   * back in the order it got them.
+   */
+  #exactAhead(hash: string): number | undefined {
+    for (const index of this.#byStrictHash.get(hash) ?? []) {
+      if (index > this.#cursor) return index;
+    }
+    return undefined;
+  }
+
+  /**
+   * Positions a near-match may reach. Bounded: past this, a match is more likely a coincidence.
+   */
+  #nearAhead(): number[] {
+    const observed = this.#concurrency?.() ?? 0;
+    const window = Math.max(LOOKAHEAD, Number.isFinite(observed) ? observed : 0);
+    const limit = Math.min(this.#cursor + window, this.#recorded.length - 1);
+    const out: number[] = [];
+    for (let ahead = this.#cursor + 1; ahead <= limit; ahead += 1) out.push(ahead);
+    return out;
   }
 
   /** Match against one recorded request, without moving the cursor. */
@@ -563,7 +729,22 @@ export class RequestMatcher {
     }
 
     // Rung 3 — the ask is the same, the history is not. Typical after context compaction.
-    if (sameAsk) {
+    //
+    // "The history is not" has to mean the history. Compaction is the case this rung was written
+    // for, and compaction rewrites `messages`; what it never does is leave the message count
+    // untouched while replacing the system prompt. An indexing pipeline does exactly that — one
+    // fixed instruction as the only message, the document that varies carried in the system
+    // prompt — so every document's request is `sameAsk` against every other document's, and this
+    // rung handed each one whichever answer the cursor happened to be sitting on. Measured on 30
+    // real HotpotQA paragraphs at concurrency 10: 24 matched here, each served another
+    // paragraph's answer, and the run still exited 0.
+    //
+    // Requiring the counts to differ costs nothing that rung 2 does not already cover — a request
+    // whose history is the same length and whose ask is the same either fits inside rung 2's
+    // tolerance or is a different request — and it sends the indexing case to rung 4, where the
+    // lookahead can find its real answer instead of being handed a wrong one.
+    const historyDiffers = messageCount(live) !== messageCount(recorded);
+    if (sameAsk && historyDiffers) {
       return {
         matched: true,
         rung: 3,

@@ -363,7 +363,9 @@ describe('TraceWriter.close', () => {
     expect(m.exit_code).toBe(3);
     expect(m.counts).toEqual({ events: 2, blobs: 0 });
     expect(m.integrity?.blob_count).toBe(0);
-    expect(m.schema_version).toBe('0.1.0');
+    // 0.2.0 since `retrieval.context` was added. Spec §2.3: adding an event type is a MINOR
+    // bump, and a version that does not move is a version that stops meaning anything.
+    expect(m.schema_version).toBe('0.2.0');
     expect(m.platform?.node).toBe(process.version);
   });
 

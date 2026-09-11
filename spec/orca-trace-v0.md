@@ -71,7 +71,8 @@ Because every model turn resends the whole conversation, content addressing is w
 | `mcp.request` / `mcp.response` | An MCP JSON-RPC exchange seen by the shim. |
 | `shell.exec` / `shell.result` | A shell command, from the PATH shim. |
 | `fs.snapshot` / `fs.change` | A workspace tree id, and a diff against the previous tree. |
-| `net.request` / `net.response` | Non-model HTTP seen by the proxy. |
+| `net.request` / `net.response` | Non-model HTTP seen by the proxy. A pair carrying `rule` and `replay_key` is a **retrieval call** — an endpoint whose answer is a function of its request, such as an embedding — and is replayable by looking that key up rather than by the ladder in §4. `stored: "digest"` on the response means the trace kept `response_sha256` instead of the body: enough to prove a later run agreed, not enough to serve it. |
+| `retrieval.context` | What a retriever put into a prompt, **derived** from the `model.request` that carried it — query and the retrieved passages. Same standing as `tool.call`: reconstructed from the wire, never separately captured. Scores and `top-k` are not here because they are not on the wire. |
 | `session.snapshot` | The harness's own transcript, captured at the point the run ended. Carries what the run was *asked*, which a hand-driven run leaves nowhere on the wire. |
 | `error` | A failure derived from another event or reported by the harness. |
 | `divergence` | Replay matched inexactly. See §4. |

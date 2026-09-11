@@ -318,6 +318,111 @@ describe('exclusions', () => {
   });
 });
 
+/**
+ * Paths an adapter declares as its harness's product, captured despite the workspace ignoring them.
+ *
+ * A coding agent's output is the working tree, which the ordinary snapshot already holds. A
+ * pipeline's output is an index, and every such project ignores it — IndexRAG's first three
+ * `.gitignore` lines are `vector_store/`, `cache/` and `dataset/` — so a recording of an indexing
+ * run held every call that built the index and nothing of the index itself.
+ */
+describe('forced capture', () => {
+  itGit('captures a path the workspace ignores, when the adapter declares it', async () => {
+    const root = await makeTempDir();
+    const workTree = join(root, 'ws');
+    await mkdir(workTree, { recursive: true });
+    const shadow = await ShadowIndex.create({
+      gitDir: join(root, 'run', 'fs'),
+      workTree,
+      forced: ['cache'],
+    });
+    await write(workTree, '.gitignore', 'cache/\nvector_store/\n');
+    await write(workTree, 'cache/mini_faqs.json', '{"faq_data":[]}\n');
+    await write(workTree, 'vector_store/index.faiss', 'binary\n');
+    await write(workTree, 'main.py', 'print(1)\n');
+
+    expect(await filesIn(shadow, await shadow.snapshot())).toEqual([
+      '.gitignore',
+      'cache/mini_faqs.json',
+      'main.py',
+    ]);
+  });
+
+  /**
+   * The security property that makes this safe to hand to third-party plugin code: the sensitive
+   * pathspecs are applied to the forced add too, and a pathspec exclusion is enforced by `git add`
+   * itself — no `-f` and no `.gitignore` negation overrides it. So an adapter that declares `.`
+   * to try to sweep the whole tree in still cannot capture a credential.
+   */
+  itGit('still refuses secrets when the adapter declares the whole tree', async () => {
+    const root = await makeTempDir();
+    const workTree = join(root, 'ws');
+    await mkdir(workTree, { recursive: true });
+    const shadow = await ShadowIndex.create({
+      gitDir: join(root, 'run', 'fs'),
+      workTree,
+      forced: ['.'],
+    });
+    await write(workTree, '.gitignore', '!.env\n');
+    await write(workTree, '.env', 'API_KEY=sk-live-secret\n');
+    await write(workTree, '.ssh/id_ed25519', 'PRIVATE KEY\n');
+    await write(workTree, 'node_modules/pkg/index.js', 'noise\n');
+    await write(workTree, 'ok.txt', 'fine\n');
+
+    const files = await filesIn(shadow, await shadow.snapshot());
+    expect(files).toEqual(['.gitignore', 'ok.txt']);
+  });
+
+  // Snapshot 0 is taken before the harness has written anything, and `git add` refuses a pathspec
+  // that matches nothing. One missing directory must not cost the whole snapshot.
+  itGit('snapshots normally when a declared path does not exist yet', async () => {
+    const root = await makeTempDir();
+    const workTree = join(root, 'ws');
+    await mkdir(workTree, { recursive: true });
+    const shadow = await ShadowIndex.create({
+      gitDir: join(root, 'run', 'fs'),
+      workTree,
+      forced: ['cache', 'vector_store'],
+    });
+    await write(workTree, '.gitignore', 'cache/\nvector_store/\n');
+    await write(workTree, 'main.py', 'print(1)\n');
+
+    expect(await filesIn(shadow, await shadow.snapshot())).toEqual(['.gitignore', 'main.py']);
+
+    // And it picks the path up as soon as the harness creates it.
+    await write(workTree, 'cache/mini_faqs.json', '{}\n');
+    expect(await filesIn(shadow, await shadow.snapshot())).toEqual([
+      '.gitignore',
+      'cache/mini_faqs.json',
+      'main.py',
+    ]);
+  });
+
+  itGit('tracks a forced path across edits and deletions', async () => {
+    const root = await makeTempDir();
+    const workTree = join(root, 'ws');
+    await mkdir(workTree, { recursive: true });
+    const shadow = await ShadowIndex.create({
+      gitDir: join(root, 'run', 'fs'),
+      workTree,
+      forced: ['cache'],
+    });
+    await write(workTree, '.gitignore', 'cache/\n');
+    await write(workTree, 'cache/a.json', '{"n":1}\n');
+    const first = await shadow.snapshot();
+
+    await write(workTree, 'cache/a.json', '{"n":2}\n');
+    const second = await shadow.snapshot();
+    expect(first).not.toBe(second);
+    expect(new TextDecoder().decode(await shadow.readFileAt(second, 'cache/a.json'))).toBe(
+      '{"n":2}\n',
+    );
+
+    await rm(join(workTree, 'cache'), { recursive: true, force: true });
+    expect(await filesIn(shadow, await shadow.snapshot())).toEqual(['.gitignore']);
+  });
+});
+
 describe('readFileAt', () => {
   itGit('returns the exact bytes stored in a tree', async () => {
     const { workTree, shadow } = await fixture();

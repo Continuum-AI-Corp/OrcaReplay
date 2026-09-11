@@ -8,6 +8,11 @@ import { ShadowIndex } from './shadow.js';
 export interface FsCaptureOptions {
   runDir: string;
   cwd: string;
+  /**
+   * Paths to snapshot even where the workspace's `.gitignore` excludes them, from the adapter's
+   * `artifacts.capture`. See {@link ShadowIndex.snapshot}.
+   */
+  forced?: readonly string[];
 }
 
 export interface TurnSnapshot {
@@ -39,6 +44,7 @@ export class FsCapture {
     const shadow = await ShadowIndex.create({
       gitDir: join(opts.runDir, 'fs'),
       workTree: opts.cwd,
+      ...(opts.forced === undefined ? {} : { forced: opts.forced }),
     });
     return new FsCapture(opts.runDir, opts.cwd, shadow);
   }

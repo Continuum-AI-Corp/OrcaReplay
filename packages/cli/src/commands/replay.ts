@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import {
   enclosingDelegation,
   TraceReader,
@@ -12,10 +12,17 @@ import {
   TraceWriter,
 } from '@orcareplay/core';
 import { FsCapture } from '@orcareplay/fs-capture';
-import { createProxy, defaultDialects, type RecordedExchange, type RunCa } from '@orcareplay/proxy';
+import {
+  createProxy,
+  defaultDialects,
+  type RecordedExchange,
+  type RecordedRetrieval,
+  type RunCa,
+} from '@orcareplay/proxy';
 import { defaultAdapters, resolveLaunch } from '@orcareplay/adapters';
 import { serveViewer } from '@orcareplay/viewer';
 import { isBlobRef, type TraceEvent } from '@orcareplay/schema';
+import type { HarnessArtifacts } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
@@ -102,6 +109,63 @@ export async function loadExchanges(reader: TraceReader): Promise<RecordedExchan
 }
 
 /**
+ * Rebuild the recording's retrieval calls — embeddings, rerank — from its `net.*` pairs.
+ *
+ * They live there rather than in `model.request` because that is what they are: HTTP the proxy
+ * saw and no dialect claimed. What sets them apart from the rest of that traffic is the two
+ * attributes `RetrievalRule` put on them. `replay_key` is what a later run looks the answer up
+ * by, and its presence is the whole test for "this pair can be served again" — a pair without one
+ * is the opaque traffic `net.*` has always held, and is skipped here rather than guessed at.
+ *
+ * Pairing is by `causes`, not by position. A run interleaves retrieval with model calls and the
+ * responses arrive out of order under a worker pool, so the nth response is not the answer to the
+ * nth request; the writer already records which request each response answered.
+ */
+export async function loadRetrievals(reader: TraceReader): Promise<RecordedRetrieval[]> {
+  const events = await reader.events();
+  const responses = new Map<number, TraceEvent>();
+  for (const event of events) {
+    if (event.type !== 'net.response') continue;
+    for (const cause of event.causes ?? []) responses.set(cause, event);
+  }
+
+  const out: RecordedRetrieval[] = [];
+  for (const request of events) {
+    if (request.type !== 'net.request') continue;
+    const key = request.attrs?.['replay_key'];
+    if (typeof key !== 'string' || key === '') continue;
+    const response = responses.get(request.seq);
+    const headers = response?.attrs?.['headers'];
+    const contentType =
+      headers !== null && typeof headers === 'object'
+        ? ((headers as Record<string, unknown>)['content-type'] ?? 'application/json')
+        : 'application/json';
+    const stored = response?.attrs?.['stored'];
+    const digest = response?.attrs?.['response_sha256'];
+    const batchKey = request.attrs?.['batch_key'];
+    out.push({
+      seq: request.seq,
+      rule: String(request.attrs?.['rule'] ?? 'unknown'),
+      key,
+      path: String(request.attrs?.['path'] ?? ''),
+      status: Number(response?.attrs?.['status'] ?? 200),
+      contentType: typeof contentType === 'string' ? contentType : 'application/json',
+      // Needed only to reorder a batch, which cannot be done without knowing which text each
+      // recorded vector answered. A recording made before that existed has none, and simply
+      // cannot be reordered.
+      rawRequest: await rawBodyOf(reader, request),
+      // A digest-only recording kept no body. Empty here is what the proxy reads as "orca has
+      // proof of this answer and not the answer", and it says so rather than serving nothing.
+      rawResponse:
+        stored === 'digest' || response === undefined ? '' : await rawBodyOf(reader, response),
+      ...(typeof digest === 'string' ? { digest } : {}),
+      ...(typeof batchKey === 'string' ? { batchKey } : {}),
+    });
+  }
+  return out;
+}
+
+/**
  * Read a recorded body back as the exact bytes that were sent.
  *
  * The subtlety is the spill boundary. The writer stores `JSON.stringify(payload)` in a blob once a
@@ -147,12 +211,73 @@ async function rawBodyOf(reader: TraceReader, event: TraceEvent): Promise<string
  * and calling it a replay.
  */
 function driveArgs(
-  adapter: { driveArgs?(prompts: string[], recorded: string[]): string[] | undefined },
+  adapter: {
+    driveArgs?(prompts: string[], recorded: string[]): string[] | undefined;
+    replayArgs?(recorded: string[]): string[] | undefined;
+    artifacts?: HarnessArtifacts;
+  },
+  ctx: { manifest: { argv: string[] }; prompts: string[] },
+  out: Output,
+  args?: ParsedArgs,
+): string[] {
+  const argv = chosenArgs(adapter, ctx, out);
+  return args?.bool('serialize') ? serialized(adapter.artifacts, argv, out) : argv;
+}
+
+/**
+ * Run the harness one request at a time, for an operator who asked for determinism explicitly.
+ *
+ * Never on by default, and the reason is the whole point of a replay: clamping concurrency
+ * changes the run being reproduced. A pipeline with ten workers and one with one worker do the
+ * same work in a different order, and a replay that quietly ran the second is not a replay of the
+ * first. What it *is* good for is the second question someone asks of a flaky pipeline — "is this
+ * a concurrency problem?" — which is worth one flag and worth being asked for.
+ *
+ * The adapter declares which flag its harness spells this with; orca does not guess. An adapter
+ * that declares none says so rather than silently doing nothing.
+ */
+function serialized(
+  artifacts: HarnessArtifacts | undefined,
+  argv: string[],
+  out: Output,
+): string[] {
+  const clamp = artifacts?.concurrencyFlag;
+  if (clamp === undefined) {
+    out.warn('replay.serialize_unsupported', {
+      why: 'this adapter declares no concurrency flag, so orca has nothing to clamp',
+      effect: 'the replay runs exactly as recorded',
+    });
+    return argv;
+  }
+  const at = argv.indexOf(clamp.flag);
+  const next = [...argv];
+  if (at === -1) next.push(clamp.flag, clamp.serialValue);
+  else next[at + 1] = clamp.serialValue;
+  out.info('replay.serialized', {
+    flag: clamp.flag,
+    value: clamp.serialValue,
+    note: 'this replays a different run from the one recorded, on purpose',
+  });
+  return next;
+}
+
+/** The argv a replay would run with, before `--serialize` has a say. */
+function chosenArgs(
+  adapter: {
+    driveArgs?(prompts: string[], recorded: string[]): string[] | undefined;
+    replayArgs?(recorded: string[]): string[] | undefined;
+  },
   ctx: { manifest: { argv: string[] }; prompts: string[] },
   out: Output,
 ): string[] {
   const recorded = ctx.manifest.argv.slice(1);
   const prompts = ctx.prompts;
+  // Before the transcript is consulted, because a harness that keeps none never reached the hook
+  // below at all: the early return for "no prompts" fired first, so an adapter for a pipeline —
+  // whose argv is the entire instruction and whose prompts exist nowhere — had no way to say
+  // anything about its own replay.
+  const rewritten = adapter.replayArgs?.(recorded);
+  if (rewritten !== undefined) return rewritten;
   if (prompts.length === 0) return recorded;
 
   // Whether argv already drives the run, decided by comparing it against the prompts the harness
@@ -234,6 +359,7 @@ export async function replayCommand(
   }
 
   const exchanges = await loadExchanges(reader);
+  const retrievals = await loadRetrievals(reader);
   const prompts = await readPrompts(reader, events);
   const from = args.num('from');
   const model = args.str('model');
@@ -244,13 +370,22 @@ export async function replayCommand(
         manifest,
         events,
         exchanges,
+        retrievals,
         runDir,
         cwd,
         prompts,
         from,
         model,
       })
-    : await replayExact(args, out, { manifest, events, exchanges, runDir, cwd, prompts });
+    : await replayExact(args, out, {
+        manifest,
+        events,
+        exchanges,
+        retrievals,
+        runDir,
+        cwd,
+        prompts,
+      });
 
   if (args.bool('ui')) {
     // Show the run you just produced: after a fork that is the child, not the parent, because
@@ -277,6 +412,8 @@ interface Ctx {
   manifest: ReturnType<TraceReader['manifest']>;
   events: TraceEvent[];
   exchanges: RecordedExchange[];
+  /** Embedding and rerank calls the recording can answer without a dialect. */
+  retrievals: RecordedRetrieval[];
   runDir: string;
   cwd: string;
   /** The user's turns, recovered from the harness transcript. Empty when there was none. */
@@ -426,6 +563,7 @@ async function replayRestored(
     const proxy = await createProxy({
       mode: 'replay',
       exchanges: ctx.exchanges,
+      retrievals: ctx.retrievals,
       loose: args.bool('loose'),
       upstream: plan.upstream,
       upstreamHeaders: plan.headers,
@@ -552,7 +690,7 @@ async function replayRestored(
       cwd: workspace.dir,
       proxyUrl: proxy.url,
       runDir: ctx.runDir,
-      userArgs: driveArgs(adapter, ctx, out),
+      userArgs: driveArgs(adapter, ctx, out, args),
       env: process.env,
     });
     // Replaying must not introduce a catalog request before the capture plugin is installed.
@@ -606,6 +744,19 @@ async function replayRestored(
       await trace.close(verdict);
     }
 
+    /**
+     * Retrieval fidelity, on its own axis and only when the run has one.
+     *
+     * Never folded into `exact`: that number is about a matching ladder these calls do not climb,
+     * and mixing them would make a recording look more faithfully reproduced the more embeddings
+     * it happened to make. Omitted entirely when neither the recording nor the replay had any, so
+     * an ordinary run's verdict line keeps the shape it has always had.
+     */
+    const retrieval =
+      stats.retrievalTotal > 0 || stats.retrievalServed > 0 || stats.retrievalLive > 0
+        ? { retrieval: `${stats.retrievalServed}/${stats.retrievalTotal}` }
+        : {};
+
     out.phase('replay.done', {
       // `matched=1 total=13` was the old shape, and on a healthy replay of a real harness it read as
       // a failure: rung 1 is only reachable when nothing in the request was redacted, so a run whose
@@ -615,6 +766,12 @@ async function replayRestored(
       exact: stats.matchedExact,
       divergences: stats.divergences,
       unmatched: stats.unmatched,
+      // Only when it happened. An exchange served from a position other than the cursor is not a
+      // fidelity loss — it was byte-identical, or it carried a divergence of its own and is
+      // counted there — but it is worth saying, because it is the difference between a recording
+      // that reproduced and one that merely happened to line up.
+      ...(stats.reordered > 0 ? { reordered: stats.reordered } : {}),
+      ...retrieval,
       exit: exitCode,
       // Omitted entirely under --no-trace: `Output` drops undefined fields, so the line stays the
       // shape it has always been for anyone who opted out.
@@ -794,7 +951,14 @@ async function replayFork(
   let forkFs: FsCapture | undefined;
   if (args.bool('fs', true)) {
     try {
-      forkFs = await FsCapture.start({ runDir: writer.runDir, cwd: worktree });
+      // Same widening as the recording's: a fork of a pipeline produces the same kind of
+      // artifact, and a fork whose snapshots omit it is a fork that cannot itself be replayed.
+      const forkArtifacts = defaultAdapters().get(ctx.manifest.adapter.id).artifacts?.capture;
+      forkFs = await FsCapture.start({
+        runDir: writer.runDir,
+        cwd: worktree,
+        ...(forkArtifacts === undefined ? {} : { forced: forkArtifacts }),
+      });
     } catch (err) {
       out.warn('fs.unavailable', { reason: String(err) });
     }
@@ -852,6 +1016,8 @@ async function replayFork(
     forkAt,
     forkModel: ctx.model,
     exchanges: ctx.exchanges,
+    // Past the cursor too: a fork changes which model answers, not what a paragraph embeds to.
+    retrievals: ctx.retrievals,
     upstream: plan.upstream,
     upstreamHeaders: plan.headers,
     upstreamHeadersOrigin: plan.headersOrigin,
@@ -923,7 +1089,7 @@ async function replayFork(
       cwd: worktree,
       proxyUrl: proxy.url,
       runDir: writer.runDir,
-      userArgs: driveArgs(adapter, ctx, out),
+      userArgs: driveArgs(adapter, ctx, out, args),
       env: process.env,
     });
 
@@ -962,6 +1128,11 @@ async function replayFork(
     replayed: forkAt,
     live: stats.liveCalls,
     divergences: stats.divergences,
+    // A fork keeps replaying retrieval past its own cursor, so this says how much of the parent's
+    // index work it reused rather than paid for again. `live` counts chat turns; these are not.
+    ...(stats.retrievalTotal > 0 || stats.retrievalLive > 0
+      ? { retrieval: `${stats.retrievalServed}/${stats.retrievalTotal}` }
+      : {}),
     events: manifest.counts?.events ?? writer.seq,
     exit: exitCode,
   });
@@ -990,6 +1161,16 @@ interface Workspace {
    * reaches the launch at all.
    */
   release: () => Promise<void>;
+  /**
+   * Whether this directory holds the recording's state and will be put back afterwards.
+   *
+   * False for `--in-place`, for a run with no snapshot to restore, and for a replay invoked from
+   * somewhere other than the directory the recording was made in. It gates the one thing a replay
+   * does that is not reversible on its own: deleting an adapter's declared artifacts. Orca may
+   * delete only what it took a copy of first — anywhere else that would be destroying the
+   * operator's index to reproduce someone else's.
+   */
+  restored: boolean;
 }
 
 const noRelease = async (): Promise<void> => {};
@@ -1019,7 +1200,11 @@ const noRelease = async (): Promise<void> => {};
  * default.
  */
 async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Workspace> {
-  if (args.bool('in-place')) return { dir: ctx.cwd, release: noRelease };
+  const artifacts = adapterArtifacts(ctx);
+  if (args.bool('in-place')) {
+    warnArtifactsKept(artifacts, out);
+    return { dir: ctx.cwd, release: noRelease, restored: false };
+  }
 
   const initial = deriveCheckpoints(ctx.events).find((c) => c.fsTree !== undefined);
   if (!initial?.fsTree) {
@@ -1027,15 +1212,18 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
       why: 'this run has no filesystem snapshot to restore',
       note: 'recorded with --no-fs; a file the run read may since have changed',
     });
-    return { dir: ctx.cwd, release: noRelease };
+    warnArtifactsKept(artifacts, out);
+    return { dir: ctx.cwd, release: noRelease, restored: false };
   }
 
   const recorded = await FsCapture.start({ runDir: ctx.runDir, cwd: ctx.cwd });
 
   if (args.bool('worktree')) {
+    // A fresh directory, so there is nothing for a reset to remove: the restore below is the only
+    // thing that puts anything here, and what it puts here is the recording's starting state.
     const worktree = await mkdtemp(join(tmpdir(), `orca-replay-${ctx.manifest.run_id}-`));
     await recorded.restore(initial.fsTree, worktree);
-    return { dir: worktree, release: noRelease };
+    return { dir: worktree, release: noRelease, restored: true };
   }
 
   if (resolve(ctx.cwd) !== resolve(ctx.manifest.cwd)) {
@@ -1044,13 +1232,25 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
       running_in: ctx.cwd,
       note: 'not restoring over a directory the run was not recorded in; use --worktree for a copy',
     });
-    return { dir: ctx.cwd, release: noRelease };
+    warnArtifactsKept(artifacts, out);
+    return { dir: ctx.cwd, release: noRelease, restored: false };
   }
 
   // A store of its own, under the OS temp dir: the safety snapshot is scratch, and writing it into
   // the trace's shadow store would leave an object in a recorded run that nothing references.
   const scratch = await mkdtemp(join(tmpdir(), 'orca-safety-'));
-  const safety = await FsCapture.start({ runDir: scratch, cwd: ctx.cwd });
+  // With the adapter's declared artifacts, for the reason the safety snapshot exists at all: the
+  // replay is about to delete those paths (see `resetArtifacts`), and a snapshot that skipped
+  // them because the workspace ignores them would make that deletion permanent. Orca may delete
+  // only what it has a copy of.
+  const forced = [
+    ...new Set([...(artifacts?.capture ?? []), ...(artifacts?.resetBeforeReplay ?? [])]),
+  ];
+  const safety = await FsCapture.start({
+    runDir: scratch,
+    cwd: ctx.cwd,
+    ...(forced.length === 0 ? {} : { forced }),
+  });
   const before = await safety.snapshotTurn(0);
 
   out.info('replay.restored', {
@@ -1092,13 +1292,97 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
   // and a `release` that puts it back, or it throws with the tree as it found it. That is what
   // lets the caller arm its own guard on the line after the call rather than before it.
   try {
+    // Before the restore, not after — and that ordering is the whole definition of the reset.
+    // `materialize` writes the tree's files and leaves anything else where it is, so a cache the
+    // recording never had would survive it and the harness would resume from work the recording
+    // did not do. Clearing first and restoring second leaves these paths holding *exactly* what
+    // they held when the recording started, which is the only state the recording can answer for
+    // — including the case where that state was a populated cache, as it is for a recording of
+    // one mid-pipeline stage. Doing it the other way round deleted that stage's own input.
+    await resetArtifacts(ctx.cwd, artifacts, out);
     await recorded.restore(initial.fsTree, ctx.cwd);
   } catch (err) {
     await release();
     throw err;
   }
 
-  return { dir: ctx.cwd, release };
+  return { dir: ctx.cwd, release, restored: true };
+}
+
+/** What the adapter that made this recording says about its own artifacts, if anything. */
+function adapterArtifacts(ctx: {
+  manifest: { adapter: { id: string } };
+}): HarnessArtifacts | undefined {
+  try {
+    return defaultAdapters().get(ctx.manifest.adapter.id).artifacts;
+  } catch {
+    // A trace naming an adapter this build does not have. The replay fails on that later, with a
+    // better message than one from here; nothing about the workspace should depend on it.
+    return undefined;
+  }
+}
+
+/**
+ * Delete the artifacts the harness resumes from, so the replay starts where the recording did.
+ *
+ * A pipeline picks up where it left off: it reads its own cache, sees which items are finished
+ * and does the rest. Replayed on top of the recording's *completed* cache it does nothing — no
+ * request is made, nothing is matched, and the replay reports having reproduced a run it never
+ * ran. `reused=0/6 exit=0` is what that looks like, and it reads as a broken recording.
+ *
+ * Whole paths, never "the parts that look invalid". IndexRAG's resume skips by `chunk_id`
+ * including entries whose recorded outcome was a failure, so keeping what looks valid promotes
+ * the previous run's failures to completed work — a subtler wrong answer than the one being
+ * fixed. The workspace is restored afterwards, which is what makes deleting acceptable at all,
+ * and `workspace.restored` is the gate: orca deletes only where it took a copy first.
+ */
+async function resetArtifacts(
+  dir: string,
+  artifacts: HarnessArtifacts | undefined,
+  out: Output,
+): Promise<void> {
+  const paths = artifacts?.resetBeforeReplay ?? [];
+  if (paths.length === 0) return;
+  const removed: string[] = [];
+  for (const pattern of paths) {
+    // The leading directory of the pattern, which is what a reset actually means: `cache/**` is a
+    // declaration about `cache`, and removing the directory is both what the harness needs and
+    // the only thing that can be done without a glob library. A pattern that names no directory
+    // is removed as the literal path it is.
+    const root = pattern.split(/[\\/]/)[0] ?? pattern;
+    if (root === '' || root === '.' || root === '..' || root.includes('*')) continue;
+    const target = resolve(dir, root);
+    // Never outside the workspace, whatever an adapter declares.
+    if (!isInsideDir(dir, target)) continue;
+    await rm(target, { recursive: true, force: true });
+    removed.push(root);
+  }
+  if (removed.length > 0) {
+    out.info('replay.artifacts_reset', {
+      paths: [...new Set(removed)].join(','),
+      why: 'the harness resumes from these, so they are put back to the recording’s starting state',
+      note: 'your files are restored when the replay ends',
+    });
+  }
+}
+
+/** The `--in-place` half of the same rule: say what was not done, rather than doing it unsafely. */
+function warnArtifactsKept(artifacts: HarnessArtifacts | undefined, out: Output): void {
+  const paths = artifacts?.resetBeforeReplay ?? [];
+  if (paths.length === 0) return;
+  out.warn('replay.artifacts_kept', {
+    paths: paths.join(','),
+    why: 'this replay is not restoring the working tree, so orca has no copy to put back',
+    effect:
+      'the harness may resume from artifacts the recording had not produced yet and ask nothing',
+    next: 'replay without --in-place, or clear them yourself',
+  });
+}
+
+/** Whether `target` is `dir` or sits under it, by the platform's own path rules. */
+function isInsideDir(dir: string, target: string): boolean {
+  const rel = relative(resolve(dir), target);
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
 }
 
 /** Where the replayed agent's own stdout should go, given the flags. */

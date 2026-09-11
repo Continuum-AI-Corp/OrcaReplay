@@ -59,8 +59,21 @@ class TestTheTraceItself:
         assert reader.manifest.run_id == example_run.name
         assert RUN_ID_PATTERN.match(reader.manifest.run_id)
 
-    def test_schema_version_is_the_one_this_sdk_implements(self, reader: TraceReader) -> None:
-        assert reader.manifest.schema_version == SCHEMA_VERSION
+    def test_the_sdk_implements_a_version_that_can_read_this_trace(
+        self, reader: TraceReader
+    ) -> None:
+        """Same MAJOR, and no newer than the SDK. Not equality.
+
+        The example is a trace, written once by whichever writer made it, and the format has
+        moved since — a MINOR bump only adds event types, so an older trace reads exactly as it
+        always did. Requiring the two to be equal meant every addition to the format broke a test
+        about a file that had not changed, and would have had a reader refuse traces it can read
+        perfectly well.
+        """
+        written = tuple(int(part) for part in reader.manifest.schema_version.split("."))
+        implemented = tuple(int(part) for part in SCHEMA_VERSION.split("."))
+        assert written[0] == implemented[0], "a MAJOR bump is a format this SDK does not read"
+        assert written <= implemented, "this trace was written by a newer format than the SDK"
 
     def test_integrity_verifies(self, reader: TraceReader) -> None:
         """Spec §6. A mismatch here means the checked-in example was edited by hand."""

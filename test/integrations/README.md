@@ -46,8 +46,10 @@ a matrix that only exercised a plain completion would have said nothing about ei
 | `langgraph-tools` | the same, with a bound tool | tool-calling graphs |
 | `browser-use` | its own `ChatOpenAI` passes an unset `base_url` through | browser-use, and the pattern any wrapper using the official SDK follows |
 | `fetch-hook` | `NODE_OPTIONS` preload on `globalThis.fetch` | the Vercel AI SDK, and any JS agent with its origin compiled in |
+| `rag-index` | a concurrent index build, an embedding batch, and an answer over retrieved context | IndexRAG, LlamaIndex, GraphRAG, LightRAG — every pipeline that indexes before it answers |
+| `rag-split-origin` | the same run with embeddings at a **second origin of the same wire dialect** | any stack whose chat and embeddings do not share a provider |
 
-Eleven checks. Covering the layer underneath still covers what stands on it — that is what the
+Thirteen checks. Covering the layer underneath still covers what stands on it — that is what the
 `litellm` row is for — but three of these exist because that stopped being enough, and each of the
 three was added after running the framework itself said something the layer could not.
 
@@ -58,6 +60,17 @@ both variables `generic-openai` sets — but the stated reason had been wrong fo
 version, and nothing here could have noticed. Running CrewAI also turned up two changes worth
 documenting: a bare model name always reaches the native provider while a prefixed one can need
 LiteLLM installed, and `LLM(base_url=…)`, long documented as silently ignored, is now honoured.
+
+**The two `rag-*` checks cover a shape none of the others could.** An indexing pipeline sends the
+same *message* many times over — the prompt template is fixed and the document that varies rides
+in the **system** prompt — so the matching ladder, built for a conversation where the trailing
+message is the question, served each document whichever answer the cursor happened to be on. Every
+check above would have stayed green through that: the counts were right, `unmatched=0`, `exit=0`,
+and only the contents were wrong. `rag-index` asserts each request gets its own answer and that
+the embedding calls replay at all, which before `RetrievalRule` was a 502 on the first one.
+`rag-split-origin` asserts *where* each half went, and that assertion is the whole reason it is
+not a copy of `rag-index` — without it, "two origins" and "one origin" look identical from the
+numbers, which is exactly how embedding traffic came to be forwarded to the chat origin.
 
 **`openai-agents` is not a duplicate of `openai-async` either.** The Agents SDK defaults to the
 Responses API; `AsyncOpenAI` in that check uses chat completions. So the older check covered the

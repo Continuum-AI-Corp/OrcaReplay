@@ -43,8 +43,21 @@ interface HarnessFixture {
   base_urls: Record<string, string>;
   /** Set only when the incoming environment already carries them — never invented. */
   optional_env_vars: string[];
+  /**
+   * Variables the adapter rewrites rather than passes on, and the proxy path each becomes.
+   *
+   * `optional_env_vars` cannot describe these: it asserts the value comes through untouched, and
+   * the whole point of a second model origin is that the value is *replaced* — with a
+   * `/forward/` path carrying the destination orca took the call away from. Without an entry
+   * here, an adapter that stopped redirecting its embedding endpoint would pass every check in
+   * this file while sending that traffic straight past the proxy.
+   */
+  redirected_env_vars?: Record<string, string>;
   note?: string;
 }
+
+/** The origin a `redirected_env_vars` entry is probed with. Its encoding is what the path holds. */
+const REDIRECT_PROBE = 'https://embeddings.example/v1';
 
 /**
  * A real directory, because `ctx.runDir` is where the contract tells an adapter to put scratch
@@ -145,6 +158,14 @@ describe.each(registry.ids())('%s', (id) => {
     // this file exists to catch.
     const live = Object.keys(launch.env).filter((name) => BASE_URL_LIKE.test(name));
     expect(live.sort()).toEqual(Object.keys(fixture.base_urls).sort());
+  });
+
+  it('still redirects the origins it is recorded as redirecting', async () => {
+    const fixture = readFixture(adapter, await adapter.prepare(ctx()));
+    for (const [name, path] of Object.entries(fixture.redirected_env_vars ?? {})) {
+      const launch = await adapter.prepare(ctx({ env: { [name]: REDIRECT_PROBE } }));
+      expect(launch.env[name]).toBe(`${PROXY}${path}`);
+    }
   });
 
   it('passes its optional variables through without inventing them', async () => {
