@@ -35,16 +35,21 @@ from orca_trace import (
     turns_of,
 )
 
+# These are golden against the *TypeScript implementation*, not against arithmetic. When the example
+# trace changes, recompute them by running `deriveCheckpoints`, `turnsOf` and `chainTo` over the new
+# events rather than adjusting by hand — hand-adjusting makes the Python side agree with whoever did
+# the sums, which is the one thing these constants exist to prevent.
+#
 #: Every seq that satisfies spec §3 for this trace, per deriveCheckpoints() in TypeScript.
-GOLDEN_CHECKPOINT_SEQS = [1, 13, 14, 15, 16, 17, 20, 23, 24, 25]
+GOLDEN_CHECKPOINT_SEQS = [1, 13, 14, 15, 16, 17, 20, 23, 24, 25, 26, 27, 28]
 
 #: (turn, startSeq, endSeq) per turnsOf() in TypeScript.
-GOLDEN_TURN_SPANS = [(0, 0, 1), (1, 2, 4), (2, 5, 8), (3, 9, 17), (4, 18, 20), (5, 21, 25)]
+GOLDEN_TURN_SPANS = [(0, 0, 1), (1, 2, 4), (2, 5, 8), (3, 9, 17), (4, 18, 20), (5, 21, 28)]
 
 #: causalChain(events, 17) in TypeScript — the failing test, traced back to its first request.
 GOLDEN_CHAIN_TO_17 = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15, 16, 17]
 
-GOLDEN_EVENT_COUNT = 26
+GOLDEN_EVENT_COUNT = 29
 
 
 @pytest.fixture
