@@ -126,14 +126,40 @@ const RULES: Rule[] = [
  * inflates to the declared size like any other. The line is that the payload has to be a picture;
  * a picture cannot be proved innocent.
  */
-// Padding only where padding belongs. `Buffer.from(x, 'base64')` stops at the first `=` and
-// ignores the rest, so a run of `<image>==<credential>` decoded to a valid image and the span
-// covered the credential with it. Ending the run at the padding splits the two, and an interior
-// `=` ends a run for the same reason.
-const BASE64_RUN = /(?:[A-Za-z0-9+/]|\\[/\\])+={0,2}/g;
+/**
+ * Whether `code` is a base64 alphabet character.
+ *
+ * A run used to be found with `/(?:[A-Za-z0-9+/]|\\[/\\])+={0,2}/g`, and a backtracking `+` over a
+ * multi-megabyte run overflows V8's regexp stack: measured, `redactString` threw
+ * `RangeError: Maximum call stack size exceeded` from `RegExpStringIterator.next` at 8 MB of
+ * contiguous base64 — a ~6 MB screenshot, which is the thing this exemption exists to protect. The
+ * entropy sweep's own `TOKEN` never had the problem because `+` and `/` are not in its class, so
+ * real base64 reaches it as thousands of short matches; this prefilter was the first pattern to run
+ * a quantifier across a whole payload, and the same input that the pre-change code walked without
+ * complaint at 16 MB threw here. So runs are found by hand, in one left-to-right pass.
+ */
+function isBase64Char(code: number): boolean {
+  return (
+    (code >= 0x41 && code <= 0x5a) || // A-Z
+    (code >= 0x61 && code <= 0x7a) || // a-z
+    (code >= 0x30 && code <= 0x39) || // 0-9
+    code === 0x2b || // +
+    code === 0x2f // /
+  );
+}
 
 /** Shortest run worth decoding: below this it cannot hold a header and any pixels. */
 const MIN_RASTER_CHARS = 40;
+
+/**
+ * The largest pixel stream worth inflating, as a matter of policy rather than of format.
+ *
+ * An 8K screenshot at four channels is about 127 MiB of raw pixels, so 256 MiB is roughly double the
+ * largest thing anyone is plausibly recording. An IHDR that declares more than this is refused
+ * before any memory is committed — otherwise the header itself, which is the caller's to write,
+ * would set how much the redactor allocates.
+ */
+const MAX_RASTER_RAW_BYTES = 1 << 28;
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -265,6 +291,15 @@ function isWholePng(b: Buffer): boolean {
     at = next;
   }
 
+  // The size is known before the inflate, not after it, so the inflate is bounded by it. Deciding
+  // afterwards meant a 400 KB IDAT declaring 1×1 could expand to whatever it liked: measured, one
+  // 531 KB base64 payload took RSS up by 821 MB, and `--max-old-space-size` does not bound it
+  // because zlib writes outside the JS heap. This is the one place in the write path that runs
+  // over bytes an agent's tools, an MCP server, or (for `orca scrub`) somebody else's trace file
+  // chose.
+  const expected = pngRawLength(width, height, channels, depth, interlace === 1);
+  if (expected > MAX_RASTER_RAW_BYTES) return false;
+
   const stream = Buffer.concat(idat);
   let raw: Buffer;
   try {
@@ -273,17 +308,18 @@ function isWholePng(b: Buffer): boolean {
     // inflates to the declared size with the credential still in the trace. `@types/node` models
     // only the plain-Buffer overload, so the shape is spelled out here; only `bytesWritten` and
     // `buffer` are read from it.
-    const result = inflateSync(stream, { info: true }) as unknown as {
+    const result = inflateSync(stream, { info: true, maxOutputLength: expected }) as unknown as {
       buffer: Buffer;
       engine: { bytesWritten: number };
     };
     if (result.engine.bytesWritten !== stream.length) return false;
     raw = result.buffer;
   } catch {
-    // Not a zlib stream, which is what a credential wrapped in an IDAT chunk is.
+    // Not a zlib stream, or a stream that wanted more room than the header asked for — which is
+    // what a decompression bomb is. Either way: not an image, so the sweep runs as it always did.
     return false;
   }
-  return raw.length === pngRawLength(width, height, channels, depth, interlace === 1);
+  return raw.length === expected;
 }
 
 /** Whether these bytes are one complete image this exemption can account for. */
@@ -301,14 +337,44 @@ function isWholeRasterImage(b: Buffer): boolean {
  */
 function rasterSpans(value: string): [number, number][] {
   const spans: [number, number][] = [];
-  for (const m of value.matchAll(BASE64_RUN)) {
-    const run = m[0];
-    if (run.length < MIN_RASTER_CHARS) continue;
+  let at = 0;
+  while (at < value.length) {
+    const start = at;
+    // One maximal run of the base64 alphabet, `\/` and `\\` counting as the character they stand
+    // for. Advancing to the run's end rather than past its first character is what keeps this
+    // linear: a signature *inside* a run does not start one, so there is nothing to come back for.
+    while (at < value.length) {
+      const code = value.charCodeAt(at);
+      if (isBase64Char(code)) {
+        at += 1;
+        continue;
+      }
+      if (code === 0x5c) {
+        const next = value.charCodeAt(at + 1);
+        if (next === 0x2f || next === 0x5c) {
+          at += 2;
+          continue;
+        }
+      }
+      break;
+    }
+    if (at === start) {
+      at += 1;
+      continue;
+    }
+    // Padding only where padding belongs. `Buffer.from(x, 'base64')` stops at the first `=` and
+    // ignores the rest, so a run of `<image>==<credential>` decoded to a valid image and the span
+    // covered the credential with it. Ending the run at the padding splits the two, and an interior
+    // `=` ends a run for the same reason.
+    let end = at;
+    for (let pad = 0; pad < 2 && value.charCodeAt(end) === 0x3d; pad += 1) end += 1;
+    at = end;
+
     // `iVBORw` is what a PNG signature looks like once base64-encoded.
-    if (!run.startsWith('iVBORw')) continue;
+    if (end - start < MIN_RASTER_CHARS || !value.startsWith('iVBORw', start)) continue;
     // `\/` and `\\` stand for payload characters; they are stripped before decoding and the span
     // still covers them, or the sweep would resume inside the image.
-    const payload = run.replace(/\\(.)/g, '$1');
+    const payload = value.slice(start, end).replace(/\\(.)/g, '$1');
     let bytes: Buffer;
     try {
       bytes = Buffer.from(payload, 'base64');
@@ -316,7 +382,7 @@ function rasterSpans(value: string): [number, number][] {
       continue;
     }
     if (!isWholeRasterImage(bytes)) continue;
-    spans.push([m.index, m.index + run.length]);
+    spans.push([start, end]);
   }
   return spans;
 }

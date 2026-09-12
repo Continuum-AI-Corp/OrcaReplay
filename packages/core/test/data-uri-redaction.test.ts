@@ -530,6 +530,114 @@ describe('a whole PNG is excluded from the entropy sweep', () => {
     expect(redactor.rulesFired().high_entropy).toBeGreaterThan(0);
   });
 
+  // ---- what it costs to look, which is the other way this can go wrong ----
+
+  /**
+   * The size is known from IHDR before the inflate, so the inflate is bounded by it.
+   *
+   * Deciding afterwards meant a 400 KB `IDAT` declaring 1×1 could expand to whatever it liked —
+   * measured on the code before this guard, a 531 KB base64 payload took RSS up by 821 MB, and a
+   * heap cap does not help because zlib allocates outside the JS heap. The redactor is the one
+   * place in the write path that runs over bytes an agent's tools, an MCP server, or somebody
+   * else's trace file chose.
+   */
+  it('refuses a pixel stream that inflates past what IHDR declares, without inflating it', () => {
+    const bomb = deflateSync(Buffer.alloc(64 * 1024 * 1024), { level: 9 });
+    expect(bomb.length).toBeLessThan(128 * 1024); // a small payload claiming a large one
+    const forged = Buffer.concat([
+      SIG,
+      chunk('IHDR', ihdrOf(1, 1)), // four bytes of pixels, by its own account
+      chunk('IDAT', bomb),
+      chunk('IEND', Buffer.alloc(0)),
+    ]).toString('base64');
+
+    const before = process.memoryUsage().rss;
+    const started = Date.now();
+    new Redactor({}).redactString(JSON.stringify({ url: forged }));
+    const grewMb = (process.memoryUsage().rss - before) / 1024 / 1024;
+
+    // The assertion is the cost, not the verdict. A deflate stream of zeros base64-encodes to a
+    // long run of 'A', which the sweep would leave alone on its own account — so "it came back
+    // redacted" would pass here whether the exemption was refused or not. What the guard changes
+    // is whether 64 MB gets allocated to find that out. Generous bounds: the claim is orders of
+    // magnitude, not a stopwatch.
+    expect(grewMb, `inflating the bomb cost ${grewMb.toFixed(0)} MB`).toBeLessThan(32);
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
+  /**
+   * The other half of the bound, and the only shape that distinguishes it.
+   *
+   * `maxOutputLength: expected` alone caps the inflate at whatever IHDR declares — and IHDR's
+   * dimensions are the caller's, up to 2^32 each. A bomb whose declared size is *also* enormous
+   * therefore gets exactly as much room as it asked for. Every cheaper forgery is already refused
+   * on the size mismatch instead, which is why this one has to carry a stream that really does
+   * inflate to the size in its header.
+   */
+  it('refuses a bomb whose header declares the size it inflates to', () => {
+    const w = 1000;
+    const h = 100_000; // 100000 * (1 + 3000) = 286 MiB of "pixels", over the cap
+    let bomb: Buffer | undefined = deflateSync(Buffer.alloc(h * (1 + 3 * w)), { level: 9 });
+    const forged = Buffer.concat([
+      SIG,
+      chunk('IHDR', ihdrOf(w, h)),
+      chunk('IDAT', bomb),
+      chunk('IEND', Buffer.alloc(0)),
+    ]).toString('base64');
+    bomb = undefined;
+
+    const before = process.memoryUsage().rss;
+    const started = Date.now();
+    new Redactor({}).redactString(JSON.stringify({ url: forged }));
+    const grewMb = (process.memoryUsage().rss - before) / 1024 / 1024;
+
+    // Cost, not verdict, for the same reason as the test above: a deflate stream of zeros
+    // base64-encodes to a long run of 'A' that the sweep would leave alone anyway.
+    expect(grewMb, `the declared size bought ${grewMb.toFixed(0)} MB`).toBeLessThan(64);
+    expect(Date.now() - started).toBeLessThan(10_000);
+  }, 60_000);
+
+  it('refuses an IHDR that declares more pixels than the redactor will ever hold', () => {
+    // Incompressible, so the run is swept to pieces the moment the exemption is refused — which
+    // is what makes the verdict observable here and not in the test above.
+    const raw = Buffer.alloc(4096);
+    randomBytes(raw.length).copy(raw);
+    const forged = Buffer.concat([
+      SIG,
+      chunk('IHDR', ihdrOf(40_000, 40_000)), // 40000 * (1 + 120000) = 4.8 GB
+      chunk('IDAT', deflateSync(raw)),
+      chunk('IEND', Buffer.alloc(0)),
+    ]).toString('base64');
+    const redactor = new Redactor({});
+    const { value } = redactor.redactString(JSON.stringify({ url: forged }));
+    expect(value).not.toContain(forged);
+    expect(redactor.rulesFired().high_entropy).toBeGreaterThan(0);
+  });
+
+  /**
+   * The prefilter used to be `/(?:[A-Za-z0-9+\/]|\\[\/\\])+={0,2}/g`, and a backtracking `+` over a
+   * multi-megabyte run overflows V8's regexp stack — `RangeError` out of `RegExpStringIterator`,
+   * through `redactString`, with nothing to catch it: the recording aborts and the trace is left
+   * unsealed, which `verifyIntegrity` then reports as tampered rather than unfinished.
+   *
+   * The sweep's own `TOKEN` never had the problem, because `+` and `/` are not in its class and so
+   * real base64 arrives as thousands of short matches. The payload here is real base64 for exactly
+   * that reason: a run of `[A-Za-z0-9]` only would be one enormous `TOKEN` and would overflow on
+   * both sides of the change, which is a test that passes for the wrong reason.
+   */
+  it('walks a base64 run far larger than any screenshot without overflowing', () => {
+    const run =
+      'iVBORw' +
+      randomBytes(12 * 1024 * 1024)
+        .toString('base64')
+        .replace(/=+$/, '');
+    expect(run.length).toBeGreaterThan(16 * 1024 * 1024);
+    expect(run).toMatch(/[+/]/); // representative: the sweep's TOKEN cannot span these
+    expect(() =>
+      new Redactor({}).redactString(JSON.stringify({ url: `data:image/png;base64,${run}` })),
+    ).not.toThrow();
+  }, 60_000);
+
   it('covers a payload carrying escaped characters, as a JSON-encoded body does', () => {
     // A body reaches the trace inside JSON, so a `/` in the payload can arrive as `\/`.
     const image = png();
