@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -47,6 +48,16 @@ def read(path):
         return [json.loads(line) for line in f if line.strip()]
 
 
+def spans_of(processor):
+    """What this processor wrote.
+
+    Not the path handed to it: one file per process, so the name carries a pid suffix. The tests
+    ask the processor where it wrote rather than recomputing the rule, which is the only way they
+    keep testing the behaviour instead of restating it.
+    """
+    return read(processor._path)
+
+
 def test_inert_without_the_environment_variable(monkeypatch, tmp_path):
     monkeypatch.delenv(SPANS_ENV, raising=False)
     processor = OrcaTracingProcessor()
@@ -65,7 +76,7 @@ def test_writes_a_handoff(tmp_path):
     out = tmp_path / "spans.jsonl"
     processor = OrcaTracingProcessor(str(out))
     processor.on_span_end(FakeSpan(HandoffSpanData({"from_agent": "Triage", "to_agent": "Billing"})))
-    records = read(out)
+    records = spans_of(processor)
     assert len(records) == 1
     assert records[0]["type"] == "HandoffSpanData"
     assert records[0]["data"] == {"from_agent": "Triage", "to_agent": "Billing"}
@@ -77,7 +88,7 @@ def test_drops_what_the_proxy_already_has(tmp_path):
     out = tmp_path / "spans.jsonl"
     processor = OrcaTracingProcessor(str(out))
     processor.on_span_end(FakeSpan(ResponseSpanData({"response": "..."})))
-    assert not out.exists() or read(out) == []
+    assert not Path(processor._path).exists() or spans_of(processor) == []
 
 
 def test_a_span_that_will_not_serialise_does_not_raise(tmp_path):
@@ -111,7 +122,7 @@ def test_an_export_that_raises_does_not_reach_the_agent(tmp_path):
     out = tmp_path / "spans.jsonl"
     processor = OrcaTracingProcessor(str(out))
     processor.on_span_end(FakeSpan(Exploding(None)))
-    assert read(out)[0]["data"] == {}
+    assert spans_of(processor)[0]["data"] == {}
 
 
 def test_a_property_that_raises_does_not_reach_the_agent(tmp_path):
@@ -132,8 +143,8 @@ def test_a_property_that_raises_does_not_reach_the_agent(tmp_path):
     out = tmp_path / "spans.jsonl"
     processor = OrcaTracingProcessor(str(out))
     processor.on_span_end(Sneaky())
-    assert read(out)[0]["started_at"] is None
-    assert read(out)[0]["data"] == {"from_agent": "A", "to_agent": "B"}
+    assert spans_of(processor)[0]["started_at"] is None
+    assert spans_of(processor)[0]["data"] == {"from_agent": "A", "to_agent": "B"}
 
 
 def test_a_tool_call_carrying_a_credential_is_not_written(tmp_path):
@@ -158,7 +169,7 @@ def test_a_tool_call_carrying_a_credential_is_not_written(tmp_path):
             )
         )
     )
-    assert not out.exists() or read(out) == []
+    assert not Path(processor._path).exists() or spans_of(processor) == []
 
 
 def test_only_the_fields_the_reader_maps_are_kept(tmp_path):
@@ -182,7 +193,7 @@ def test_only_the_fields_the_reader_maps_are_kept(tmp_path):
             )
         )
     )
-    assert read(out)[0]["data"] == {
+    assert spans_of(processor)[0]["data"] == {
         "name": "triage",
         "handoffs": ["billing"],
         "tools": ["lookup"],
@@ -225,3 +236,67 @@ def test_keep_export_appends_instead(monkeypatch, tmp_path):
 
     assert install() is True
     assert installed and installed[0][0] == "add"
+
+
+def test_one_file_per_process(tmp_path):
+    # The whole environment is inherited by everything the agent starts, so an agent that shells out
+    # to `python`, or runs `pytest -n` or a worker pool, has several processes tracing at once.
+    # `threading.Lock` serialises none of them, and Windows implements append as seek-then-write.
+    base = tmp_path / "spans.jsonl"
+    processor = OrcaTracingProcessor(str(base))
+    processor.on_span_end(FakeSpan(HandoffSpanData({"from_agent": "A", "to_agent": "B"})))
+    processor.shutdown()
+    assert not base.exists()
+    written = list(tmp_path.glob("spans.jsonl.*"))
+    assert [p.name for p in written] == [f"spans.jsonl.{os.getpid()}"]
+
+
+def test_a_short_write_cannot_swallow_the_next_record(tmp_path):
+    # The loss worth preventing is the *second* one. A write that stops part-way leaves the file
+    # mid-record; appended straight on, the next record glues to that fragment, and the reader —
+    # which skips any line that does not parse — loses both: the torn one, and the intact one whose
+    # bytes were fine. One leading newline separates them.
+    #
+    # A partial write is what has to be simulated, not a failed one: a write that lands nothing
+    # leaves the file ending in a clean newline, where the next record is safe either way.
+    processor = OrcaTracingProcessor(str(tmp_path / "spans.jsonl"))
+    processor.on_span_end(FakeSpan(HandoffSpanData({"from_agent": "A", "to_agent": "B"})))
+    os.write(processor._fd, b'{"kind":"span","type":"HandoffSpa')  # cut off mid-record
+    processor._torn = True
+    processor._dropped = 1
+
+    processor.on_span_end(FakeSpan(HandoffSpanData({"from_agent": "C", "to_agent": "D"})))
+    processor.shutdown()
+
+    text = Path(processor._path).read_text(encoding="utf-8")
+    lines = [line for line in text.split("\n") if line.strip()]
+    unparseable = 0
+    records = []
+    for line in lines:
+        try:
+            records.append(json.loads(line))
+        except ValueError:
+            unparseable += 1
+    assert unparseable == 1, "only the fragment itself should be unreadable"
+    kept = [r["data"]["from_agent"] for r in records if r["kind"] == "span"]
+    assert kept == ["A", "C"], "the record after a torn one must survive"
+
+
+def test_it_says_how_many_it_lost(tmp_path):
+    # The count used to be kept and never read by anything, which is what makes a loss silent: orca
+    # deletes this file as soon as it has ingested it, so a note here is the only chance to mention
+    # it. `kind` is not "span", so a reader that does not know the record skips it.
+    processor = OrcaTracingProcessor(str(tmp_path / "spans.jsonl"))
+    processor.on_span_end(FakeSpan(HandoffSpanData({"from_agent": "A", "to_agent": "B"})))
+    os.close(processor._fd)
+    processor.on_span_end(FakeSpan(HandoffSpanData({"from_agent": "LOST", "to_agent": "X"})))
+    processor._fd = None
+    processor.shutdown()
+    assert {"kind": "dropped", "count": 1} in spans_of(processor)
+
+
+def test_it_says_nothing_when_it_lost_nothing(tmp_path):
+    processor = OrcaTracingProcessor(str(tmp_path / "spans.jsonl"))
+    processor.on_span_end(FakeSpan(HandoffSpanData({"from_agent": "A", "to_agent": "B"})))
+    processor.shutdown()
+    assert [r for r in spans_of(processor) if r["kind"] == "dropped"] == []

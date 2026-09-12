@@ -138,14 +138,45 @@ class OrcaTracingProcessor:
     """
 
     def __init__(self, path: str | None = None) -> None:
-        self._path = path or os.environ.get(SPANS_ENV)
+        base = path or os.environ.get(SPANS_ENV)
+        # One file per process, not one file per run.
+        #
+        # `orca record` puts both halves of the bootstrap in the child's environment, and a child's
+        # environment is inherited by everything it starts — so an agent that shells out to
+        # `python`, or runs `pytest -n`, uvicorn workers or a `ProcessPoolExecutor`, has several
+        # processes tracing at once. `threading.Lock` serialises none of them. Under `O_APPEND` a
+        # small write is atomic on POSIX, but Windows implements append as seek-then-write, where
+        # two processes can land on the same offset.
+        #
+        # A lock would need `fcntl` on one platform and `msvcrt` on the other. A file each needs
+        # neither, and the reader globs the set.
+        self._path = f"{base}.{os.getpid()}" if base else None
         self._lock = threading.Lock()
+        self._fd: int | None = None
+        self._torn = False
         self._dropped = 0
 
     @property
     def active(self) -> bool:
         """False when orca is not recording, which is when this must do nothing."""
         return bool(self._path)
+
+    def _handle(self) -> int | None:
+        """One descriptor for the life of the processor, opened on first use.
+
+        Opened rather than re-opened per record because the write below has to be one syscall: a
+        buffered `open(...).write()` splits a record larger than `io.DEFAULT_BUFFER_SIZE` across
+        several, and anything between them can land in the middle of it.
+        """
+        if self._fd is not None:
+            return self._fd
+        if not self._path:
+            return None
+        try:
+            self._fd = os.open(self._path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+        except Exception:  # noqa: BLE001 - a debugger that cannot write must not fail the run
+            self._path = None
+        return self._fd
 
     def _write(self, record: dict[str, Any]) -> None:
         if not self._path:
@@ -155,11 +186,33 @@ class OrcaTracingProcessor:
         except Exception:  # noqa: BLE001 - a span that will not serialise must not end the run
             self._dropped += 1
             return
+        with self._lock:
+            fd = self._handle()
+            if fd is None:
+                self._dropped += 1
+                return
+            # A leading newline after a failed write. A short write leaves the file mid-record, and
+            # the next record appended straight on would glue to it — the reader then loses *both*,
+            # the torn one and the intact one whose bytes were fine. One byte closes that.
+            payload = (("\n" if self._torn else "") + line + "\n").encode("utf-8")
+            try:
+                written = os.write(fd, payload)
+                self._torn = written != len(payload)
+                if self._torn:
+                    self._dropped += 1
+            except Exception:  # noqa: BLE001 - same: a debugger must not be able to fail a run
+                self._torn = True
+                self._dropped += 1
+
+    def _close(self) -> None:
+        with self._lock:
+            fd, self._fd = self._fd, None
+        if fd is None:
+            return
         try:
-            with self._lock, open(self._path, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
-        except Exception:  # noqa: BLE001 - same: a debugger must not be able to fail a run
-            self._dropped += 1
+            os.close(fd)
+        except Exception:  # noqa: BLE001 - nothing here may raise into the agent's run
+            pass
 
     # ── the SDK's interface ───────────────────────────────────────────────────
     def on_trace_start(self, trace: Any) -> None:
@@ -199,9 +252,20 @@ class OrcaTracingProcessor:
         )
 
     def shutdown(self) -> None:
-        return None
+        """Say how many records were lost, then let the descriptor go.
+
+        The count used to be kept and never read by anything, which is the shape of a silent loss:
+        the trace simply has fewer `agent.*` events than the run had, with nothing to say so. Orca
+        deletes this file as soon as it has ingested it, so a note left here is the only chance to
+        mention it — and `kind` is not `"span"`, so a reader that does not know about this record
+        skips it rather than mistaking it for one.
+        """
+        if self._dropped > 0:
+            self._write({"kind": "dropped", "count": self._dropped})
+        self._close()
 
     def force_flush(self) -> None:
+        """Nothing is buffered on our side — every record is one `os.write`."""
         return None
 
 
