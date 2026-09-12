@@ -1,11 +1,16 @@
 import { createServer, type Server } from 'node:http';
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parseArgs } from '../src/args.js';
 import { Output, type LogEntry } from '../src/out.js';
-import { pullCommand, pushCommand, releaseRunLock } from '../src/commands/sync.js';
+import {
+  breakStaleRunLock,
+  pullCommand,
+  pushCommand,
+  releaseRunLock,
+} from '../src/commands/sync.js';
 import { readArchive, writeArchive } from '../src/archive.js';
 import { writeConfig } from '../src/config.js';
 
@@ -688,5 +693,175 @@ describe('push and pull', () => {
       ORCA_GATEWAY_KEY: 'sk-orca-home',
     });
     expect(received[0]!.auth).toBe('Bearer sk-orca-home');
+  });
+
+  /**
+   * PUSH SHIPS THE TRACE, NOT THE CAPTURE SCAFFOLDING.
+   *
+   * A run directory accumulates files that are not trace content, and `runEntries` is the only
+   * thing that SWEEPS it — every other command (`export`, `gc`, `scrub`) enumerates named
+   * artifacts and cannot pick up a neighbour. With a denylist, each of those files shipped until
+   * somebody read a packed archive and noticed:
+   *
+   *   mcp-config.json      MCP server `env` blocks, kept verbatim by rewriteMcpConfig — which is
+   *                        where an MCP server's API token lives.
+   *   shell-frames.jsonl   raw argv of every command the agent ran.
+   *   mcp-frames.jsonl     raw JSON-RPC bodies.
+   *   shims/               generated launchers carrying this machine's paths.
+   *
+   * `orca scrub` is why a denylist cannot be finished: it rewrites manifest.json, events.jsonl and
+   * blobs/ and NOTHING else, so a user who scrubbed a secret and pushed was shipping an unscrubbed
+   * copy of it in the raw logs — scrub said it succeeded and the secret went out anyway.
+   *
+   * Asserted on ENTRY NAMES, exactly like the TLS test beside it and for the same reason: zip names
+   * are stored uncompressed while payloads are deflated, so a body scan can pass over a file that
+   * is very much in the archive.
+   */
+  it('packs only trace content, never the capture scaffolding beside it', async () => {
+    await seedRun();
+    const dir = join(workspace, '.orca', 'runs', runId);
+    await writeFile(
+      join(dir, 'mcp-config.json'),
+      `${JSON.stringify({
+        mcpServers: { gh: { command: 'x', env: { GITHUB_TOKEN: 'ghp_scaffolding_secret' } } },
+      })}\n`,
+    );
+    await writeFile(
+      join(dir, 'shell-frames.jsonl'),
+      '{"name":"curl","argv":["-H","Authorization: Bearer shell_frame_secret"]}\n',
+    );
+    await writeFile(
+      join(dir, 'mcp-frames.jsonl'),
+      '{"jsonrpc":"2.0","result":"mcp_frame_secret"}\n',
+    );
+    await mkdir(join(dir, 'shims'), { recursive: true });
+    await writeFile(join(dir, 'shims', 'curl'), '#!/bin/sh\nexec orca-shell-shim "$@"\n');
+    // Kept: the scrub ledger says a run WAS scrubbed, by rule and count and never by value.
+    await writeFile(join(dir, 'redactions.json'), '{"records":[{"rule":"scrub","count":2}]}\n');
+    // Kept: the workspace snapshots are content the user recorded on purpose.
+    await mkdir(join(dir, 'fs', 'objects'), { recursive: true });
+    await writeFile(join(dir, 'fs', 'objects', 'aa'), 'snapshot\n');
+    // A NESTED copy of an excluded name is content, not scaffolding: the filter is top-level only.
+    await mkdir(join(dir, 'fs', 'shims'), { recursive: true });
+    await writeFile(join(dir, 'fs', 'shims', 'recorded'), 'the user recorded this\n');
+
+    await pushCommand(parseArgs(['push', runId, '--gateway', url]), out, workspace, env());
+
+    const sent = received.find((r) => r.method === 'POST');
+    expect(sent, 'the push must have happened').toBeTruthy();
+    const start = sent!.body.indexOf('PK');
+    const end = sent!.body.lastIndexOf('\r\n--');
+    const names = (await readArchive(new Uint8Array(sent!.body.subarray(start, end))))
+      .map((e) => e.name)
+      .sort();
+    expect(names).toEqual([
+      `${runId}/blobs/ab/abcdef`,
+      `${runId}/events.jsonl`,
+      `${runId}/fs/objects/aa`,
+      `${runId}/fs/shims/recorded`,
+      `${runId}/manifest.json`,
+      `${runId}/redactions.json`,
+    ]);
+
+    // The payload backstop, for anything that arrives by another route.
+    const body = sent!.body.toString('latin1');
+    for (const secret of ['ghp_scaffolding_secret', 'shell_frame_secret', 'mcp_frame_secret']) {
+      expect(body).not.toContain(secret);
+    }
+  });
+
+  /**
+   * A STALE-BREAK MUST NOT REMOVE A LOCK THAT IS ALIVE.
+   *
+   * Two waiters can judge the same abandoned lock stale. The break then read the lock's bytes BY
+   * PATH and asked `releaseRunLock` to remove "that" token — which read the same path again. Two
+   * reads of one path are not evidence about each other:
+   *
+   *   W1 and W2 both stat the abandoned lock: stale.
+   *   W1 breaks it and acquires — a FRESH lock now sits at that path.
+   *   W2 reads the path, gets W1's fresh token, and removes it as though it were the stale one.
+   *   W2 acquires beside W1 — two pulls doing recovery-and-swap on one run.
+   *
+   * Driven directly at the break, because the window is inside `withRunLock`'s retry loop and no
+   * caller can interpose on it.
+   */
+  it('breaks the stale lock it claimed, never a live one that replaced it', async () => {
+    const runs = join(workspace, '.orca', 'runs');
+    await mkdir(runs, { recursive: true });
+    const lock = join(runs, `${runId}.lock`);
+
+    // W1's fresh lock, standing where W2 last saw a stale one. Written NOW, so it is not stale.
+    const fresh = `${process.pid} w1-is-working\n`;
+    await writeFile(lock, fresh);
+
+    await breakStaleRunLock(lock);
+
+    expect(
+      await readFile(lock, 'utf8').catch(() => undefined),
+      'a live holder’s lock was removed by another waiter’s stale-break',
+    ).toBe(fresh);
+    // And nothing is left lying about beside it.
+    expect((await readdir(runs)).filter((n) => n.includes('.breaking.'))).toEqual([]);
+
+    // The genuinely stale case still works, or the lock would never be reclaimable.
+    const old = new Date(Date.now() - 30 * 60 * 1000);
+    await writeFile(lock, '424242 abandoned\n');
+    await utimes(lock, old, old);
+    await breakStaleRunLock(lock);
+    expect(await readFile(lock, 'utf8').catch(() => undefined)).toBeUndefined();
+    expect((await readdir(runs)).filter((n) => n.includes('.breaking.'))).toEqual([]);
+  });
+
+  /**
+   * PUSH HAS NO DEFAULT DESTINATION — and `orca setup`'s own default is not one either.
+   *
+   * README's "Never a default destination" says a run goes only where you NAMED, because a run
+   * carries source, shell output and workspace snapshots. The code read `config.gateway.url`, and
+   * `orca setup` writes ORCAROUTER_URL into that field when you press Enter — so plain
+   * `orca setup` followed by `orca push last` sent all of it to a host the user never typed.
+   */
+  it('refuses to push to a gateway orca setup chose rather than the user', async () => {
+    await seedRun();
+    await writeConfig(
+      { gateway: { url: 'https://api.orcarouter.ai', url_source: 'default', api_key: 'sk-x' } },
+      { XDG_CONFIG_HOME: home },
+    );
+    const noEnv = { XDG_CONFIG_HOME: home };
+
+    await expect(pushCommand(parseArgs(['push', runId]), out, workspace, noEnv)).rejects.toThrow(
+      /not a destination you named/,
+    );
+    expect(received).toHaveLength(0);
+
+    // The same URL, NAMED, is fine — the rule is about provenance, not about the host.
+    await writeConfig(
+      { gateway: { url, url_source: 'named', api_key: 'sk-x' } },
+      { XDG_CONFIG_HOME: home },
+    );
+    await pushCommand(parseArgs(['push', runId]), out, workspace, noEnv);
+    expect(received).toHaveLength(1);
+  });
+
+  /**
+   * Configs written before `url_source` existed carry no provenance, so the URL decides. Setup
+   * writes ORCAROUTER_URL and nothing else without being told, so any OTHER origin can only have
+   * been named.
+   */
+  it('treats a pre-provenance config as named unless it is the CLI’s own default', async () => {
+    await seedRun();
+    const noEnv = { XDG_CONFIG_HOME: home };
+
+    await writeConfig(
+      { gateway: { url: 'https://api.orcarouter.ai', api_key: 'sk-x' } },
+      { XDG_CONFIG_HOME: home },
+    );
+    await expect(pushCommand(parseArgs(['push', runId]), out, workspace, noEnv)).rejects.toThrow(
+      /not a destination you named/,
+    );
+    expect(received).toHaveLength(0);
+
+    await writeConfig({ gateway: { url, api_key: 'sk-x' } }, { XDG_CONFIG_HOME: home });
+    await pushCommand(parseArgs(['push', runId]), out, workspace, noEnv);
+    expect(received).toHaveLength(1);
   });
 });

@@ -395,10 +395,11 @@ key you exported for your own gateway.
 - **Never a default destination.** `orca setup` may default the *model* gateway to OrcaRouter,
   because proxying a call your agent was already making is not a disclosure. A run is: it holds
   source, shell output and workspace snapshots, which travel with it as content-addressed blobs.
-  So push has no default host: `ORCA_GATEWAY_URL` above is a line you type, not one `orca setup`
-  fills in for you — naming OrcaRouter there is a destination you chose, and the CLI still has
-  none of its own. `push.packed` also reports the file count and byte size *before* the request
-  goes out rather than after.
+  So push has no default host. A gateway counts as a destination only when you NAMED it —
+  `--gateway`, `ORCA_GATEWAY_URL`, or a URL you typed at `orca setup` — and the one `orca setup`
+  fills in for you when you press Enter does not count, however well it serves your model traffic.
+  Running plain `orca setup` and then `orca push last` is refused, and says why. `push.packed` also
+  reports the file count and byte size *before* the request goes out rather than after.
 - **Never a key to a host it was not set up for.** Every credential has a home — the stored key's
   is `orca setup`'s gateway, an exported key's is `ORCA_GATEWAY_URL` — and it is attached only when
   the destination matches that home. `--gateway` changes where the run goes, not what the key was

@@ -71,7 +71,14 @@ export async function setupCommand(
   // OrcaRouter fills the blank, and Enter accepts it. Offered rather than imposed: the whole point
   // of a gateway is that one origin serves several models, and most people asking for that do not
   // have one already — but anyone who does types over it, and `--gateway` skips the question.
+  //
+  // WHICH OF THE TWO HAPPENED IS RECORDED, because push needs to know and the URL alone cannot say
+  // (GatewayConfig.url_source). A default that is right for model traffic — proxying a call the
+  // agent was already making — is not right for a RUN, which carries source, shell output and
+  // workspace snapshots. Without this, `orca setup` + `orca push last` sent all of it to a host
+  // the user never typed, against the README's "Never a default destination".
   if (!url && ask) url = await ask(`Gateway URL (serves the model APIs) [${ORCAROUTER_URL}]: `);
+  const urlSource: NonNullable<OrcaConfig['gateway']>['url_source'] = url ? 'named' : 'default';
   if (!url) url = ORCAROUTER_URL;
   if (!key && !keyEnv && ask) {
     if (sameOrigin(url, ORCAROUTER_URL)) {
@@ -80,7 +87,7 @@ export async function setupCommand(
     key = await ask('API key (stored 0600; leave blank for none): ');
   }
 
-  const gateway: OrcaConfig['gateway'] = { url };
+  const gateway: OrcaConfig['gateway'] = { url, url_source: urlSource };
   // Stored key wins if both are given, and only one is ever written: keeping both would leave a
   // credential on disk for someone who explicitly asked not to have one.
   if (key) gateway.api_key = key;

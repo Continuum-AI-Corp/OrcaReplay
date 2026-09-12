@@ -1,10 +1,26 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  link,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 import { ensureRunsDir, resolveRunSelector, runDirFor } from '@orcareplay/core';
 import type { ParsedArgs } from '../args.js';
 import type { Output } from '../out.js';
-import { readConfig, gatewayHeaders, sameOrigin, type OrcaConfig } from '../config.js';
+import {
+  readConfig,
+  gatewayHeaders,
+  namedPushDestination,
+  sameOrigin,
+  type OrcaConfig,
+} from '../config.js';
 import { readArchive, writeArchive, type ArchiveEntry } from '../archive.js';
 
 /**
@@ -59,23 +75,40 @@ const exportPath = (runKey: string): string =>
   `/api/replay/runs/${encodeURIComponent(runKey)}/export`;
 
 /**
- * The gateway a sync command talks to: flag, then environment, then the configured gateway.
+ * The gateway a sync command talks to: flag, then environment, then a configured gateway THE USER
+ * NAMED.
  *
  * The same precedence `resolveUpstream` uses for model traffic, and for the same reason — the more
- * specific and more recent the instruction, the more it wins. There is deliberately NO default
- * here, unlike model traffic: pushing a recording of someone's source code to a host they did not
- * name is not a fallback, it is a disclosure.
+ * specific and more recent the instruction, the more it wins. The last step is where the two part
+ * company, and the comment that used to stand here ("there is deliberately NO default") described
+ * an intention the code did not implement: it read `config.gateway?.url`, and `orca setup` writes
+ * ORCAROUTER_URL into that field when nobody names anything. So `orca setup` followed by
+ * `orca push last` sent the run — source, shell output, workspace snapshots — to a host the user
+ * never typed, which is exactly what README's "Never a default destination" promises cannot
+ * happen.
+ *
+ * `namedPushDestination` is that promise as one function, so both sync commands and anything added
+ * later ask the same question instead of each re-deriving it.
  */
 async function resolveGateway(
   args: ParsedArgs,
   env: NodeJS.ProcessEnv,
 ): Promise<{ url: string; headers: Record<string, string> }> {
   const config: OrcaConfig = await readConfig(env);
-  const url = args.str('gateway') ?? env.ORCA_GATEWAY_URL ?? config.gateway?.url;
+  const named = namedPushDestination(config);
+  const url = args.str('gateway') ?? env.ORCA_GATEWAY_URL ?? named;
   if (!url) {
+    // Two different situations, and telling them apart is the whole value of the message: nothing
+    // configured at all, versus a gateway that IS configured but only as setup's own default for
+    // model traffic. The second reads as a bug unless it says so.
     throw new Error(
-      'no gateway configured. Run `orca setup --gateway <url>`, or pass --gateway, ' +
-        'or set ORCA_GATEWAY_URL.',
+      config.gateway?.url !== undefined
+        ? `the configured gateway (${config.gateway.url}) is orca setup's default for MODEL ` +
+            'traffic, not a destination you named for your runs, and a run carries source, shell ' +
+            'output and workspace snapshots. Name it explicitly: pass --gateway <url>, set ' +
+            'ORCA_GATEWAY_URL, or re-run `orca setup --gateway <url>`.'
+        : 'no gateway configured. Run `orca setup --gateway <url>`, or pass --gateway, ' +
+            'or set ORCA_GATEWAY_URL.',
     );
   }
 
@@ -146,39 +179,61 @@ function refusal(status: number, body: string): string {
   return trimmed === '' ? `gateway answered ${status}` : `gateway answered ${status}: ${trimmed}`;
 }
 
-/** Every file under a run directory, as archive entries named `<run_id>/<path>`. */
 /**
- * Directories inside a run that are NOT trace content and must never leave the machine.
+ * The run directory's top-level entries that a push SHIPS. Everything else stays on the machine.
  *
- * A RUN DIRECTORY HOLDS MORE THAN THE TRACE, and this is the only thing here that walks it.
- * `orca export`, `gc` and `scrub` all enumerate the NAMED artifacts — `manifest.json`,
- * `events.jsonl`, and the blobs events reference — so none of them can pick up a neighbour.
- * `runEntries` sweeps, which is what makes push the one path that can ship something nobody meant
- * to send.
+ * AN ALLOWLIST, AND IT USED TO BE A DENYLIST OF ONE (`tls/`). That is the whole fix
+ * (orcacode-review, `orca push` packing unredacted capture scaffolding): a denylist ships every
+ * file nobody has thought about yet, and a run directory accumulates files that are not trace
+ * content — `mcp-config.json` (MCP server `env` blocks, preserved verbatim by `rewriteMcpConfig`,
+ * which is where an MCP server's API token lives), `shell-frames.jsonl` (raw argv of every command
+ * the agent ran), `mcp-frames.jsonl` (raw JSON-RPC bodies), `shims/` (generated launchers holding
+ * this machine's paths), `tls/` (the run's own interception CA private key). Each of those was
+ * being POSTed to the gateway, stored there, and served to everyone who pulls the run.
  *
- * `tls/` is the run's own interception CA: `RunCa.create` writes `ca.key` there at 0600, and
- * `dispose()` is the only thing that removes it. SECURITY.md says the CA is "deleted when the run
- * ends, including when the run fails, is interrupted" — and the code does not guarantee that.
- * record.ts warns `tls.ca_not_removed` and then seals the trace normally, so the run looks finished
- * with the private key still in it; a SIGKILL leaves it with no handler running at all. Pushing
- * such a run POSTs the key to a gateway that stores it and serves it to everyone who pulls the run,
- * with only the gateway's secret scan in the way — and `--force` exists to bypass that.
+ * The reason a denylist cannot be made complete here is `orca scrub`. Scrub rewrites
+ * `manifest.json`, `events.jsonl` and `blobs/` and nothing else, so a user who scrubs a secret and
+ * then pushes was shipping an unscrubbed copy of it in the raw frame logs — the scrub reported
+ * success and the secret went out anyway. `push` is the sharing path; shipping a file scrub cannot
+ * reach defeats the command whose entire job is to make sharing safe.
  *
- * A NAMED SET rather than one `if`, because the next thing written beside a trace will be found the
- * same way this was: by someone reading a packed archive. Anything that is not trace content
- * belongs here the day it is created.
+ * Why each entry is here:
+ *
+ *   manifest.json / events.jsonl / blobs  the trace, and what scrub covers.
+ *   redactions.json                       the scrub ledger — by rule and COUNT, never by value —
+ *                                         so the recipient can see the run was scrubbed.
+ *   fs                                    the workspace snapshots. Scrub cannot rewrite them
+ *                                         either (it warns `fs_store_not_scrubbed` and offers
+ *                                         `--drop-fs`), but unlike the frame logs they are content
+ *                                         the user recorded ON PURPOSE, and README says a run
+ *                                         carries them.
+ *
+ * ONE THING IS DELIBERATELY LOST, and it is worth stating rather than discovering: `orca replay`
+ * mocks MCP servers from `mcp-frames.jsonl`, so replaying a PULLED run no longer has those frames.
+ * That is a degraded secondary feature against a credential disclosure, and the unblock is the
+ * project rule this file already lives under — redaction belongs in the write path
+ * (CONTRIBUTING.md). Once the MCP tee redacts as it writes, `mcp-frames.jsonl` joins this list.
+ *
+ * Nested copies are untouched: a `tls/` or `shims/` INSIDE a recorded workspace snapshot is
+ * something the user recorded, and the filter applies at the top level only.
  */
-const NEVER_PUSHED = new Set(['tls']);
+const PUSHED_TOP_LEVEL = new Set([
+  'manifest.json',
+  'events.jsonl',
+  'redactions.json',
+  'blobs',
+  'fs',
+]);
 
+/** Every pushable file under a run directory, as archive entries named `<run_id>/<path>`. */
 async function runEntries(runDir: string, runId: string): Promise<ArchiveEntry[]> {
   const entries: ArchiveEntry[] = [];
   const walk = async (dir: string): Promise<void> => {
     for (const item of await readdir(dir, { withFileTypes: true })) {
+      // Top level only — see PUSHED_TOP_LEVEL.
+      if (dir === runDir && !PUSHED_TOP_LEVEL.has(item.name)) continue;
       const full = join(dir, item.name);
       if (item.isDirectory()) {
-        // Top level only: NEVER_PUSHED names the run's own subdirectories, and a `tls/` nested
-        // inside a recorded workspace snapshot is content the user recorded on purpose.
-        if (dir === runDir && NEVER_PUSHED.has(item.name)) continue;
         await walk(full);
         continue;
       }
@@ -272,6 +327,62 @@ export async function releaseRunLock(lock: string, token: string): Promise<void>
   await rm(lock, { force: true }).catch(() => undefined);
 }
 
+/**
+ * Break a lock judged stale, without ever removing a LIVE one.
+ *
+ * The previous version read the lock's bytes by PATH after judging it stale and then asked
+ * `releaseRunLock` to remove "that" token — which re-read the same path. Both reads can land on a
+ * DIFFERENT lock than the one the staleness verdict was about, and the two agreeing with each
+ * other is not evidence, because they are the same read twice:
+ *
+ *   W1 stats the abandoned lock, stale.
+ *   W2 stats the same lock, stale.
+ *   W1 reads it, removes it, and acquires — a FRESH lock now sits at that path.
+ *   W2 reads the path and gets W1's fresh token, hands it to releaseRunLock, which reads the path
+ *     again, sees the same bytes, and deletes it.
+ *   W2 acquires beside W1 — two pulls doing recovery-and-swap on one run, which is the exact
+ *     thing this lock exists to prevent.
+ *
+ * So the break claims the file ATOMICALLY first. `rename` moves an inode: exactly one racer can
+ * take it and the rest get ENOENT, and afterwards we hold something nobody else can reach, so it
+ * can be examined without anything changing under us.
+ *
+ * And it is examined, because winning the rename does not mean the file was stale — the same
+ * window above can hand us a lock created between the `stat` and the `rename`. An aside whose
+ * mtime is recent is put BACK, with `link`, which fails EEXIST rather than clobbering whoever
+ * claimed the path meanwhile; either way this waiter keeps waiting instead of acquiring.
+ *
+ * A crash between the rename and the unlink leaves a `.breaking.*` file beside the run. It matches
+ * no RUN_ID_PATTERN, so every command ignores it, and it holds no lock — strictly better than the
+ * failure it replaces.
+ *
+ * Exported for the test that drives the interleaving directly: the window between the `stat` and
+ * the break is inside `withRunLock`'s retry loop, and no caller can reach into it.
+ */
+export async function breakStaleRunLock(lock: string): Promise<void> {
+  const aside = `${lock}.breaking.${process.pid}.${randomUUID()}`;
+  try {
+    await rename(lock, aside);
+  } catch {
+    // Someone else took it first, or it is already gone. Either way this waiter has nothing to
+    // break and should go round again.
+    return;
+  }
+  const age = await stat(aside)
+    .then((st) => Date.now() - st.mtimeMs)
+    // Unreadable after we moved it: treat as stale rather than restoring a lock we cannot
+    // describe. The alternative is putting an unknowable file back and spinning on it forever.
+    .catch(() => Number.POSITIVE_INFINITY);
+  if (age > STALE_LOCK_MS) {
+    await rm(aside, { force: true }).catch(() => undefined);
+    return;
+  }
+  // NOT stale after all — created between the stat and the rename. Put it back where its holder
+  // expects it, and only if nothing has claimed the path since.
+  await link(aside, lock).catch(() => undefined);
+  await rm(aside, { force: true }).catch(() => undefined);
+}
+
 async function withRunLock<T>(dest: string, fn: () => Promise<T>): Promise<T> {
   const lock = `${dest}.lock`;
   // See releaseRunLock for why this is a token and not just a pid.
@@ -292,12 +403,7 @@ async function withRunLock<T>(dest: string, fn: () => Promise<T>): Promise<T> {
         .then((st) => Date.now() - st.mtimeMs)
         .catch(() => 0);
       if (stale > STALE_LOCK_MS) {
-        // BREAK THE LOCK WE JUDGED STALE, not whatever is at that path now. Two waiters can both
-        // read the same abandoned lock as stale; without this, the first breaks it and acquires,
-        // and the second then deletes that fresh lock and acquires alongside it — the same
-        // own-only rule as releaseRunLock, at the other end of the lock's life.
-        const abandoned = await readFile(lock, 'utf8').catch(() => undefined);
-        if (abandoned !== undefined) await releaseRunLock(lock, abandoned);
+        await breakStaleRunLock(lock);
         continue;
       }
       await new Promise((ok) => setTimeout(ok, 100));
