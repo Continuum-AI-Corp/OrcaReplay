@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { AUTH_REQUEST_HEADERS, Redactor } from '@orcareplay/core';
+import { AUTH_REQUEST_HEADERS, Redactor, fetchPinned } from '@orcareplay/core';
 import type { CanonicalRequest, CanonicalResponse, Usage } from '@orcareplay/plugin-api';
 import {
   anthropicToCanonicalRequest,
@@ -485,7 +485,15 @@ function sameOrigin(a: string, b: string): boolean {
 
 export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
   const dialects = options.dialects ?? defaultDialects();
-  const doFetch = options.fetchImpl ?? fetch;
+  // PINNED BY DEFAULT (orcacode-review). This proxy is handed the stored gateway
+  // key as `upstreamHeaders` and attaches it to both live call sites, so it is a
+  // carrier of exactly the credential fetchPinned exists to protect — and it
+  // escaped the CLI's fence twice over: that fence walked only packages/cli/src,
+  // and this call is an ALIAS, so a scan for a bare `fetch(` would not have seen
+  // it even with the wider scope.
+  //
+  // `fetchImpl` stays the seam the tests inject through; only the default moves.
+  const doFetch = options.fetchImpl ?? fetchPinned;
   const recorded = options.exchanges ?? [];
   const captured: RecordedExchange[] = [];
 

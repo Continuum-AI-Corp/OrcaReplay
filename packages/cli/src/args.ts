@@ -69,7 +69,16 @@ export const VALUELESS = new Set([
   // without an entry here fails a test rather than a user.
   'quiet',
   'full',
+  // `-h` parses to the body "h" (short flags take one dash), and main.ts reads it with
+  // args.bool('h'). Found by the derived invariant test the day it was written, which is the
+  // point of deriving it — the hand-written list had missed this one too.
   'h',
+  // push / pull: "store this even though the scan found something", and "replace the local copy".
+  // Missing here it was VALUE-TAKING, so `orca push --force run_abc` ate the selector and pushed
+  // the workspace's NEWEST run to the gateway instead, without ?force=1, reporting success under
+  // the other run's name. See the invariant test below for why the list is now derived rather
+  // than trusted.
+  'force',
 ]);
 
 /**
