@@ -109,7 +109,9 @@ export async function recordCommand(
       await ca.dispose().catch(() => undefined);
     }
     for (const path of rawSinks) {
-      await discardAgentSpans(path).catch(() => undefined);
+      // Expanded here rather than stored: one file per tracing process, and which processes
+      // existed is not known until the run is over.
+      await discardAgentSpans(await agentSpansFiles(path)).catch(() => undefined);
     }
     throw err;
   }
@@ -373,11 +375,6 @@ async function runRecording(
     // `finishRun`, which this is the short-circuit for — so every throw after `installAgentSpans`
     // used to leave an un-redacted transport in the run directory, where `orca scrub` does not
     // reach it. The likeliest such throw is the first statement of `finishRun`.
-    // Nothing was ingested on this path, so the whole set goes: what it holds is about to be
-    // unreachable either way, and leaving it is the one outcome that must not happen.
-    if (agentSpans) {
-      await discardAgentSpans(await agentSpansFiles(agentSpans.spansPath)).catch(() => undefined);
-    }
     await writer
       .append({ type: 'run.end', actor: 'orca', turn, attrs: { error: String(err) } })
       .catch(() => undefined);
