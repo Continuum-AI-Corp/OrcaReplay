@@ -213,6 +213,13 @@ describe('shell shim', () => {
       '[1,2]',
       JSON.stringify({ name: 'sh', argv: 'not-an-array', cwd: '/tmp' }),
       JSON.stringify({ argv: [], cwd: '/tmp' }),
+      // The one a check on `name`/`argv` alone lets through, and the one that actually ends a run:
+      // the consumer adds `durationMs` to the parsed `startedAt`, so a frame torn between those two
+      // fields becomes `new Date(<ms> + undefined)` — an Invalid Date, which throws
+      // `RangeError: Invalid time value` inside `TraceWriter.append`, where the trace is sealed.
+      JSON.stringify({ ...good, durationMs: undefined }),
+      JSON.stringify({ ...good, durationMs: '5' }),
+      JSON.stringify({ ...good, startedAt: 1757630000000 }),
       JSON.stringify(good),
       '{"name":"sh","argv":[',
       '',
@@ -221,5 +228,6 @@ describe('shell shim', () => {
     const frames = await readShellFrames(shim.framesPath);
     expect(frames).toHaveLength(1);
     expect(frames[0]!.argv).toEqual(['-c', 'true']);
+    expect(frames[0]!.durationMs).toBe(1);
   });
 });
