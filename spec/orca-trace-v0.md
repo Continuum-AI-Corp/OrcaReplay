@@ -121,6 +121,16 @@ request with the same policy — and MUST compare the *kind* of secret rather th
 is the most a trace can know about a value it deliberately destroyed. A request that is equal only
 after that fold is a rung 2 `minor` divergence, never rung 1.
 
+A rendered image makes rung 1 unreachable for the same reason. Replay does not intercept the world,
+so an agent that sees through a browser or a camera renders its next frame afresh, and two renders
+of one scene are not the same bytes. Implementations MUST therefore compare image content parts
+below rung 1 on their presence and media type rather than on their payload, and MUST keep the
+payload in the comparison at rung 1, so an exact match still means exact. The text accompanying the
+image MUST remain fully compared: it is what identifies the request — a browser agent sends its
+element tree, the page URL and its own memory in the same message — and folding the payload is only
+sound because that text is untouched. A request that is equal only after this fold is a rung 2
+`minor` divergence, never rung 1, and the divergence MUST say how many images it covered.
+
 Distance MUST be measured per field rather than over the serialized body as a whole. A whole-body
 longest-common-prefix-and-suffix measure counts everything between two distant edits as changed, so
 two drifting identifiers in a large prompt score as a total rewrite and no request can reach rung 2.

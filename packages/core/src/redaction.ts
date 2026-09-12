@@ -82,6 +82,130 @@ const RULES: Rule[] = [
   { kind: 'google_api_key', pattern: /AIza[0-9A-Za-z_-]{35}/g },
 ];
 
+/**
+ * A base64 run that decodes to a whole raster image, wherever it sits in the value.
+ *
+ * The exemption is granted on the payload, not on the syntax around it or the label in front of
+ * it, because every argument for it is an argument about *pixels* — bytes that cannot hide a
+ * credential a reader could recover, and that the sweep was never protecting. Three things follow
+ * from putting it that way, each of which was a hole when this keyed on `data:image/<type>;base64,`
+ * instead:
+ *
+ *   - **The spelling stops mattering.** OpenAI puts an image on the wire as a `data:` URI;
+ *     Anthropic sends `{"type":"base64","media_type":"image/png","data":"…"}` with no prefix at
+ *     all, so a screenshot in a `/v1/messages` recording was still being shredded. A rule about the
+ *     bytes covers both, and whatever the next dialect does.
+ *   - **The label stops being evidence.** It is text an agent wrote in front of the payload, so an
+ *     exemption granted on it is one any caller can claim: the same encoded credential was spared
+ *     behind `image/png` and swept behind `application/pdf`.
+ *   - **The run cannot walk off the end of the payload.** The old class admitted `\`, so a
+ *     JSON-escaped newline — `\` then `n`, both in the class — did not end it, and a token on the
+ *     next line was swallowed into the span and never swept.
+ *
+ * Validated end to end rather than by its first bytes, because a signature is also just text a
+ * caller can write: `iVBORw0KGgo` followed by a base64 credential passed a head-only check, and
+ * the credential landed in the trace verbatim with nothing in `redactions.json`. A structure that
+ * has to close — PNG's chunk walk ending at `IEND`, JPEG's `FF D9`, GIF's `0x3B`, a declared size
+ * for BMP, WebP and AVIF — is not something an appended secret survives.
+ *
+ * What this does not claim: a secret hidden *inside* otherwise valid pixel data is not detectable
+ * here, and no content rule could. The line is that a payload which is not a picture does not get
+ * a picture's exemption.
+ */
+const BASE64_RUN = /(?:[A-Za-z0-9+/=]|\\[/\\])+/g;
+
+/** Shortest run worth decoding: below this it cannot hold a header and any pixels. */
+const MIN_RASTER_CHARS = 40;
+
+/** Reads a big-endian uint32 without throwing past the end. */
+function be32(b: Buffer, at: number): number {
+  return at + 4 <= b.length ? b.readUInt32BE(at) : Number.NaN;
+}
+
+/**
+ * Whether these bytes are one complete raster image and nothing else.
+ *
+ * Each walk has to *close* — consume exactly the buffer, or end on the format's terminator — so
+ * appending to a real image breaks it, which is the case a head-only check let through.
+ */
+function isWholeRasterImage(b: Buffer): boolean {
+  if (b.length < 8) return false;
+  const ascii = (at: number, n: number) => b.subarray(at, at + n).toString('latin1');
+
+  // PNG: signature, then length-prefixed chunks, ending at IEND with nothing after it.
+  if (b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    let at = 8;
+    for (;;) {
+      const len = be32(b, at);
+      if (!Number.isFinite(len) || len < 0) return false;
+      const type = ascii(at + 4, 4);
+      const next = at + 12 + len; // length + type + data + CRC
+      if (next > b.length) return false;
+      if (type === 'IEND') return next === b.length;
+      at = next;
+    }
+  }
+
+  // JPEG: SOI at the front, EOI at the very end.
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) {
+    return b[b.length - 2] === 0xff && b[b.length - 1] === 0xd9;
+  }
+
+  // GIF: header, and the trailer byte last.
+  if (ascii(0, 6) === 'GIF87a' || ascii(0, 6) === 'GIF89a') {
+    return b[b.length - 1] === 0x3b;
+  }
+
+  // BMP: the file-size field is the whole file.
+  if (b[0] === 0x42 && b[1] === 0x4d) {
+    return b.length >= 6 && b.readUInt32LE(2) === b.length;
+  }
+
+  // WebP: the RIFF size covers everything after the first eight bytes.
+  if (ascii(0, 4) === 'RIFF' && ascii(8, 12 - 8) === 'WEBP') {
+    return b.length >= 12 && b.readUInt32LE(4) === b.length - 8;
+  }
+
+  // AVIF and friends: top-level boxes, which must tile the buffer exactly.
+  if (ascii(4, 4) === 'ftyp') {
+    let at = 0;
+    while (at < b.length) {
+      const size = be32(b, at);
+      if (!Number.isFinite(size) || size < 8 || at + size > b.length) return false;
+      at += size;
+    }
+    return at === b.length;
+  }
+
+  return false;
+}
+
+/**
+ * The spans of `value` that are whole raster images.
+ *
+ * The head is checked before decoding, so a long run that is not an image costs four bytes rather
+ * than a full decode — which matters because this runs over every string a trace writes.
+ */
+function rasterSpans(value: string): [number, number][] {
+  const spans: [number, number][] = [];
+  for (const m of value.matchAll(BASE64_RUN)) {
+    const run = m[0];
+    if (run.length < MIN_RASTER_CHARS) continue;
+    // `\/` and `\\` stand for payload characters; they are stripped before decoding and the span
+    // still covers them, or the sweep would resume inside the image.
+    const payload = run.replace(/\\(.)/g, '$1');
+    let bytes: Buffer;
+    try {
+      bytes = Buffer.from(payload, 'base64');
+    } catch {
+      continue;
+    }
+    if (!isWholeRasterImage(bytes)) continue;
+    spans.push([m.index, m.index + run.length]);
+  }
+  return spans;
+}
+
 const TOKEN = /[A-Za-z0-9_-]{20,}/g;
 const PLACEHOLDER = /<secret:[a-z_]+:[0-9a-f]{8}>/g;
 const MIN_ENTROPY_LENGTH = 20;
@@ -155,6 +279,7 @@ function spansOf(value: string): [number, number][] {
   for (const m of value.matchAll(PROTOCOL_SIGNATURE_VALUE)) {
     spans.push([m.index, m.index + m[0].length]);
   }
+  spans.push(...rasterSpans(value));
   return spans;
 }
 
