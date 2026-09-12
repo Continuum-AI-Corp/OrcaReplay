@@ -351,6 +351,12 @@ async function runRecording(
     await proxy.close().catch(() => undefined);
     await writes.drain().catch(() => undefined);
     if (ca) await ca.dispose().catch(() => undefined);
+    // Beside the CA, and for the same reason: both are things the run created that must not
+    // outlive it. The success path removes the spans files once ingested, but that is inside
+    // `finishRun`, which this is the short-circuit for — so every throw after `installAgentSpans`
+    // used to leave an un-redacted transport in the run directory, where `orca scrub` does not
+    // reach it. The likeliest such throw is the first statement of `finishRun`.
+    if (agentSpans) await discardAgentSpans(agentSpans.spansPath).catch(() => undefined);
     await writer
       .append({ type: 'run.end', actor: 'orca', turn, attrs: { error: String(err) } })
       .catch(() => undefined);

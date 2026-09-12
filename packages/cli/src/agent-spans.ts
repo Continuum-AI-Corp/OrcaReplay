@@ -156,7 +156,8 @@ export interface AgentSpan {
   trace_id?: string;
   started_at?: string;
   ended_at?: string;
-  error?: unknown;
+  /** Whether the span carried an error. A boolean, never the SDK's payload-bearing `SpanError`. */
+  failed?: boolean;
   data?: Record<string, unknown>;
 }
 
