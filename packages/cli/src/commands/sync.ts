@@ -686,6 +686,43 @@ export async function revertStagedSwap(
 }
 
 /**
+ * fetch with the DESTINATION PINNED — a redirect is a hard failure, never a hand-off.
+ *
+ * THE ORIGIN CHECK VALIDATES THE URL WE PASS, NOT THE URL THE REQUEST REACHES (orcacode-review).
+ * `resolveGateway` decides whether the key may go to this host, and then `fetch` was free to follow
+ * a `Location` anywhere. undici strips `authorization` across origins but NOT `x-api-key`, and
+ * gatewayHeaders sets both to the same key — so one header from whoever answers for the gateway
+ * carried the replay-scoped credential to a host it was never issued for, defeating the promise the
+ * README makes in writing: "Never a key to a host it was not set up for."
+ *
+ * Push had a second failure on top: a 301/302/303 is re-issued as a GET with no body, so the
+ * target's 200 satisfied `res.ok` and the CLI printed `push.done` for a run that went nowhere. A
+ * 307/308 instead failed with an opaque "fetch failed", because undici cannot replay a detached
+ * body — so a legitimately redirecting gateway could not be talked to either.
+ *
+ * `manual` rather than `error`: Node resolves it with the real status and Location, so the refusal
+ * can NAME the destination. `error` rejects with a bare TypeError whose only distinguishing mark is
+ * an undici-internal cause string ("unexpected redirect"), which a genuine connection failure
+ * ("bad port") is indistinguishable from without matching on that string.
+ *
+ * Following a same-origin redirect would be safe and is deliberately not implemented: no gateway
+ * this CLI talks to issues one, and an unused branch that forwards credentials is the wrong thing
+ * to carry.
+ */
+async function fetchPinned(target: string, init: RequestInit): Promise<Response> {
+  const res = await fetch(target, { ...init, redirect: 'manual' });
+  if (res.status >= 300 && res.status < 400) {
+    const to = res.headers.get('location') ?? '(no Location header)';
+    throw new Error(
+      `${target} answered ${res.status} redirecting to ${to}. orca does not follow it: your key is ` +
+        `attached to the host you named, and following would hand it to whatever answers there. ` +
+        `Point --gateway (or ORCA_GATEWAY_URL) at the final address instead.`,
+    );
+  }
+  return res;
+}
+
+/**
  * push — send a local run to the gateway.
  *
  * `orca push [run] [--gateway URL] [--force]`
@@ -727,7 +764,7 @@ export async function pushCommand(
   // opt-in on purpose: the default refusal is what stops a secret reaching a shared server.
   const target = `${url}${UPLOAD_PATH}${args.bool('force') ? '?force=1' : ''}`;
   const { body, contentType } = multipart('file', `${runId}.orca.zip`, archive);
-  const res = await fetch(target, {
+  const res = await fetchPinned(target, {
     method: 'POST',
     headers: { ...headers, 'content-type': contentType },
     body,
@@ -744,6 +781,74 @@ export async function pushCommand(
     // we already know it.
   }
   out.phase('push.done', { run: runId, replaced, gateway: url });
+}
+
+function lostTheLock(): Error {
+  return new Error(
+    'another orca pull took this run\u2019s lock while this one was staging; nothing was ' +
+      'installed. Re-run the pull.',
+  );
+}
+
+/**
+ * Write an archive's entries into the staging directory, STOPPING THE MOMENT THE LOCK IS NOT OURS.
+ *
+ * THE FOURTH SITE OF "nothing that lost the lock may touch what the lock protects", and the half
+ * the previous commit missed (orcacode-review). Gating the REVERT stopped an evicted pull from
+ * DELETING the new holder's staging; it said nothing about the evicted pull's WRITES. The only
+ * ownership probe sat after this whole loop, so a pull stopped long enough to be stale-broken
+ * resumed and went on writing entries into `<dest>.incoming` — which, the scratch name being
+ * deterministic, is by then the directory the NEW holder is staging into. The new holder renames
+ * the blend into place and prints `pull.done`.
+ *
+ * Two archives of one run key differ in ordinary operation — a re-push, a scrub between fetches, or
+ * the truncated export the `x-orca-run-truncated` header warns about — so the result is a run whose
+ * manifest integrity root covers one copy while some of its blobs are the other's. That is verbatim
+ * the outcome withRunLock's own comment says the lock exists to rule out: "the run that lands is a
+ * blend of both copies … with nothing reporting it."
+ *
+ * Every 256 entries, so the syscall is noise next to the writes between them (one small read
+ * against thousands of file writes) while the unowned window stays bounded by a fixed count rather
+ * than by the archive's size. Probed BEFORE the first write too, so an already-evicted pull writes
+ * nothing at all — including the mkdir of a directory that is no longer its own.
+ *
+ * Aborting leaves the partial staging as litter, which is correct: `recoverInterruptedSwap` runs
+ * under the lock at the head of every pull and reclaims it. Exported for the test, because the
+ * window is a SIGSTOP wide and a test that tries to hit it by timing is a coin flip.
+ */
+export async function stageRunEntries(
+  entries: { name: string; bytes: Uint8Array }[],
+  runId: string,
+  staging: string,
+  stillHeld: () => Promise<boolean>,
+): Promise<void> {
+  if (!(await stillHeld())) throw lostTheLock();
+  await mkdir(staging, { recursive: true, mode: DIR_MODE });
+  await chmod(staging, DIR_MODE).catch(() => undefined);
+  for (const [index, entry] of entries.entries()) {
+    if (index > 0 && (index & 0xff) === 0 && !(await stillHeld())) throw lostTheLock();
+    const rel = entry.name.slice(entry.name.indexOf('/') + 1);
+    if (rel === '' || entry.name.indexOf('/') < 0) continue;
+    const path = join(staging, ...rel.split('/'));
+    // A TRAILING SLASH NAMES A DIRECTORY (orcacode-review). `runEntries` walks files and skips
+    // directories, so nothing this CLI writes produces such an entry — but pull is documented
+    // to read archives from the gateway's Go writer and from whatever produced them before
+    // that, and every general-purpose zip writer emits them (`zip -r`, shutil.make_archive, a
+    // filepath.Walk that appends "/" for a dir).
+    //
+    // Written as a file, the empty payload lands AS the directory: the next entry under it
+    // dies with ENOTDIR and the whole pull rolls back, or — when the archive has no file under
+    // it — the pull SUCCEEDS and installs a run whose `blobs` is a zero-byte file. That last
+    // one is the silent-wrong-store outcome the rest of this function exists to avoid.
+    if (entry.name.endsWith('/')) {
+      await mkdir(path, { recursive: true, mode: DIR_MODE });
+      await chmod(path, DIR_MODE).catch(() => undefined);
+      continue;
+    }
+    await mkdir(dirname(path), { recursive: true, mode: DIR_MODE });
+    await writeFile(path, entry.bytes, { mode: FILE_MODE });
+    await chmod(path, FILE_MODE).catch(() => undefined);
+  }
 }
 
 /**
@@ -783,7 +888,7 @@ export async function pullCommand(
     // Not a run id — the post-fetch recovery below is the one that matters anyway.
   }
 
-  const res = await fetch(`${url}${exportPath(runKey)}`, { headers });
+  const res = await fetchPinned(`${url}${exportPath(runKey)}`, { headers });
   if (!res.ok) throw new Error(refusal(res.status, await res.text()));
 
   // The gateway sets this when it could not store the recording whole. Pulling one is allowed —
@@ -866,40 +971,17 @@ export async function pullCommand(
     const retired = `${dest}.replaced`;
 
     try {
-      await mkdir(staging, { recursive: true, mode: DIR_MODE });
-      await chmod(staging, DIR_MODE).catch(() => undefined);
-      for (const entry of entries) {
-        const rel = entry.name.slice(entry.name.indexOf('/') + 1);
-        if (rel === '' || entry.name.indexOf('/') < 0) continue;
-        const path = join(staging, ...rel.split('/'));
-        // A TRAILING SLASH NAMES A DIRECTORY (orcacode-review). `runEntries` walks files and skips
-        // directories, so nothing this CLI writes produces such an entry — but pull is documented
-        // to read archives from the gateway's Go writer and from whatever produced them before
-        // that, and every general-purpose zip writer emits them (`zip -r`, shutil.make_archive, a
-        // filepath.Walk that appends "/" for a dir).
-        //
-        // Written as a file, the empty payload lands AS the directory: the next entry under it
-        // dies with ENOTDIR and the whole pull rolls back, or — when the archive has no file under
-        // it — the pull SUCCEEDS and installs a run whose `blobs` is a zero-byte file. That last
-        // one is the silent-wrong-store outcome the rest of this function exists to avoid.
-        if (entry.name.endsWith('/')) {
-          await mkdir(path, { recursive: true, mode: DIR_MODE });
-          await chmod(path, DIR_MODE).catch(() => undefined);
-          continue;
-        }
-        await mkdir(dirname(path), { recursive: true, mode: DIR_MODE });
-        await writeFile(path, entry.bytes, { mode: FILE_MODE });
-        await chmod(path, FILE_MODE).catch(() => undefined);
-      }
+      await stageRunEntries(entries, runId, staging, stillHeld);
 
       // INSIDE the try: if another process recreated `dest` between the stat above and here, this
       // move is what fails, and leaving it outside stranded the staging directory while reporting
       // an error.
+      //
+      // KEPT, even though stageRunEntries now probes as it writes. The last probe inside the loop
+      // is followed by the last entries and then by two renames; this one is what stops the
+      // DESTRUCTIVE half from running on a lock lost in that tail.
       if (!(await stillHeld())) {
-        throw new Error(
-          'another orca pull took this run\u2019s lock while this one was staging; nothing was ' +
-            'installed. Re-run the pull.',
-        );
+        throw lostTheLock();
       }
       if (existing) await rename(dest, retired);
       await rename(staging, dest);

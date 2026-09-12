@@ -13,6 +13,7 @@ import {
   releaseRunLock,
   restoreLockFile,
   revertStagedSwap,
+  stageRunEntries,
   withRunLockForTest,
 } from '../src/commands/sync.js';
 import { readArchive, writeArchive } from '../src/archive.js';
@@ -1067,6 +1068,120 @@ describe('push and pull', () => {
       ).toBe(aged);
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  /*
+  AND IT MUST NOT KEEP WRITING EITHER — the fourth site of the same class, and the half the
+  previous commit missed.
+
+  Gating the REVERT stopped an evicted pull from deleting the new holder's staging. It did nothing
+  about the evicted pull's WRITES: the only ownership probe sat AFTER the whole staging loop, so a
+  pull that lost its lock went on writing archive entries into `<dest>.incoming` — which, because
+  the scratch name is deterministic, is by then the directory the new holder is staging into. The
+  new holder renames the blend into place and prints `pull.done`.
+
+  Two archives of one run key differ in ordinary operation (a re-push, a scrub between fetches, or
+  the truncated export the `x-orca-run-truncated` header warns about), and the result is a run whose
+  manifest integrity root covers one copy while some blobs are the other's. That is verbatim what
+  withRunLock's own comment says the lock exists to rule out: "the run that lands is a blend of both
+  copies … with nothing reporting it."
+
+  Asserted through the exported staging step rather than by racing two real pulls: the window is a
+  SIGSTOP wide, so a test that tries to hit it by timing is a coin flip (this file already had two
+  such tests, and they were flaky one run in four).
+  */
+  it('stops staging the moment the lock is no longer ours', async () => {
+    const runs = join(workspace, '.orca', 'runs');
+    await mkdir(runs, { recursive: true });
+    const dest = join(runs, runId);
+    const staging = `${dest}.incoming`;
+
+    const entries = Array.from({ length: 600 }, (_, i) => ({
+      name: `${runId}/blobs/aa/${String(i).padStart(6, '0')}`,
+      bytes: new Uint8Array([1, 2, 3]),
+    }));
+
+    // Ours for the first probe, gone by the next one — the eviction, without the timing.
+    let probes = 0;
+    const stillHeld = async (): Promise<boolean> => ++probes <= 1;
+
+    await expect(stageRunEntries(entries, runId, staging, stillHeld)).rejects.toThrow(/lock/i);
+
+    const written = (await readdir(join(staging, 'blobs', 'aa')).catch(() => [])).length;
+    expect(
+      written,
+      'the evicted pull wrote the whole archive into the new holder’s staging directory',
+    ).toBeLessThan(entries.length);
+    expect(probes, 'ownership was asked once, after the loop — not while writing').toBeGreaterThan(1);
+
+    // And while the lock IS ours it must stage everything, or the check has simply broken pull.
+    await rm(staging, { recursive: true, force: true });
+    await stageRunEntries(entries, runId, staging, async () => true);
+    expect(await readdir(join(staging, 'blobs', 'aa'))).toHaveLength(entries.length);
+  });
+
+  /*
+  A CREDENTIAL GOES TO THE HOST IT WAS SET UP FOR, AND NOWHERE A REDIRECT POINTS.
+
+  Both requests let fetch follow redirects, and undici strips only `authorization` across origins —
+  `x-api-key`, which gatewayHeaders sets to the SAME key, is forwarded to whatever the redirect
+  names. resolveGateway validates the URL the code PASSES, not the URL the request REACHES, so the
+  whole origin check is bypassed by one Location header. The README states the promise this breaks
+  in writing: "Never a key to a host it was not set up for."
+
+  And push then reports success for an upload that never happened: a 301/302/303 is re-issued as a
+  GET with no body, and the redirect target's 200 is `res.ok`.
+
+  Anyone who can answer for the gateway reaches this — the gateway itself, an SSO interstitial in
+  front of it, a compromise of it, or an on-path attacker on the plaintext `http://` gateway a user
+  typed.
+  */
+  it('refuses to follow a redirect rather than handing the key to whoever answers', async () => {
+    await seedRun();
+
+    // A second origin standing in for the redirect target. It records what reaches it.
+    const seen: { apiKey?: string; auth?: string; method: string }[] = [];
+    const thief = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        seen.push({
+          apiKey: req.headers['x-api-key'] as string | undefined,
+          auth: req.headers.authorization,
+          method: req.method ?? '',
+        });
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ success: true, data: { run_key: runId } }));
+      });
+    });
+    await new Promise<void>((ok) => thief.listen(0, '127.0.0.1', ok));
+    const thiefAddr = thief.address();
+    const thiefUrl = `http://127.0.0.1:${typeof thiefAddr === 'object' && thiefAddr ? thiefAddr.port : 0}`;
+
+    try {
+      for (const status of [301, 302, 303, 307, 308]) {
+        seen.length = 0;
+        reply = { status, body: '', headers: { location: `${thiefUrl}/stolen` } };
+
+        await expect(
+          pushCommand(parseArgs(['push', runId]), out, workspace, env()),
+        ).rejects.toThrow();
+
+        expect(
+          seen,
+          `a ${status} sent the request onward; the key reached a host it was not set up for`,
+        ).toHaveLength(0);
+      }
+
+      // Pull is the same request shape and the same key, so it gets the same rule.
+      reply = { status: 302, body: '', headers: { location: `${thiefUrl}/stolen` } };
+      seen.length = 0;
+      await expect(
+        pullCommand(parseArgs(['pull', runId, '--force']), out, workspace, env()),
+      ).rejects.toThrow();
+      expect(seen, 'pull followed a redirect and handed over the key').toHaveLength(0);
+    } finally {
+      await new Promise<void>((ok) => thief.close(() => ok()));
     }
   });
 
