@@ -342,3 +342,69 @@ def test_a_name_that_will_not_encode_does_not_reach_the_agent(tmp_path):
     processor.shutdown()
     kept = [r for r in spans_of(processor) if r["kind"] == "span"]
     assert [r["data"]["from_agent"] for r in kept] == ["A"]
+
+
+def test_two_threads_cannot_glue_a_record_onto_a_torn_one(tmp_path, monkeypatch):
+    # `_torn` describes the file, so it has to be read where the file is written. Read before the
+    # lock is taken, the answer can be stale: both threads build a payload with no leading newline,
+    # the first tears, and the second glues its intact record onto the fragment — losing both, which
+    # is the loss the newline exists to prevent.
+    #
+    # Made deterministic rather than raced: a barrier at the serialise point puts both threads past
+    # it before either can take the lock, which is exactly the interleaving at issue.
+    import json as json_module
+    import threading
+
+    from orcareplay_openai_agents import processor as mod
+
+    gate = threading.Barrier(2, timeout=10)
+    real_dumps = json_module.dumps
+
+    def dumps_at_the_gate(*args, **kwargs):
+        line = real_dumps(*args, **kwargs)
+        gate.wait()
+        return line
+
+    monkeypatch.setattr(mod.json, "dumps", dumps_at_the_gate)
+
+    # The first write to land is short; the rest go through.
+    real_write = os.write
+    first = threading.Lock()
+    torn_once = []
+
+    def short_first(fd, data):
+        with first:
+            tear = not torn_once
+            if tear:
+                torn_once.append(True)
+        if tear:
+            return real_write(fd, data[: len(data) // 2])
+        return real_write(fd, data)
+
+    monkeypatch.setattr(mod.os, "write", short_first)
+
+    processor = OrcaTracingProcessor(str(tmp_path / "spans.jsonl"))
+    threads = [
+        threading.Thread(
+            target=processor.on_span_end,
+            args=(FakeSpan(HandoffSpanData({"from_agent": name, "to_agent": "B"})),),
+        )
+        for name in ("A", "C")
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+
+    monkeypatch.undo()
+    text = Path(processor._path).read_text(encoding="utf-8")
+    survived = []
+    for chunk in text.split("\n"):
+        if not chunk.strip():
+            continue
+        try:
+            survived.append(json_module.loads(chunk))
+        except ValueError:
+            pass
+    kept = sorted(r["data"]["from_agent"] for r in survived if r.get("kind") == "span")
+    assert len(kept) == 1, f"the record written after the tear must survive, got {kept}"
