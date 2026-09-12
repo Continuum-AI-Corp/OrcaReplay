@@ -18,6 +18,7 @@ import { installShellShim, readShellFrames } from '@orcareplay/shell-shim';
 import {
   agentSpansFiles,
   discardAgentSpans,
+  discardAgentSpanTransport,
   droppedSpanCount,
   eventForSpan,
   installAgentSpans,
@@ -111,7 +112,7 @@ export async function recordCommand(
     for (const path of rawSinks) {
       // Expanded here rather than stored: one file per tracing process, and which processes
       // existed is not known until the run is over.
-      await discardAgentSpans(await agentSpansFiles(path)).catch(() => undefined);
+      await discardAgentSpanTransport(path).catch(() => undefined);
     }
     throw err;
   }
@@ -239,7 +240,7 @@ async function runRecording(
     try {
       agentSpans = await installAgentSpans(writer.runDir);
       // Registered the moment it exists, so nothing between here and the ingest can leave it.
-      rawSinks.push(agentSpans.spansPath);
+      rawSinks.push(agentSpans.transportDir);
     } catch (err) {
       // Same posture as the other optional layers: degrade the trace, never abort the run.
       out.warn('agent_spans.unavailable', { reason: String(err) });
@@ -610,9 +611,23 @@ async function runRecording(
         // this, the trace would otherwise just have fewer agent events than the run did.
         out.warn('agent_spans.dropped', { count: lost });
       }
-      // Exactly what was read, never a fresh listing: a process that starts tracing between the
-      // two would have its file removed with nothing parsed out of it.
-      const failed = await discardAgentSpans(ingested);
+      // Said out loud rather than counted and forgotten, the same reason as the line above: a
+      // producer that outlived the agent — a worker pool, an MCP server, anything the agent did
+      // not wait for — has its file read up to this instant, and whatever it writes afterwards
+      // goes nowhere. Comparing the listing before and after the read is enough to notice: a
+      // file that grew, or one that appeared, means someone is still tracing.
+      const after = await agentSpansFiles(agentSpans.spansPath);
+      const stillWriting = after.filter((f) => !ingested.includes(f));
+      if (stillWriting.length > 0) {
+        out.warn('agent_spans.still_writing', { files: stillWriting.length });
+      }
+
+      // The whole directory, not the files the read listed. Two reasons, and the second is why
+      // the directory is outside the run in the first place: a producer that outlives the agent
+      // creates a file after that listing, and a per-file discard leaves it — where, when the
+      // transport lived in the run directory, it was an un-redacted file in a sealed trace that
+      // `orca scrub` does not reach. Nothing else is in this directory; orca made it for this.
+      const failed = await discardAgentSpanTransport(agentSpans.transportDir);
       if (failed !== undefined) {
         out.warn('agent_spans.not_removed', { path: agentSpans.spansPath, reason: failed });
       }
