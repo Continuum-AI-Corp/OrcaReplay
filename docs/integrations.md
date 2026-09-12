@@ -233,6 +233,32 @@ Two things to decide before a long run:
 and orca does not capture them; `set_tracing_disabled(True)` turns them off if you would rather the
 run talked to nothing but the proxy.
 
+### Agents, handoffs and guardrails
+
+`orca record` sees `POST /v1/responses` and cannot tell which agent sent it. Measured on a two-agent
+run with a handoff and a guardrail, recorded twice:
+
+| the trace can answer | without | with |
+|---|---|---|
+| which agent a turn belonged to | no | **yes** |
+| that a handoff happened, and from whom | no | **yes** |
+| that a guardrail ran | no | **yes** |
+
+The handoff row is the sharp one. The SDK implements a handoff as a function tool named
+`transfer_to_<agent>`, so the proxy records an ordinary tool call — a rule could *guess* a handoff
+from the name, but a user tool may be called that too, and the agent it came **from** never reaches
+the wire. A passing guardrail is plainer still: it need make no request at all.
+
+```console
+pip install orcareplay-openai-agents
+```
+
+Nothing to add to your agent. `orca record` writes a `sitecustomize.py` into the run directory and
+puts it on `PYTHONPATH`, the same trick as the Node adapter's `NODE_OPTIONS` preload, and the
+package is inert unless orca is recording. `--no-agent-spans` turns it off. The model exchanges are
+left to the proxy, which already has them byte for byte. See
+[`python-openai-agents`](../python-openai-agents/README.md).
+
 **The websocket transport is not captured.** With the Responses websocket transport enabled the SDK
 reads `OPENAI_WEBSOCKET_BASE_URL`, and orca's proxy speaks HTTP. Under `--tls-intercept` an upgrade
 inside an intercepted connection is refused with `501` rather than half-relayed, so it fails loudly;

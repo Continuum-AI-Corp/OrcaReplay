@@ -42,6 +42,7 @@ a matrix that only exercised a plain completion would have said nothing about ei
 | `openhands-sdk` | the OpenHands SDK's own `LLM`, which wraps LiteLLM | OpenHands |
 | `crewai` | CrewAI's own `Agent`, `Task` and `Crew` | CrewAI, which since 1.x does **not** use LiteLLM |
 | `openai-agents` | the Agents SDK on the **Responses API**, its default | the Agents SDK, and orca's `responses` dialect |
+| `openai-agents-handoff` | two agents, a handoff and a guardrail — reported by the SDK, not seen on the wire | the sixth capture layer |
 | `langgraph-stream` | LangChain's own `OPENAI_API_BASE`, over SSE | LangGraph, LangChain |
 | `langgraph-tools` | the same, with a bound tool | tool-calling graphs |
 | `browser-use` | its own `ChatOpenAI` passes an unset `base_url` through | browser-use, and the pattern any wrapper using the official SDK follows |
