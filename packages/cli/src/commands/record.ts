@@ -16,6 +16,7 @@ import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
 import { installShellShim, readShellFrames } from '@orcareplay/shell-shim';
 import {
+  discardAgentSpans,
   eventForSpan,
   installAgentSpans,
   pythonPathWith,
@@ -443,25 +444,34 @@ async function runRecording(
     return abandon(err);
   }
 
-  await writes.drain();
-
   /*
-   * The drain reaches `abandon` too.
+   * Everything after the child's exit reaches `abandon` too.
    *
-   * The guard above stops at the child's exit, which is where the failures it was written for
-   * lived. Everything below runs with the proxy still listening and the trace still open, and it
-   * reads three files another process appended to — so it has exactly the same two failure modes
-   * `abandon` documents: a throw here printed the error and then hung, because the listening proxy
-   * keeps the event loop alive, and left the trace with no `ended_at`, `counts` or `integrity`.
+   * The guard above stops at the spawn, which is where the failures it was written for lived.
+   * Everything after it runs with the proxy still listening and the trace still open, so it has
+   * exactly the two failure modes `abandon` documents — a throw prints the error and then *hangs*,
+   * because the listening proxy keeps the event loop alive, and leaves the trace with no
+   * `ended_at`, `counts` or `integrity`, which `verifyIntegrity` reports as *tampered* rather than
+   * as unfinished. That is the wrong run to lose: a capture layer that broke is the run a user most
+   * needs to read.
    *
-   * That is the wrong run to lose. A capture layer that broke is the run a user most needs to read,
-   * and an unsealed trace reports as *tampered* rather than as unfinished.
+   * The region has to be the whole tail, not the part that reads files. `writes.drain()` is the
+   * likeliest thrower in it and is not optional — `SerialQueue` collects task errors and re-throws
+   * the first at `drain()`, by design, and the queued tasks are `writer.append` calls that a full
+   * disk fails. `abandon` has always wrapped it in `.catch()` for that reason, which is the clearest
+   * statement that a rejection here is expected. Guarding only the capture-file drain would have
+   * closed the rare path and left the likely one open.
    */
-  try {
-    await drainIntoTrace();
-  } catch (err) {
-    await abandon(err);
-  }
+  /**
+   * Narrowed once, here, because the closures below cannot re-narrow it: the if/else above proves
+   * an adapter was chosen (its last branch throws), but that proof does not cross a function
+   * boundary.
+   */
+  const harness: Adapter = adapter;
+  /** Declared out here because the warning at the end of the run reads it. */
+  let session: Awaited<ReturnType<typeof captureSession>>;
+
+  const manifest = await finishRun().catch((err: unknown) => abandon(err));
 
   /** The turn an out-of-band frame belongs to: the last one that had begun when it happened. */
   function turnAt(at: number): number {
@@ -471,6 +481,19 @@ async function runRecording(
       found = mark.turn;
     }
     return found;
+  }
+
+  /**
+   * Everything between the child's exit and a sealed trace, in one place so one guard covers it.
+   *
+   * Returning the manifest rather than assigning it is what lets the caller write
+   * `finishRun().catch(abandon)`: `abandon` returns `never`, so the union is the manifest and
+   * TypeScript needs no assertion that it was assigned.
+   */
+  async function finishRun(): Promise<Awaited<ReturnType<typeof writer.close>>> {
+    await writes.drain();
+    await drainIntoTrace();
+    return sealTrace();
   }
 
   async function drainIntoTrace(): Promise<void> {
@@ -529,6 +552,13 @@ async function runRecording(
           attrs: derived.attrs,
         });
       }
+      // The file is a transport and its contents are now in the trace, which is the one place the
+      // redactor, the integrity digest and `orca scrub` all reach. Leaving it would make it the
+      // only thing in the run directory none of them covers.
+      const failed = await discardAgentSpans(agentSpans.spansPath);
+      if (failed !== undefined) {
+        out.warn('agent_spans.not_removed', { path: agentSpans.spansPath, reason: failed });
+      }
     }
 
     if (mcp) await drainMcpFrames(mcp, writer, turnAt, turn);
@@ -544,58 +574,61 @@ async function runRecording(
     }
   }
 
-  // Before the trace is sealed, not after. A tunnel's record is only complete when its socket
-  // closes, and closing the proxy is what closes the ones an exiting agent left open — so a
-  // `proxy.close()` after `writer.close()` produced tunnel records with nowhere to go.
-  await proxy.close();
-  await writes.drain();
-  // The CA dies with the run. `dispose` is idempotent and best-effort: failing to delete a key is
-  // worth a warning, never worth losing the trace the user was recording.
-  if (ca) {
-    try {
-      await ca.dispose();
-    } catch (err) {
-      out.warn('tls.ca_not_removed', { path: ca.dir, reason: String(err) });
+  async function sealTrace(): Promise<Awaited<ReturnType<typeof writer.close>>> {
+    // Before the trace is sealed, not after. A tunnel's record is only complete when its socket
+    // closes, and closing the proxy is what closes the ones an exiting agent left open — so a
+    // `proxy.close()` after `writer.close()` produced tunnel records with nowhere to go.
+    await proxy.close();
+    // Closing the proxy can push newly arrived tunnel records onto the queue, so this second drain
+    // can reject for the same reason the first one can — and it is inside the guard for it.
+    await writes.drain();
+    // The CA dies with the run. `dispose` is idempotent and best-effort: failing to delete a key is
+    // worth a warning, never worth losing the trace the user was recording.
+    if (ca) {
+      try {
+        await ca.dispose();
+      } catch (err) {
+        out.warn('tls.ca_not_removed', { path: ca.dir, reason: String(err) });
+      }
     }
-  }
 
-  /**
-   * The harness's own transcript, and with it the prompts nothing on the wire carries.
-   *
-   * Written before `run.end` so it is part of the run rather than an appendix, and stored as the
-   * harness's own bytes so a fork can put the file back and resume into it natively.
-   */
-  let session: Awaited<ReturnType<typeof captureSession>>;
-  if (adapter.session) {
-    try {
-      session = await captureSession(adapter.session, cwd, process.env, sessionBefore);
-    } catch (err) {
-      out.warn('session.unavailable', { reason: String(err) });
+    /**
+     * The harness's own transcript, and with it the prompts nothing on the wire carries.
+     *
+     * Written before `run.end` so it is part of the run rather than an appendix, and stored as the
+     * harness's own bytes so a fork can put the file back and resume into it natively.
+     */
+    if (harness.session) {
+      try {
+        session = await captureSession(harness.session, cwd, process.env, sessionBefore);
+      } catch (err) {
+        out.warn('session.unavailable', { reason: String(err) });
+      }
     }
-  }
-  if (session) {
-    await writer.append({
-      type: 'session.snapshot',
-      actor: 'harness',
-      turn,
-      attrs: {
-        harness: adapter.id,
-        session_id: session.id,
-        rel_path: session.relPath,
-        prompts: session.prompts.length,
-        bytes: session.bytes.byteLength,
-      },
-      // The writer spills anything over the inline limit to a content-addressed blob, so the
-      // transcript rides the same path every other large payload does — redaction included.
-      payload: {
-        prompts: session.prompts,
-        transcript: new TextDecoder().decode(session.bytes),
-      },
-    });
-  }
+    if (session) {
+      await writer.append({
+        type: 'session.snapshot',
+        actor: 'harness',
+        turn,
+        attrs: {
+          harness: harness.id,
+          session_id: session.id,
+          rel_path: session.relPath,
+          prompts: session.prompts.length,
+          bytes: session.bytes.byteLength,
+        },
+        // The writer spills anything over the inline limit to a content-addressed blob, so the
+        // transcript rides the same path every other large payload does — redaction included.
+        payload: {
+          prompts: session.prompts,
+          transcript: new TextDecoder().decode(session.bytes),
+        },
+      });
+    }
 
-  await writer.append({ type: 'run.end', actor: 'orca', turn, attrs: { exit_code: exitCode } });
-  const manifest = await writer.close(exitCode);
+    await writer.append({ type: 'run.end', actor: 'orca', turn, attrs: { exit_code: exitCode } });
+    return writer.close(exitCode);
+  }
 
   out.phase('recorded', {
     run: writer.runId,

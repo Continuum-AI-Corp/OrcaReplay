@@ -1,9 +1,11 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { validateEvent } from '@orcareplay/schema';
 import {
+  discardAgentSpans,
   eventForSpan,
   installAgentSpans,
   pythonPathWith,
@@ -154,6 +156,37 @@ describe('a translator that cannot be handed something it does not expect', () =
     for (const value of [null, undefined, 42, 'span', [], true]) {
       expect(eventForSpan(value)).toBeUndefined();
     }
+  });
+});
+
+describe('the spans file is a transport, not part of the trace', () => {
+  it('is created by orca rather than by the child, so it gets the run directory mode', async () => {
+    // SECURITY.md: "Trace files and blobs are written mode 0600." A file the child creates gets
+    // that interpreter's umask instead, which is how a run directory ends up with one
+    // world-readable file in it. The two capture layers that already leave a side file here
+    // pre-create it for exactly this reason.
+    const capture = await installAgentSpans(dir);
+    const info = await stat(capture.spansPath);
+    expect(info.isFile()).toBe(true);
+    if (process.platform !== 'win32') expect(info.mode & 0o777).toBe(0o600);
+  });
+
+  it('is gone once its contents are in the trace', async () => {
+    // Nothing reads it after the drain — not replay, not fork, not the viewer. Leaving it would
+    // make it the only thing in a run directory that the redactor, the integrity digest and
+    // `orca scrub` all miss: a scrub would print `removed=N` with the same material beside it.
+    const capture = await installAgentSpans(dir);
+    await writeFile(capture.spansPath, '{"kind":"span","type":"HandoffSpanData","data":{}}\n');
+    expect(await discardAgentSpans(capture.spansPath)).toBeUndefined();
+    expect(existsSync(capture.spansPath)).toBe(false);
+  });
+
+  it('reports a removal it could not do rather than throwing', async () => {
+    // It runs inside the region that seals the trace, so a throw here is the hang and the unsealed
+    // manifest all over again. Failing to delete it is worth a warning and never worth the trace.
+    const asDirectory = join(dir, 'occupied.jsonl');
+    await mkdir(join(asDirectory, 'in-the-way'), { recursive: true });
+    expect(await discardAgentSpans(asDirectory)).toEqual(expect.stringMatching(/./));
   });
 });
 
