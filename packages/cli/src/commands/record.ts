@@ -92,11 +92,24 @@ export async function recordCommand(
   cwd = process.cwd(),
 ): Promise<RecordResult> {
   const minted: RunCa[] = [];
+  /**
+   * Sinks the child writes to directly, which therefore never pass the write-path redactor.
+   *
+   * `agent-spans.jsonl` is the one: the SDK appends to it from inside the agent’s interpreter,
+   * and `orca scrub` rewrites only `events.jsonl`, the manifest and the blobs — so a scrub would
+   * report `removed=N` with the same material still sitting beside it. The success path deletes
+   * it after ingest; this is the other paths. A throw anywhere in `runRecording` reaches here,
+   * including everything routed through `abandon`, which rethrows.
+   */
+  const rawSinks: string[] = [];
   try {
-    return await runRecording(args, out, cwd, minted);
+    return await runRecording(args, out, cwd, minted, rawSinks);
   } catch (err) {
     for (const ca of minted) {
       await ca.dispose().catch(() => undefined);
+    }
+    for (const path of rawSinks) {
+      await discardAgentSpans(path).catch(() => undefined);
     }
     throw err;
   }
@@ -107,6 +120,7 @@ async function runRecording(
   out: Output,
   cwd: string,
   minted: RunCa[],
+  rawSinks: string[],
 ): Promise<RecordResult> {
   const registry = defaultAdapters();
   const agentName = args.positionals[0];
@@ -222,6 +236,8 @@ async function runRecording(
   if (args.bool('agent-spans', true)) {
     try {
       agentSpans = await installAgentSpans(writer.runDir);
+      // Registered the moment it exists, so nothing between here and the ingest can leave it.
+      rawSinks.push(agentSpans.spansPath);
     } catch (err) {
       // Same posture as the other optional layers: degrade the trace, never abort the run.
       out.warn('agent_spans.unavailable', { reason: String(err) });
