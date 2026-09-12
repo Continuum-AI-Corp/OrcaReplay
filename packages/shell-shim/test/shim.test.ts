@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -189,4 +189,37 @@ describe('shell shim', () => {
       expect(shim.shimmed).toEqual(['sh', 'bash', 'zsh']);
     },
   );
+
+  it('skips a line that parsed but is not a frame', async () => {
+    // Tolerating a bad line has to mean more than surviving `JSON.parse`. Every shim appends to
+    // this file at once, so an interleaved write can leave a line that is valid JSON and not a
+    // frame — and the only consumer spreads `frame.argv` into an event, which threw at the point
+    // the trace was being sealed.
+    const good = {
+      name: 'sh',
+      argv: ['-c', 'true'],
+      cwd: '/tmp',
+      exitCode: 0,
+      signal: null,
+      startedAt: '2026-09-12T00:00:00.000Z',
+      durationMs: 1,
+      stdoutBytes: 0,
+      stderrBytes: 0,
+    };
+    const lines = [
+      'null',
+      '7',
+      '"a string"',
+      '[1,2]',
+      JSON.stringify({ name: 'sh', argv: 'not-an-array', cwd: '/tmp' }),
+      JSON.stringify({ argv: [], cwd: '/tmp' }),
+      JSON.stringify(good),
+      '{"name":"sh","argv":[',
+      '',
+    ];
+    await writeFile(shim.framesPath, lines.join('\n'), 'utf8');
+    const frames = await readShellFrames(shim.framesPath);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.argv).toEqual(['-c', 'true']);
+  });
 });
