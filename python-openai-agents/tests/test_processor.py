@@ -438,3 +438,53 @@ def test_a_raising_trace_attribute_does_not_reach_the_agent(tmp_path):
     assert [r["kind"] for r in records] == ["trace.start", "trace.end"]
     assert records[0]["name"] is None, "what it could not read becomes None, not an exception"
     assert records[1]["trace_id"] is None
+
+
+def test_a_datetime_timestamp_does_not_take_the_record_with_it(tmp_path):
+    # Not what this SDK does: `SpanImpl.start` sets `util.time_iso()`, a string, and its own
+    # `export()` passes it through without conversion. This is about what happens if that changes.
+    #
+    # Measured before the guard: `json.dumps` refuses a `datetime`, the whole *record* is dropped —
+    # not the field — and the file holds nothing but the `dropped` count. Every `agent.start`,
+    # `agent.handoff` and `agent.guardrail` would vanish from every trace with one warning to show
+    # for it, which is a total and silent failure of the layer the package exists to provide.
+    from datetime import datetime, timezone
+
+    when = datetime(2026, 9, 12, 20, 46, 53, tzinfo=timezone.utc)
+
+    class Stamped(FakeSpan):
+        pass
+
+    span = FakeSpan(HandoffSpanData({"from_agent": "A", "to_agent": "B"}))
+    span.started_at = when
+    processor = OrcaTracingProcessor(str(tmp_path / "spans.jsonl"))
+    processor.on_span_end(span)
+    processor.shutdown()
+
+    records = spans_of(processor)
+    kept = [r for r in records if r["kind"] == "span"]
+    assert len(kept) == 1, "the record must survive a timestamp it cannot serialise"
+    assert kept[0]["started_at"] == when.isoformat()
+    assert kept[0]["data"] == {"from_agent": "A", "to_agent": "B"}
+    assert [r for r in records if r["kind"] == "dropped"] == []
+
+
+def test_an_unserialisable_envelope_field_costs_that_field_only(tmp_path):
+    # The envelope is built from `_read`, so its values are whatever the SDK's attributes hold. One
+    # of them being unserialisable should cost the field, never the record — and the placeholder is
+    # a constant rather than a `repr`, because this half has no whitelist in front of it.
+    class Opaque:
+        def __repr__(self):
+            return "SECRET-IN-REPR"
+
+    span = FakeSpan(HandoffSpanData({"from_agent": "A", "to_agent": "B"}))
+    span.span_id = Opaque()
+    processor = OrcaTracingProcessor(str(tmp_path / "spans.jsonl"))
+    processor.on_span_end(span)
+    processor.shutdown()
+
+    record = spans_of(processor)[0]
+    assert record["kind"] == "span"
+    assert record["span_id"] == "<unserialisable>"
+    assert "SECRET-IN-REPR" not in Path(processor._path).read_text(encoding="utf-8")
+    assert record["data"] == {"from_agent": "A", "to_agent": "B"}

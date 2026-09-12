@@ -96,6 +96,38 @@ def _plain(value: Any) -> Any:
         return "<unrepresentable>"
 
 
+def _stamp(value: Any) -> Any:
+    """A timestamp in the form the reader expects, whatever the SDK hands over.
+
+    The SDK this targets stores these as ISO strings already — `SpanImpl.start` does
+    `self._started_at = util.time_iso()`, and its own `export()` passes them straight through
+    without conversion. This is not for that; it is for the version that changes its mind.
+
+    The cost of being wrong is total and silent: `json.dumps` refuses a `datetime`, and the whole
+    span record goes, not the timestamp — measured, the file then holds nothing but the `dropped`
+    count. Every `agent.start`, `agent.handoff` and `agent.guardrail` would vanish from every trace
+    with one warning to show for it. Six lines against that is cheap.
+    """
+    if isinstance(value, (str, type(None))):
+        return value
+    try:
+        iso = getattr(value, "isoformat", None)
+        return iso() if callable(iso) else _plain(value)
+    except Exception:  # noqa: BLE001 - same posture as `_plain`: never raise out of here
+        return None
+
+
+def _unserialisable(_value: Any) -> str:
+    """What `json.dumps` writes instead of refusing the record.
+
+    The envelope is built from `_read`, so its values are whatever the SDK's attributes hold. One
+    of them being unserialisable should cost that field, never the record — the same trade `_plain`
+    makes for `data`. A constant rather than `repr`: this is the half with no whitelist in front of
+    it, and a `repr` of an unknown object is exactly the payload `KEEP` exists to keep out.
+    """
+    return "<unserialisable>"
+
+
 def _read(obj: Any, name: str) -> Any:
     """One attribute, or None.
 
@@ -190,7 +222,7 @@ class OrcaTracingProcessor:
         # Serialising touches nothing shared, so it stays outside the lock. Everything that reads or
         # writes state does not.
         try:
-            line = json.dumps(record, ensure_ascii=False)
+            line = json.dumps(record, ensure_ascii=False, default=_unserialisable)
         except Exception:  # noqa: BLE001 - a span that will not serialise must not end the run
             with self._lock:
                 self._dropped += 1
@@ -267,8 +299,8 @@ class OrcaTracingProcessor:
                 "span_id": _read(span, "span_id"),
                 "parent_id": _read(span, "parent_id"),
                 "trace_id": _read(span, "trace_id"),
-                "started_at": _read(span, "started_at"),
-                "ended_at": _read(span, "ended_at"),
+                "started_at": _stamp(_read(span, "started_at")),
+                "ended_at": _stamp(_read(span, "ended_at")),
                 # No `error`. The SDK's `SpanError` carries a free-form `data` dict — a tool's
                 # input, an API error echoed back, a guardrail's `output_info` — and `_plain` walks
                 # it deeply, so writing it puts exactly the kind of payload here that `KEEP` exists
