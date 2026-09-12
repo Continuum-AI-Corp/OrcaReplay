@@ -1,9 +1,15 @@
+import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { promisify } from 'node:util';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { TraceWriter } from '@orcareplay/core';
 import { validateEvent } from '@orcareplay/schema';
+import { parseArgs } from './../src/args.js';
+import { Output } from './../src/out.js';
+import { recordCommand } from './../src/commands/record.js';
 import {
   discardAgentSpans,
   eventForSpan,
@@ -234,5 +240,89 @@ describe('pythonPathWith', () => {
     // asked for and is a way to shadow a module by where you happened to run from.
     expect(pythonPathWith('/orca', undefined, ':')).toBe('/orca');
     expect(pythonPathWith('/orca', '', ':')).toBe('/orca');
+  });
+});
+
+/**
+ * The spans file is a raw sink, so it may not outlive the run on *any* path.
+ *
+ * It is appended to by the agent’s own interpreter and never passes the write-path redactor,
+ * and `orca scrub` rewrites only `events.jsonl`, the manifest and the blobs — so a scrub would
+ * report `removed=N` with the same material sitting beside it untouched, which SECURITY.md calls
+ * worse than having no scrubber at all.
+ *
+ * The ingest deletes it on the way out, and `abandon` deletes it for a throw that reaches there.
+ * Neither covers the window in between: `installAgentSpans` runs at the top of the recording, and
+ * the first `try` that routes to `abandon` is a hundred and fifty lines later — with the TLS
+ * setup, the proxy’s own bind, the opening `run.start` append and the initial filesystem
+ * snapshot in between, every one of which can throw. So the file is owned by `recordCommand`,
+ * beside the minted CAs it already releases, and released for every throw rather than for the
+ * ones a particular function happens to catch.
+ *
+ * Parameterised over where the throw lands, because the two later cases passed before that was
+ * true and the first two did not.
+ */
+describe('an abandoned run does not leave the spans file behind', () => {
+  const exec = promisify(execFile);
+  let workspace: string;
+
+  beforeEach(async () => {
+    workspace = await mkdtemp(join(tmpdir(), 'orca-abandon-'));
+    await exec('git', ['init', '-q'], { cwd: workspace });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: workspace });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: workspace });
+    await writeFile(join(workspace, 'auth.ts'), 'export const fixed = false;\n');
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await rm(workspace, { recursive: true, force: true });
+  });
+
+  /**
+   * Only `TraceWriter.append` is replaced, and only to make one call reject the way a full disk
+   * would. Everything else — the command, the proxy, the child — is real.
+   */
+  it.each([
+    [1, 'before the proxy is even listening'],
+    [2, 'while the run is opening'],
+    [3, 'once the trace is being sealed'],
+  ])('removes it when append #%i throws, %s', async (nth) => {
+    const agent = join(workspace, 'agent.mjs');
+    await writeFile(
+      agent,
+      [
+        'import { appendFileSync } from "node:fs";',
+        'const p = process.env.ORCA_AGENT_SPANS;',
+        'if (p) appendFileSync(p, JSON.stringify({ kind: "span", type: "AgentSpanData", data: { name: "Triage" } }) + "\\n");',
+        'console.log("GOT: done");',
+      ].join('\n'),
+    );
+
+    const real = TraceWriter.prototype.append;
+    let calls = 0;
+    vi.spyOn(TraceWriter.prototype, 'append').mockImplementation(async function (
+      this: TraceWriter,
+      ...args: Parameters<typeof real>
+    ) {
+      calls += 1;
+      if (calls >= nth) throw new Error('ENOSPC: no space left on device');
+      return real.apply(this, args);
+    } as typeof real);
+
+    const out = new Output({ write: () => {}, isTTY: false });
+    await expect(
+      recordCommand(
+        parseArgs(['record', 'generic-openai', '--', process.execPath, agent]),
+        out,
+        workspace,
+      ),
+    ).rejects.toThrow();
+
+    const runs = join(workspace, '.orca', 'runs');
+    const ids = await readdir(runs).catch(() => []);
+    expect(ids.length, 'no run directory was made, so this proves nothing').toBeGreaterThan(0);
+    const left = ids.filter((id) => existsSync(join(runs, id, 'agent-spans.jsonl')));
+    expect(left, 'the raw spans file outlived an abandoned run').toEqual([]);
   });
 });
