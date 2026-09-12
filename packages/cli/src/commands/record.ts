@@ -15,6 +15,18 @@ import { captureSession, defaultAdapters, resolveLaunch, snapshotDir } from '@or
 import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
 import { installShellShim, readShellFrames } from '@orcareplay/shell-shim';
+import {
+  agentSpansFiles,
+  discardAgentSpans,
+  discardAgentSpanTransport,
+  droppedSpanCount,
+  eventForSpan,
+  installAgentSpans,
+  pythonPathWith,
+  readAgentSpans,
+  SPANS_ENV,
+  type AgentSpanCapture,
+} from '../agent-spans.js';
 import { drainMcpFrames, pointAtMcpConfig, setupMcpCapture, type McpCapture } from '../mcp.js';
 import { SerialQueue } from '../serial.js';
 import { appendSnapshot } from '../fs-events.js';
@@ -56,6 +68,19 @@ export interface RecordResult {
  * different — `Bash`, `shell`, `run_command`, `exec` — and a list of names would be wrong for the
  * next one. A `command` string is what they all have in common.
  */
+/**
+ * Whether an instant can be written down at all.
+ *
+ * `0000-01-01T00:00:00.000Z` to `9999-12-31T23:59:59.999Z`, because the schema types `ts` as
+ * `date-time` and that admits a four-digit year and nothing else. Being a finite number is not
+ * enough: a duration spliced from two concurrent appends is finite and sixteen digits long, and
+ * the sum formats as `+011533-…`, which `assertEvent` rejects — or does not format at all, which
+ * `toISOString()` throws on. Both happen inside the write, where the trace is being sealed.
+ */
+function expressibleMs(ms: number): boolean {
+  return ms >= -62_167_219_200_000 && ms <= 253_402_300_799_999;
+}
+
 function isCommandTool(input: unknown): boolean {
   if (input === null || typeof input !== 'object') return false;
   const command = (input as { command?: unknown }).command;
@@ -68,11 +93,26 @@ export async function recordCommand(
   cwd = process.cwd(),
 ): Promise<RecordResult> {
   const minted: RunCa[] = [];
+  /**
+   * Sinks the child writes to directly, which therefore never pass the write-path redactor.
+   *
+   * `agent-spans.jsonl` is the one: the SDK appends to it from inside the agent’s interpreter,
+   * and `orca scrub` rewrites only `events.jsonl`, the manifest and the blobs — so a scrub would
+   * report `removed=N` with the same material still sitting beside it. The success path deletes
+   * it after ingest; this is the other paths. A throw anywhere in `runRecording` reaches here,
+   * including everything routed through `abandon`, which rethrows.
+   */
+  const rawSinks: string[] = [];
   try {
-    return await runRecording(args, out, cwd, minted);
+    return await runRecording(args, out, cwd, minted, rawSinks);
   } catch (err) {
     for (const ca of minted) {
       await ca.dispose().catch(() => undefined);
+    }
+    for (const path of rawSinks) {
+      // Expanded here rather than stored: one file per tracing process, and which processes
+      // existed is not known until the run is over.
+      await discardAgentSpanTransport(path).catch(() => undefined);
     }
     throw err;
   }
@@ -83,6 +123,7 @@ async function runRecording(
   out: Output,
   cwd: string,
   minted: RunCa[],
+  rawSinks: string[],
 ): Promise<RecordResult> {
   const registry = defaultAdapters();
   const agentName = args.positionals[0];
@@ -189,6 +230,23 @@ async function runRecording(
     }
   }
 
+  // Agent-level structure, for a harness that reports it. The proxy sees `POST /v1/responses` and
+  // cannot say which agent sent it, that a handoff happened, or that a guardrail ran — the last of
+  // which need make no request at all. A `sitecustomize.py` on PYTHONPATH attaches the OpenAI Agents
+  // SDK's tracing to a run without editing the agent, the same trick as the fetch hook's
+  // NODE_OPTIONS. Silent and free where the SDK is absent, which is most runs.
+  let agentSpans: AgentSpanCapture | undefined;
+  if (args.bool('agent-spans', true)) {
+    try {
+      agentSpans = await installAgentSpans(writer.runDir);
+      // Registered the moment it exists, so nothing between here and the ingest can leave it.
+      rawSinks.push(agentSpans.transportDir);
+    } catch (err) {
+      // Same posture as the other optional layers: degrade the trace, never abort the run.
+      out.warn('agent_spans.unavailable', { reason: String(err) });
+    }
+  }
+
   const deriver = new ExchangeEventDeriver();
   let turn = 0;
   // When each turn began, so an out-of-band frame can be attributed to the turn it happened during
@@ -239,6 +297,7 @@ async function runRecording(
   let commandToolCalls = 0;
   /** Commands the shim actually saw. Zero against a non-zero `commandToolCalls` is the warning. */
   let shellFrames = 0;
+  let agentSpanEvents = 0;
   /**
    * Exchanges the upstream answered with an error status.
    *
@@ -312,6 +371,11 @@ async function runRecording(
     await proxy.close().catch(() => undefined);
     await writes.drain().catch(() => undefined);
     if (ca) await ca.dispose().catch(() => undefined);
+    // Beside the CA, and for the same reason: both are things the run created that must not
+    // outlive it. The success path removes the spans files once ingested, but that is inside
+    // `finishRun`, which this is the short-circuit for — so every throw after `installAgentSpans`
+    // used to leave an un-redacted transport in the run directory, where `orca scrub` does not
+    // reach it. The likeliest such throw is the first statement of `finishRun`.
     await writer
       .append({ type: 'run.end', actor: 'orca', turn, attrs: { error: String(err) } })
       .catch(() => undefined);
@@ -348,6 +412,16 @@ async function runRecording(
 
       if (shell) {
         prepared.env.PATH = `${shell.dir}${delimiter}${process.env.PATH ?? ''}`;
+      }
+      if (agentSpans) {
+        // Both, or neither works: PYTHONPATH is how Python finds the bootstrap, and the variable is
+        // what tells the bootstrap this is a recording rather than an ordinary Python process.
+        prepared.env.PYTHONPATH = pythonPathWith(
+          agentSpans.pythonPath,
+          process.env.PYTHONPATH,
+          delimiter,
+        );
+        prepared.env[SPANS_ENV] = agentSpans.spansPath;
       }
       if (mcp) {
         pointAtMcpConfig(prepared.env, mcp.configPath);
@@ -409,7 +483,34 @@ async function runRecording(
     return abandon(err);
   }
 
-  await writes.drain();
+  /*
+   * Everything after the child's exit reaches `abandon` too.
+   *
+   * The guard above stops at the spawn, which is where the failures it was written for lived.
+   * Everything after it runs with the proxy still listening and the trace still open, so it has
+   * exactly the two failure modes `abandon` documents — a throw prints the error and then *hangs*,
+   * because the listening proxy keeps the event loop alive, and leaves the trace with no
+   * `ended_at`, `counts` or `integrity`, which `verifyIntegrity` reports as *tampered* rather than
+   * as unfinished. That is the wrong run to lose: a capture layer that broke is the run a user most
+   * needs to read.
+   *
+   * The region has to be the whole tail, not the part that reads files. `writes.drain()` is the
+   * likeliest thrower in it and is not optional — `SerialQueue` collects task errors and re-throws
+   * the first at `drain()`, by design, and the queued tasks are `writer.append` calls that a full
+   * disk fails. `abandon` has always wrapped it in `.catch()` for that reason, which is the clearest
+   * statement that a rejection here is expected. Guarding only the capture-file drain would have
+   * closed the rare path and left the likely one open.
+   */
+  /**
+   * Narrowed once, here, because the closures below cannot re-narrow it: the if/else above proves
+   * an adapter was chosen (its last branch throws), but that proof does not cross a function
+   * boundary.
+   */
+  const harness: Adapter = adapter;
+  /** Declared out here because the warning at the end of the run reads it. */
+  let session: Awaited<ReturnType<typeof captureSession>>;
+
+  const manifest = await finishRun().catch((err: unknown) => abandon(err));
 
   /** The turn an out-of-band frame belongs to: the last one that had begun when it happened. */
   function turnAt(at: number): number {
@@ -421,106 +522,185 @@ async function runRecording(
     return found;
   }
 
-  if (shell) {
-    // Timestamped from the frame, not from now. These are read off disk after the agent has
-    // exited, so stamping them at write time put every shell command at the end of the run with
-    // the final turn number — which makes `mono_us` describe the drain rather than the command,
-    // and leaves the commands unable to interleave with the model turns they happened between.
-    const frames = await readShellFrames(shell.framesPath);
-    shellFrames = frames.length;
-    for (const frame of frames) {
-      const startedAt = Date.parse(frame.startedAt);
-      const at = Number.isNaN(startedAt) ? undefined : new Date(startedAt);
-      const frameTurn = at === undefined ? turn : turnAt(startedAt);
-      const exec = await writer.append({
-        type: 'shell.exec',
-        actor: 'harness',
-        turn: frameTurn,
-        ...(at === undefined ? {} : { occurredAt: at }),
-        attrs: { argv: [frame.name, ...frame.argv], cwd: frame.cwd },
-      });
+  /**
+   * Everything between the child's exit and a sealed trace, in one place so one guard covers it.
+   *
+   * Returning the manifest rather than assigning it is what lets the caller write
+   * `finishRun().catch(abandon)`: `abandon` returns `never`, so the union is the manifest and
+   * TypeScript needs no assertion that it was assigned.
+   */
+  async function finishRun(): Promise<Awaited<ReturnType<typeof writer.close>>> {
+    await writes.drain();
+    await drainIntoTrace();
+    return sealTrace();
+  }
+
+  async function drainIntoTrace(): Promise<void> {
+    if (shell) {
+      // Timestamped from the frame, not from now. These are read off disk after the agent has
+      // exited, so stamping them at write time put every shell command at the end of the run with
+      // the final turn number — which makes `mono_us` describe the drain rather than the command,
+      // and leaves the commands unable to interleave with the model turns they happened between.
+      const frames = await readShellFrames(shell.framesPath);
+      shellFrames = frames.length;
+      for (const frame of frames) {
+        const startedAt = Date.parse(frame.startedAt);
+        const at = Number.isNaN(startedAt) ? undefined : new Date(startedAt);
+        const frameTurn = at === undefined ? turn : turnAt(startedAt);
+        // Computed rather than inlined, because this one is arithmetic and the other is not: a
+        // `durationMs` that is missing or not a number makes the sum `NaN`, and `TraceWriter.append`
+        // calls `toISOString()` on it — `RangeError: Invalid time value`, thrown where the trace is
+        // being sealed. The reader rejects such a frame, and this is the second lock on the same
+        // door: an Invalid Date must not be constructible here whatever the file held.
+        const endedMs = startedAt + frame.durationMs;
+        const endedAt =
+          at === undefined || !Number.isFinite(frame.durationMs) || !expressibleMs(endedMs)
+            ? undefined
+            : new Date(endedMs);
+        const exec = await writer.append({
+          type: 'shell.exec',
+          actor: 'harness',
+          turn: frameTurn,
+          ...(at === undefined ? {} : { occurredAt: at }),
+          attrs: { argv: [frame.name, ...frame.argv], cwd: frame.cwd },
+        });
+        await writer.append({
+          type: 'shell.result',
+          actor: 'harness',
+          turn: frameTurn,
+          causes: [exec.seq],
+          // The result happened when the command finished, which is what its duration measures.
+          ...(endedAt === undefined ? {} : { occurredAt: endedAt }),
+          attrs: {
+            exit_code: frame.exitCode,
+            signal: frame.signal,
+            duration_ms: frame.durationMs,
+            stdout_bytes: frame.stdoutBytes,
+            stderr_bytes: frame.stderrBytes,
+          },
+        });
+      }
+    }
+
+    if (agentSpans) {
+      // Timestamped from the span, like the shell frames above and for the same reason: these are
+      // read off disk after the agent exited, so stamping them now would file every handoff at the
+      // end of the run rather than between the turns it happened between.
+      const { spans, ingested } = await readAgentSpans(agentSpans.spansPath);
+      for (const span of spans) {
+        const derived = eventForSpan(span);
+        if (derived === undefined) continue;
+        const startedAt = Date.parse(String(span.started_at ?? ''));
+        const at = Number.isNaN(startedAt) ? undefined : new Date(startedAt);
+        agentSpanEvents += 1;
+        await writer.append({
+          type: derived.type as 'agent.start',
+          // `harness`, not `orca`: we did not observe this, we were told it.
+          actor: 'harness',
+          turn: at === undefined ? turn : turnAt(startedAt),
+          ...(at === undefined ? {} : { occurredAt: at }),
+          attrs: derived.attrs,
+        });
+      }
+      // The file is a transport and its contents are now in the trace, which is the one place the
+      // redactor, the integrity digest and `orca scrub` all reach. Leaving it would make it the
+      // only thing in the run directory none of them covers.
+      const lost = droppedSpanCount(spans);
+      if (lost > 0) {
+        // Said out loud rather than counted and forgotten: with the file deleted immediately after
+        // this, the trace would otherwise just have fewer agent events than the run did.
+        out.warn('agent_spans.dropped', { count: lost });
+      }
+      // Said out loud rather than counted and forgotten, the same reason as the line above: a
+      // producer that outlived the agent — a worker pool, an MCP server, anything the agent did
+      // not wait for — has its file read up to this instant, and whatever it writes afterwards
+      // goes nowhere. Comparing the listing before and after the read is enough to notice: a
+      // file that grew, or one that appeared, means someone is still tracing.
+      const after = await agentSpansFiles(agentSpans.spansPath);
+      const stillWriting = after.filter((f) => !ingested.includes(f));
+      if (stillWriting.length > 0) {
+        out.warn('agent_spans.still_writing', { files: stillWriting.length });
+      }
+
+      // The whole directory, not the files the read listed. Two reasons, and the second is why
+      // the directory is outside the run in the first place: a producer that outlives the agent
+      // creates a file after that listing, and a per-file discard leaves it — where, when the
+      // transport lived in the run directory, it was an un-redacted file in a sealed trace that
+      // `orca scrub` does not reach. Nothing else is in this directory; orca made it for this.
+      const failed = await discardAgentSpanTransport(agentSpans.transportDir);
+      if (failed !== undefined) {
+        out.warn('agent_spans.not_removed', { path: agentSpans.spansPath, reason: failed });
+      }
+    }
+
+    if (mcp) await drainMcpFrames(mcp, writer, turnAt, turn);
+
+    const orphans = deriver.unresolved();
+    if (orphans.length > 0) {
       await writer.append({
-        type: 'shell.result',
+        type: 'note',
+        actor: 'orca',
+        turn,
+        attrs: { rule: 'unresolved_tool_calls', ids: orphans.map((o) => o.id) },
+      });
+    }
+  }
+
+  async function sealTrace(): Promise<Awaited<ReturnType<typeof writer.close>>> {
+    // Before the trace is sealed, not after. A tunnel's record is only complete when its socket
+    // closes, and closing the proxy is what closes the ones an exiting agent left open — so a
+    // `proxy.close()` after `writer.close()` produced tunnel records with nowhere to go.
+    await proxy.close();
+    // Closing the proxy can push newly arrived tunnel records onto the queue, so this second drain
+    // can reject for the same reason the first one can — and it is inside the guard for it.
+    await writes.drain();
+    // The CA dies with the run. `dispose` is idempotent and best-effort: failing to delete a key is
+    // worth a warning, never worth losing the trace the user was recording.
+    if (ca) {
+      try {
+        await ca.dispose();
+      } catch (err) {
+        out.warn('tls.ca_not_removed', { path: ca.dir, reason: String(err) });
+      }
+    }
+
+    /**
+     * The harness's own transcript, and with it the prompts nothing on the wire carries.
+     *
+     * Written before `run.end` so it is part of the run rather than an appendix, and stored as the
+     * harness's own bytes so a fork can put the file back and resume into it natively.
+     */
+    if (harness.session) {
+      try {
+        session = await captureSession(harness.session, cwd, process.env, sessionBefore);
+      } catch (err) {
+        out.warn('session.unavailable', { reason: String(err) });
+      }
+    }
+    if (session) {
+      await writer.append({
+        type: 'session.snapshot',
         actor: 'harness',
-        turn: frameTurn,
-        causes: [exec.seq],
-        // The result happened when the command finished, which is what its duration measures.
-        ...(at === undefined ? {} : { occurredAt: new Date(startedAt + frame.durationMs) }),
+        turn,
         attrs: {
-          exit_code: frame.exitCode,
-          signal: frame.signal,
-          duration_ms: frame.durationMs,
-          stdout_bytes: frame.stdoutBytes,
-          stderr_bytes: frame.stderrBytes,
+          harness: harness.id,
+          session_id: session.id,
+          rel_path: session.relPath,
+          prompts: session.prompts.length,
+          bytes: session.bytes.byteLength,
+        },
+        // The writer spills anything over the inline limit to a content-addressed blob, so the
+        // transcript rides the same path every other large payload does — redaction included.
+        payload: {
+          prompts: session.prompts,
+          transcript: new TextDecoder().decode(session.bytes),
         },
       });
     }
-  }
 
-  if (mcp) await drainMcpFrames(mcp, writer, turnAt, turn);
-
-  const orphans = deriver.unresolved();
-  if (orphans.length > 0) {
-    await writer.append({
-      type: 'note',
-      actor: 'orca',
-      turn,
-      attrs: { rule: 'unresolved_tool_calls', ids: orphans.map((o) => o.id) },
-    });
+    await writer.append({ type: 'run.end', actor: 'orca', turn, attrs: { exit_code: exitCode } });
+    return writer.close(exitCode);
   }
-
-  // Before the trace is sealed, not after. A tunnel's record is only complete when its socket
-  // closes, and closing the proxy is what closes the ones an exiting agent left open — so a
-  // `proxy.close()` after `writer.close()` produced tunnel records with nowhere to go.
-  await proxy.close();
-  await writes.drain();
-  // The CA dies with the run. `dispose` is idempotent and best-effort: failing to delete a key is
-  // worth a warning, never worth losing the trace the user was recording.
-  if (ca) {
-    try {
-      await ca.dispose();
-    } catch (err) {
-      out.warn('tls.ca_not_removed', { path: ca.dir, reason: String(err) });
-    }
-  }
-
-  /**
-   * The harness's own transcript, and with it the prompts nothing on the wire carries.
-   *
-   * Written before `run.end` so it is part of the run rather than an appendix, and stored as the
-   * harness's own bytes so a fork can put the file back and resume into it natively.
-   */
-  let session: Awaited<ReturnType<typeof captureSession>>;
-  if (adapter.session) {
-    try {
-      session = await captureSession(adapter.session, cwd, process.env, sessionBefore);
-    } catch (err) {
-      out.warn('session.unavailable', { reason: String(err) });
-    }
-  }
-  if (session) {
-    await writer.append({
-      type: 'session.snapshot',
-      actor: 'harness',
-      turn,
-      attrs: {
-        harness: adapter.id,
-        session_id: session.id,
-        rel_path: session.relPath,
-        prompts: session.prompts.length,
-        bytes: session.bytes.byteLength,
-      },
-      // The writer spills anything over the inline limit to a content-addressed blob, so the
-      // transcript rides the same path every other large payload does — redaction included.
-      payload: {
-        prompts: session.prompts,
-        transcript: new TextDecoder().decode(session.bytes),
-      },
-    });
-  }
-
-  await writer.append({ type: 'run.end', actor: 'orca', turn, attrs: { exit_code: exitCode } });
-  const manifest = await writer.close(exitCode);
 
   out.phase('recorded', {
     run: writer.runId,
