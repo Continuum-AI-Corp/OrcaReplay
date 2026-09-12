@@ -1120,6 +1120,66 @@ describe('push and pull', () => {
   });
 
   /*
+  AND WHEN THE RENAME ITSELF FAILS, WITH THE LOCK STILL PERFECTLY OURS (orcacode-review,
+  second report on this function).
+
+  The restore above hung off the ownership probe, so it covered exactly one way to fail:
+  the lock being broken between the two renames. `rename(staging, dest)` has a whole other
+  family — EACCES/EPERM/EIO on a store that just went read-only or is being indexed, a
+  Windows handle on the directory we have only this moment finished writing, ENOTEMPTY if
+  `dest` reappeared. On any of those the probe answers "still ours", never fires, and
+  `swapStagedRun` throws with the old run sitting at `<run>.replaced`.
+
+  The caller cannot clean up after it, and that is the part that makes this structural
+  rather than an oversight: `movedAside` is a local, so `movedAside = await
+  swapStagedRun(...)` does not assign on a throw. The caller's copy is still `false`,
+  `revertStagedSwap` is told `existing: false`, and it puts nothing back — while also
+  deleting the staged replacement. `<run>` then exists nowhere: `.replaced` matches no
+  RUN_ID_PATTERN, so list, show, events, checkpoints, export, scrub, gc and push all skip
+  it, and only a later `orca pull` of that exact id would ever reclaim it.
+
+  A function cannot both return a value and throw, so no return value can carry this. The
+  failure path has to stop needing the caller, which is what the single `catch` inside
+  `swapStagedRun` now does.
+
+  Provoked with a staging directory that is not there, so `rename(staging, dest)` fails
+  ENOENT with ownership never in question — the plain-failure variant, which the lock-loss
+  test above does not reach.
+  */
+  it('puts the old run back when the swap rename fails and the lock is still ours', async () => {
+    const runs = join(workspace, '.orca', 'runs');
+    const dest = join(runs, runId);
+    await mkdir(dest, { recursive: true });
+    await writeFile(join(dest, 'events.jsonl'), 'the run that was already here\n');
+
+    const staging = `${dest}.incoming`;
+    const retired = `${dest}.replaced`;
+    // Deliberately absent: the second rename fails, the lock never does.
+    await rm(staging, { recursive: true, force: true });
+
+    let probes = 0;
+    const stillHeld = async (): Promise<boolean> => {
+      probes++;
+      return true;
+    };
+
+    await expect(
+      swapStagedRun({ dest, staging, retired, existing: true }, stillHeld),
+    ).rejects.toThrow();
+
+    expect(probes, 'ownership was never in doubt on this path').toBeGreaterThan(0);
+    expect(
+      await readFile(join(dest, 'events.jsonl'), 'utf8').catch(() => undefined),
+      'the run stayed at <run>.replaced after a failed swap — invisible to every command, ' +
+        'and the caller cannot put it back because a throw carries no return value',
+    ).toBe('the run that was already here\n');
+    expect(
+      await readFile(join(retired, 'events.jsonl'), 'utf8').catch(() => undefined),
+      'the move-aside must be undone, not merely duplicated',
+    ).toBeUndefined();
+  });
+
+  /*
   AND IT MUST NOT KEEP WRITING EITHER — the fourth site of the same class, and the half the
   previous commit missed.
 

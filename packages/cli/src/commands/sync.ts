@@ -817,10 +817,13 @@ export async function stageRunEntries(
 }
 
 /**
- * Move the staged copy into place, refusing — and undoing the move-aside — if the lock is lost.
+ * Move the staged copy into place, undoing the move-aside on EVERY failure — a lost lock,
+ * a rename the filesystem refused, anything.
  *
- * Returns whether the old run was moved aside, so the caller's revert knows whether it is
- * entitled to move anything back.
+ * Returns whether the old run was moved aside. That is only a SUCCESS signal, telling the
+ * caller whether a `retired` directory is left to remove; a throw has already restored the
+ * old run here. It cannot be otherwise: a function that throws returns nothing, so the
+ * caller's `movedAside` is still `false` and its revert would put nothing back.
  *
  * Exported for the test: the window is the gap between two renames, and this file already
  * learned that a test aiming at such a window by timing is a coin flip.
@@ -855,9 +858,36 @@ export async function swapStagedRun(
   // can also be another pull's move-aside, and renaming THAT over `dest` is the same
   // class of fault this whole sequence is about: only the process that moved a thing may
   // move it back.
+  //
+  // AND IT IS OWNED BY ONE `catch`, NOT BY THE PROBE (orcacode-review, second report on
+  // this function). The probe's own restore covered the case it was written for — the
+  // lock being broken between the renames — and nothing else. `rename(staging, dest)`
+  // has a whole other family of failures: EACCES/EPERM/EIO on a store that just went
+  // read-only or is being indexed, a Windows handle on the directory we have only this
+  // moment finished writing, ENOTEMPTY if `dest` reappeared. On any of those the lock is
+  // still perfectly ours, so `abortUnlessOurs` never runs, and `swapStagedRun` throws.
+  //
+  // The caller could not cover it either, and that is the part worth stating plainly:
+  // `movedAside` is a local, so `movedAside = await swapStagedRun(...)` does not assign
+  // on a throw. The caller's copy is still `false`, `revertStagedSwap` is told
+  // `existing: false`, and it dutifully puts nothing back. On-disk result: `<run>` gone,
+  // the user's only copy at `<run>.replaced` — invisible to list, show, events,
+  // checkpoints, export, scrub, gc and push, because it matches no RUN_ID_PATTERN — and
+  // the freshly staged replacement deleted. Exactly the vanished run this sequence's
+  // comments exist to rule out, and exactly what `revertStagedSwap`'s own comment
+  // promises cannot happen ("the caller is about to be told the pull did not happen, and
+  // that has to be true of the store as well as of the message").
+  //
+  // A function cannot both return a value and throw, so the doc's promise — "returns
+  // whether the old run was moved aside, so the caller's revert knows whether it is
+  // entitled to move anything back" — is unkeepable on the failure path BY
+  // CONSTRUCTION. So the failure path stops depending on the caller: every exit from
+  // here that is not the completed swap restores the move-aside itself, and the return
+  // value now only tells a SUCCESSFUL caller whether there is a `retired` directory left
+  // to remove. One place undoes the move, and it covers every throw rather than the one
+  // that was reported.
   const abortUnlessOurs = async (): Promise<void> => {
     if (await stillHeld()) return;
-    if (movedAside) await rename(retired, dest).catch(() => undefined);
     throw lostTheLock();
   };
 
@@ -866,8 +896,16 @@ export async function swapStagedRun(
     await rename(dest, retired);
     movedAside = true;
   }
-  await abortUnlessOurs();
-  await rename(staging, dest);
+  try {
+    await abortUnlessOurs();
+    await rename(staging, dest);
+  } catch (err) {
+    // Best-effort by necessity: if the rename failed because `dest` came back, this
+    // fails too and `<run>.replaced` stays for `recoverInterruptedSwap` to reclaim.
+    // Litter that a later `orca pull` puts right, not a run nothing can reach.
+    if (movedAside) await rename(retired, dest).catch(() => undefined);
+    throw err;
+  }
   return movedAside;
 }
 
