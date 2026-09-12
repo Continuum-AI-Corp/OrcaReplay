@@ -376,6 +376,22 @@ export async function releaseRunLock(lock: string, token: string): Promise<void>
   // the unlink destroy the one that had replaced it. The comment here called that "a narrowing
   // rather than a proof", which accurately described a hole and was not a reason to leave it: the
   // one line in this file that can delete another holder's lock is exactly that unlink.
+  // DO NOT OPEN THE WINDOW WE ALREADY KNOW WE WILL LOSE (orcacode-review).
+  //
+  // The claim below is a rename: for the instant between it and `restoreLockFile` the path is FREE,
+  // and a third pull waiting on it can create a lock there. Harmless when the lock really is ours —
+  // it is ours precisely because nobody else is waiting on it — but the case that put this comment
+  // here is the deterministic one: a pull whose lock was stale-broken mid-staging aborts, and its
+  // `finally` then runs this on a lock it demonstrably does not own, EVERY time. The reader below
+  // hands it straight back, but only after the path has stood empty, and the pull that now owns the
+  // run sees its own `stillHeld()` fail.
+  //
+  // So ask first. A plain read is not a compare-and-swap and does not pretend to be one — the claim
+  // still verifies — but a read that says "not ours" is never wrong in the direction that matters,
+  // and skipping on it removes the window from the case that happens by schedule rather than by
+  // interleaving. Fail-closed toward NOT TOUCHING: if the lock is unreadable we leave it, and the
+  // stale-break reclaims it.
+  if (!(await lockStillHeld(lock, token))) return;
   const aside = await claimLockFile(lock, 'releasing');
   if (aside === undefined) return;
   const holder = await readFile(aside, 'utf8').catch(() => undefined);
@@ -421,7 +437,7 @@ async function claimLockFile(lock: string, why: string): Promise<string | undefi
  * RUN_ID_PATTERN, so every command ignores it; that is strictly better than a live holder whose
  * lock has evaporated while it is mid-swap.
  */
-async function restoreLockFile(aside: string, lock: string): Promise<boolean> {
+export async function restoreLockFile(aside: string, lock: string): Promise<boolean> {
   for (let attempt = 0; attempt < 5; attempt++) {
     try {
       await link(aside, lock);
@@ -535,10 +551,23 @@ async function withRunLock<T>(
   // stops beating and its lock ages out exactly as before, so the break still works on the case it
   // was written for.
   //
+  // AND IT MUST ONLY BEAT ON OUR OWN LOCK. The beat refreshed whatever file sat at the path, which
+  // after a stale-break is somebody else's lock — and refreshing it is not a harmless write. It is
+  // the one write that decides whether a lock can ever be broken: a pull whose lock was taken from
+  // it goes on holding the new holder's lock open, so if THAT pull dies its lock never ages out and
+  // the run is wedged until a human deletes the file. The concept the break rests on is defeated by
+  // a process that no longer has any claim on it.
+  //
+  // Read-then-utimes is a narrowing, not a compare-and-swap; the same shape and the same reason as
+  // releaseRunLock's own pre-check, and it removes the case that happens by schedule.
+  //
   // unref'd, or the interval would hold the CLI open after the pull finishes.
   const beat = setInterval(() => {
-    const now = new Date();
-    void utimes(lock, now, now).catch(() => undefined);
+    void (async () => {
+      if (!(await lockStillHeld(lock, token))) return;
+      const now = new Date();
+      await utimes(lock, now, now).catch(() => undefined);
+    })();
   }, LOCK_HEARTBEAT_MS);
   beat.unref?.();
   try {

@@ -11,6 +11,7 @@ import {
   pushCommand,
   LOCK_HEARTBEAT_MS,
   releaseRunLock,
+  restoreLockFile,
   revertStagedSwap,
   withRunLockForTest,
 } from '../src/commands/sync.js';
@@ -912,24 +913,31 @@ describe('push and pull', () => {
     const runs = join(workspace, '.orca', 'runs');
     await mkdir(runs, { recursive: true });
     const lock = join(runs, `${runId}.lock`);
-    await writeFile(lock, 'live-holder\n');
+    // The hand-back is asserted directly rather than by racing a write against breakStaleRunLock's
+    // internal window: the window is two awaits wide, so the old version of this test was a coin
+    // flip that happened to land right most of the time — a test that is red one run in four teaches
+    // the next reader to re-run rather than to read, which is worse than not having it.
+    const aside = `${lock}.breaking.pid.claimed`;
+    await writeFile(aside, 'live-holder\n');
+    // What a third pull leaves at the path while the live holder's lock is held aside.
+    await writeFile(lock, 'a-third-pull\n');
 
-    // Occupy the path the instant the break claims the file, so `link` cannot put it back. Done by
-    // racing a writer against the break rather than by mocking, so the EEXIST is the real one.
-    const broke = breakStaleRunLock(lock);
-    await writeFile(lock, 'a-third-pull\n', { flag: 'w' });
-    await broke;
+    const returned = await restoreLockFile(aside, lock);
 
-    // The third pull's lock is intact — the break did not clobber it …
+    expect(returned, 'link clobbered a lock another waiter already holds').toBe(false);
+    // The third pull's lock is intact …
     expect(await readFile(lock, 'utf8')).toBe('a-third-pull\n');
     // … and the live holder's token still exists somewhere rather than having been destroyed.
-    const asides = (await readdir(runs)).filter((n) => n.includes('.breaking.'));
-    const survived =
-      asides.length > 0 && (await readFile(join(runs, asides[0]!), 'utf8')) === 'live-holder\n';
     expect(
-      survived,
+      await readFile(aside, 'utf8').catch(() => undefined),
       'the break deleted a lock it could not return — the outcome it exists to prevent',
-    ).toBe(true);
+    ).toBe('live-holder\n');
+
+    // And the ordinary hand-back still hands back, or a lock judged live would never be returned.
+    await rm(lock);
+    expect(await restoreLockFile(aside, lock)).toBe(true);
+    expect(await readFile(lock, 'utf8')).toBe('live-holder\n');
+    expect(await stat(aside).catch(() => undefined)).toBeUndefined();
   });
 
   /*
@@ -962,7 +970,14 @@ describe('push and pull', () => {
         const old = new Date(Date.now() - 60 * 60 * 1000);
         await utimes(lock, old, old);
         aged = (await stat(lock)).mtimeMs;
+        // The beat reads the lock's bytes before refreshing it (it must not refresh one it has
+        // lost), so firing the timer is not the same as the write having landed: advance in small
+        // steps until it does, rather than sampling once and calling a slow filesystem a
+        // regression.
         await vi.advanceTimersByTimeAsync(LOCK_HEARTBEAT_MS + 50);
+        for (let i = 0; i < 100 && (await stat(lock)).mtimeMs <= aged; i++) {
+          await vi.advanceTimersByTimeAsync(20);
+        }
         beaten = (await stat(lock)).mtimeMs;
       });
       expect(
@@ -980,6 +995,79 @@ describe('push and pull', () => {
     const settled = (await stat(lock)).mtimeMs;
     await new Promise((ok) => setTimeout(ok, 120));
     expect((await stat(lock)).mtimeMs).toBe(settled);
+  });
+
+  /*
+  RELEASING A LOCK THAT IS NOT OURS MUST NOT DISTURB THE PATH AT ALL.
+
+  The claim is a rename, so for the instant between it and the hand-back the path stands EMPTY and a
+  third pull waiting on the run can create a lock there. That is tolerable when the lock is ours. It
+  is not tolerable in the case that produces it deterministically: a pull whose lock was stale-broken
+  mid-staging aborts, and its `finally` releases a lock it demonstrably does not own — every time,
+  by schedule rather than by interleaving. The new holder then watches its own `stillHeld()` fail.
+
+  Asserted on the INODE, not on the bytes: the hand-back restores the content either way, so a test
+  that reads the file passes whether or not the window was opened. The inode is what the rename
+  moves, and it is what a third pull's `wx` create would find missing.
+  */
+  it('does not move a lock aside to discover it is not ours', async () => {
+    const runs = join(workspace, '.orca', 'runs');
+    await mkdir(runs, { recursive: true });
+    const lock = join(runs, `${runId}.lock`);
+    await writeFile(lock, 'the new holder\n');
+    const before = (await stat(lock)).ino;
+
+    await releaseRunLock(lock, 'ours\n');
+
+    expect(
+      (await stat(lock)).ino,
+      'the release renamed another holder’s lock away from the path and back, leaving the path free ' +
+        'for a third pull in between',
+    ).toBe(before);
+    expect(await readFile(lock, 'utf8')).toBe('the new holder\n');
+    // The litter a hand-back leaves when the path has been re-taken must not appear here either:
+    // nothing was claimed, so there is nothing to hand back.
+    expect((await readdir(runs)).sort()).toEqual([`${runId}.lock`]);
+  });
+
+  /*
+  AND THE BEAT MUST NOT REFRESH A LOCK THAT IS NO LONGER OURS.
+
+  The beat wrote the mtime of whatever file sat at the path. After a stale-break that file is the
+  NEW holder's lock, and refreshing it is not a harmless write: the mtime is the only thing that
+  decides whether a lock can ever be broken. A pull that lost its lock and kept beating holds the
+  new holder's lock open for as long as it runs — so if the new holder then dies, its lock never
+  ages out, no later pull can break it, and the run is wedged until someone deletes the file.
+  */
+  it('stops beating on the lock once it belongs to someone else', async () => {
+    const runs = join(workspace, '.orca', 'runs');
+    await mkdir(runs, { recursive: true });
+    const dest = join(runs, runId);
+    const lock = `${dest}.lock`;
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let aged = 0;
+      let after = 0;
+      await withRunLockForTest(dest, async () => {
+        // A stale-break hands the path to another pull, exactly as it would mid-staging …
+        await writeFile(lock, 'the new holder\n');
+        const old = new Date(Date.now() - 60 * 60 * 1000);
+        await utimes(lock, old, old);
+        aged = (await stat(lock)).mtimeMs;
+        // Same number of steps the positive test needs to see a beat land, so this one is not
+        // green merely because it sampled sooner.
+        await vi.advanceTimersByTimeAsync(LOCK_HEARTBEAT_MS + 50);
+        for (let i = 0; i < 100; i++) await vi.advanceTimersByTimeAsync(20);
+        after = (await stat(lock)).mtimeMs;
+      });
+      expect(
+        after,
+        'the beat kept refreshing a lock it had lost, so the new holder’s lock can never go stale',
+      ).toBe(aged);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   /*
