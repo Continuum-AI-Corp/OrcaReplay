@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 /**
@@ -102,7 +102,37 @@ export async function installAgentSpans(runDir: string): Promise<AgentSpanCaptur
   const dir = join(runDir, 'py');
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, SITECUSTOMIZE), SITECUSTOMIZE_SOURCE, 'utf8');
-  return { spansPath: join(runDir, SPANS_FILENAME), pythonPath: dir };
+  const spansPath = join(runDir, SPANS_FILENAME);
+  // Created here rather than left to the child, so it gets the mode SECURITY.md promises for
+  // everything in a run directory — "trace files and blobs are written mode 0600". A file the
+  // child creates gets that interpreter's umask instead, and the two capture layers that already
+  // leave a side file here both pre-create it for the same reason (`shell-shim`'s frames,
+  // `mcp.ts`'s config). Best-effort, like theirs: a capture layer may degrade a trace and may
+  // never fail the run it is watching.
+  await writeFile(spansPath, '', { flag: 'a', mode: 0o600 }).catch(() => undefined);
+  return { spansPath, pythonPath: dir };
+}
+
+/**
+ * Remove the spans file once its contents are in the trace.
+ *
+ * It is a transport, not part of the trace: one reader, during the drain, and nothing in replay,
+ * fork or the viewer touches it. Leaving it would make it the one thing in a run directory that no
+ * other machinery covers — `orca scrub` rewrites `events.jsonl`, the manifest and the blobs and
+ * would report `removed=N` with this file untouched beside them, which SECURITY.md calls worse than
+ * having no scrubber at all. Deleting it is cheaper and more honest than teaching three other
+ * components about a file that has no reason to outlive the ingest.
+ *
+ * Returns what went wrong, for the caller to warn about. Failing to delete it is worth saying and
+ * never worth losing the trace over — the same posture as the run CA's `dispose`.
+ */
+export async function discardAgentSpans(path: string): Promise<string | undefined> {
+  try {
+    await rm(path, { force: true });
+    return undefined;
+  } catch (err) {
+    return String(err);
+  }
 }
 
 /** PYTHONPATH with our directory in front, keeping whatever was already there. */
