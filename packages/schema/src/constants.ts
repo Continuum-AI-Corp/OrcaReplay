@@ -6,7 +6,7 @@
  * same drift protection as codegen without a build step that can silently break.
  */
 
-export const SCHEMA_VERSION = '0.1.0';
+export const SCHEMA_VERSION = '0.2.0';
 
 export const EVENT_TYPES = [
   'run.start',
@@ -27,6 +27,9 @@ export const EVENT_TYPES = [
   'divergence',
   'checkpoint',
   'fork',
+  'agent.start',
+  'agent.handoff',
+  'agent.guardrail',
   'route.decision',
   'session.snapshot',
   'note',

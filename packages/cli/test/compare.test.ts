@@ -17,17 +17,35 @@ const here = dirname(fileURLToPath(import.meta.url));
 const FAKE_AGENT = join(here, 'fixtures', 'fake-agent.mjs');
 
 describe('compare without --models', () => {
-  it('tells you both ways to supply models when none are available', async () => {
+  /**
+   * An empty config, supplied rather than assumed.
+   *
+   * `compareCommand` falls back to `readConfig()`, which reads the *real* `~/.config/orca`. On a
+   * machine where anyone has run `orca setup` that config has models in it, so this test never
+   * reached the branch it names — it got as far as "no runs recorded" instead and failed on the
+   * wrong error. Nothing to do with the platform; CI passes only because CI has no config.
+   */
+  async function withEmptyConfig<T>(fn: (cwd: string) => Promise<T>): Promise<T> {
     const home = await mkdtemp(join(tmpdir(), 'orca-cmp-cfg-'));
+    const previous = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = join(home, 'config');
+    try {
+      return await fn(home);
+    } finally {
+      if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previous;
+      await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    }
+  }
+
+  it('tells you both ways to supply models when none are available', async () => {
     const lines: string[] = [];
     const out = new Output({ write: (l) => void lines.push(l), isTTY: false });
-    try {
+    await withEmptyConfig(async (home) => {
       await expect(compareCommand(parseArgs(['compare', 'last']), out, home)).rejects.toThrow(
         /orca setup/,
       );
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 });
 
@@ -72,9 +90,18 @@ describe('compare', () => {
   }
 
   it('needs models, and says how to give them', async () => {
-    await expect(compareCommand(parseArgs(['compare', 'last']), out, workspace)).rejects.toThrow(
-      /--models/,
-    );
+    // Same reason as the block above: without an empty config this reads the developer's own
+    // `orca setup` models, never reaches the branch, and fails on "no runs recorded" instead.
+    const previous = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = join(workspace, 'empty-config');
+    try {
+      await expect(compareCommand(parseArgs(['compare', 'last']), out, workspace)).rejects.toThrow(
+        /--models/,
+      );
+    } finally {
+      if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previous;
+    }
   });
 
   it('forks every model from the SAME parent run, not from the previous fork', async () => {
