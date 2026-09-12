@@ -1,5 +1,5 @@
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 
 /**
  * Getting the OpenAI Agents SDK's own run structure into a trace, without editing the agent.
@@ -127,12 +127,17 @@ export async function installAgentSpans(runDir: string): Promise<AgentSpanCaptur
  * never worth losing the trace over — the same posture as the run CA's `dispose`.
  */
 export async function discardAgentSpans(path: string): Promise<string | undefined> {
-  try {
-    await rm(path, { force: true });
-    return undefined;
-  } catch (err) {
-    return String(err);
+  const failures: string[] = [];
+  // The whole set, not just the base: one file per tracing process, and leaving any of them behind
+  // leaves the same uncovered file in the run directory that this exists to remove.
+  for (const file of await spansFiles(path)) {
+    try {
+      await rm(file, { force: true });
+    } catch (err) {
+      failures.push(String(err));
+    }
   }
+  return failures.length === 0 ? undefined : failures.join('; ');
 }
 
 /** PYTHONPATH with our directory in front, keeping whatever was already there. */
@@ -151,7 +156,8 @@ export interface AgentSpan {
   trace_id?: string;
   started_at?: string;
   ended_at?: string;
-  error?: unknown;
+  /** Whether the span carried an error. A boolean, never the SDK's payload-bearing `SpanError`. */
+  failed?: boolean;
   data?: Record<string, unknown>;
 }
 
@@ -168,27 +174,66 @@ export interface AgentSpan {
  * is kept only if it parsed to an object.
  */
 export async function readAgentSpans(path: string): Promise<AgentSpan[]> {
-  let raw: string;
-  try {
-    raw = await readFile(path, 'utf8');
-  } catch {
-    // No file means the SDK was never used, or the package is not installed. Both are ordinary.
-    return [];
-  }
   const spans: AgentSpan[] = [];
-  for (const line of raw.split('\n')) {
-    if (line.trim() === '') continue;
-    let parsed: unknown;
+  for (const file of await spansFiles(path)) {
+    let raw: string;
     try {
-      parsed = JSON.parse(line);
+      raw = await readFile(file, 'utf8');
     } catch {
+      // No file means the SDK was never used, or the package is not installed. Both are ordinary.
       continue;
     }
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      spans.push(parsed as AgentSpan);
+    for (const line of raw.split('\n')) {
+      if (line.trim() === '') continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        spans.push(parsed as AgentSpan);
+      }
     }
   }
   return spans;
+}
+
+/**
+ * Every file the processors wrote: `<base>` and `<base>.<pid>`.
+ *
+ * One process per file, because the whole environment — `PYTHONPATH` and the variable naming this
+ * path — is inherited by everything the agent starts, so an agent that shells out to `python`, or
+ * runs `pytest -n` or a worker pool, has several tracing at once. Serialising them would need
+ * `fcntl` on one platform and `msvcrt` on the other; a file each needs neither.
+ *
+ * `<base>` itself is still read. It is what `installAgentSpans` pre-creates for the mode, and it is
+ * where a processor that predates the per-pid split would have written.
+ */
+async function spansFiles(base: string): Promise<string[]> {
+  const dir = dirname(base);
+  const prefix = `${basename(base)}.`;
+  let siblings: string[] = [];
+  try {
+    siblings = (await readdir(dir))
+      .filter((name) => name.startsWith(prefix))
+      .map((name) => join(dir, name))
+      .sort();
+  } catch {
+    // The run directory is gone, which is not this layer's problem to report.
+  }
+  return [base, ...siblings];
+}
+
+/** How many records a processor said it had to throw away. Zero unless one told us. */
+export function droppedSpanCount(spans: AgentSpan[]): number {
+  let total = 0;
+  for (const span of spans) {
+    if (span.kind !== 'dropped') continue;
+    const count = (span as { count?: unknown }).count;
+    if (typeof count === 'number' && Number.isFinite(count)) total += count;
+  }
+  return total;
 }
 
 /**

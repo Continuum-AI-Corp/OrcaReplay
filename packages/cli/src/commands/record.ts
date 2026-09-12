@@ -17,6 +17,7 @@ import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js
 import { installShellShim, readShellFrames } from '@orcareplay/shell-shim';
 import {
   discardAgentSpans,
+  droppedSpanCount,
   eventForSpan,
   installAgentSpans,
   pythonPathWith,
@@ -65,6 +66,19 @@ export interface RecordResult {
  * different — `Bash`, `shell`, `run_command`, `exec` — and a list of names would be wrong for the
  * next one. A `command` string is what they all have in common.
  */
+/**
+ * Whether an instant can be written down at all.
+ *
+ * `0000-01-01T00:00:00.000Z` to `9999-12-31T23:59:59.999Z`, because the schema types `ts` as
+ * `date-time` and that admits a four-digit year and nothing else. Being a finite number is not
+ * enough: a duration spliced from two concurrent appends is finite and sixteen digits long, and
+ * the sum formats as `+011533-…`, which `assertEvent` rejects — or does not format at all, which
+ * `toISOString()` throws on. Both happen inside the write, where the trace is being sealed.
+ */
+function expressibleMs(ms: number): boolean {
+  return ms >= -62_167_219_200_000 && ms <= 253_402_300_799_999;
+}
+
 function isCommandTool(input: unknown): boolean {
   if (input === null || typeof input !== 'object') return false;
   const command = (input as { command?: unknown }).command;
@@ -337,6 +351,12 @@ async function runRecording(
     await proxy.close().catch(() => undefined);
     await writes.drain().catch(() => undefined);
     if (ca) await ca.dispose().catch(() => undefined);
+    // Beside the CA, and for the same reason: both are things the run created that must not
+    // outlive it. The success path removes the spans files once ingested, but that is inside
+    // `finishRun`, which this is the short-circuit for — so every throw after `installAgentSpans`
+    // used to leave an un-redacted transport in the run directory, where `orca scrub` does not
+    // reach it. The likeliest such throw is the first statement of `finishRun`.
+    if (agentSpans) await discardAgentSpans(agentSpans.spansPath).catch(() => undefined);
     await writer
       .append({ type: 'run.end', actor: 'orca', turn, attrs: { error: String(err) } })
       .catch(() => undefined);
@@ -513,10 +533,11 @@ async function runRecording(
         // calls `toISOString()` on it — `RangeError: Invalid time value`, thrown where the trace is
         // being sealed. The reader rejects such a frame, and this is the second lock on the same
         // door: an Invalid Date must not be constructible here whatever the file held.
+        const endedMs = startedAt + frame.durationMs;
         const endedAt =
-          at === undefined || !Number.isFinite(frame.durationMs)
+          at === undefined || !Number.isFinite(frame.durationMs) || !expressibleMs(endedMs)
             ? undefined
-            : new Date(startedAt + frame.durationMs);
+            : new Date(endedMs);
         const exec = await writer.append({
           type: 'shell.exec',
           actor: 'harness',
@@ -546,7 +567,8 @@ async function runRecording(
       // Timestamped from the span, like the shell frames above and for the same reason: these are
       // read off disk after the agent exited, so stamping them now would file every handoff at the
       // end of the run rather than between the turns it happened between.
-      for (const span of await readAgentSpans(agentSpans.spansPath)) {
+      const spans = await readAgentSpans(agentSpans.spansPath);
+      for (const span of spans) {
         const derived = eventForSpan(span);
         if (derived === undefined) continue;
         const startedAt = Date.parse(String(span.started_at ?? ''));
@@ -564,6 +586,12 @@ async function runRecording(
       // The file is a transport and its contents are now in the trace, which is the one place the
       // redactor, the integrity digest and `orca scrub` all reach. Leaving it would make it the
       // only thing in the run directory none of them covers.
+      const lost = droppedSpanCount(spans);
+      if (lost > 0) {
+        // Said out loud rather than counted and forgotten: with the file deleted immediately after
+        // this, the trace would otherwise just have fewer agent events than the run did.
+        out.warn('agent_spans.dropped', { count: lost });
+      }
       const failed = await discardAgentSpans(agentSpans.spansPath);
       if (failed !== undefined) {
         out.warn('agent_spans.not_removed', { path: agentSpans.spansPath, reason: failed });
