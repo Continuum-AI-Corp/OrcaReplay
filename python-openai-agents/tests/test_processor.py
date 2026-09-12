@@ -97,6 +97,99 @@ def test_an_unwritable_path_does_not_raise(tmp_path):
     processor.on_span_end(FakeSpan(HandoffSpanData({"from_agent": "A", "to_agent": "B"})))
 
 
+def test_an_export_that_raises_does_not_reach_the_agent(tmp_path):
+    # The `repr` case above guards what `_plain` is *handed*. This is the raise that happens while
+    # the argument is still being built, which that guard never saw: `CustomSpanData.export()`
+    # JSON-encodes the user's payload and raises on a circular reference. The SDK calls
+    # `on_span_end` synchronously from `Span.finish()`, so an escape surfaces as the user's own
+    # `Runner.run()` failing — the debugger ending the run it was watching.
+    class Exploding(FakeSpanData):
+        def export(self):
+            raise ValueError("Circular reference detected")
+
+    Exploding.__name__ = "AgentSpanData"
+    out = tmp_path / "spans.jsonl"
+    processor = OrcaTracingProcessor(str(out))
+    processor.on_span_end(FakeSpan(Exploding(None)))
+    assert read(out)[0]["data"] == {}
+
+
+def test_a_property_that_raises_does_not_reach_the_agent(tmp_path):
+    # Same shape one field over. Every `getattr` here reads something the SDK is entitled to make a
+    # property, and a property is user code.
+    class Sneaky:
+        span_id = "span_1"
+        parent_id = None
+        trace_id = "trace_1"
+        ended_at = None
+        error = None
+        span_data = HandoffSpanData({"from_agent": "A", "to_agent": "B"})
+
+        @property
+        def started_at(self):
+            raise RuntimeError("a raising property")
+
+    out = tmp_path / "spans.jsonl"
+    processor = OrcaTracingProcessor(str(out))
+    processor.on_span_end(Sneaky())
+    assert read(out)[0]["started_at"] is None
+    assert read(out)[0]["data"] == {"from_agent": "A", "to_agent": "B"}
+
+
+def test_a_tool_call_carrying_a_credential_is_not_written(tmp_path):
+    # The rule this file lives under: "If you add a new sink, it goes through the redactor." There
+    # is no redactor in Python and there must not be a second one, so nothing a user put in a span
+    # may be written at all. `FunctionSpanData.export()` is `{name, input, output}` — the tool's
+    # arguments and its result, which is where an Authorization header lives. The same bytes are
+    # scrubbed in `events.jsonl`, and `orca scrub` does not rewrite this file.
+    class FunctionSpanData(FakeSpanData):
+        pass
+
+    out = tmp_path / "spans.jsonl"
+    processor = OrcaTracingProcessor(str(out))
+    processor.on_span_end(
+        FakeSpan(
+            FunctionSpanData(
+                {
+                    "name": "http_get",
+                    "input": {"headers": {"Authorization": "Bearer sk-abcdefghijklmnop12345"}},
+                    "output": "ok",
+                }
+            )
+        )
+    )
+    assert not out.exists() or read(out) == []
+
+
+def test_only_the_fields_the_reader_maps_are_kept(tmp_path):
+    # A whitelist, so a field the SDK adds later is not written until someone lists it here. The one
+    # below is real: `instructions` is the agent's system prompt.
+    class AgentSpanData(FakeSpanData):
+        pass
+
+    out = tmp_path / "spans.jsonl"
+    processor = OrcaTracingProcessor(str(out))
+    processor.on_span_end(
+        FakeSpan(
+            AgentSpanData(
+                {
+                    "name": "triage",
+                    "handoffs": ["billing"],
+                    "tools": ["lookup"],
+                    "output_type": "str",
+                    "instructions": "you are a helpful assistant with SECRET-PROMPT",
+                }
+            )
+        )
+    )
+    assert read(out)[0]["data"] == {
+        "name": "triage",
+        "handoffs": ["billing"],
+        "tools": ["lookup"],
+        "output_type": "str",
+    }
+
+
 @pytest.mark.skipif(
     os.environ.get("ORCA_SKIP_SDK_TESTS") == "1", reason="asked to skip SDK-dependent tests"
 )

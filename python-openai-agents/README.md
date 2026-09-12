@@ -90,6 +90,32 @@ agent.start     {"name":"Billing Specialist","handoffs":"","tools":0}
 They are written with `actor: "harness"` rather than `actor: "orca"`, because orca did not observe
 them — it was told.
 
+### It writes a whitelist, never a payload
+
+Three span types reach disk, and from each only the fields the reader turns into an event:
+
+| type | fields kept |
+|---|---|
+| `AgentSpanData` | `name`, `handoffs`, `tools`, `output_type` |
+| `HandoffSpanData` | `from_agent`, `to_agent` |
+| `GuardrailSpanData` | `name`, `triggered` |
+
+Everything else — every other span type, and every other field of these three — is dropped, and the
+reason is a rule this package cannot bend. OrcaReplay's redactor lives in the TypeScript write path,
+and there is deliberately no second one, because a second redaction implementation is how a secret
+leaks. This file is a sink with no redactor in front of it, so nothing a *user* put in a span may be
+written here at all.
+
+That is not hypothetical. `FunctionSpanData.export()` is `{name, input, output}` — a tool's
+arguments and its result, which is exactly where an `Authorization` header or a returned credential
+lives. `MCPToolCallSpanData` carries `arguments` and `result`; `CustomSpanData` is whatever was
+passed to `custom_span(data=…)`; `AgentSpanData.instructions` is the system prompt. The same bytes
+are scrubbed in `events.jsonl`, and `orca scrub` does not rewrite this file — so anything written
+here would survive a scrub that reported success.
+
+A fourth type is supported by listing its fields in `KEEP`, never by widening this to the whole
+export.
+
 ## Failure posture
 
 Nothing in this package may fail a run it is only watching. Every write, every import and every
@@ -97,5 +123,13 @@ value it renders is guarded, including the `repr` fallback for objects it cannot
 payload is whatever the agent put in it, and an object whose `__repr__` raises would otherwise take
 the run down from inside a debugging aid. A value that cannot be described becomes
 `<unrepresentable>` and the run continues.
+
+Guarding the value is not enough on its own, which took a review to notice. `export()` and every
+attribute read happen while the record is still being *built*, before the value-level guard is
+entered, and both are user code: `CustomSpanData.export()` raises on a circular reference, and the
+SDK may make any of `span_id`, `started_at` or `ended_at` a property. The SDK calls `on_span_end`
+synchronously from `Span.finish()`, so an escape there surfaces as the user's own `Runner.run()`
+failing — the debugger ending the run it was watching. Those reads are guarded too; a span that
+cannot be read is skipped, and the run continues.
 
 Apache-2.0. Part of [OrcaReplay](https://github.com/Continuum-AI-Corp/OrcaReplay).

@@ -49,9 +49,29 @@ from typing import Any
 # nothing at all — which is what makes it safe to leave installed.
 SPANS_ENV = "ORCA_AGENT_SPANS"
 
-#: Span types the proxy already has, byte for byte. Recording them again would be a second and worse
-#: copy of the model conversation.
-REDUNDANT = frozenset({"ResponseSpanData", "GenerationSpanData"})
+#: The span types orca turns into events, and the only fields it reads from each.
+#:
+#: A whitelist, not a blocklist, and the reason is the one rule this package cannot bend.
+#: CONTRIBUTING: "Secrets never reach disk or a TTY. Redaction lives in the write path. If you add a
+#: new sink, it goes through the redactor." This file *is* a new sink, and the redactor lives in the
+#: TypeScript write path — `python/README.md` says why there is no second one: "a second writer
+#: means a second redaction implementation, which is how a secret leaks."
+#:
+#: So nothing here may write a payload a user put there. `FunctionSpanData.export()` is
+#: `{name, input, output}` — a tool's arguments and its result, which is where an `Authorization`
+#: header or a returned credential lives. `MCPToolCallSpanData` carries `arguments` and `result`.
+#: `CustomSpanData` is whatever the agent passed to `custom_span(data=...)`. The same bytes are
+#: scrubbed in `events.jsonl`, and `orca scrub` does not rewrite this file, so a credential written
+#: here survives a scrub that reports success.
+#:
+#: Everything below is a name, a count or a boolean the agent's author chose as an identifier, and
+#: the three types are exactly what `eventForSpan` maps. A fourth type is added by listing its
+#: fields here — never by widening this to the whole export.
+KEEP: dict[str, tuple[str, ...]] = {
+    "AgentSpanData": ("name", "handoffs", "tools", "output_type"),
+    "HandoffSpanData": ("from_agent", "to_agent"),
+    "GuardrailSpanData": ("name", "triggered"),
+}
 
 
 def _plain(value: Any) -> Any:
@@ -74,6 +94,39 @@ def _plain(value: Any) -> Any:
         return repr(value)
     except Exception:  # noqa: BLE001 - see the docstring: never raise out of here
         return "<unrepresentable>"
+
+
+def _read(obj: Any, name: str) -> Any:
+    """One attribute, or None.
+
+    `getattr` looks free and is not: an SDK is entitled to make any of these a property, and a
+    property is user code. `_plain` guards what it is *handed*, which is no help when the raise
+    happens while building the argument list — that is the shape of the bug this replaced, where a
+    `ValueError` from `export()` escaped `on_span_end` and, because the SDK calls it synchronously
+    from `Span.finish()`, surfaced as the user's own `Runner.run()` raising. A debugger that ends
+    the run it is watching is worse than one that records nothing.
+    """
+    try:
+        return getattr(obj, name, None)
+    except Exception:  # noqa: BLE001 - same posture as `_plain`: never raise out of here
+        return None
+
+
+def _kept(data: Any, fields: tuple[str, ...]) -> dict[str, Any]:
+    """The whitelisted fields of a span's own export, and nothing else. See `KEEP`.
+
+    `export()` is the call that walks the user's payload, so it is the one most likely to raise:
+    `CustomSpanData.export()` JSON-encodes whatever was handed to `custom_span(data=...)` and raises
+    on a circular reference, and a pydantic-backed export raises on a field it cannot serialise.
+    """
+    try:
+        export = getattr(data, "export", None)
+        exported = export() if callable(export) else {}
+    except Exception:  # noqa: BLE001 - never raise out of here
+        return {}
+    if not isinstance(exported, dict):
+        return {}
+    return {k: _plain(exported[k]) for k in fields if k in exported}
 
 
 class OrcaTracingProcessor:
@@ -127,22 +180,21 @@ class OrcaTracingProcessor:
         return None
 
     def on_span_end(self, span: Any) -> None:
-        data = getattr(span, "span_data", None)
-        type_name = type(data).__name__ if data is not None else "unknown"
-        if type_name in REDUNDANT:
+        data = _read(span, "span_data")
+        fields = KEEP.get(type(data).__name__ if data is not None else "unknown")
+        if fields is None:
             return
-        export = getattr(data, "export", None)
         self._write(
             {
                 "kind": "span",
-                "type": type_name,
-                "span_id": getattr(span, "span_id", None),
-                "parent_id": getattr(span, "parent_id", None),
-                "trace_id": getattr(span, "trace_id", None),
-                "started_at": getattr(span, "started_at", None),
-                "ended_at": getattr(span, "ended_at", None),
-                "error": _plain(getattr(span, "error", None)),
-                "data": _plain(export() if callable(export) else {}),
+                "type": type(data).__name__,
+                "span_id": _read(span, "span_id"),
+                "parent_id": _read(span, "parent_id"),
+                "trace_id": _read(span, "trace_id"),
+                "started_at": _read(span, "started_at"),
+                "ended_at": _read(span, "ended_at"),
+                "error": _plain(_read(span, "error")),
+                "data": _kept(data, fields),
             }
         )
 
