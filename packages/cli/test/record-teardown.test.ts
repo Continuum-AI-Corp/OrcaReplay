@@ -126,4 +126,25 @@ describe('orca record, when the run dies before the agent starts', () => {
     expect(stdout).not.toMatch(/events {2}exit 0/);
     expect(stdout).toContain('never finished');
   }, 60_000);
+
+  it('takes the agent-spans transport with it, like the CA', async () => {
+    // `agent-spans.jsonl` is written by the child's interpreter and never goes through the write
+    // path's redactor, and `orca scrub` does not rewrite it — so it must not outlive the run. The
+    // success path removes it after ingest, but that is inside the region this teardown is the
+    // short-circuit for, so every throw after `installAgentSpans` used to leave one behind.
+    await run(process.execPath, [cli, 'record', 'node', '--', 'orca-no-such-binary'], {
+      cwd: dir,
+      env: bare,
+      timeout: 60_000,
+    }).catch(() => undefined);
+
+    const runs = join(dir, '.orca', 'runs');
+    const [id] = await readdir(runs);
+    expect(id, 'the failed run left no trace at all').toBeDefined();
+    // Recursive, because the transport lives in a directory of its own now — a check on the top
+    // level would pass without looking at the place the file actually is.
+    const entries = await readdir(join(runs, id!), { recursive: true, withFileTypes: true });
+    const left = entries.filter((e) => e.name.startsWith('agent-spans')).map((e) => e.name);
+    expect(left, 'an un-redacted transport was left in the run directory').toEqual([]);
+  }, 60_000);
 });
