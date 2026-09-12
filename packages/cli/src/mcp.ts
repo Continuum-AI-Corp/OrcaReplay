@@ -123,6 +123,34 @@ export function pointAtMcpConfig(env: Record<string, string>, configPath: string
  * duration (spec §2.1), and a frame stamped at the drain can never interleave with the model turns
  * it actually sat between.
  */
+/** `0000-01-01T00:00:00.000Z` and `9999-12-31T23:59:59.999Z`: what a `date-time` `ts` can express. */
+const EARLIEST_MS = -62_167_219_200_000;
+const LATEST_MS = 253_402_300_799_999;
+
+/**
+ * Whether a parsed capture line is something the drain can safely turn into an event.
+ *
+ * Several shims share one capture file — `createWriteStream(out, { flags: 'a' })`, whose own
+ * comment says "several servers in one run may share a capture file" — so this file is exposed to
+ * the same interleaved write as the shell frames, and the same two failures follow from it:
+ *
+ *   - a line that parses to `null` reaches `frame.ts` and throws `TypeError`
+ *   - a `ts` that parses to an instant outside the range a `date-time` can express becomes a `Date`
+ *     that `TraceWriter.append` cannot format, and `toISOString()` or `assertEvent` throws
+ *
+ * Both happen after the agent has exited, where the trace is being sealed. Being the right *type*
+ * is not enough for `ts`; the instant has to exist.
+ */
+function usableFrame(value: unknown): value is McpFrameRecord {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const ts = (value as { ts?: unknown }).ts;
+  if (ts === undefined) return true;
+  if (typeof ts !== 'string') return false;
+  const at = Date.parse(ts);
+  // An unparseable `ts` is fine: the drain already falls back to the run's own turn for it.
+  return Number.isNaN(at) || (at >= EARLIEST_MS && at <= LATEST_MS);
+}
+
 export async function drainMcpFrames(
   mcp: McpCapture,
   writer: TraceWriter,
@@ -130,6 +158,10 @@ export async function drainMcpFrames(
   fallbackTurn: number,
 ): Promise<void> {
   for (const frame of await mcp.drain()) {
+    // Belt and braces with the filter in `drain`. This function is exported and reached from three
+    // call sites, and what it is handed comes off a file several processes append to — the same
+    // reasoning that made `eventForSpan` take `unknown`.
+    if (!usableFrame(frame)) continue;
     const at = frame.ts === undefined ? Number.NaN : Date.parse(frame.ts);
     const when = Number.isNaN(at) ? undefined : new Date(at);
     await writer.append({
@@ -212,11 +244,14 @@ export async function setupMcpCapture(opts: {
       const records: McpFrameRecord[] = [];
       for (const line of text.split('\n')) {
         if (line.trim() === '') continue;
+        let parsed: unknown;
         try {
-          records.push(JSON.parse(line) as McpFrameRecord);
+          parsed = JSON.parse(line);
         } catch {
           // A malformed capture line must never break the recorder; the agent's run matters more.
+          continue;
         }
+        if (usableFrame(parsed)) records.push(parsed);
       }
       return records;
     },

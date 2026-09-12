@@ -9,7 +9,7 @@ import { TraceReader, deriveCheckpoints, resolveRunSelector } from '@orcareplay/
 import { validateEvent } from '@orcareplay/schema';
 import { parseArgs } from '../src/args.js';
 import { Output } from '../src/out.js';
-import { mcpSourceFrom, usedMcp } from '../src/mcp.js';
+import { mcpSourceFrom, setupMcpCapture, usedMcp } from '../src/mcp.js';
 import { recordCommand } from '../src/commands/record.js';
 import { replayCommand } from '../src/commands/replay.js';
 import { startFakeModel } from './fixtures/fake-model.mjs';
@@ -253,5 +253,69 @@ describe('mcpSourceFrom', () => {
     expect(usedMcp([{ type: 'mcp.request' }])).toBe(true);
     expect(usedMcp([{ type: 'mcp.response' }])).toBe(true);
     expect(usedMcp([{ type: 'model.request' }, { type: 'note' }])).toBe(false);
+  });
+});
+
+describe('a capture line that parsed is not yet a frame', () => {
+  /**
+   * The same rule the shell frames reader has, one file over, and for the same reason: several
+   * shims share one capture file — its own comment says "several servers in one run may share a
+   * capture file" — so an interleaved write can leave a line that is valid JSON and not a frame.
+   *
+   * The drain runs after the agent has exited, where the trace is being sealed, so both failures
+   * end the run there: `null` reaches `frame.ts` and throws `TypeError`, and a `ts` outside the
+   * range a `date-time` can express becomes a `Date` that `TraceWriter.append` cannot format.
+   */
+  const good = {
+    ts: '2026-09-12T00:00:00.000Z',
+    dir: 'in',
+    name: 'srv',
+    kind: 'req',
+    method: 'tools/call',
+    id: 1,
+    raw: {},
+  };
+
+  async function framesFrom(lines: string[]) {
+    const runDir = await mkdtemp(join(tmpdir(), 'orca-mcp-frames-'));
+    const config = join(runDir, 'mcp.json');
+    await writeFile(config, JSON.stringify({ mcpServers: { srv: { command: 'node' } } }), 'utf8');
+    const out = new Output({ write: () => undefined, isTTY: false });
+    const capture = await setupMcpCapture({ sourceConfigPath: config, runDir, out });
+    // The shim's own output path, which the capture keeps to itself.
+    await writeFile(join(runDir, 'mcp-frames.jsonl'), lines.join('\n'), 'utf8');
+    const frames = await capture!.drain();
+    await rm(runDir, { recursive: true, force: true });
+    return frames;
+  }
+
+  it('skips a line that is not an object', async () => {
+    const frames = await framesFrom(['null', '7', '"a string"', '[1,2]', JSON.stringify(good), '']);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.method).toBe('tools/call');
+  });
+
+  it('skips a ts whose instant cannot be written down', async () => {
+    // Right type, unusable magnitude. `+275760-09-13T…` parses to 8.64e15, which formats to a
+    // six-digit year — and the schema types `ts` as `date-time`, which admits four.
+    const frames = await framesFrom([
+      JSON.stringify({ ...good, ts: '+275760-09-13T00:00:00.000Z' }),
+      JSON.stringify({ ...good, ts: 12345 }),
+      JSON.stringify(good),
+      '',
+    ]);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.ts).toBe(good.ts);
+  });
+
+  it('keeps a frame with no ts, and one whose ts will not parse', async () => {
+    // Both already have a defined outcome: the drain stamps them with the run's own turn. Dropping
+    // them would lose a call the agent really made.
+    const frames = await framesFrom([
+      JSON.stringify({ ...good, ts: undefined }),
+      JSON.stringify({ ...good, ts: 'not a date' }),
+      '',
+    ]);
+    expect(frames).toHaveLength(2);
   });
 });
