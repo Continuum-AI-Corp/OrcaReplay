@@ -508,6 +508,15 @@ async function runRecording(
         const startedAt = Date.parse(frame.startedAt);
         const at = Number.isNaN(startedAt) ? undefined : new Date(startedAt);
         const frameTurn = at === undefined ? turn : turnAt(startedAt);
+        // Computed rather than inlined, because this one is arithmetic and the other is not: a
+        // `durationMs` that is missing or not a number makes the sum `NaN`, and `TraceWriter.append`
+        // calls `toISOString()` on it — `RangeError: Invalid time value`, thrown where the trace is
+        // being sealed. The reader rejects such a frame, and this is the second lock on the same
+        // door: an Invalid Date must not be constructible here whatever the file held.
+        const endedAt =
+          at === undefined || !Number.isFinite(frame.durationMs)
+            ? undefined
+            : new Date(startedAt + frame.durationMs);
         const exec = await writer.append({
           type: 'shell.exec',
           actor: 'harness',
@@ -521,7 +530,7 @@ async function runRecording(
           turn: frameTurn,
           causes: [exec.seq],
           // The result happened when the command finished, which is what its duration measures.
-          ...(at === undefined ? {} : { occurredAt: new Date(startedAt + frame.durationMs) }),
+          ...(endedAt === undefined ? {} : { occurredAt: endedAt }),
           attrs: {
             exit_code: frame.exitCode,
             signal: frame.signal,
