@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { inflateSync } from 'node:zlib';
 import type { RedactionRecord } from '@orcareplay/schema';
 
 /** Bump when a rule is added or changed, so old traces stay interpretable. */
@@ -87,110 +88,164 @@ const RULES: Rule[] = [
  *
  * The exemption is granted on the payload, not on the syntax around it or the label in front of
  * it, because every argument for it is an argument about *pixels* — bytes that cannot hide a
- * credential a reader could recover, and that the sweep was never protecting. Three things follow
- * from putting it that way, each of which was a hole when this keyed on `data:image/<type>;base64,`
- * instead:
+ * credential a reader could recover, and that the sweep was never protecting. Three earlier drafts
+ * each granted it on something a caller writes, and each was a hole:
  *
- *   - **The spelling stops mattering.** OpenAI puts an image on the wire as a `data:` URI;
- *     Anthropic sends `{"type":"base64","media_type":"image/png","data":"…"}` with no prefix at
- *     all, so a screenshot in a `/v1/messages` recording was still being shredded. A rule about the
- *     bytes covers both, and whatever the next dialect does.
- *   - **The label stops being evidence.** It is text an agent wrote in front of the payload, so an
- *     exemption granted on it is one any caller can claim: the same encoded credential was spared
- *     behind `image/png` and swept behind `application/pdf`.
- *   - **The run cannot walk off the end of the payload.** The old class admitted `\`, so a
- *     JSON-escaped newline — `\` then `n`, both in the class — did not end it, and a token on the
- *     next line was swallowed into the span and never swept.
+ *   - the media type, so `data:image/png;base64,<credential>` bought one
+ *   - the signature, so `iVBORw0KGgo<credential>` bought one
+ *   - the *framing*, so `PNG signature + IHDR + IDAT{<credential>} + IEND` with self-consistent
+ *     lengths bought one — five bytes of decoration for JPEG, seven for GIF
  *
- * Validated end to end rather than by its first bytes, because a signature is also just text a
- * caller can write: `iVBORw0KGgo` followed by a base64 credential passed a head-only check, and
- * the credential landed in the trace verbatim with nothing in `redactions.json`. A structure that
- * has to close — PNG's chunk walk ending at `IEND`, JPEG's `FF D9`, GIF's `0x3B`, a declared size
- * for BMP, WebP and AVIF — is not something an appended secret survives.
+ * The last of those is why the check now looks at the content. A PNG has to have an IDAT stream
+ * that actually inflates, to exactly the size its own IHDR declares; a JPEG has to have a marker
+ * chain that reaches EOI with a frame header in it. A credential wrapped in framing is neither.
  *
- * What this does not claim: a secret hidden *inside* otherwise valid pixel data is not detectable
- * here, and no content rule could. The line is that a payload which is not a picture does not get
- * a picture's exemption.
+ * Measured, on a 1 MB PNG: the chunk walk costs 0.2 ms and the inflate 1.2 ms, against the 55 ms
+ * the base64 decode already costs. The cheap version of this check was not cheaper in any way that
+ * matters.
+ *
+ * Only PNG and JPEG. Earlier drafts listed GIF, BMP, WebP and AVIF as well, on no evidence — the
+ * case this exists for is a browser screenshot, which is one of these two, and every one of those
+ * formats validated by a size field the same caller computes. A format with no validator does not
+ * get an exemption; it gets the sweep, as it did before any of this.
+ *
+ * What this still does not claim: a secret hidden *inside* real pixel data is not detectable here,
+ * and no content rule could be. The line is that the payload has to be a picture — not that a
+ * picture cannot be abused.
  */
-const BASE64_RUN = /(?:[A-Za-z0-9+/=]|\\[/\\])+/g;
+// Padding only where padding belongs. `Buffer.from(x, 'base64')` stops at the first `=` and
+// ignores the rest, so a run of `<image>==<credential>` decoded to a valid image and the span
+// covered the credential with it. Ending the run at the padding splits the two, and an interior
+// `=` ends a run for the same reason.
+const BASE64_RUN = /(?:[A-Za-z0-9+/]|\\[/\\])+={0,2}/g;
 
 /** Shortest run worth decoding: below this it cannot hold a header and any pixels. */
 const MIN_RASTER_CHARS = 40;
 
-/** Reads a big-endian uint32 without throwing past the end. */
-function be32(b: Buffer, at: number): number {
-  return at + 4 <= b.length ? b.readUInt32BE(at) : Number.NaN;
+/**
+ * Whether these bytes are a PNG whose pixel data is really pixel data.
+ *
+ * The chunk walk has to close at `IEND` having consumed the buffer, *and* the concatenated `IDAT`
+ * stream has to inflate to exactly the size `IHDR` describes. The walk alone is framing — lengths
+ * a caller sets — and framing is what the previous version accepted.
+ *
+ * Adam7 is not reconstructed: an interlaced image is accepted on a successful inflate alone,
+ * because the seven passes do not sum to the plain formula and a wrong rejection here puts a real
+ * screenshot back through the shredder. Inflating at all is the part a wrapped credential fails.
+ */
+function isWholePng(b: Buffer): boolean {
+  if (!b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return false;
+  }
+  let at = 8;
+  let ihdr: Buffer | undefined;
+  const idat: Buffer[] = [];
+  for (;;) {
+    if (at + 12 > b.length) return false;
+    const len = b.readUInt32BE(at);
+    const type = b.subarray(at + 4, at + 8).toString('latin1');
+    const next = at + 12 + len; // length + type + data + CRC
+    if (len < 0 || next > b.length) return false;
+    const data = b.subarray(at + 8, at + 8 + len);
+    if (type === 'IHDR') ihdr = Buffer.from(data);
+    else if (type === 'IDAT') idat.push(Buffer.from(data));
+    else if (type === 'IEND') {
+      if (next !== b.length || ihdr === undefined || ihdr.length < 13 || idat.length === 0) {
+        return false;
+      }
+      break;
+    }
+    at = next;
+  }
+
+  const width = ihdr!.readUInt32BE(0);
+  const height = ihdr!.readUInt32BE(4);
+  const depth = ihdr![8]!;
+  const colour = ihdr![9]!;
+  const interlace = ihdr![12]!;
+  if (width === 0 || height === 0) return false;
+
+  let raw: Buffer;
+  try {
+    raw = inflateSync(Buffer.concat(idat));
+  } catch {
+    // Not a zlib stream, which is what a credential wrapped in an IDAT chunk is.
+    return false;
+  }
+  if (interlace !== 0) return raw.length > 0;
+
+  const channels = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[colour];
+  if (channels === undefined) return false;
+  const rowBytes = Math.ceil((width * channels * depth) / 8);
+  return raw.length === height * (rowBytes + 1);
 }
 
 /**
- * Whether these bytes are one complete raster image and nothing else.
+ * Whether these bytes are a JPEG whose marker chain closes.
  *
- * Each walk has to *close* — consume exactly the buffer, or end on the format's terminator — so
- * appending to a real image breaks it, which is the case a head-only check let through.
+ * Segment by segment to `EOI`, requiring a frame header along the way, and requiring the scan's
+ * entropy-coded data to be delimited the way a decoder would read it. `FF D8 FF <credential> FF D9`
+ * — the previous version's whole test — has no frame and no coherent chain.
  */
-function isWholeRasterImage(b: Buffer): boolean {
-  if (b.length < 8) return false;
-  const ascii = (at: number, n: number) => b.subarray(at, at + n).toString('latin1');
-
-  // PNG: signature, then length-prefixed chunks, ending at IEND with nothing after it.
-  if (b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
-    let at = 8;
-    for (;;) {
-      const len = be32(b, at);
-      if (!Number.isFinite(len) || len < 0) return false;
-      const type = ascii(at + 4, 4);
-      const next = at + 12 + len; // length + type + data + CRC
-      if (next > b.length) return false;
-      if (type === 'IEND') return next === b.length;
-      at = next;
+function isWholeJpeg(b: Buffer): boolean {
+  if (b[0] !== 0xff || b[1] !== 0xd8) return false;
+  let at = 2;
+  let sawFrame = false;
+  while (at + 1 < b.length) {
+    if (b[at] !== 0xff) return false;
+    let marker = b[at + 1]!;
+    // Fill bytes are legal between segments.
+    while (marker === 0xff && at + 2 < b.length) {
+      at += 1;
+      marker = b[at + 1]!;
+    }
+    at += 2;
+    if (marker === 0xd9) return at === b.length; // EOI, and nothing after it
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue; // standalone
+    if (at + 2 > b.length) return false;
+    const len = b.readUInt16BE(at);
+    if (len < 2 || at + len > b.length) return false;
+    // SOF0..SOF15, excluding the huffman/arithmetic/restart markers in that range.
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      sawFrame = true;
+    }
+    at += len;
+    if (marker === 0xda) {
+      if (!sawFrame) return false;
+      // Entropy-coded data: any `FF` that is not a stuffed `FF 00` or a restart ends it.
+      while (at + 1 < b.length) {
+        if (b[at] === 0xff && b[at + 1] !== 0x00 && !(b[at + 1]! >= 0xd0 && b[at + 1]! <= 0xd7)) {
+          break;
+        }
+        at += 1;
+      }
     }
   }
-
-  // JPEG: SOI at the front, EOI at the very end.
-  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) {
-    return b[b.length - 2] === 0xff && b[b.length - 1] === 0xd9;
-  }
-
-  // GIF: header, and the trailer byte last.
-  if (ascii(0, 6) === 'GIF87a' || ascii(0, 6) === 'GIF89a') {
-    return b[b.length - 1] === 0x3b;
-  }
-
-  // BMP: the file-size field is the whole file.
-  if (b[0] === 0x42 && b[1] === 0x4d) {
-    return b.length >= 6 && b.readUInt32LE(2) === b.length;
-  }
-
-  // WebP: the RIFF size covers everything after the first eight bytes.
-  if (ascii(0, 4) === 'RIFF' && ascii(8, 12 - 8) === 'WEBP') {
-    return b.length >= 12 && b.readUInt32LE(4) === b.length - 8;
-  }
-
-  // AVIF and friends: top-level boxes, which must tile the buffer exactly.
-  if (ascii(4, 4) === 'ftyp') {
-    let at = 0;
-    while (at < b.length) {
-      const size = be32(b, at);
-      if (!Number.isFinite(size) || size < 8 || at + size > b.length) return false;
-      at += size;
-    }
-    return at === b.length;
-  }
-
   return false;
+}
+
+/** Whether these bytes are one complete raster image and nothing else. */
+function isWholeRasterImage(b: Buffer): boolean {
+  if (b.length < 16) return false;
+  return isWholePng(b) || isWholeJpeg(b);
 }
 
 /**
  * The spans of `value` that are whole raster images.
  *
- * The head is checked before decoding, so a long run that is not an image costs four bytes rather
- * than a full decode — which matters because this runs over every string a trace writes.
+ * The signature is checked before anything is decoded, so a long run that is not an image costs
+ * two bytes rather than a decode — which matters because this runs over every string a trace
+ * writes.
  */
 function rasterSpans(value: string): [number, number][] {
   const spans: [number, number][] = [];
   for (const m of value.matchAll(BASE64_RUN)) {
     const run = m[0];
     if (run.length < MIN_RASTER_CHARS) continue;
+    // `iVBORw` and `/9j/` are what PNG and JPEG signatures look like once base64-encoded.
+    if (!run.startsWith('iVBORw') && !run.startsWith('/9j/') && !run.startsWith('\\/9j\\/')) {
+      continue;
+    }
     // `\/` and `\\` stand for payload characters; they are stripped before decoding and the span
     // still covers them, or the sweep would resume inside the image.
     const payload = run.replace(/\\(.)/g, '$1');
@@ -386,7 +441,11 @@ export class Redactor {
     for (const m of value.matchAll(TOKEN)) {
       const token = m[0];
       const start = m.index;
-      if (spans.some(([a, b]) => start >= a && start < b)) continue;
+      // Wholly inside, not merely starting inside. A TOKEN is `[A-Za-z0-9_-]+`, which runs on
+      // past an image payload through a `_` or `-` that base64 has no use for — so a token that
+      // began in the image and ended in a credential was skipped entire, and the credential with
+      // it. Overlap would be wrong the other way: it would exempt text outside the image.
+      if (spans.some(([a, b]) => start >= a && start + token.length <= b)) continue;
       if (token.length < MIN_ENTROPY_LENGTH || !looksRandom(token)) continue;
       if (entropy(token) <= ENTROPY_BITS_PER_CHAR) continue;
       out += value.slice(cut, start) + this.#hit('high_entropy', token, context, hits);
