@@ -106,15 +106,25 @@ export class ExchangeEventDeriver {
         path: exchange.path,
         messages: exchange.canonicalRequest.messages.length,
         tools: exchange.canonicalRequest.tools?.length ?? 0,
+        // Only where orca established the connection and therefore knows. Absent reads as "not
+        // recorded" rather than as HTTP/1.1, which is why it is left off instead of defaulted.
+        ...(exchange.alpn === undefined ? {} : { alpn: exchange.alpn }),
       },
       payload: exchange.rawRequest,
       // Absent rather than empty when nothing came back: an edge list naming nothing is noise a
       // reader has to interpret, and `causes` is optional precisely so it can be left off.
       ...(resultsAt.length > 0 ? { causesIndex: resultsAt } : {}),
     });
+    const requestAt = events.length - 1;
 
     const response = exchange.canonicalResponse;
     events.push({
+      // The edge every other request/response pair already had. Without it `orca graph --to` on a
+      // model.response walks backwards, finds no incoming edge, and reports that the run has no
+      // causal edges at all -- on a run whose graph is otherwise full of them. `net.response`,
+      // `tool.result` and `shell.result` all name what they answered; this is the same fact about
+      // the pair the recorder watched most directly.
+      causesIndex: [requestAt],
       type: 'model.response',
       actor: 'model',
       attrs: {
@@ -125,6 +135,19 @@ export class ExchangeEventDeriver {
         status: exchange.status,
         duration_ms: exchange.durationMs ?? 0,
         streamed: exchange.streamed,
+        // The payload below is the decoded body, so the encoding it arrived in is recorded here or
+        // nowhere: a promoted exchange keeps no response headers.
+        ...(exchange.responseDecodedFrom === undefined
+          ? {}
+          : { decoded_from: exchange.responseDecodedFrom }),
+        // Who answered. The trace said what was sent and what came back and never this, which is
+        // the first question asked of a recording that looks wrong — a gateway left behind in
+        // `~/.orca/config.json` redirects every run on the machine, and nothing in the run said so.
+        // On the response because it is a fact about the answer, and per exchange rather than in
+        // the manifest because the origin is chosen per request: a fork that changes provider
+        // changes it again mid-run. Absent means an older orca did not record it, never "the
+        // vendor's own API".
+        ...(exchange.upstream === undefined ? {} : { upstream: exchange.upstream }),
       },
       payload: exchange.rawResponse,
     });

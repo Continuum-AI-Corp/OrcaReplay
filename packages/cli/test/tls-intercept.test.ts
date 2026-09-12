@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { TraceReader } from '@orcareplay/core';
+import { TraceReader, listRuns } from '@orcareplay/core';
 import { RunCa } from '@orcareplay/proxy';
 import { validateEvent } from '@orcareplay/schema';
 import { parseArgs } from '../src/args.js';
@@ -44,7 +44,7 @@ describe('orca record --tls-intercept', () => {
   let ambient: Record<string, string | undefined>;
 
   async function startOrigin(
-    handler: (path: string) => { status: number; body: string },
+    handler: (path: string) => { status: number; body: string } | undefined,
   ): Promise<{ port: number; close: () => Promise<void> }> {
     const issued = originCa.issue('127.0.0.1');
     const server = createHttpsServer({ key: issued.keyPem, cert: issued.certPem }, (req, res) => {
@@ -52,6 +52,10 @@ describe('orca record --tls-intercept', () => {
       req.on('data', (c: Buffer) => void chunks.push(c));
       req.on('end', () => {
         const reply = handler(req.url ?? '/');
+        // `undefined` means never answer. That is the only way to hold an exchange in the state a
+        // client that leaves early puts it in -- request decrypted, no response header ever sent
+        // -- deterministically, rather than by racing a fast origin.
+        if (!reply) return;
         res.writeHead(reply.status, { 'content-type': 'application/json' });
         res.end(reply.body);
       });
@@ -76,10 +80,11 @@ describe('orca record --tls-intercept', () => {
       status: 200,
       body: JSON.stringify({ served: path, note: 'MODEL-BODY-MARKER' }),
     }));
-    bank = await startOrigin(() => ({
-      status: 200,
-      body: JSON.stringify({ balance: 'BANK-BODY-MARKER' }),
-    }));
+    bank = await startOrigin((path) =>
+      path === '/v3/never'
+        ? undefined
+        : { status: 200, body: JSON.stringify({ balance: 'BANK-BODY-MARKER' }) },
+    );
 
     lines = [];
     out = new Output({ write: (s) => void lines.push(s), isTTY: false });
@@ -225,6 +230,12 @@ describe('orca record --tls-intercept', () => {
     // Rejected before `RunCa.create`, so the run that is not going to happen leaves no private key
     // anywhere under the runs root — the same guarantee `--tls-hosts '*'` already has.
     expect(await grepRunDir(join(workspace, '.orca'), 'PRIVATE KEY')).toEqual([]);
+    // And before `ensureRunsDir`, so there is no runs root either. The key was the urgent half;
+    // this is the rest of it — a refused host list used to leave an empty run for `orca list` to
+    // show, the same way a refused upstream did.
+    expect(await listRuns(workspace), 'a refused host list must not have created a run').toEqual(
+      [],
+    );
   });
 
   /**
@@ -267,6 +278,49 @@ describe('orca record --tls-intercept', () => {
 
     const warnings = lines.join('').match(/tls\.unclaimed_path/g) ?? [];
     expect(warnings).toHaveLength(1);
+  });
+
+  it('blames the capture limit, not an unrecognised path, for a body it had to cut', async () => {
+    // 1.2 MiB against a 1 MiB limit. The truncation itself is fine -- `truncated: true`, the
+    // prefix kept -- but a body cut mid-JSON cannot be parsed by any dialect, so `add a dialect
+    // for it` is advice that cannot help. Driving this through a real origin printed exactly that
+    // about a path the openai dialect had claimed all along.
+    process.env.ORCA_TEST_TARGETS = JSON.stringify([
+      {
+        host: '127.0.0.1',
+        port: bank.port,
+        path: '/v1/chat/completions',
+        method: 'POST',
+        padKb: 1224,
+      },
+    ]);
+    await record(['--tls-intercept', '--tls-hosts', `127.0.0.1:${bank.port}`]);
+
+    const printed = lines.join('');
+    expect(printed).toContain('tls.request_too_large');
+    expect(printed).toContain('limit_bytes=1048576');
+    // The wrong one, specifically, must not appear.
+    expect(printed).not.toContain('tls.unclaimed_path');
+    expect(printed).not.toContain('plugins.md');
+  });
+
+  it('stays quiet about a call the agent abandoned before the origin answered', async () => {
+    // Same path and the same JSON body as the warning test above, so the only difference is that
+    // this one never got a response. `add a dialect for it` cannot help an exchange with nothing
+    // to replay, and a harness that opens calls and leaves would print this every turn.
+    process.env.ORCA_TEST_TARGETS = JSON.stringify([
+      {
+        host: '127.0.0.1',
+        port: bank.port,
+        path: '/v3/never',
+        method: 'POST',
+        body: JSON.stringify({ prompt: 'hello' }),
+        leave: true,
+      },
+    ]);
+    await record(['--tls-intercept', '--tls-hosts', `127.0.0.1:${bank.port}`]);
+
+    expect(lines.join('')).not.toContain('tls.unclaimed_path');
   });
 
   it('stays quiet about traffic that was never a model call to begin with', async () => {
@@ -447,11 +501,19 @@ describe('orca record --tls-intercept', () => {
   });
 });
 
-/** Every file under a run directory that contains `needle`. */
+/**
+ * Every file under a run directory that contains `needle`.
+ *
+ * A directory that is not there holds no files, and answering `[]` for it is the honest reading
+ * rather than a convenience: the callers ask whether a refused run left a key behind, and a runs
+ * root that was never created is the strongest possible no. It used to throw ENOENT instead, so
+ * moving the refusal ahead of `ensureRunsDir` failed the very test that asked for it.
+ */
 async function grepRunDir(runDir: string, needle: string): Promise<string[]> {
   const hits: string[] = [];
   const walk = async (dir: string): Promise<void> => {
-    for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
       const full = join(dir, entry.name);
       if (entry.isDirectory()) {
         await walk(full);

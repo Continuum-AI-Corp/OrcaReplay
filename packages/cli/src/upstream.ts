@@ -1,4 +1,5 @@
 import type { ParsedArgs } from './args.js';
+import { unusableOrigin } from '@orcareplay/proxy';
 import { gatewayHeaders, readConfig, resolveUpstream, sameOrigin } from './config.js';
 
 /**
@@ -17,6 +18,15 @@ import { gatewayHeaders, readConfig, resolveUpstream, sameOrigin } from './confi
 export interface UpstreamPlan {
   upstream: Record<string, string> | undefined;
   headers: Record<string, string> | undefined;
+  /**
+   * The origin the headers belong to, when they belong to one.
+   *
+   * The gateway key is attached per request rather than to every outbound call, because a
+   * forwarded request can legitimately go somewhere the gateway is not — a `/forward/` path names
+   * its own destination, and sending the gateway's credential there hands a third party a key
+   * they were never meant to see, which is the one outcome this plan exists to make impossible.
+   */
+  headersOrigin: string | undefined;
 }
 
 export async function upstreamPlan(
@@ -25,6 +35,24 @@ export async function upstreamPlan(
 ): Promise<UpstreamPlan> {
   const config = await readConfig(env);
   const upstream = await resolveUpstream(args, env);
+
+  // Refused here, because here is where all three sources meet: `--upstream-*`,
+  // `ORCA_UPSTREAM_*`, and the gateway from the config file. `orca setup` refuses one on the way
+  // in, but a config written before it did, a hand-edited one, an environment variable and a flag
+  // all still arrive unchecked — and on the record path an origin is not only sent, it is
+  // *printed*: `distinctOrigins` renders it on the recording line, and an origin `doFetch` cannot
+  // parse comes back inside undici's TypeError, which the proxy hands to the agent as a 500 body.
+  // Neither sink can be made safe by scrubbing alone, because `recordableOrigin` answers with a
+  // value for a scheme-less URL whose username parses as the protocol. Refusing closes both.
+  for (const [dialect, origin] of Object.entries(upstream ?? {})) {
+    const problem = unusableOrigin(origin);
+    if (problem === undefined) continue;
+    throw new Error(
+      `the upstream for ${dialect} is not an origin orca can use: ${problem}` +
+        '\n  give it as scheme, host and path: --upstream-openai https://gateway.example/v1' +
+        '\n  read in order: --upstream-*, then ORCA_UPSTREAM_*, then the gateway from orca setup',
+    );
+  }
   const headers = gatewayHeaders(config, env);
   // Unanimity, not `some`. `upstreamHeaders` are attached to every live call the proxy makes —
   // there is no per-dialect header channel — so if any origin we might reach is not the gateway,
@@ -42,5 +70,6 @@ export async function upstreamPlan(
   return {
     upstream,
     headers: goingToGateway && Object.keys(headers).length > 0 ? headers : undefined,
+    headersOrigin: goingToGateway ? config.gateway!.url : undefined,
   };
 }

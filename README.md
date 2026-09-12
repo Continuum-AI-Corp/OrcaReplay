@@ -3,7 +3,7 @@
 
 ### Your agent broke something at 2am. Replay it at 9am — exactly, offline, as many times as you like.
 
-Record any coding agent. Reproduce the run byte-for-byte with the network off. Fork it from any step
+Record any coding agent. Reproduce the run byte-for-byte with no model called. Fork it from any step
 onto a different model and see who gets it right.
 
 <a href="https://www.orcarouter.ai">
@@ -14,7 +14,11 @@ onto a different model and see who gets it right.
 for Claude, GPT, Gemini, Grok, DeepSeek, Qwen and the rest. It is what `orca setup` points at by
 default, and what makes `orca compare` a single command instead of four provider accounts.
 
-[All models](https://www.orcarouter.ai/models) · [OrcaCode Review](https://www.orcarouter.ai/code-review) · [X](https://x.com/OrcaRouter) · [Hugging Face](https://huggingface.co/orcarouter)
+Find us: [OrcaRouter All model APIs](https://www.orcarouter.ai/models) 
+
+Github Repos: [OrcaCode Review](https://www.orcarouter.ai/code-review) · [OrcaRouter Lite](https://github.com/Continuum-AI-Corp/OrcaRouter-Lite) 
+
+Connect: [X](https://x.com/OrcaRouter) · [Discord](https://discord.com/invite/YEubt8enRA) · [Hugging Face](https://huggingface.co/orcarouter) · [Ollama](https://ollama.com/orcarouter)
 
 <br clear="left">
 
@@ -23,10 +27,11 @@ default, and what makes `orca compare` a single command instead of four provider
 [![Node](https://img.shields.io/badge/node-20%2B-brightgreen)](#install)
 [![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Agents%20SDK%20%C2%B7%20AI%20SDK%20%C2%B7%20any-black)](#which-agents)
 [![Good first issues](https://img.shields.io/badge/good%20first%20issues-12-orange)](docs/good-first-issues.md)
+[![Mentioned in Awesome Claude Code](https://awesome.re/mentioned-badge.svg)](https://github.com/hesreallyhim/awesome-claude-code)
 
 ![Recording a Claude Code run, replaying it offline, then forking it onto two models](docs/demo-cli.gif)
 
-<sup>Real output from one session — a Claude Code run recorded, replayed with the network off, then
+<sup>Real output from one session — a Claude Code run recorded, replayed against the recording, then
 forked at checkpoint 4 onto two models and graded by `npx tsc --noEmit`. Nothing here is mocked up.</sup>
 
 ## Try it in three commands
@@ -43,6 +48,18 @@ from step 4 onward. The model is the only variable, which is what makes the answ
 ```console
 npm i -g orcareplay
 ```
+
+The three commands at the top need an agent installed, a key, a network and real tokens. If you
+have none of those yet, one command brings its own:
+
+```console
+orca quickstart
+```
+
+It writes a small project with a genuine bug in it and a recording of an agent fixing that bug,
+then replays the recording against the project with no model called: two failing tests before,
+four passing after, three turns served from the trace and nothing spent. `--full` prints the whole
+timeline and the replay as it happened.
 
 ## Read your agent's own system prompt
 
@@ -70,7 +87,7 @@ OrcaReplay answers that by giving you the run back.
 |---|---|---|
 | Tells you what a run cost | ✅ | ✅ |
 | Tells you which tool call deleted the file | sometimes | ✅ |
-| Runs the agent again and gets the same answer | ❌ | ✅ offline, byte-for-byte |
+| Runs the agent again and gets the same answer | ❌ | ✅ from the recording, byte-for-byte |
 | Lets you change the model and re-run from step 4 | ❌ | ✅ |
 | Needs you to modify your agent | usually an SDK wrapper | ❌ two env vars |
 | Works after you close the terminal | ❌ | ✅ it is a file |
@@ -80,8 +97,9 @@ OrcaReplay answers that by giving you the run back.
 The last two rows are the ones an SDK wrapper structurally cannot reach. Capture happens *below*
 the agent — at the process and socket boundary — so it does not matter whether the agent is
 yours, whether you can edit it, or whether it even holds an API key: a Codex CLI signed in with
-a ChatGPT subscription talks to its own backend over TLS and has no base URL to point anywhere,
-and orca can still record it. See
+a ChatGPT subscription talks to its own backend over TLS, with a credential that only that backend
+accepts, so it cannot be pointed elsewhere and stay the same session — and orca can still record
+it. See
 [when the harness will not be redirected](#when-the-harness-will-not-be-redirected).
 
 ## How it works
@@ -92,6 +110,8 @@ request, each streamed response, every tool call the model emitted, and every to
 harness produced. That one property is what the tool is built on, and it is why **OrcaReplay does
 not patch your agent** — it stands up a local proxy, sets two environment variables, and gets out of
 the way.
+
+**What "egress blocked" means, exactly.** On replay the proxy refuses to forward anything it cannot serve from the trace, so no model is called and no tokens are spent — that run prints `egress=blocked`. `--loose` lifts it deliberately: an unmatched request is then answered by the provider and recorded as a major divergence, and the same line reads `egress=live-on-unmatched`. A replay still *executes the recorded tool calls for real*, and a tool that opens its own socket — a shell command running `curl`, an MCP server fetching something — is outside the guarantee either way. By default it never reaches the proxy and goes to the network as usual. Under `--tls-intercept` it does reach the proxy, because that sets `HTTPS_PROXY` for the whole child: a host off the intercept list is tunnelled through untouched, though its hostname, port and byte counts still land in the trace, and a host on the list is refused there like any other unmatched call. Replay is not a sandbox; if you need one, run it inside one.
 
 Three more layers catch what the protocol cannot see: an exit code, a real duration, which stream a
 byte came out of, a file written without telling anyone. A fifth exists for the agents that read no
@@ -446,22 +466,61 @@ whether orca understands the wire format it speaks once it arrives.
 | **Claude Code** | `ANTHROPIC_BASE_URL` | works — validated against a real bug fix, [in detail](docs/validation.md) |
 | **Codex CLI** (API key) | `OPENAI_BASE_URL` → Responses API | works |
 | **Codex CLI** (ChatGPT login) | `--tls-intercept` → Responses API | works, [with a decision to make](#when-the-harness-will-not-be-redirected) |
-| **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | works |
-| **Vercel AI SDK** | fetch hook — `orca record node -- node app.mjs` | works |
+| **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | works — the SDK itself, on the Responses API it defaults to, records and replays at `exact=1`, [in CI](test/integrations/); [its own tracing is a second egress](docs/integrations.md#openai-agents-sdk) |
+| **Vercel AI SDK** | fetch hook — `orca record node -- node app.mjs` | works — an agent posting to an origin compiled into its source records and replays at `exact=1`, [in CI](test/integrations/) |
 | **grok-cli** (and its Telegram bot) | `orca record grok` — `GROK_BASE_URL`, plus the hook for its sub-agents | works |
 | **OpenClaw** | `orca record openclaw` — the hook for the gateway, inherited variables for the agents it spawns | works |
 | **opencode** | `orca record opencode` | adapter shipped, both origins redirected |
-| **LangGraph / LangChain** | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | should work — it goes through the official clients, but nothing here tests it yet |
+| **goose** (Block) | `orca record goose` — `OPENAI_HOST` **and** `OPENAI_BASE_URL`, `ANTHROPIC_HOST` → Responses API | works — driven end to end against goose 1.49.0, [what is different about it](#the-harness-that-reads-different-variables) |
+| **LangGraph / LangChain** | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | works — a two-node graph, streaming and with a tool, records and replays at `exact=2` and forks live, [in CI](test/integrations/) |
+| **OpenHands** | `orca record generic-openai -- python your_agent.py` — its SDK wraps LiteLLM and reads `OPENAI_API_BASE` | works — the SDK's own LLM layer records and replays at `exact=1`, [in CI](test/integrations/) |
+| **CrewAI** | `orca record generic-openai -- python your_crew.py` — since 1.x its own provider, reading `OPENAI_API_BASE` and `OPENAI_BASE_URL` | works — a real `Agent`, `Task` and `Crew` records and replays at `exact=1`, [in CI](test/integrations/); [what 1.x changed](docs/integrations.md#crewai) |
+| **Aider** | `orca record generic-openai -- python your_agent.py` — routes through LiteLLM, which reads `OPENAI_API_BASE` | works — the LiteLLM layer records and replays at `exact=1`, [in CI](test/integrations/) |
+| **browser-use** | `orca record generic-openai -- python your_task.py` — its `ChatOpenAI` passes an unset `base_url` straight through | works — records and replays at `exact=1`, [in CI](test/integrations/); LLM layer only, [the browser is not driven](docs/integrations.md#browser-use) |
 | **Hermes** (Nous Research) | `ORCA_BASE_URL_VARS=… orca record generic-openai -- hermes …` | should work — it overrides per provider; [name the variable](#a-base-url-variable-orca-has-never-heard-of) |
 | **Codex-in-the-IDE** | `orca record exec --tls-intercept -- code .` | works — the extension spawns the agent, and it inherits the capture |
 | **a bot with a hardcoded origin** | `orca record exec --tls-intercept -- <cmd>` | works — a Grok bot posting to a URL in its own source, [in detail](#an-agent-that-reads-nothing-at-all) |
 | **an agent in a sandbox or on another machine** | `orca attach` | works — orca is reachable and prints what to export, [in detail](#an-agent-that-is-not-on-this-machine) |
 | **anything else** | `orca record generic-openai -- <cmd>` | works if it reads a base-URL variable; `orca record node -- <cmd>` if it does not |
 
-Only Claude Code has been driven end to end against the real harness, and
-[it broke four things doing it](docs/validation.md). The rest are held to the adapter contract and
-to fixtures that record the exact variables each one sets, so a harness that renames the variable
-it reads turns a check red instead of producing an empty trace.
+Claude Code, Hermes and goose have been driven end to end against the real harness, and each of
+them broke something. Claude Code [broke four things](docs/validation.md); Hermes found a streaming
+exchange the proxy was dropping entirely; goose broke two more, and neither was in the adapter —
+one was the replay matcher, one was a run reporting success over a trace of nothing but errors. The
+rest are held to the adapter contract and to fixtures that record the exact variables each one
+sets, so a harness that renames the variable it reads turns a check red instead of producing an
+empty trace.
+
+### The harness that reads different variables
+
+Every other OpenAI-shaped client in this table reads `OPENAI_BASE_URL`. goose reads it too, but it
+reads `OPENAI_HOST` **first** — and for Anthropic it reads `ANTHROPIC_HOST` and nothing else.
+
+That combination is worse than it sounds, because both halves fail silently:
+
+- Setting only `OPENAI_BASE_URL` works right up until the user already has `OPENAI_HOST` exported
+  for something else. Then their value wins, the run goes to their origin, and orca prints a clean
+  recording over an empty trace.
+- `ANTHROPIC_BASE_URL` — the variable `generic-openai` sets, and the one the rest of the ecosystem
+  reads — does nothing at all here. A sink addressed only by it receives no request.
+
+So the adapter sets `OPENAI_HOST`, `OPENAI_BASE_URL` and `ANTHROPIC_HOST`, all at the same proxy,
+and the fixture pins all three. The traffic that arrives is the Responses API — `POST /v1/responses`
+plus one `GET /v1/models` on start-up — which the proxy's `openai-responses` dialect already claims.
+
+```console
+GOOSE_PROVIDER=openai GOOSE_MODEL=<model> orca record goose -- run -t "fix the failing test"
+```
+
+`GOOSE_PROVIDER` and `GOOSE_MODEL` are passed through, never invented: goose has no default for a
+custom endpoint, and choosing one for you would launch a different agent than `goose` does.
+
+Two limits worth knowing before you rely on it. goose runs its shell without going through orca's
+PATH shim, so `shell` tool calls are in the trace with their output but without the real exit code,
+duration or stdout/stderr split — record with `--no-shell` to claim nothing rather than that. And
+goose asks a second model for a session title *while the conversation is already under way*, so
+that call and the first real turn race; the replay matcher handles them arriving in either order,
+which it did not before goose was the first harness to do this.
 
 ### A gateway that launches the coding agent
 
@@ -575,8 +634,16 @@ If you record an agent this way and it works, an adapter is about twenty lines �
 ## When the harness will not be redirected
 
 Base-URL injection captures every harness that reads a base-URL variable, and the fetch hook covers
-the Node ones that do not. A Codex CLI signed in with a ChatGPT subscription is neither: it talks to
-its own backend over TLS, so there is no origin to rewrite and no `fetch` of ours to reach.
+the Node ones that do not. A Codex CLI signed in with a ChatGPT subscription is neither — but not
+for the reason this section used to give.
+
+It *does* read a provider base URL, and an explicit one overrides the ChatGPT backend; both paths
+even speak the same wire protocol. What is bound to that backend is the **credential**: a signed-in
+subscription carries a plan token the ChatGPT backend accepts and `api.openai.com` does not. Point
+the URL somewhere else and Codex asks for an API key instead — you are no longer recording the
+subscription session, you are recording a different one. Codex is Rust, so there is no `fetch` of
+ours to reach either.
+
 `--tls-intercept` is the answer to that, and it is deliberately a separate decision you have to
 make, because it mints a certificate authority.
 
@@ -657,6 +724,7 @@ Early. `v0` is the walking skeleton of the three commands above. Everything belo
 | Machine-readable output (`--json`) | working — one JSON document on stdout, diagnostics on stderr, failures as JSON |
 | Causal graph (`orca graph`) | working — what caused what, as a table or as JSON. Every edge says whether the trace recorded it or orca derived it just now, and names the rule either way. `--to N` narrows to the chain that produced one event |
 | Shareable cards | working — `orca export --card` draws one causal chain, `--graph-card` draws the whole run with that chain lit, and `compare --share` draws the verdict table. `.svg` always; `.png` and `.gif` when the optional render toolchain is installed, which `orca doctor` reports and `npm ci` never pulls in |
+| First run without an agent (`orca quickstart`) | working — the package carries a real recording and the project it was made against, and replays one over the other offline, so the first look costs no key, no network and no tokens |
 | MCP server (`orca mcp`) | working — six tools over stdio, so an agent can read, explain and replay its own runs |
 | Programmatic API (`Orca`) | working — the commands render what it returns, so the terminal is a view of one source of truth |
 | Replaying a session you typed into | working, and approximate — [what that means](#replaying-a-session-you-typed-into) |
@@ -671,7 +739,7 @@ Early. `v0` is the walking skeleton of the three commands above. Everything belo
 | Non-model network capture | working — opt in with `--tls-intercept`; mints a per-run CA the launched agent alone trusts, decrypts an allowlist of hosts, tunnels the rest unread, and deletes the key when the run ends |
 | Codex subscription model capture/replay | working — recognizes the `/backend-api/codex/responses` HTTPS fallback, decodes zstd request bodies for matching, and serves the recorded SSE response without opening the origin during replay |
 | Validated against a real agent | Claude Code, recording a real fix to a real bug: recorded, replayed offline end to end, forked from a checkpoint and exported. It broke four things no fixture could have produced, all since fixed — [what a real agent found](docs/validation.md) |
-| Subscription-auth harnesses | Claude Code works. A Codex CLI signed in with a ChatGPT subscription talks to its own backend, so there is no origin to rewrite: it needs `--tls-intercept`. With an API key it needs nothing special |
+| Subscription-auth harnesses | Claude Code works. A Codex CLI signed in with a ChatGPT subscription carries a plan credential only its own backend accepts, so redirecting the URL would record a different session rather than that one: it needs `--tls-intercept`. With an API key it needs nothing special |
 
 ## Replaying a session you typed into
 
@@ -814,6 +882,7 @@ interface first, with a second implementation showing it is not shaped around on
 **Reference:**
 
 - [`spec/orca-trace-v0.md`](spec/orca-trace-v0.md) — the normative trace format
+- [`docs/integrations.md`](docs/integrations.md) — recording a framework, one command each, every number asserted in CI
 - [`docs/architecture.md`](docs/architecture.md) — how capture, replay and fork actually work
 - [`docs/validation.md`](docs/validation.md) — what broke the first time this met a real agent
 - [`docs/launch-path.md`](docs/launch-path.md) — what is built, what is not, and what is next
@@ -832,8 +901,9 @@ already written down.
   about twenty lines — [docs/plugins.md](docs/plugins.md). If it does not, `node` may already cover
   it; a recording that comes back empty from a harness not listed [above](#which-agents) is worth
   an issue either way.
-- **Prove LangGraph.** It should work through the official clients and nothing here tests it. An
-  end-to-end test against a stub upstream would turn a "should" into a row that CI can turn red.
+- **Add a framework to the integration checks.** `test/integrations/` records a real framework
+  against a stub origin, kills the origin and replays it. Eight are covered; AutoGen, LlamaIndex,
+  Pydantic AI and smolagents are not. A new one is a script and a row.
 - **Reimplement the reader.** The spec is CC BY 4.0 on purpose. There is already a Python reader;
   Go and Rust are open.
 - **Break the replay.** The matching ladder is the heart of this and the fastest way to improve it

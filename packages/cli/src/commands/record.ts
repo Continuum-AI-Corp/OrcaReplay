@@ -3,7 +3,14 @@ import { readFile } from 'node:fs/promises';
 import { delimiter, resolve } from 'node:path';
 import { TraceWriter, ensureRunsDir } from '@orcareplay/core';
 import { FsCapture } from '@orcareplay/fs-capture';
-import { createProxy, RunCa, type NetExchange, type RecordedExchange } from '@orcareplay/proxy';
+import {
+  createProxy,
+  unusableOrigin,
+  recordableOrigin,
+  RunCa,
+  type NetExchange,
+  type RecordedExchange,
+} from '@orcareplay/proxy';
 import { captureSession, defaultAdapters, resolveLaunch, snapshotDir } from '@orcareplay/adapters';
 import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
@@ -13,7 +20,7 @@ import { SerialQueue } from '../serial.js';
 import { appendSnapshot } from '../fs-events.js';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
-import { persistNetExchange, setupTlsCapture, trustRunCa } from '../tls-capture.js';
+import { persistNetExchange, planTlsCapture, setupTlsCapture, trustRunCa } from '../tls-capture.js';
 import { upstreamPlan } from '../upstream.js';
 import { ORCA_VERSION } from '../version.js';
 
@@ -83,6 +90,22 @@ async function runRecording(
   let adapter: Adapter | undefined;
   if (agentName) {
     adapter = registry.get(agentName);
+  } else if (args.passthrough.length > 0) {
+    // A command after `--` is not a hint about the environment; it is the answer. Detection is
+    // machine-wide by construction — every adapter's is `detectAgent(binaries, homePaths)`, which
+    // asks whether a binary is on PATH or a directory exists under `$HOME`, and neither is a fact
+    // about this directory. So on a machine with Claude Code installed,
+    // `orca record -- python my_graph.py` detected `claude-code` and launched *that*, handing it
+    // `python my_graph.py` as arguments. The run recorded, so the failure looked like a bad key
+    // rather than like orca having started the wrong program.
+    //
+    // `generic-openai` rather than `exec`: both decline to guess what the command is, but only one
+    // of them redirects anything. `exec` points the agent nowhere and warns that interception is
+    // required — correct for a Go binary with its origin compiled in, and wrong as a default,
+    // because most things run this way read a base-URL variable and would have been captured by
+    // setting the three that `generic-openai` sets. Sending everyone to `--tls-intercept` to record
+    // a Python script is a worse answer than the bug this replaces.
+    adapter = registry.get('generic-openai');
   } else {
     adapter = await registry.detect(cwd);
     if (!adapter) {
@@ -94,6 +117,16 @@ async function runRecording(
     }
     out.info('adapter.detected', { id: adapter.id });
   }
+
+  // Before the run directory exists, because both of these refuse: `upstreamPlan` an upstream that
+  // is not an origin, `planTlsCapture` a `--tls-hosts` list that names `*` or contradicts itself
+  // and an `ORCA_TLS_UPSTREAM_CA` that cannot be read. Resolved after it, a typo in any of them
+  // left an empty run behind for `orca list` to show. Neither depends on more than the arguments,
+  // the environment and a file the run was going to read anyway, so there is no reason for either
+  // to run later — and `planTlsCapture` is the refusing half of `setupTlsCapture` alone, so the
+  // certificate authority is still minted below, once the run has a directory to mint it into.
+  const plan = await upstreamPlan(args);
+  await planTlsCapture(args);
 
   const dir = await ensureRunsDir(cwd);
 
@@ -165,8 +198,6 @@ async function runRecording(
   // calls collide on index.lock. It also keeps seq in the order exchanges actually happened.
   const writes = new SerialQueue();
 
-  const plan = await upstreamPlan(args);
-
   /**
    * TLS interception, off unless the flag is present.
    *
@@ -208,13 +239,29 @@ async function runRecording(
   let commandToolCalls = 0;
   /** Commands the shim actually saw. Zero against a non-zero `commandToolCalls` is the warning. */
   let shellFrames = 0;
+  /**
+   * Exchanges the upstream answered with an error status.
+   *
+   * Counted because a run in which every model call failed is indistinguishable, from the summary
+   * line alone, from one that worked: the harness retries, gives up, exits 0, and orca prints
+   * `recorded … exit=0` over a trace whose every answer is a 503. That happened against a gateway
+   * whose credentials had lapsed, and nothing in the output said so.
+   */
+  let erroredExchanges = 0;
+  /** The status those errors carried, so the warning can name it rather than describe it. */
+  const errorStatuses = new Map<number, number>();
 
   const proxy = await createProxy({
     mode: 'record',
     upstream: plan.upstream,
     upstreamHeaders: plan.headers,
+    upstreamHeadersOrigin: plan.headersOrigin,
     onExchange: (exchange: RecordedExchange) => {
       modelExchanges += 1;
+      if (exchange.status >= 400) {
+        erroredExchanges += 1;
+        errorStatuses.set(exchange.status, (errorStatuses.get(exchange.status) ?? 0) + 1);
+      }
       writes.push(() => persist(exchange));
     },
     // A POST on a path no dialect claims is forwarded rather than refused, and lands in the trace
@@ -333,6 +380,17 @@ async function runRecording(
     run: writer.runId,
     adapter: adapter.id,
     proxy: proxy.url,
+    // `proxy` is orca's own address, so the line said where the agent would call and never where
+    // the call would go on to. A gateway left behind in `~/.orca/config.json` redirects every run
+    // on the machine, and the first sign of it used to be an answer from a model nobody asked for.
+    //
+    // Only when something was configured. Left alone, each dialect has its own vendor default and
+    // there is no single value to print — and `upstream=default` on every ordinary run is noise
+    // that would teach people to stop reading the line. The trace records the origin either way,
+    // per exchange, because that is where it is actually decided.
+    ...(distinctOrigins(plan.upstream).length > 0
+      ? { upstream: distinctOrigins(plan.upstream).join(',') }
+      : {}),
     fs: fs ? 'on' : 'off',
     shell: shell ? 'on' : 'off',
   });
@@ -484,24 +542,58 @@ async function runRecording(
    * the adapters; this guards the run, which is where a user actually meets it.
    */
   if (modelExchanges === 0) {
+    const baseUrls = Object.keys(launch.env)
+      .filter((name) => /(?:_BASE_URL|_API_BASE)$/.test(name))
+      .sort();
+    // Which cause is worth naming depends on how this adapter captures at all, and the line
+    // already carries the evidence: `set=none` means there was never a variable to be ignored.
+    // Printing "it may not read a base-URL variable" next to `set=none` contradicts the run's own
+    // output and sends the reader after a route that was never the route -- which is how the
+    // capture bug fixed earlier in this branch stayed hidden through a dozen rounds of debugging.
+    const cause =
+      baseUrls.length > 0
+        ? 'the agent never called the proxy — it may not read a base-URL variable'
+        : tls.ca
+          ? 'this adapter captures at the transport, and nothing orca decrypted looked like a model call'
+          : 'this adapter captures at the transport, and interception was not on';
     out.warn('capture.empty', {
       exchanges: 0,
-      cause: 'the agent never called the proxy — it may not read a base-URL variable',
-      set:
-        Object.keys(launch.env)
-          .filter((name) => /(?:_BASE_URL|_API_BASE)$/.test(name))
-          .sort()
-          .join(',') || 'none',
+      cause,
+      set: baseUrls.join(',') || 'none',
       next: 'orca doctor',
+    });
+  }
+
+  /**
+   * Every model call came back an error.
+   *
+   * `capture.empty` covers the run the proxy never saw. This covers the run it saw all of, where
+   * every answer was a refusal: an expired gateway credential, a model the account cannot reach, a
+   * provider outage. The harness retries, exhausts its attempts, prints its own error and exits 0,
+   * so the summary reads exactly like a successful recording — `recorded events=27 exit=0` — over
+   * a trace that contains no model output at all. Replaying it faithfully reproduces the failures.
+   *
+   * Only when *all* of them failed. A run that retried once and then worked is a run that worked,
+   * and warning about it would train people to ignore the line that matters.
+   */
+  if (modelExchanges > 0 && erroredExchanges === modelExchanges) {
+    const commonest = [...errorStatuses.entries()].sort((a, b) => b[1] - a[1])[0];
+    out.warn('capture.errors', {
+      exchanges: modelExchanges,
+      errors: erroredExchanges,
+      status: commonest ? commonest[0] : 'unknown',
+      cause: 'every model call the proxy forwarded came back an error',
+      effect: 'the trace holds the failures, not any model output — a replay reproduces those',
+      next: 'orca show to read the errors, then check the upstream credential or model id',
     });
   }
 
   /**
    * Shell capture that was on and recorded nothing.
    *
-   * `installShellShim` succeeding means a `bash` and an `sh` were written into the run directory
-   * and put at the front of PATH. It does not mean the harness went through them, and on Windows
-   * Claude Code does not: it finds its shell without consulting PATH, so the shim sits there
+   * `installShellShim` succeeding means a `sh`, a `bash` and a `zsh` were written into the run
+   * directory and put at the front of PATH. It does not mean the harness went through them, and
+   * on Windows Claude Code does not: it finds its shell without consulting PATH, so the shim sits
    * unused while `shell=on` is printed and the frames file stays empty. What is lost is precisely
    * what only the shim can see — the real exit code, the real duration, and which stream each byte
    * came from — while the commands still appear as tool calls, so nothing looks wrong.
@@ -605,4 +697,32 @@ async function runChild(
       resolve(code ?? 0);
     });
   });
+}
+
+/**
+ * The origins a configured upstream map actually names, deduplicated and safe to print.
+ *
+ * `resolveUpstream` writes one entry per dialect and `openai` and `openai-responses` always share
+ * a value — so the raw map renders a single gateway three times. What a reader wants is the set of
+ * places traffic can go, which is usually one.
+ *
+ * Through `recordableOrigin` for the same reason the trace goes through it, and against the same
+ * sentence: `orca setup --gateway` accepts a URL carrying the key — `https://user:pw@gw.example`,
+ * `https://gw.example?key=…` — and `config.ts` says of that file that "nothing ever prints it
+ * back". A line on the terminal is printing it back, and it is a line that ends up in CI logs.
+ */
+export function distinctOrigins(upstream: Record<string, string> | undefined): string[] {
+  const safe = Object.values(upstream ?? {})
+    // Dropped only where sanitising cannot work, so a gateway configured with its key in the URL
+    // still says *where* the traffic went. `recordableOrigin` removes userinfo and query, which is
+    // enough for every `http(s)://` value — but a scheme-less URL parses with its username as the
+    // protocol, so it comes back as `myuser://PASSWORD@gw.example/v1`, credential intact, and a
+    // filter keeping everything that is not `undefined` kept it. There is no sanitising that: with
+    // no scheme there is no telling which half of `a:b` was meant as the host. `upstreamPlan`
+    // refuses these before a run starts; this is here because the function is exported and one
+    // line from a terminal.
+    .filter((origin) => unusableOrigin(origin) === undefined)
+    .map(recordableOrigin)
+    .filter((origin): origin is string => origin !== undefined);
+  return [...new Set(safe)];
 }

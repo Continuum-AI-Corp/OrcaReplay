@@ -138,8 +138,15 @@ async function runAttached(
 
   // The last thing that can refuse the run, and it runs before the trace exists: a writer created
   // first and abandoned by a throw leaves an unsealed run directory behind, which then wins `last`
-  // — so the next command someone types operates on the session that never happened.
-  planTlsCapture(args, replaying?.hosts);
+  // — so the next command someone types operates on the session that never happened. Awaited
+  // since it grew the one refusal that needs the disk, an `ORCA_TLS_UPSTREAM_CA` that cannot be
+  // read; the guarantee here is unchanged, it just covers one more way to fail.
+  await planTlsCapture(args, replaying?.hosts);
+
+  // Before the run directory exists, because this refuses an upstream that is not an origin: resolved after it, a
+  // typo in `--upstream-*` left an empty run behind for `orca list` to show. It depends on nothing
+  // but the arguments and the environment, so there is no reason for it to run any later.
+  const plan = await upstreamPlan(args);
 
   const dir = await ensureRunsDir(cwd);
   const writer = await TraceWriter.create(dir, {
@@ -154,7 +161,6 @@ async function runAttached(
   let unmatched = 0;
 
   const writes = new SerialQueue();
-  const plan = await upstreamPlan(args);
   const tls = await setupTlsCapture({
     args,
     out,
@@ -183,6 +189,7 @@ async function runAttached(
     port: requestedPort,
     upstream: plan.upstream,
     upstreamHeaders: plan.headers,
+    upstreamHeadersOrigin: plan.headersOrigin,
     ...tls.proxyOptions,
     onUnmatched: () => {
       unmatched += 1;
@@ -234,7 +241,13 @@ async function runAttached(
       proxy: proxyUrl,
       for: adapter.id,
       ...(replaying
-        ? { serving: replaySelector, exchanges: replaying.exchanges.length, egress: 'blocked' }
+        ? {
+            serving: replaySelector,
+            exchanges: replaying.exchanges.length,
+            // Same flag, same reason as `orca replay`: attach takes `--loose` too and passes it
+            // to the same proxy, so the label has to come from it rather than be assumed.
+            egress: args.bool('loose') ? 'live-on-unmatched' : 'blocked',
+          }
         : {}),
     });
     if (proxy.tls) {

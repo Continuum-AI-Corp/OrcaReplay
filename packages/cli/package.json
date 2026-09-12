@@ -1,6 +1,7 @@
 {
   "name": "orcareplay",
-  "version": "0.1.2",
+  "version": "0.2.4",
+  "mcpName": "io.github.Continuum-AI-Corp/orcareplay",
   "type": "module",
   "license": "Apache-2.0",
   "description": "Record, replay and fork debugger for AI agents",
@@ -14,7 +15,8 @@
     ".": "./dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "quickstart"
   ],
   "engines": {
     "node": ">=20.0.0"
@@ -36,15 +38,15 @@
     "directory": "packages/cli"
   },
   "dependencies": {
-    "@orcareplay/schema": "0.1.2",
-    "@orcareplay/plugin-api": "0.1.2",
-    "@orcareplay/core": "0.1.2",
-    "@orcareplay/proxy": "0.1.2",
-    "@orcareplay/providers": "0.1.2",
-    "@orcareplay/adapters": "0.1.2",
-    "@orcareplay/fs-capture": "0.1.2",
-    "@orcareplay/viewer": "0.1.2",
-    "@orcareplay/mcp-shim": "0.1.2",
-    "@orcareplay/shell-shim": "0.1.2"
+    "@orcareplay/schema": "0.2.4",
+    "@orcareplay/plugin-api": "0.2.4",
+    "@orcareplay/core": "0.2.4",
+    "@orcareplay/proxy": "0.2.4",
+    "@orcareplay/providers": "0.2.4",
+    "@orcareplay/adapters": "0.2.4",
+    "@orcareplay/fs-capture": "0.2.4",
+    "@orcareplay/viewer": "0.2.4",
+    "@orcareplay/mcp-shim": "0.2.4",
+    "@orcareplay/shell-shim": "0.2.4"
   }
 }

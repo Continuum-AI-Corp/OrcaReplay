@@ -82,6 +82,38 @@ describe('proxy — record mode', () => {
     expect(ex.usage?.input_tokens).toBe(12);
   });
 
+  it('sends the query the client wrote, on the endpoint orca resolved', async () => {
+    const up = stubUpstream(ANTHROPIC_REPLY);
+    const proxy = await createProxy({
+      mode: 'record',
+      fetchImpl: up.fetchImpl,
+      upstream: { anthropic: 'https://res.openai.azure.com/openai/deployments/dep' },
+    });
+    closers.push(proxy.close);
+
+    const res = await post(`${proxy.url}/v1/messages?api-version=2026-02-01`, ANTHROPIC_BODY);
+
+    // The path is orca's to normalise -- it chose this origin, and the incoming path cannot be
+    // trusted to carry the version segment. The query is not: the client set it, and Azure OpenAI
+    // requires `api-version` on every call, so losing it is `404 Resource not found` with nothing
+    // in the run to explain it.
+    expect(res.status).toBe(200);
+    expect(up.calls).toHaveLength(1);
+    expect(up.calls[0]!.url).toBe(
+      'https://res.openai.azure.com/openai/deployments/dep/v1/messages?api-version=2026-02-01',
+    );
+  });
+
+  it('adds no query to a request that had none', async () => {
+    const up = stubUpstream(ANTHROPIC_REPLY);
+    const proxy = await createProxy({ mode: 'record', fetchImpl: up.fetchImpl });
+    closers.push(proxy.close);
+
+    await post(`${proxy.url}/v1/messages`, ANTHROPIC_BODY);
+
+    expect(up.calls[0]!.url).not.toContain('?');
+  });
+
   it('forwards the caller auth header upstream but never records it', async () => {
     // Both halves matter. Claude Code under a subscription login authenticates with its own
     // `authorization: Bearer` header and ignores any injected key, so a proxy that drops it

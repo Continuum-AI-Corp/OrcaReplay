@@ -79,6 +79,22 @@ describe('orca record — a run that captured no model traffic', () => {
     expect(warning).toMatch(/base.?url/i);
   });
 
+  it('does not blame a base-URL variable when the adapter never set one', async () => {
+    // `exec` captures at the transport, so there was never a variable to be ignored -- and the
+    // same line says `set=none`. Blaming one contradicts the run's own output, and points the
+    // reader at a route that was never the route.
+    const args = parseArgs(['record', 'exec', '--', 'node', DEAF_AGENT]);
+    process.env.FAKE_AGENT_TURNS = '2';
+    delete process.env.FAKE_AGENT_CWD;
+    await recordCommand(args, out, workspace);
+
+    const warning = lines.find((l) => l.includes('capture.empty')) ?? '';
+    expect(warning).toContain('set=none');
+    expect(warning).not.toMatch(/base.?url/i);
+    // And it names what this adapter actually depends on instead.
+    expect(warning).toMatch(/transport/i);
+  });
+
   it('points at orca doctor, which is where the answer is', async () => {
     await record(DEAF_AGENT);
     const warning = lines.find((l) => l.includes('capture.empty')) ?? '';
@@ -88,5 +104,77 @@ describe('orca record — a run that captured no model traffic', () => {
   it('says nothing when the run did capture model traffic', async () => {
     await record(FAKE_AGENT);
     expect(lines.find((l) => l.includes('capture.empty'))).toBeUndefined();
+  });
+});
+
+/**
+ * A recording in which every model call came back an error.
+ *
+ * The other half of the same silence. `capture.empty` covers the run the proxy never saw; this
+ * covers the run it saw all of, where every answer was a refusal — an expired gateway credential,
+ * a model the account cannot reach. The harness retries, exhausts its attempts, prints its own
+ * error and exits 0, so the summary reads exactly like a successful recording over a trace with no
+ * model output in it. Found against a real gateway whose upstream auth had lapsed: eight recorded
+ * exchanges, all 503, and `recorded events=27 exit=0` printed without a word about it.
+ */
+describe('orca record — a run whose every model call failed', () => {
+  let workspace: string;
+  let model: Awaited<ReturnType<typeof startFakeModel>>;
+  let out: Output;
+  let lines: string[];
+
+  async function setup(failWith?: number) {
+    workspace = await mkdtemp(join(tmpdir(), 'orca-errors-'));
+    model = await startFakeModel(failWith === undefined ? {} : { failWith });
+    lines = [];
+    out = new Output({ write: (s) => void lines.push(s), isTTY: false });
+    await run('git', ['init', '-q'], { cwd: workspace });
+    await run('git', ['config', 'user.email', 'test@example.com'], { cwd: workspace });
+    await run('git', ['config', 'user.name', 'Test'], { cwd: workspace });
+    await writeFile(join(workspace, 'auth.ts'), 'export const fixed = false;\n');
+    const args = parseArgs([
+      'record',
+      'generic-openai',
+      '--upstream-anthropic',
+      model.url,
+      '--',
+      'node',
+      FAKE_AGENT,
+    ]);
+    process.env.FAKE_AGENT_TURNS = '2';
+    delete process.env.FAKE_AGENT_CWD;
+    return recordCommand(args, out, workspace);
+  }
+
+  afterEach(async () => {
+    await model.close();
+    await rm(workspace, { recursive: true, force: true });
+  });
+
+  it('warns, rather than reporting a clean recording over nothing usable', async () => {
+    const result = await setup(503);
+    // The exchanges are all there. That is the point: nothing about the count says they failed.
+    expect(result.modelExchanges).toBeGreaterThan(0);
+    const warning = lines.find((l) => l.includes('capture.errors'));
+    expect(warning, `no capture.errors in:\n${lines.join('\n')}`).toBeDefined();
+  });
+
+  it('names the status, so the cause is a lookup rather than an investigation', async () => {
+    await setup(503);
+    expect(lines.find((l) => l.includes('capture.errors')) ?? '').toContain('status=503');
+  });
+
+  it('says what the trace now holds, since a replay will reproduce it faithfully', async () => {
+    await setup(401);
+    const warning = lines.find((l) => l.includes('capture.errors')) ?? '';
+    expect(warning).toContain('status=401');
+    expect(warning).toMatch(/replay/i);
+  });
+
+  // A run that retried once and then worked is a run that worked. Warning about it would train
+  // people to ignore the line that matters.
+  it('says nothing when the calls succeeded', async () => {
+    await setup();
+    expect(lines.find((l) => l.includes('capture.errors'))).toBeUndefined();
   });
 });

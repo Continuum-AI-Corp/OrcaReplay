@@ -686,7 +686,6 @@ export async function revertStagedSwap(
   await rm(staging, { recursive: true, force: true });
 }
 
-
 /**
  * push — send a local run to the gateway.
  *

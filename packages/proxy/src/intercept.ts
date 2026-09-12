@@ -56,8 +56,14 @@ const SECRET_REQUEST_HEADERS = new Set(AUTH_REQUEST_HEADERS);
 /** A response can hand out credentials too. `set-cookie` is a session, not metadata. */
 const SECRET_RESPONSE_HEADERS = new Set(AUTH_RESPONSE_HEADERS);
 
-/** Enough to hold any model exchange; short of enough to hold somebody's video download. */
-const DEFAULT_MAX_CAPTURED_BYTES = 1024 * 1024;
+/**
+ * Enough to hold any model exchange; short of enough to hold somebody's video download.
+ *
+ * Exported because a run that hits it has to be able to say so in the number the operator will
+ * measure their conversation against. A warning that says "too large" without saying how large is
+ * a warning nobody can act on.
+ */
+export const DEFAULT_MAX_CAPTURED_BYTES = 1024 * 1024;
 
 /** One decrypted HTTP request and its reply, as seen inside an intercepted TLS session. */
 export interface NetExchange {
@@ -70,8 +76,18 @@ export interface NetExchange {
   requestBody: string;
   requestTruncated: boolean;
   status: number;
+  /**
+   * Auth headers removed, and -- when orca decoded the body -- the two headers that described the
+   * encoding it removed. See {@link headersWithoutEncoding}.
+   */
   responseHeaders: Record<string, string>;
   responseBody: string;
+  /**
+   * The `content-encoding` orca decoded away, when there was one. Absent when the recorded body is
+   * exactly the bytes that arrived, which is the ordinary case: `accept-encoding` is stripped from
+   * every intercepted request so an origin that honours it answers in plaintext.
+   */
+  responseDecodedFrom?: string;
   responseTruncated: boolean;
   /** The full size on the wire, even where the captured body was truncated. */
   responseBytes: number;
@@ -84,6 +100,16 @@ export interface NetExchange {
    * question a trace cannot answer.
    */
   alpn?: string;
+  /**
+   * True when the client went away before the response finished, so the body here is a prefix of
+   * what the origin sent rather than the whole of it.
+   *
+   * Distinct from `responseTruncated`, which means the capture limit was reached: one says orca
+   * stopped keeping bytes, the other says the agent stopped asking for them. A harness that reads
+   * a streaming reply only until it has its answer produces this on every turn, and an exchange
+   * recorded this way is the only evidence such a run leaves behind.
+   */
+  abandoned?: boolean;
   durationMs: number;
 }
 
@@ -106,7 +132,34 @@ export interface InterceptResponse {
   body: string;
 }
 
-/** Decode a request body for model-dialect parsing while leaving forwarding byte-for-byte. */
+/**
+ * Forward this decrypted request to the origin, but with a different body.
+ *
+ * The CONNECT target stays the recorded host — a TLS-intercepted harness is still talking to the
+ * origin it named — while a fork's `--model` has to change what that origin is asked. Returning a
+ * full {@link InterceptResponse} would answer from orca and never reach the origin; returning
+ * nothing would reach it with the recorded model. This is the third option that `--model` needs.
+ */
+export interface InterceptForward {
+  outboundBody: Buffer;
+}
+
+export type InterceptDecision = InterceptResponse | InterceptForward;
+
+export function isInterceptResponse(decision: InterceptDecision): decision is InterceptResponse {
+  return 'status' in decision;
+}
+
+/**
+ * A rewritten body is uncompressed JSON even when the client sent gzip/zstd. The origin must not
+ * be told the old encoding, or it will try to inflate plaintext and the substitution is lost.
+ */
+function applyRewrittenBody(headers: Record<string, unknown>, body: Buffer): void {
+  delete headers['content-encoding'];
+  delete headers['content-length'];
+  headers['content-length'] = String(body.length);
+}
+
 /** Decode a recorded body, whichever of the two forms it was stored in. */
 export function readRecordedBody(body: string): Buffer {
   return body.startsWith(BINARY_BODY_PREFIX)
@@ -114,8 +167,21 @@ export function readRecordedBody(body: string): Buffer {
     : Buffer.from(body, 'utf8');
 }
 
-export function decodeRequestBody(bytes: Buffer, contentEncoding?: string): string {
+/**
+ * Decode a body for reading while forwarding stays byte-for-byte.
+ *
+ * Named for the body, not for the half of the exchange: responses arrive compressed too, and a
+ * function called `decodeRequestBody` decoding one would be a name that has to be read past.
+ */
+export function decodeBody(bytes: Buffer, contentEncoding?: string): string {
   const encoding = contentEncoding?.split(',')[0]?.trim().toLowerCase();
+  // The three Node has always been able to decode. Without them a gzipped model request was
+  // recorded as base64 of its compressed bytes, so no dialect could read it, the exchange was
+  // never promoted to a model call, and the run said `capture.empty` without ever mentioning an
+  // encoding -- the same silent shape as the bugs above it in this file.
+  if (encoding === 'gzip') return recordableBody(zlib.gunzipSync(bytes));
+  if (encoding === 'deflate') return recordableBody(zlib.inflateSync(bytes));
+  if (encoding === 'br') return recordableBody(zlib.brotliDecompressSync(bytes));
   if (encoding === 'zstd') {
     // zstd was added to Node's built-in zlib API after the oldest runtime Orca supports. Keep the
     // import compatible there; a Codex call degrades to opaque net capture with a clear error.
@@ -129,6 +195,57 @@ export function decodeRequestBody(bytes: Buffer, contentEncoding?: string): stri
     return recordableBody(decompress(bytes));
   }
   return recordableBody(bytes);
+}
+
+/**
+ * The response body as the client saw it, plus the encoding orca took off to get there.
+ *
+ * Not attempted on a capture that is a prefix rather than the whole stream: half a deflate member
+ * cannot be inflated, and `truncated` / `abandoned` already say the record is incomplete. Nor on a
+ * response that carried no body -- RFC 7232 asks a 304 to send the header fields a 200 would have
+ * sent, `content-encoding` among them, and 204 and HEAD arrive the same way; every decoder throws
+ * "unexpected end of file" on an empty buffer, which would have reported an opaque body where
+ * there was no body at all. Failing to decode a body that *is* there is not fatal either -- the
+ * wire bytes are kept and the reason is reported, the same way an undecodable request body is.
+ */
+function recordableResponseBody(
+  captured: Capture,
+  contentEncoding: string | undefined,
+  whole: boolean,
+): { body: string; decodedFrom?: string; error?: string } {
+  const encoding = contentEncoding?.split(',')[0]?.trim().toLowerCase();
+  if (
+    encoding === undefined ||
+    encoding === '' ||
+    encoding === 'identity' ||
+    captured.bytes === 0 ||
+    !whole
+  ) {
+    return { body: captured.text() };
+  }
+  try {
+    return { body: decodeBody(captured.buffer(), contentEncoding), decodedFrom: encoding };
+  } catch (err) {
+    return { body: captured.text(), error: String(err) };
+  }
+}
+
+/**
+ * The headers that describe the body actually recorded.
+ *
+ * `content-encoding: gzip` beside a decoded body is a claim the recording no longer supports, and
+ * a `content-length` counting compressed bytes is another. Neither fact is lost: the wire size is
+ * already on the event as `bytes`, and what orca removed is recorded as `decoded_from`. Only the
+ * recorded copy is touched -- the client is served the origin's own header set, from `outHeaders`
+ * on HTTP/1.1 and `downstream` on h2.
+ */
+function headersWithoutEncoding(headers: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (key === 'content-encoding' || key === 'content-length') continue;
+    out[key] = value;
+  }
+  return out;
 }
 
 /** Text when the bytes are text, base64 behind a marker when they are not. */
@@ -174,10 +291,17 @@ export interface TlsInterceptOptions {
    */
   trustedOriginCerts?: readonly string[];
   maxCapturedBytes?: number;
-  /** Answer a decrypted request from a recording. Undefined falls through to the live origin. */
+  /**
+   * Answer a decrypted request from a recording, or rewrite it before the origin sees it.
+   *
+   * Undefined falls through to the live origin with the client's bytes unchanged. An
+   * {@link InterceptResponse} is served locally and never opens an origin connection. An
+   * {@link InterceptForward} still opens one, with a substituted body — the `--model` path on a
+   * TLS-intercepted fork.
+   */
   onRequest?: (
     request: NetRequest,
-  ) => InterceptResponse | undefined | Promise<InterceptResponse | undefined>;
+  ) => InterceptDecision | undefined | Promise<InterceptDecision | undefined>;
   onNetExchange?: (exchange: NetExchange) => void;
   onTunnel?: (tunnel: TunnelRecord) => void;
   onFailure?: (failure: InterceptFailure) => void;
@@ -454,6 +578,7 @@ export function attachTlsIntercept(
     const responseBody = new Capture(maxCaptured);
     const contentEncoding =
       typeof headers['content-encoding'] === 'string' ? headers['content-encoding'] : undefined;
+    let rewrittenBody: Buffer | undefined;
 
     // Replay answers from the recording and must never reach the origin. The HTTP/1.1 twin has
     // consulted this hook since interception existed; without the same call here, a run recorded
@@ -461,7 +586,7 @@ export function attachTlsIntercept(
     // real model calls, on the caller's own credential, during what the operator ran offline.
     if (options.onRequest) {
       for await (const chunk of stream) requestBody.add(Buffer.from(chunk as Buffer));
-      const reply = await options.onRequest({
+      const decision = await options.onRequest({
         host: target.host,
         port: target.port,
         method,
@@ -470,12 +595,16 @@ export function attachTlsIntercept(
         requestBytes: requestBody.buffer(),
         requestTruncated: requestBody.truncated,
       });
-      if (reply) {
+      if (decision && isInterceptResponse(decision)) {
         if (stream.destroyed) return;
-        stream.respond({ ':status': reply.status, ...(reply.headers ?? {}) });
-        stream.end(reply.body);
+        stream.respond({ ':status': decision.status, ...(decision.headers ?? {}) });
+        stream.end(decision.body);
         counters.intercepted += 1;
         return;
+      }
+      if (decision) {
+        rewrittenBody = decision.outboundBody;
+        applyRewrittenBody(outbound, rewrittenBody);
       }
       // The bounded capture size is also the maximum replayable request size: forwarding a
       // truncated body upstream is worse than refusing clearly, which is what HTTP/1.1 does.
@@ -494,6 +623,78 @@ export function attachTlsIntercept(
       };
 
       /**
+       * Response state, hoisted so an abandoned exchange is still recorded.
+       *
+       * Same gap the HTTP/1.1 path had: recording happened only in `upstream.on('end')`, so a
+       * client that stopped reading a streaming reply mid-flight left no trace of a request orca
+       * had already decrypted. `status` stays 0 until the origin answers, which is what tells
+       * `onDecrypted` this one has no response to replay.
+       */
+      let status = 0;
+      let recorded = false;
+      const recordableResponse: Record<string, string> = {};
+
+      const emit = (abandoned: boolean): void => {
+        if (recorded) return;
+        recorded = true;
+        counters.intercepted += 1;
+        // A body orca cannot decode is still an exchange worth having. `decodeBody` throws
+        // for zstd on a runtime without it -- inside `engines`, and why the repo's own zstd test is
+        // skipped there -- and an exception in this callback would take the process down with the
+        // exchange unrecorded. server.ts already decodes inside a try/catch for the same reason.
+        let recordedRequest: string;
+        if (rewrittenBody) {
+          recordedRequest = recordableBody(rewrittenBody);
+        } else {
+          try {
+            recordedRequest = decodeBody(requestBody.buffer(), contentEncoding);
+          } catch (err) {
+            options.onFailure?.({
+              host: target.host,
+              port: target.port,
+              reason: `request body left opaque: ${String(err)}`,
+            });
+            recordedRequest = requestBody.text();
+          }
+        }
+        const decoded = recordableResponseBody(
+          responseBody,
+          recordableResponse['content-encoding'],
+          !abandoned,
+        );
+        if (decoded.error !== undefined) {
+          options.onFailure?.({
+            host: target.host,
+            port: target.port,
+            reason: `response body left opaque: ${decoded.error}`,
+          });
+        }
+        options.onNetExchange?.({
+          host: target.host,
+          port: target.port,
+          method,
+          path,
+          requestHeaders: recordableHeaders,
+          requestBody: recordedRequest,
+          requestTruncated: requestBody.truncated,
+          status,
+          alpn: 'h2',
+          responseHeaders:
+            decoded.decodedFrom === undefined
+              ? recordableResponse
+              : headersWithoutEncoding(recordableResponse),
+          responseBody: decoded.body,
+          ...(decoded.decodedFrom === undefined
+            ? {}
+            : { responseDecodedFrom: decoded.decodedFrom }),
+          responseTruncated: responseBody.truncated,
+          responseBytes: responseBody.bytes,
+          abandoned,
+          durationMs: Date.now() - startedAt,
+        });
+      };
+
+      /**
        * The client can go at any point, and every write after that throws.
        *
        * `stream.respond` on a destroyed stream raises ERR_HTTP2_INVALID_STREAM synchronously from
@@ -502,6 +703,7 @@ export function attachTlsIntercept(
        * Node 22 with a client RST at 60 ms and an origin answering at 400 ms.
        */
       const abandon = (): void => {
+        emit(true);
         upstream.destroy();
         finish();
       };
@@ -510,7 +712,7 @@ export function attachTlsIntercept(
 
       if (options.onRequest) {
         // The hook above consumed the body, so replay the bytes it read rather than the stream.
-        upstream.end(requestBody.buffer());
+        upstream.end(rewrittenBody ?? requestBody.buffer());
       } else {
         stream.on('data', (chunk: Buffer) => {
           requestBody.add(chunk);
@@ -527,8 +729,7 @@ export function attachTlsIntercept(
 
       upstream.on('error', reject);
       upstream.on('response', (responseHeaders) => {
-        const status = Number(responseHeaders[H2.HTTP2_HEADER_STATUS] ?? 0);
-        const recordableResponse: Record<string, string> = {};
+        status = Number(responseHeaders[H2.HTTP2_HEADER_STATUS] ?? 0);
         const downstream: Record<string, string | string[] | number> = { ':status': status };
         for (const [name, value] of Object.entries(responseHeaders)) {
           const key = name.toLowerCase();
@@ -561,40 +762,10 @@ export function attachTlsIntercept(
         });
         upstream.on('end', () => {
           if (settled) return;
+          // Recorded before the stream is closed out, so the `close` listener above cannot win the
+          // race and file the same exchange as abandoned.
+          emit(false);
           if (!stream.destroyed) stream.end();
-          counters.intercepted += 1;
-          // A body orca cannot decode is still an exchange worth having. `decodeRequestBody`
-          // throws for zstd on a runtime without it -- inside `engines`, and why the repo's own
-          // zstd test is skipped there -- and an exception in this callback would take the process
-          // down with the exchange unrecorded. server.ts already decodes inside a try/catch for
-          // the same reason.
-          let recordedRequest: string;
-          try {
-            recordedRequest = decodeRequestBody(requestBody.buffer(), contentEncoding);
-          } catch (err) {
-            options.onFailure?.({
-              host: target.host,
-              port: target.port,
-              reason: `request body left opaque: ${String(err)}`,
-            });
-            recordedRequest = requestBody.text();
-          }
-          options.onNetExchange?.({
-            host: target.host,
-            port: target.port,
-            method,
-            path,
-            requestHeaders: recordableHeaders,
-            requestBody: recordedRequest,
-            requestTruncated: requestBody.truncated,
-            status,
-            alpn: 'h2',
-            responseHeaders: recordableResponse,
-            responseBody: responseBody.text(),
-            responseTruncated: responseBody.truncated,
-            responseBytes: responseBody.bytes,
-            durationMs: Date.now() - startedAt,
-          });
           finish();
         });
       });
@@ -643,12 +814,13 @@ export function attachTlsIntercept(
     outboundHeaders.host = req.headers.host ?? target.host;
 
     const requestBody = new Capture(maxCaptured);
+    let rewrittenBody: Buffer | undefined;
 
     // Replay has to decide before opening an origin connection. Buffer only when that hook is in
     // use; the recording path below retains the original streaming behaviour and bounded capture.
     if (options.onRequest) {
       for await (const chunk of req) requestBody.add(Buffer.from(chunk as Buffer));
-      const reply = await options.onRequest({
+      const decision = await options.onRequest({
         host: target.host,
         port: target.port,
         method: req.method ?? 'GET',
@@ -657,11 +829,15 @@ export function attachTlsIntercept(
         requestBytes: requestBody.buffer(),
         requestTruncated: requestBody.truncated,
       });
-      if (reply) {
-        res.writeHead(reply.status, reply.headers ?? {});
-        res.end(reply.body);
+      if (decision && isInterceptResponse(decision)) {
+        res.writeHead(decision.status, decision.headers ?? {});
+        res.end(decision.body);
         counters.intercepted += 1;
         return;
+      }
+      if (decision) {
+        rewrittenBody = decision.outboundBody;
+        applyRewrittenBody(outboundHeaders, rewrittenBody);
       }
     }
 
@@ -683,7 +859,7 @@ export function attachTlsIntercept(
       if (requestBody.truncated) {
         upstream.destroy(new Error(`request exceeded capture limit of ${maxCaptured} bytes`));
       } else {
-        upstream.end(requestBody.buffer());
+        upstream.end(rewrittenBody ?? requestBody.buffer());
       }
     } else {
       req.on('data', (chunk: Buffer) => requestBody.add(chunk));
@@ -691,9 +867,108 @@ export function attachTlsIntercept(
     }
 
     const finished = new Promise<void>((resolve, reject) => {
-      upstream.on('error', reject);
+      /**
+       * What has been read so far, hoisted out of the response handler so that an exchange the
+       * client walks away from is still recorded.
+       *
+       * Streaming is the normal case for a model API, and a harness that stops reading the moment
+       * it has what it needs leaves the rest of the stream on the floor. `onNetExchange` used to
+       * fire only from `end`, so those runs recorded nothing at all: the request had been
+       * decrypted and the response headers were in hand, and the run still reported
+       * `capture.empty` with "the agent never called the proxy" -- the opposite of what happened.
+       * Hermes is the harness that showed it; the shape is not specific to Hermes.
+       */
+      let recorded = false;
+      let status = 0;
+      const responseHeaders: Record<string, string> = {};
+      const responseBody = new Capture(maxCaptured);
+
+      const emit = (abandoned: boolean): void => {
+        if (recorded) return;
+        recorded = true;
+        counters.intercepted += 1;
+        // A body orca cannot decode is still an exchange worth having, and an exception thrown in
+        // this callback would take the process down with it. Same guard, same reason, as h2.
+        let recordedRequest: string;
+        if (rewrittenBody) {
+          recordedRequest = recordableBody(rewrittenBody);
+        } else {
+          try {
+            recordedRequest = decodeBody(
+              requestBody.buffer(),
+              typeof req.headers['content-encoding'] === 'string'
+                ? req.headers['content-encoding']
+                : undefined,
+            );
+          } catch (err) {
+            options.onFailure?.({
+              host: target.host,
+              port: target.port,
+              reason: `request body left opaque: ${String(err)}`,
+            });
+            recordedRequest = requestBody.text();
+          }
+        }
+        const decoded = recordableResponseBody(
+          responseBody,
+          responseHeaders['content-encoding'],
+          !abandoned,
+        );
+        if (decoded.error !== undefined) {
+          options.onFailure?.({
+            host: target.host,
+            port: target.port,
+            reason: `response body left opaque: ${decoded.error}`,
+          });
+        }
+        options.onNetExchange?.({
+          host: target.host,
+          port: target.port,
+          method: req.method ?? 'GET',
+          path,
+          requestHeaders: recordableHeaders,
+          requestBody: recordedRequest,
+          requestTruncated: requestBody.truncated,
+          status,
+          alpn: alpnOf(req.socket),
+          responseHeaders:
+            decoded.decodedFrom === undefined
+              ? responseHeaders
+              : headersWithoutEncoding(responseHeaders),
+          responseBody: decoded.body,
+          ...(decoded.decodedFrom === undefined
+            ? {}
+            : { responseDecodedFrom: decoded.decodedFrom }),
+          responseTruncated: responseBody.truncated,
+          responseBytes: responseBody.bytes,
+          abandoned,
+          durationMs: Date.now() - startedAt,
+        });
+      };
+
+      /** The client is gone: keep what was read, stop pulling from the origin, and settle. */
+      const abandon = (): void => {
+        emit(true);
+        upstream.destroy();
+        resolve();
+      };
+      res.on('close', () => {
+        if (!recorded) abandon();
+      });
+
+      upstream.on('error', (err) => {
+        // A client that has already left is not an upstream failure to report. Asked of `res`
+        // only: `req` destroys itself once its body has been read, so a request with no body has
+        // `req.destroyed` set long before anything went wrong, and reading it here turned every
+        // upstream failure -- an origin certificate orca refuses to trust, most of all -- into a
+        // silent abandonment with no 502 for the client to see.
+        if (res.destroyed) {
+          abandon();
+          return;
+        }
+        reject(err);
+      });
       upstream.on('response', (originRes) => {
-        const responseHeaders: Record<string, string> = {};
         const outHeaders: Record<string, string | string[]> = {};
         for (const [name, value] of Object.entries(originRes.headers)) {
           const key = name.toLowerCase();
@@ -703,43 +978,62 @@ export function attachTlsIntercept(
             responseHeaders[key] = value;
           }
         }
+        status = originRes.statusCode ?? 0;
+        if (res.destroyed) {
+          abandon();
+          return;
+        }
         res.writeHead(originRes.statusCode ?? 502, outHeaders);
 
         // Tee, never buffer. A model reply arrives over seconds and the agent renders it as it
         // lands; reading it to completion first would make every turn appear to hang.
-        const responseBody = new Capture(maxCaptured);
         originRes.on('data', (chunk: Buffer) => {
           responseBody.add(chunk);
+          if (res.destroyed) {
+            abandon();
+            return;
+          }
           if (!res.write(chunk)) {
             originRes.pause();
+            // `drain` never fires on a destroyed response, so a client that goes mid-stream would
+            // otherwise leave the origin paused for good and the exchange unrecorded.
             res.once('drain', () => originRes.resume());
           }
         });
-        originRes.on('error', reject);
+        /**
+         * The origin going away and the client going away arrive on the same two events here, and
+         * they need opposite handling.
+         *
+         * If the client left, this is abandonment: keep the prefix, stop pulling from the origin,
+         * settle. If the *origin* died, the client is still connected and waiting for a stream
+         * orca has already started forwarding -- and abandoning there settles this promise, so the
+         * caller's `.catch`, the only thing that ends the client's response, never runs. The agent
+         * then waits for a continuation that will never come. `originRes.on('aborted', abandon)`
+         * did exactly that: a crashing origin or a dropped network hung every in-flight call on
+         * this path, where before it produced a prompt answer.
+         *
+         * Both are recorded, because a response the origin cut short is still evidence. Only the
+         * first is `abandoned`: that field says the agent stopped reading, and here it did not.
+         *
+         * The h2 path needs none of this -- there `aborted` is on the client's own stream and the
+         * origin reports through `upstream.on('error')`, so the two are already separate objects.
+         */
+        const originGone = (err: Error): void => {
+          if (res.destroyed) {
+            abandon();
+            return;
+          }
+          emit(false);
+          reject(err);
+        };
+        originRes.on('aborted', () => originGone(new Error('origin aborted mid-response')));
+        originRes.on('error', originGone);
         originRes.on('end', () => {
+          if (recorded) return;
+          // Recorded before the response is closed out, so that the `close` listener above cannot
+          // win the race and file the same exchange as abandoned.
+          emit(false);
           res.end();
-          counters.intercepted += 1;
-          options.onNetExchange?.({
-            host: target.host,
-            port: target.port,
-            method: req.method ?? 'GET',
-            path,
-            requestHeaders: recordableHeaders,
-            requestBody: decodeRequestBody(
-              requestBody.buffer(),
-              typeof req.headers['content-encoding'] === 'string'
-                ? req.headers['content-encoding']
-                : undefined,
-            ),
-            requestTruncated: requestBody.truncated,
-            status: originRes.statusCode ?? 0,
-            alpn: alpnOf(req.socket),
-            responseHeaders,
-            responseBody: responseBody.text(),
-            responseTruncated: responseBody.truncated,
-            responseBytes: responseBody.bytes,
-            durationMs: Date.now() - startedAt,
-          });
           resolve();
         });
       });

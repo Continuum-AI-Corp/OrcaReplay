@@ -23,6 +23,7 @@ import type { ParsedArgs } from '../args.js';
 import { formatCost } from './compare.js';
 import { renderChainCard, renderGraphCard, scopeForCard } from '../share-card.js';
 import { cardTarget, gifFrames, svgToPng, svgsToGif, type CardFormat } from '../rasterize.js';
+import { recordableOrigin, unusableOrigin } from '@orcareplay/proxy';
 
 /** `orca list` — what runs are here, newest first. */
 export async function listCommand(
@@ -93,6 +94,12 @@ export async function showCommand(
       );
     }
   }
+  // Where the traffic went, which the timeline could not say. `proxy` is orca's own address, and
+  // the origin behind it is chosen per request — from a flag, a configured gateway, a `/forward/`
+  // base the client announced, or the vendor default — so the answer is read back off the
+  // exchanges rather than off the manifest, and a run that reached two origins says both.
+  const origins = upstreamsIn(events);
+  if (origins.length > 0) out.plain(`  upstream ${origins.join(', ')}`);
   out.plain('');
 
   // Both halves of the row. Rendering only `meta` showed token counts for a model response and an
@@ -360,4 +367,36 @@ function totalCost(events: { type: string; attrs?: Record<string, unknown> }[]):
 function nestPrefix(depth: number, previousDepth: number): string {
   if (depth === 0) return '';
   return '  '.repeat(depth - 1) + (depth > previousDepth ? '└─ ' : '   ');
+}
+
+/**
+ * The distinct origins a run's model exchanges actually reached, in the order first seen.
+ *
+ * Read off the events rather than the manifest because there is nothing to read there: the origin
+ * is resolved per request, and a fork that changes provider changes it mid-run. An empty list is
+ * a trace recorded before orca wrote this down — not a run that reached nothing.
+ */
+export function upstreamsIn(events: { type: string; attrs?: Record<string, unknown> }[]): string[] {
+  const seen: string[] = [];
+  for (const event of events) {
+    if (event.type !== 'model.response') continue;
+    const upstream = event.attrs?.['upstream'];
+    if (typeof upstream !== 'string' || upstream === '') continue;
+    // Sanitised on the way out of the file as well as on the way in, because a trace is something
+    // you are *given*. The write path strips the credential now, but a trace recorded by a build
+    // from before it did carries one — and this is a debugger whose traces get attached to issues,
+    // so the copy that reaches a terminal or an exported run.html has to be clean whatever wrote
+    // it. A value with nothing recoverable in it is dropped: an origin nobody can read is not
+    // worth printing a placeholder for.
+    // `unusableOrigin` first, then sanitise — the order `distinctOrigins` uses, and for the
+    // reason its comment gives: `recordableOrigin` alone answers with a *value* for a scheme-less
+    // string, because `new URL('myuser:PASSWORD@gw.example/v1')` reads `myuser:` as the protocol.
+    // A `!== undefined` filter therefore keeps the password. Written the other way round here at
+    // first, with a test whose comment named this case and whose input was `'not a url'` — which
+    // fails to parse, so it exercised the other branch and passed.
+    if (unusableOrigin(upstream) !== undefined) continue;
+    const safe = recordableOrigin(upstream);
+    if (safe !== undefined && !seen.includes(safe)) seen.push(safe);
+  }
+  return seen;
 }

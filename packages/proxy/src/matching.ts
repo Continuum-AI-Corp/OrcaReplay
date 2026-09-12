@@ -377,6 +377,23 @@ export class RequestMatcher {
   readonly #secrets: number[];
   readonly #redactor?: Redactor;
   #cursor = 0;
+  /**
+   * Recorded requests the cursor stepped over that have not been played yet.
+   *
+   * Stepping over used to discard them, and against a harness that issues a call concurrently with
+   * its own conversation that loses the conversation. goose is the case that found it: it asks for
+   * a session title on a second task, so the title and the first real turn race, and the order
+   * they land in is not the order they were recorded in. When the replay's title arrived first the
+   * cursor jumped past the recorded first turn to reach it — and the first turn, which was about
+   * to be asked for, had already been thrown away. The next request then met turn *two* and the
+   * replay halted on a recording that contained everything it needed.
+   *
+   * Holding them here instead costs nothing when the order does match — the set stays empty — and
+   * makes out-of-order arrival a matter of which request is served rather than whether the replay
+   * survives. Anything still in here at the end was genuinely never repeated, which is what
+   * `reused=x/y` already reports.
+   */
+  readonly #deferred: number[] = [];
 
   constructor(recorded: CanonicalRequest[], options: MatcherOptions = {}) {
     this.#recorded = recorded;
@@ -388,7 +405,7 @@ export class RequestMatcher {
   }
 
   remaining(): number {
-    return this.#recorded.length - this.#cursor;
+    return this.#recorded.length - this.#cursor + this.#deferred.length;
   }
 
   get cursor(): number {
@@ -397,6 +414,10 @@ export class RequestMatcher {
 
   match(incoming: CanonicalRequest): MatchResult {
     if (this.#cursor >= this.#recorded.length) {
+      // The cursor is past the end, but a request stepped over on the way there may be exactly
+      // what is being asked for now — the out-of-order pair whose second half arrives last.
+      const held = this.#matchDeferred(incoming);
+      if (held) return held;
       return {
         matched: false,
         rung: 4,
@@ -411,24 +432,32 @@ export class RequestMatcher {
       return at;
     }
 
-    // Nothing at the cursor. Before halting, look for this request further along: a recording made
-    // through a terminal carries calls the harness made for itself — a quota probe, a request to
-    // name the session — and a replay driven from a transcript never repeats them. Only an exact
-    // or near-exact match is worth stepping over an unplayed exchange for; anything looser and the
-    // agent would be handed some other turn's answer.
+    // Nothing at the cursor. Before looking further along, try what the cursor has already stepped
+    // over: this is the second half of a pair that arrived in the other order, and its answer is
+    // sitting in the recording unplayed. Held to the same rung-2 bar as a step-forward, and for
+    // the same reason — below that the agent would be handed some other turn's answer.
+    const out = this.#matchDeferred(incoming);
+    if (out) return out;
+
+    // Still nothing. Look for this request further along: a recording made through a terminal
+    // carries calls the harness made for itself — a quota probe, a request to name the session —
+    // and a replay driven from a transcript never repeats them. Only an exact or near-exact match
+    // is worth stepping over an unplayed exchange for.
     for (let ahead = this.#cursor + 1; ahead <= this.#lookaheadLimit(); ahead += 1) {
       const later = this.#matchAt(incoming, ahead);
       if (!later.matched || later.rung > 2) continue;
       const skipped = ahead - this.#cursor;
+      // Set aside rather than dropped. They may yet be asked for — see `#deferred`.
+      for (let i = this.#cursor; i < ahead; i += 1) this.#deferred.push(i);
       this.#cursor = ahead + 1;
       const skippedNote =
-        `, skipping ${skipped} recorded ${skipped === 1 ? 'request' : 'requests'} ` +
-        'the replay did not repeat';
+        `, holding ${skipped} recorded ${skipped === 1 ? 'request' : 'requests'} ` +
+        'the replay has not asked for yet';
       return {
         ...later,
         skipped,
-        // Always said, even when the match had a divergence of its own: a skipped exchange that
-        // goes unmentioned is a replay claiming to have reproduced something it stepped over.
+        // Always said, even when the match had a divergence of its own: an exchange stepped over
+        // without mention is a replay claiming to have reproduced something it passed by.
         divergence: {
           level: later.divergence?.level ?? 'minor',
           rung: later.rung,
@@ -439,6 +468,27 @@ export class RequestMatcher {
     }
 
     return at;
+  }
+
+  /** Serve a request the cursor stepped over earlier, when this is the one it was waiting for. */
+  #matchDeferred(incoming: CanonicalRequest): MatchResult | undefined {
+    for (let slot = 0; slot < this.#deferred.length; slot += 1) {
+      const index = this.#deferred[slot]!;
+      const held = this.#matchAt(incoming, index);
+      if (!held.matched || held.rung > 2) continue;
+      this.#deferred.splice(slot, 1);
+      const note = ', matched out of the order it was recorded in';
+      return {
+        ...held,
+        divergence: {
+          level: held.divergence?.level ?? 'minor',
+          rung: held.rung,
+          distance: held.divergence?.distance ?? 0,
+          detail: `${held.divergence?.detail ?? `matched request ${index}`}${note}`,
+        },
+      };
+    }
+    return undefined;
   }
 
   /** How far ahead a skip may reach. Bounded: past this, a match is more likely a coincidence. */

@@ -1,3 +1,4 @@
+import { NUMERIC, VALUELESS } from './args.js';
 import type { ParsedArgs } from './args.js';
 
 /**
@@ -21,6 +22,7 @@ const UPSTREAM = ['upstream-anthropic', 'upstream-openai'] as const;
 const TLS = ['tls-intercept', 'tls-hosts'] as const;
 
 export const BY_COMMAND: Record<string, readonly string[]> = {
+  quickstart: ['dir', 'full'],
   // push/pull reach a gateway the user names. `--force` means two different deliberate overrides:
   // on push, store despite a secret-scan finding; on pull, replace a local run that already exists.
   push: ['gateway', 'force'],
@@ -50,6 +52,7 @@ export const BY_COMMAND: Record<string, readonly string[]> = {
     'mcp-config',
     ...TLS,
     ...UPSTREAM,
+    'quiet',
   ],
   compare: ['from', 'models', 'verify', 'share', 'loose', ...TLS, ...UPSTREAM],
   show: [],
@@ -98,12 +101,16 @@ export function assertKnownFlags(args: ParsedArgs): void {
   if (allowed === undefined) return;
   const known = [...allowed, ...GLOBAL];
   const unknown = Object.keys(args.flags).filter((name) => !known.includes(name));
-  if (unknown.length === 0) return;
+  // Names first: "unknown flag --modle" is a better answer than "--modle needs a value".
+  if (unknown.length === 0) {
+    assertUsableValues(args, known);
+    return;
+  }
 
   const [first] = unknown;
   const suggestion = nearest(first!, known);
   throw new Error(
-    `unknown flag --${first} for "orca ${args.command}"` +
+    `unknown flag ${dashed(first!)} for "orca ${args.command}"` +
       (suggestion === undefined ? '' : `\n  did you mean --${suggestion}?`) +
       `\n  flags for this command: ${allowed.length === 0 ? '(none)' : allowed.map((f) => `--${f}`).join(' ')}`,
   );
@@ -132,6 +139,8 @@ const POSITIONALS: Record<string, number> = {
   pull: 1,
   ui: 1,
   scrub: 1,
+  // Configured entirely by `--dir`, like `attach` below it.
+  quickstart: 0,
   attach: 0,
   list: 0,
   gc: 0,
@@ -182,4 +191,69 @@ export function assertNoStrayPositionals(args: ParsedArgs): void {
       takesLine +
       forAgent,
   );
+}
+
+/**
+ * A flag as the person would have typed it.
+ *
+ * Every short flag here is one character, so the count of dashes follows from the length. Telling
+ * someone `--o needs a value` when they typed `-o` sends them looking for a flag that does not
+ * exist.
+ */
+function dashed(name: string): string {
+  return name.length === 1 ? `-${name}` : `--${name}`;
+}
+
+/**
+ * Reject a flag whose value cannot be honoured.
+ *
+ * `assertKnownFlags` settled the names; the values were still taken on trust. Every accessor falls
+ * back in silence when a value is missing or of the wrong shape, so the instruction vanished and
+ * the run reported success having done something else:
+ *
+ *   `--model` with nothing after it turned a fork into a plain replay, and the two models being
+ *   compared agreed because only one of them ever ran. `--match a --match b` redacted `b` alone and
+ *   reported its count as though that were the whole job. `--from four` replayed everything instead
+ *   of forking at a checkpoint. `--json=maybe` turned JSON output off while it was being asked for.
+ *
+ * Same reasoning as `assertNoStrayPositionals` beside it, third part of the command line: an
+ * instruction orca cannot carry out must not be carried past in silence.
+ *
+ * `orca gc --keep` checked its own by hand and was the only command that did. Doing it here is the
+ * same check for all of them, and one place to fix when it is wrong.
+ */
+function assertUsableValues(args: ParsedArgs, allowed: readonly string[]): void {
+  for (const name of Object.keys(args.flags)) {
+    const value = args.flags[name];
+
+    // Repeating a flag is how most CLIs take a list, so people write it. Say which form is one here
+    // rather than only saying no.
+    if (args.conflicting.has(name)) {
+      const listForm = [`${name}s`, `${name}es`].find((f) => allowed.includes(f));
+      throw new Error(
+        `${dashed(name)} given more than once, and only the last would have counted` +
+          (listForm === undefined
+            ? '\n  give it once'
+            : `\n  for several, use one --${listForm}: --${listForm} a,b,c`),
+      );
+    }
+
+    if (NUMERIC.has(name)) {
+      if (args.missingValue.has(name) || typeof value === 'string') {
+        throw new Error(`${dashed(name)} needs a number, like ${dashed(name)} 4`);
+      }
+      continue;
+    }
+
+    // `--flag`, `--flag=true` and `--no-flag` all arrive as a boolean. Anything else is a value on
+    // a switch, and the switch would then have read as off.
+    if (VALUELESS.has(name)) {
+      if (typeof value === 'string') {
+        throw new Error(`${dashed(name)} takes no value; it is either given or it is not`);
+      }
+      continue;
+    }
+
+    if (args.missingValue.has(name)) throw new Error(`${dashed(name)} needs a value`);
+  }
 }

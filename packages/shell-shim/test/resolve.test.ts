@@ -84,6 +84,32 @@ describe('resolveRealBinary', () => {
     );
     expect(found).toBe(join(realDir, executable));
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a shim another run left on PATH, not only its own',
+    async () => {
+      // A run inside a run — or an agent that records things and is now being recorded — has a
+      // *different* run's shim directory on PATH. A `bash` found there is a shim script, and
+      // spawning it re-runs the runner, which resolves again: the hundred-deep exec loop the
+      // first nested recording turned into. The marker comment is what makes one recognisable.
+      const otherRun = join(root, 'other-run-shims');
+      await mkdir(otherRun);
+      const shimScript = [
+        '#!/bin/sh',
+        '# Written by orca record. Runs the real binary and notes what happened.',
+        `exec node runner-bin.js bash ${otherRun} frames -- "$@"`,
+        '',
+      ].join('\n');
+      await writeFile(join(otherRun, executable), shimScript);
+      await chmod(join(otherRun, executable), 0o755);
+      const found = await resolveRealBinary(
+        'bash',
+        `${otherRun}${delimiter}${shimDir}${delimiter}${realDir}`,
+        shimDir,
+      );
+      expect(found).toBe(join(realDir, executable));
+    },
+  );
 });
 
 describe('resolveRunnerBin', () => {

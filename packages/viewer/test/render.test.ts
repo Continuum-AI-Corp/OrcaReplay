@@ -86,6 +86,46 @@ describe('buildTimeline', () => {
     expect(rows[2]!.tone).toBe('normal');
   });
 
+  it('says a body arrived compressed, since `bytes` then counts different bytes', () => {
+    const rows = buildTimeline([
+      ev({
+        type: 'net.response',
+        actor: 'orca',
+        attrs: { host: 'api.example.com', status: 200, bytes: 396, decoded_from: 'gzip' },
+      }),
+      ev({
+        type: 'net.response',
+        actor: 'orca',
+        attrs: { host: 'api.example.com', status: 200, bytes: 6742 },
+      }),
+    ]);
+    // `bytes` is the wire count and the payload is the decoded body, so a row that shows one and
+    // links the other has to say which is which.
+    expect(rows[0]!.detail).toContain('gzip decoded');
+    expect(rows[0]!.detail).toContain('status 200');
+    expect(rows[0]!.tone).toBe('normal');
+    // The ordinary case says nothing, because there is nothing to reconcile.
+    expect(rows[1]!.detail).toBe('status 200');
+  });
+
+  it('says a response was abandoned rather than showing a bare status 0', () => {
+    const rows = buildTimeline([
+      ev({
+        type: 'net.response',
+        actor: 'orca',
+        attrs: { host: 'api.example.com', status: 0, abandoned: true },
+      }),
+      ev({ type: 'net.response', actor: 'orca', attrs: { host: 'api.example.com', status: 200 } }),
+    ]);
+    // Without the marker this row is `status 0` and nothing else, which reads as a failure.
+    expect(rows[0]!.detail).toContain('client left');
+    expect(rows[0]!.detail).toContain('status 0');
+    // Leaving early is the agent's own behaviour, so the row stays quiet.
+    expect(rows[0]!.tone).toBe('normal');
+    // An ordinary response says nothing about a client that never left.
+    expect(rows[1]!.detail).toBe('status 200');
+  });
+
   it('marks errors and divergences as attention', () => {
     const rows = buildTimeline([
       ev({ type: 'error', actor: 'harness', attrs: { message: 'ENOENT', code: 'ENOENT' } }),

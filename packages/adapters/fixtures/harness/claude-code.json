@@ -1,10 +1,12 @@
 {
   "adapter": "claude-code",
   "harness_versions": ">=1.0.0",
-  "verified_at": "2026-08-31",
+  "verified_at": "2026-09-07",
   "command": "claude",
   "env_vars": ["ANTHROPIC_BASE_URL"],
-  "base_urls": { "ANTHROPIC_BASE_URL": "" },
+  "base_urls": {
+    "ANTHROPIC_BASE_URL": ""
+  },
   "optional_env_vars": ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
-  "note": "Claude Code appends its own /v1 paths, so the origin goes in bare. It carries its own credential store, so ANTHROPIC_API_KEY is passed through when set and never invented: a subscription login has none, and supplying the placeholder stops the launch on an interactive 'detected a custom API key' prompt and then authenticates with a key that is not real. With no key set, Claude Code sends its own authorization header and the proxy relays it."
+  "note": "Claude Code appends its own /v1 paths, so the origin goes in bare. It carries its own credential store, so ANTHROPIC_API_KEY is passed through when set and never invented: a subscription login has none, and supplying the placeholder stops the launch on an interactive 'detected a custom API key' prompt and then authenticates with a key that is not real. With no key set, Claude Code sends its own authorization header and the proxy relays it. Rechecked with Claude Code 2.1.220 through the built orca record CLI: API key, ANTHROPIC_AUTH_TOKEN, and CLAUDE_CODE_OAUTH_TOKEN with fake credentials and a local upstream. Model events and streaming replies were captured; OAuth authorization and anthropic-beta were forwarded."
 }

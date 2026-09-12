@@ -147,11 +147,10 @@ orca record claude           # or codex, opencode, openclaw, grok
 ```
 
 If it is not, ask before installing it — a global install changes the user's machine, and that is
-their call, not a detail of your task. Install a pinned version rather than whatever `latest`
-resolves to today:
+their call, not a detail of your task:
 
 ```console
-npm i -g orcareplay@0.1.2     # ask first
+npm i -g orcareplay     # ask first
 ```
 
 `orca record <agent>` runs the agent unmodified behind a local proxy. Nothing about the agent

@@ -23,13 +23,14 @@ import { RunCa } from '../src/ca.js';
  * import was simply `undefined` and the test below died on `zstdCompressSync is not a function` —
  * a red build on every pull request, saying nothing about the change that triggered it.
  *
- * Looked up dynamically, the same way `decodeRequestBody` looks up the other half of the pair, so
+ * Looked up dynamically, the same way `decodeBody` looks up the other half of the pair, so
  * the module still loads. Skipped rather than deleted: the behaviour is real on the runtimes that
  * have zstd, and a skipped test names the runtime that is missing something where a deleted one
  * would just be gone.
  */
 const zstdCompressSync = (zlib as typeof zlib & { zstdCompressSync?: (input: Buffer) => Buffer })
   .zstdCompressSync;
+import { decodeBody } from '../src/intercept.js';
 import {
   createProxy,
   type NetExchange,
@@ -70,6 +71,78 @@ interface ProxiedResponse {
 }
 
 /** CONNECT, then TLS over the tunnel, then one HTTP request — a proxy-aware client in 30 lines. */
+/**
+ * A client that stops reading before the response is over.
+ *
+ * `through` resolves on `end`, which is the one thing this case never reaches. A harness reading a
+ * streaming reply only until it has its answer -- and one that gives up before the origin answers
+ * at all -- both leave the exchange half-finished, and half-finished is what has to be recorded.
+ * Returns whatever arrived before the client walked away.
+ */
+async function abandoned(
+  opts: ProxiedRequest & { leaveAfter: 'first-chunk' | 'request' },
+): Promise<string> {
+  const target = `${opts.host}:${opts.port}`;
+  const tunnel = httpRequest({
+    host: '127.0.0.1',
+    port: opts.proxyPort,
+    method: 'CONNECT',
+    path: target,
+    headers: { host: target },
+  });
+  tunnel.end();
+
+  const [res, socket, head] = (await once(tunnel, 'connect')) as [IncomingMessage, Socket, Buffer];
+  if (res.statusCode !== 200) {
+    socket.destroy();
+    throw new Error(`CONNECT refused: ${res.statusCode}`);
+  }
+  if (head.length > 0) socket.unshift(head);
+
+  const secure = tlsConnect({ socket, ca: opts.trust, host: opts.host, port: opts.port });
+  await once(secure, 'secureConnect');
+
+  return await new Promise<string>((resolve) => {
+    let seen = '';
+    const req = httpRequest(
+      {
+        createConnection: () => secure,
+        host: opts.host,
+        port: opts.port,
+        method: opts.method ?? 'GET',
+        path: opts.path ?? '/',
+        headers: { host: target, ...opts.headers },
+      },
+      (response) => {
+        response.setEncoding('utf8');
+        response.on('data', (chunk: string) => {
+          seen += chunk;
+          if (opts.leaveAfter === 'first-chunk') {
+            secure.destroy();
+            resolve(seen);
+          }
+        });
+      },
+    );
+    // No `error` rejection: tearing the socket down is the behaviour under test, so the errors it
+    // raises on this side are the expected consequence rather than a failure.
+    req.on('error', () => undefined);
+    if (opts.body !== undefined) req.write(opts.body);
+    req.end();
+    if (opts.leaveAfter === 'request') {
+      // Gone while the origin is still thinking. One beat first, so the request is on the wire
+      // before the socket goes -- that is what makes the recorded request body non-empty.
+      setTimeout(() => {
+        secure.destroy();
+        resolve(seen);
+      }, 150);
+    }
+  });
+}
+
+/** Long enough for the proxy to notice the client left and file what it had. */
+const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 300));
+
 async function through(opts: ProxiedRequest): Promise<ProxiedResponse> {
   const target = `${opts.host}:${opts.port}`;
   const tunnel = httpRequest({
@@ -153,7 +226,12 @@ function commonName(certPem: string): string {
  */
 async function startH2Origin(
   ca: RunCa,
-  opts: { delayMs?: number; onStream?: (headers: IncomingHttpHeaders) => void } = {},
+  opts: {
+    delayMs?: number;
+    onStream?: (headers: IncomingHttpHeaders) => void;
+    /** What to answer with, for a test that needs a body a dialect can read. */
+    answer?: () => { contentType: string; body: string | Buffer; encoding?: string };
+  } = {},
 ): Promise<{ port: number; hits: number; close: () => Promise<void> }> {
   const issued = ca.issue('127.0.0.1');
   const server: Http2SecureServer = createHttp2Origin({
@@ -176,8 +254,13 @@ async function startH2Origin(
     stream.on('data', () => undefined);
     const answer = (): void => {
       if (stream.destroyed) return;
-      stream.respond({ ':status': 200, 'content-type': 'text/plain' });
-      stream.end('from-origin');
+      const chosen = opts.answer?.() ?? { contentType: 'text/plain', body: 'from-origin' };
+      stream.respond({
+        ':status': 200,
+        'content-type': chosen.contentType,
+        ...(chosen.encoding === undefined ? {} : { 'content-encoding': chosen.encoding }),
+      });
+      stream.end(chosen.body);
     };
     stream.on('end', () => {
       if (opts.delayMs) setTimeout(answer, opts.delayMs);
@@ -259,6 +342,34 @@ async function startOrigin(
   };
 }
 
+/**
+ * A body orca cannot decode is a body no dialect can read, and the run says only that nothing
+ * looked like a model call. Sending a gzipped request through a real intercepted host recorded
+ * `orca-base64:H4sIA...` and exactly that message, so these three are worth pinning: they need no
+ * runtime guard, unlike zstd, and gzip is the encoding an SDK is most likely to turn on.
+ */
+describe('decodeBody', () => {
+  const payload = JSON.stringify({ model: 'gpt-5.2', messages: [{ role: 'user', content: 'hi' }] });
+
+  it('reads a gzipped body back as the JSON that went in', () => {
+    expect(decodeBody(zlib.gzipSync(Buffer.from(payload)), 'gzip')).toBe(payload);
+  });
+
+  it('reads deflate and brotli too', () => {
+    expect(decodeBody(zlib.deflateSync(Buffer.from(payload)), 'deflate')).toBe(payload);
+    expect(decodeBody(zlib.brotliCompressSync(Buffer.from(payload)), 'br')).toBe(payload);
+  });
+
+  it("honours the first encoding of a list, and the header's case", () => {
+    expect(decodeBody(zlib.gzipSync(Buffer.from(payload)), 'GZIP, identity')).toBe(payload);
+  });
+
+  it('leaves an unencoded body alone', () => {
+    expect(decodeBody(Buffer.from(payload), undefined)).toBe(payload);
+    expect(decodeBody(Buffer.from(payload), 'identity')).toBe(payload);
+  });
+});
+
 describe('TLS interception', () => {
   let runDir: string;
   let originDir: string;
@@ -277,6 +388,8 @@ describe('TLS interception', () => {
   let originSawAuth: string | undefined;
   /** The same, for the headers a provider attributes traffic by. */
   let originSawAttribution: Record<string, string | undefined>;
+  /** Body of a `/v1/chat/completions` the origin received, for `--model` substitution. */
+  let originSawChatBody: string | undefined;
 
   beforeEach(async () => {
     runDir = await mkdtemp(join(tmpdir(), 'orca-mitm-run-'));
@@ -288,12 +401,74 @@ describe('TLS interception', () => {
     modelExchanges = [];
     originSawAuth = undefined;
     originSawAttribution = {};
+    originSawChatBody = undefined;
 
     model = await startOrigin(originCa, (req, res) => {
       const chunks: Buffer[] = [];
       req.on('data', (c: Buffer) => void chunks.push(c));
       req.on('end', () => {
         const body = Buffer.concat(chunks).toString('utf8');
+        if (req.url === '/die-mid-stream') {
+          // Headers, one chunk, then the connection goes without an end. This is a crashing
+          // origin or a network break, not a client that left -- and the difference is the whole
+          // point of the test below.
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          res.write('data: first\n\n');
+          setTimeout(() => res.socket?.destroy(), 30);
+          return;
+        }
+        if (req.url === '/not-modified') {
+          // What a cache revalidation answers, and RFC 7232 asks for the header fields a 200
+          // would have carried -- so `content-encoding` is here on a response with no body.
+          res.writeHead(304, { 'content-encoding': 'gzip', etag: '"abc"' });
+          res.end();
+          return;
+        }
+        if (req.url === '/stream-gzip') {
+          // A compressed stream, handed over in two writes so a client can leave mid-member. What
+          // orca keeps is then a prefix of a deflate stream, which cannot be inflated.
+          const whole = zlib.gzipSync(Buffer.from('data: first\n\ndata: second\n\n'));
+          res.writeHead(200, {
+            'content-type': 'text/event-stream',
+            'content-encoding': 'gzip',
+          });
+          res.write(whole.subarray(0, Math.floor(whole.length / 2)));
+          void new Promise<void>((resolve) => {
+            release = resolve;
+          }).then(() => {
+            res.write(whole.subarray(Math.floor(whole.length / 2)));
+            res.end();
+          });
+          return;
+        }
+        if (req.headers['x-test-gzip'] !== undefined) {
+          // Compressed regardless of `accept-encoding`, which the interceptor strips from every
+          // request precisely so an origin that honours it answers in plaintext. This is the
+          // origin that does not: a gateway with compression forced on, or an edge handing back a
+          // pre-compressed error page.
+          const payload = JSON.stringify({
+            id: 'chatcmpl-1',
+            object: 'chat.completion',
+            model: 'gpt-5.2',
+            choices: [
+              { index: 0, message: { role: 'assistant', content: 'hi' }, finish_reason: 'stop' },
+            ],
+            usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+          });
+          // `lying` claims the encoding without applying it, which is what a gateway in front of
+          // an already-decompressing cache produces.
+          const out =
+            req.headers['x-test-gzip'] === 'lying'
+              ? Buffer.from(payload)
+              : zlib.gzipSync(Buffer.from(payload));
+          res.writeHead(200, {
+            'content-type': 'application/json',
+            'content-encoding': 'gzip',
+            'content-length': String(out.length),
+          });
+          res.end(out);
+          return;
+        }
         if (req.url === '/stream') {
           res.writeHead(200, { 'content-type': 'text/event-stream' });
           res.write('data: first\n\n');
@@ -307,7 +482,20 @@ describe('TLS interception', () => {
           });
           return;
         }
+        if (req.url === '/v1/chat/completions' && req.headers['x-test-hold'] !== undefined) {
+          // Held before a single response header is written, which is the state a client that
+          // gives up early leaves the exchange in: a request orca decrypted and a response that
+          // never began. Released in `afterEach` along with `/stream`.
+          void new Promise<void>((resolve) => {
+            release = resolve;
+          }).then(() => {
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end('{}');
+          });
+          return;
+        }
         if (req.url === '/v1/chat/completions') {
+          originSawChatBody = body;
           res.writeHead(200, { 'content-type': 'application/json' });
           res.end(
             JSON.stringify({
@@ -367,6 +555,34 @@ describe('TLS interception', () => {
     return proxy;
   }
 
+  it.each([
+    {
+      path: '/api/v2/chat/messages',
+      body: { model: 'gpt-5.2', messages: [{ role: 'user', content: 'hello' }] },
+    },
+    { path: '/v3/conversations/messages', body: { text: 'hello', channel: 'fixture' } },
+  ])('keeps intercepted $path traffic opaque', async ({ path, body }) => {
+    const handle = await startProxy([`127.0.0.1:${model.port}`]);
+    const rawBody = JSON.stringify(body);
+    const response = await through({
+      proxyPort: handle.port,
+      host: '127.0.0.1',
+      port: model.port,
+      trust: [runCa.certPem],
+      method: 'POST',
+      path,
+      body: rawBody,
+      headers: { 'content-type': 'application/json' },
+    });
+
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ saw: rawBody, path });
+    expect(modelExchanges).toHaveLength(0);
+    expect(handle.exchanges()).toHaveLength(0);
+    expect(netExchanges).toHaveLength(1);
+    expect(netExchanges[0]).toMatchObject({ path, requestBody: rawBody, status: 200 });
+  });
+
   /**
    * HTTP/2, which reaches a different forwarder inside the interceptor.
    *
@@ -399,6 +615,86 @@ describe('TLS interception', () => {
       });
       return proxy;
     }
+
+    it('decodes a compressed h2 response too, and stops claiming the encoding', async () => {
+      // The h2 forwarder builds its own header map and files its own exchange, so the property
+      // holds only where it is pinned. Asked on a path no dialect claims, because that is the
+      // exchange that keeps response headers to check.
+      h2Origin = await startH2Origin(originCa, {
+        answer: () => ({
+          contentType: 'application/json',
+          encoding: 'gzip',
+          body: zlib.gzipSync(Buffer.from('{"answer":"from the origin"}')),
+        }),
+      });
+      const handle = await startProxy([`127.0.0.1:${h2Origin.port}`]);
+
+      const session = await h2Through({
+        proxyPort: handle.port,
+        host: '127.0.0.1',
+        port: h2Origin.port,
+        trust: [runCa.certPem],
+      });
+      const request = session.request({ ':method': 'POST', ':path': '/not-a-model-endpoint' });
+      request.setEncoding('utf8');
+      request.on('data', () => undefined);
+      request.end('{}');
+      await once(request, 'close');
+      session.destroy();
+
+      expect(netExchanges).toHaveLength(1);
+      const exchange = netExchanges[0]!;
+      expect(exchange.responseBody).toBe('{"answer":"from the origin"}');
+      expect(exchange.responseDecodedFrom).toBe('gzip');
+      expect(exchange.responseHeaders['content-encoding']).toBeUndefined();
+    });
+
+    it('carries the protocol onto a model exchange promoted from an h2 call', async () => {
+      // `alpn` has been recorded on `net.request` since the interceptor learned h2, and the
+      // reason given was that "did this run go through the h2 path" has to be answerable from the
+      // trace. On an intercepted run it was not: every model call a dialect claims is promoted,
+      // so no `net.*` event is left to carry the field, and promotion dropped it. Asked over h2
+      // because that is the answer worth having -- and because the HTTP/1.1 test client offers no
+      // ALPN at all, where absent is the honest value.
+      h2Origin = await startH2Origin(originCa, {
+        answer: () => ({
+          contentType: 'application/json',
+          body: JSON.stringify({
+            id: 'chatcmpl-1',
+            object: 'chat.completion',
+            model: 'gpt-5.2',
+            choices: [
+              { index: 0, message: { role: 'assistant', content: 'hi' }, finish_reason: 'stop' },
+            ],
+            usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+          }),
+        }),
+      });
+      const handle = await startProxy([`127.0.0.1:${h2Origin.port}`]);
+
+      const session = await h2Through({
+        proxyPort: handle.port,
+        host: '127.0.0.1',
+        port: h2Origin.port,
+        trust: [runCa.certPem],
+      });
+      const request = session.request({
+        ':method': 'POST',
+        ':path': '/v1/chat/completions',
+        'content-type': 'application/json',
+      });
+      request.setEncoding('utf8');
+      request.on('data', () => undefined);
+      request.end(
+        JSON.stringify({ model: 'gpt-5.2', messages: [{ role: 'user', content: 'hi' }] }),
+      );
+      await once(request, 'close');
+      session.destroy();
+
+      expect(modelExchanges).toHaveLength(1);
+      expect(modelExchanges[0]!.alpn).toBe('h2');
+      expect(netExchanges).toHaveLength(0);
+    });
 
     /**
      * The same guarantee over h2, which is the path that actually matters here: `openrouter.ai`
@@ -509,6 +805,37 @@ describe('TLS interception', () => {
       expect(h2Origin.hits).toBe(1);
     });
 
+    it('records an h2 exchange the client abandoned before the origin answered', async () => {
+      // The test above proves the proxy survives this. This one proves the run remembers it.
+      let sawStream = (): void => undefined;
+      const streamReached = new Promise<void>((resolve) => {
+        sawStream = resolve;
+      });
+      h2Origin = await startH2Origin(originCa, { delayMs: 250, onStream: () => sawStream() });
+      const handle = await startProxy([`127.0.0.1:${h2Origin.port}`]);
+
+      const session = await h2Through({
+        proxyPort: handle.port,
+        host: '127.0.0.1',
+        port: h2Origin.port,
+        trust: [runCa.certPem],
+      });
+      const request = session.request({ ':method': 'POST', ':path': '/abort' });
+      request.on('error', () => undefined);
+      request.end('hello');
+      await streamReached;
+      request.destroy();
+      await new Promise((r) => setTimeout(r, 500));
+      session.destroy();
+
+      expect(netExchanges).toHaveLength(1);
+      expect(netExchanges[0]!.abandoned).toBe(true);
+      expect(netExchanges[0]!.alpn).toBe('h2');
+      // The request reached the origin, so the bytes the agent sent are the part worth keeping.
+      expect(netExchanges[0]!.requestBody).toBe('hello');
+      expect(netExchanges[0]!.status).toBe(0);
+    });
+
     it('records an exchange whose request body it cannot decode', async () => {
       h2Origin = await startH2Origin(originCa);
       const handle = await startProxy([`127.0.0.1:${h2Origin.port}`]);
@@ -525,7 +852,7 @@ describe('TLS interception', () => {
       const request = session.request({
         ':method': 'POST',
         ':path': '/v1/embeddings',
-        // Claims an encoding the body does not have. `decodeRequestBody` throws either because
+        // Claims an encoding the body does not have. `decodeBody` throws either because
         // the runtime has no zstd or because the stream is corrupt; both used to escape the
         // `end` handler as an uncaught exception.
         'content-encoding': 'zstd',
@@ -662,6 +989,195 @@ describe('TLS interception', () => {
     expect(modelExchanges[0]!.canonicalRequest.model).toBe('gpt-5.2');
     expect(modelExchanges[0]!.status).toBe(200);
     expect(netExchanges).toHaveLength(0);
+  });
+
+  it('recognises a model API call whose endpoint carries a query string', async () => {
+    const handle = await startProxy([`127.0.0.1:${model.port}`]);
+
+    await through({
+      proxyPort: handle.port,
+      host: '127.0.0.1',
+      port: model.port,
+      trust: [runCa.certPem],
+      method: 'POST',
+      // What Azure OpenAI's endpoints look like, and they are not optional there.
+      path: '/v1/chat/completions?api-version=2026-02-01',
+      body: JSON.stringify({ model: 'gpt-5.2', messages: [{ role: 'user', content: 'hello' }] }),
+      headers: { 'content-type': 'application/json' },
+    });
+
+    // Matching the raw path recorded this as net traffic: unreplayable, unforkable, and reported
+    // as a path no dialect claims.
+    expect(modelExchanges).toHaveLength(1);
+    expect(modelExchanges[0]!.dialect).toBe('openai');
+    expect(netExchanges).toHaveLength(0);
+    // The query stays in the trace -- it is what the agent asked for; only the match ignores it.
+    expect(modelExchanges[0]!.path).toBe('/v1/chat/completions?api-version=2026-02-01');
+  });
+
+  /**
+   * A response body reaches the recording compressed only from an origin that ignores the
+   * stripped `accept-encoding`. What made it worth fixing is that the fallback was silently wrong
+   * rather than merely large: measured against such an origin, `orca replay` reported
+   * `exact=1 divergences=0` over a response the agent could not read.
+   */
+  describe('a response the origin compressed anyway', () => {
+    it('records the body the client saw, and says what it took off to get there', async () => {
+      const handle = await startProxy([`127.0.0.1:${model.port}`]);
+      await through({
+        proxyPort: handle.port,
+        host: '127.0.0.1',
+        port: model.port,
+        trust: [runCa.certPem],
+        method: 'POST',
+        path: '/v1/chat/completions',
+        body: JSON.stringify({ model: 'gpt-5.2', messages: [{ role: 'user', content: 'hello' }] }),
+        headers: { 'content-type': 'application/json', 'x-test-gzip': '1' },
+      });
+
+      expect(modelExchanges).toHaveLength(1);
+      const exchange = modelExchanges[0]!;
+      // Three failures from the one cause, each pinned here. No dialect can read a deflate
+      // stream, so `usage` came out 0/0 on a call that reports 3/1 uncompressed; the recorded
+      // body was base64 of the wire bytes, which is what a reader opens; and replay answers from
+      // that body under a `content-type` it synthesises and never a `content-encoding`, so the
+      // agent was handed the base64 text as the model's reply.
+      expect(exchange.rawResponse).toContain('"content":"hi"');
+      expect(exchange.rawResponse).not.toContain('orca-base64:');
+      expect(exchange.usage?.input_tokens).toBe(3);
+      expect(exchange.usage?.output_tokens).toBe(1);
+      expect(exchange.responseDecodedFrom).toBe('gzip');
+    });
+
+    it('stops claiming an encoding the recorded body no longer has', async () => {
+      // Asked on a path no dialect claims, because that is the exchange that keeps its response
+      // headers. A promoted model exchange carries none at all, which is why `decoded_from` has
+      // to travel separately.
+      const handle = await startProxy([`127.0.0.1:${model.port}`]);
+      await through({
+        proxyPort: handle.port,
+        host: '127.0.0.1',
+        port: model.port,
+        trust: [runCa.certPem],
+        method: 'POST',
+        path: '/not-a-model-endpoint',
+        body: '{}',
+        headers: { 'content-type': 'application/json', 'x-test-gzip': '1' },
+      });
+
+      expect(netExchanges).toHaveLength(1);
+      const exchange = netExchanges[0]!;
+      expect(exchange.responseBody).toContain('"content":"hi"');
+      // `content-encoding: gzip` beside a decoded body is a claim the recording cannot support,
+      // and a `content-length` counting compressed bytes is another. Neither fact is lost: the
+      // wire size is what `responseBytes` has always been.
+      expect(exchange.responseHeaders['content-encoding']).toBeUndefined();
+      expect(exchange.responseHeaders['content-length']).toBeUndefined();
+      expect(exchange.responseHeaders['content-type']).toBe('application/json');
+      expect(exchange.responseDecodedFrom).toBe('gzip');
+      expect(exchange.responseBytes).toBeLessThan(exchange.responseBody.length);
+    });
+
+    it('keeps the wire bytes, and says why, when the claimed encoding is not there', async () => {
+      const failures: string[] = [];
+      const handle = await createProxy({
+        mode: 'record',
+        onExchange: (e) => void modelExchanges.push(e),
+        tls: {
+          ca: runCa,
+          hosts: [`127.0.0.1:${model.port}`],
+          trustedOriginCerts: [originCa.certPem],
+          onNetExchange: (e) => void netExchanges.push(e),
+          onFailure: (f) => void failures.push(f.reason),
+        },
+      });
+      proxy = handle;
+      await through({
+        proxyPort: handle.port,
+        host: '127.0.0.1',
+        port: model.port,
+        trust: [runCa.certPem],
+        method: 'POST',
+        path: '/not-a-model-endpoint',
+        body: '{}',
+        headers: { 'content-type': 'application/json', 'x-test-gzip': 'lying' },
+      });
+
+      // Undecodable is not unrecordable. The bytes are kept exactly as they arrived and the
+      // header set is left describing them, because in this case it still does.
+      expect(netExchanges).toHaveLength(1);
+      expect(netExchanges[0]!.responseDecodedFrom).toBeUndefined();
+      expect(netExchanges[0]!.responseHeaders['content-encoding']).toBe('gzip');
+      expect(failures.some((reason) => reason.startsWith('response body left opaque'))).toBe(true);
+    });
+
+    it('says nothing about a response that carried no body at all', async () => {
+      const failures: string[] = [];
+      const handle = await createProxy({
+        mode: 'record',
+        tls: {
+          ca: runCa,
+          hosts: [`127.0.0.1:${model.port}`],
+          trustedOriginCerts: [originCa.certPem],
+          onNetExchange: (e) => void netExchanges.push(e),
+          onFailure: (f) => void failures.push(f.reason),
+        },
+      });
+      proxy = handle;
+      await through({
+        proxyPort: handle.port,
+        host: '127.0.0.1',
+        port: model.port,
+        trust: [runCa.certPem],
+        method: 'GET',
+        path: '/not-modified',
+      });
+
+      expect(netExchanges).toHaveLength(1);
+      expect(netExchanges[0]!.status).toBe(304);
+      expect(netExchanges[0]!.responseBody).toBe('');
+      expect(netExchanges[0]!.responseDecodedFrom).toBeUndefined();
+      // Every decoder throws "unexpected end of file" on an empty buffer, so attempting one here
+      // reported an opaque body on a response that never had one.
+      expect(failures).toEqual([]);
+      // Nothing was decoded, so the header set still describes what arrived.
+      expect(netExchanges[0]!.responseHeaders['content-encoding']).toBe('gzip');
+    });
+
+    it('leaves a stream the client walked away from mid-member alone, and says nothing', async () => {
+      // Half a deflate member cannot be inflated, so attempting it would report a failure on
+      // every turn of a harness that stops reading once it has its answer -- and `abandoned`
+      // already says the record is a prefix rather than the whole of it.
+      const failures: string[] = [];
+      const handle = await createProxy({
+        mode: 'record',
+        tls: {
+          ca: runCa,
+          hosts: [`127.0.0.1:${model.port}`],
+          trustedOriginCerts: [originCa.certPem],
+          onNetExchange: (e) => void netExchanges.push(e),
+          onFailure: (f) => void failures.push(f.reason),
+        },
+      });
+      proxy = handle;
+      await abandoned({
+        proxyPort: handle.port,
+        host: '127.0.0.1',
+        port: model.port,
+        trust: [runCa.certPem],
+        path: '/stream-gzip',
+        leaveAfter: 'first-chunk',
+      });
+      // Filed from `res.on('close')`, which lands after the client's own promise settles. The
+      // origin is left holding the rest of the member on purpose; `afterEach` releases it into a
+      // socket that has already gone.
+      await settle();
+
+      expect(netExchanges).toHaveLength(1);
+      expect(netExchanges[0]!.abandoned).toBe(true);
+      expect(netExchanges[0]!.responseDecodedFrom).toBeUndefined();
+      expect(failures).toEqual([]);
+    });
   });
 
   it.skipIf(zstdCompressSync === undefined)(
@@ -876,6 +1392,112 @@ describe('TLS interception', () => {
     expect(netExchanges[0]!.responseBody).toBe('data: first\n\ndata: second\n\n');
   });
 
+  /**
+   * The failure that made Hermes look uncapturable.
+   *
+   * Recording used to happen only when the response reached `end`, so a client that stopped
+   * reading a streaming reply the moment it had its answer left nothing behind -- and the run
+   * reported `capture.empty` with "the agent never called the proxy", about a request orca had
+   * decrypted and forwarded itself. The prefix is the evidence, and the prefix is what gets kept.
+   */
+  it('records a streaming exchange the client walks away from mid-flight', async () => {
+    const handle = await startProxy([`127.0.0.1:${model.port}`]);
+
+    const seen = await abandoned({
+      proxyPort: handle.port,
+      host: '127.0.0.1',
+      port: model.port,
+      trust: [runCa.certPem],
+      path: '/stream',
+      leaveAfter: 'first-chunk',
+    });
+    expect(seen).toBe('data: first\n\n');
+    // The origin is left holding the second chunk on purpose. Releasing it here would let
+    // the response reach `end` and be filed the ordinary way, which is the path this test is
+    // not about; `afterEach` releases it into a socket that has already gone.
+    await settle();
+
+    expect(netExchanges).toHaveLength(1);
+    const captured = netExchanges[0]!;
+    expect(captured.abandoned).toBe(true);
+    expect(captured.status).toBe(200);
+    expect(captured.responseBody).toContain('first');
+    // Not a capture-limit truncation: orca kept everything it was handed.
+    expect(captured.responseTruncated).toBe(false);
+  });
+
+  /**
+   * An exchange with no response is evidence, not a model call.
+   *
+   * `onDecrypted` promotes a decrypted POST to a model exchange when a dialect claims the path,
+   * and a call abandoned before the answer would satisfy that on the path alone. Promoting it puts
+   * an entry in the replay set that can answer nothing and cannot be forked, so it is kept as
+   * network traffic instead -- which is what it is.
+   */
+  it('keeps a model call abandoned before the origin answered as network traffic', async () => {
+    const handle = await startProxy([`127.0.0.1:${model.port}`]);
+
+    await abandoned({
+      proxyPort: handle.port,
+      host: '127.0.0.1',
+      port: model.port,
+      trust: [runCa.certPem],
+      method: 'POST',
+      path: '/v1/chat/completions',
+      body: JSON.stringify({ model: 'gpt-5.2', messages: [{ role: 'user', content: 'hello' }] }),
+      headers: { 'content-type': 'application/json', 'x-test-hold': '1' },
+      leaveAfter: 'request',
+    });
+    // Deliberately not released here: the point is an exchange whose response never began, and
+    // letting the origin answer first would give it the status that makes it a model call.
+    // `afterEach` releases it into a socket that has already gone.
+    await settle();
+
+    expect(modelExchanges).toHaveLength(0);
+    expect(netExchanges).toHaveLength(1);
+    expect(netExchanges[0]!.abandoned).toBe(true);
+    expect(netExchanges[0]!.status).toBe(0);
+    expect(netExchanges[0]!.requestBody).toContain('gpt-5.2');
+  });
+
+  /**
+   * An origin that dies is not a client that left, and only one of the two may go unanswered.
+   *
+   * The client is still connected and waiting for the rest of a response orca already began
+   * forwarding. Treating the origin's abort as abandonment settles the forward promise, so the
+   * caller's `.catch` -- the only thing that ends the client's response -- never runs, and the
+   * agent's in-flight call waits for a stream that will never continue. Recording it as
+   * `abandoned` compounds it: the field means the agent stopped reading, and here it did not.
+   */
+  it('answers the client when the origin dies mid-response rather than leaving it hanging', async () => {
+    const handle = await startProxy([`127.0.0.1:${model.port}`]);
+
+    const settled = await Promise.race([
+      through({
+        proxyPort: handle.port,
+        host: '127.0.0.1',
+        port: model.port,
+        trust: [runCa.certPem],
+        path: '/die-mid-stream',
+      }).then(
+        () => 'settled' as const,
+        // A transport error is still an answer: the client stops waiting. Hanging is the failure.
+        () => 'settled' as const,
+      ),
+      new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 4_000)),
+    ]);
+    expect(settled).toBe('settled');
+    await settle();
+
+    expect(netExchanges).toHaveLength(1);
+    const captured = netExchanges[0]!;
+    // The prefix the origin did send is worth keeping.
+    expect(captured.responseBody).toContain('first');
+    expect(captured.status).toBe(200);
+    // But not as the agent's doing. `abandoned` says the client stopped reading; it did not.
+    expect(captured.abandoned).not.toBe(true);
+  });
+
   it('refuses an origin whose certificate it cannot verify instead of downgrading', async () => {
     // A CA the proxy was never told about — the shape of a real MITM sitting in front of the
     // origin. Interception must not become an excuse to stop checking.
@@ -925,5 +1547,109 @@ describe('TLS interception', () => {
     });
     expect(handle.stats().intercepted).toBe(1);
     expect(handle.stats().tunnelled).toBe(1);
+  });
+
+  /**
+   * `--model` on a TLS-intercepted fork. Issue #49: the flag was accepted and echoed, then the
+   * intercepted live path forwarded the recorded model unchanged, and `live=0` because `goLive`
+   * never ran. Same-provider substitution has to rewrite the body and still talk to the CONNECT
+   * target — that origin's credential cannot follow us to a vendor default.
+   */
+  const interceptedChat = {
+    model: 'grok-4',
+    messages: [{ role: 'user', content: 'hello' }],
+  };
+
+  async function postInterceptedChat(
+    handle: ProxyHandle,
+    body: typeof interceptedChat = interceptedChat,
+  ): Promise<ProxiedResponse> {
+    return through({
+      proxyPort: handle.port,
+      host: '127.0.0.1',
+      port: model.port,
+      trust: [runCa.certPem],
+      method: 'POST',
+      path: '/v1/chat/completions',
+      body: JSON.stringify(body),
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+
+  it('substitutes --model on a TLS-intercepted live call and counts it as live', async () => {
+    const routes: Array<{ model: string; origin?: string }> = [];
+    proxy = await createProxy({
+      mode: 'hybrid',
+      exchanges: [],
+      forkAt: 0,
+      forkModel: 'grok-4-fast',
+      onExchange: (e) => void modelExchanges.push(e),
+      onRoute: (d) => void routes.push(d),
+      tls: {
+        ca: runCa,
+        hosts: [`127.0.0.1:${model.port}`],
+        trustedOriginCerts: [originCa.certPem],
+        onNetExchange: (e) => void netExchanges.push(e),
+      },
+    });
+
+    const response = await postInterceptedChat(proxy);
+    expect(response.status).toBe(200);
+    expect(JSON.parse(originSawChatBody ?? '{}').model).toBe('grok-4-fast');
+    expect(proxy.stats().liveCalls).toBe(1);
+    expect(modelExchanges[0]?.canonicalRequest.model).toBe('grok-4-fast');
+    expect(routes).toEqual([
+      expect.objectContaining({
+        model: 'grok-4-fast',
+        recorded: 'openai',
+        target: 'openai',
+        crossProvider: false,
+        origin: `https://127.0.0.1:${model.port}`,
+      }),
+    ]);
+  });
+
+  it('counts a TLS-intercepted live call even when --model is unchanged', async () => {
+    proxy = await createProxy({
+      mode: 'hybrid',
+      exchanges: [],
+      forkAt: 0,
+      onExchange: (e) => void modelExchanges.push(e),
+      tls: {
+        ca: runCa,
+        hosts: [`127.0.0.1:${model.port}`],
+        trustedOriginCerts: [originCa.certPem],
+        onNetExchange: (e) => void netExchanges.push(e),
+      },
+    });
+
+    const response = await postInterceptedChat(proxy);
+    expect(response.status).toBe(200);
+    expect(JSON.parse(originSawChatBody ?? '{}').model).toBe('grok-4');
+    expect(proxy.stats().liveCalls).toBe(1);
+    expect(modelExchanges).toHaveLength(1);
+  });
+
+  it('refuses a cross-provider --model on a TLS-intercepted fork instead of calling the old one', async () => {
+    proxy = await createProxy({
+      mode: 'hybrid',
+      exchanges: [],
+      forkAt: 0,
+      forkModel: 'claude-haiku-4-5',
+      onExchange: (e) => void modelExchanges.push(e),
+      tls: {
+        ca: runCa,
+        hosts: [`127.0.0.1:${model.port}`],
+        trustedOriginCerts: [originCa.certPem],
+        onNetExchange: (e) => void netExchanges.push(e),
+      },
+    });
+
+    const response = await postInterceptedChat(proxy);
+    expect(response.status).toBe(400);
+    expect(response.body).toMatch(/claude-haiku-4-5/);
+    expect(response.body).toMatch(/cannot leave the host/i);
+    expect(originSawChatBody).toBeUndefined();
+    expect(proxy.stats().liveCalls).toBe(0);
   });
 });

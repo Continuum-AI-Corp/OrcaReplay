@@ -304,7 +304,7 @@ describe('openCodeAdapter credentials', () => {
     runId: 'run_abc123',
     cwd: '/work',
     proxyUrl: 'http://127.0.0.1:51733',
-    runDir: '/work/.orca/runs/run_abc123',
+    runDir: join(scratch, '.orca/runs/run_abc123'),
     userArgs: [],
     env: {},
   });

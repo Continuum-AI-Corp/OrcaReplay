@@ -4,6 +4,7 @@ import { Orca } from './api.js';
 import { serveMcp } from './mcp-server.js';
 import { Output } from './out.js';
 import { attachCommand } from './commands/attach.js';
+import { quickstartCommand } from './commands/quickstart.js';
 import { recordCommand } from './commands/record.js';
 import { replayCommand } from './commands/replay.js';
 import {
@@ -24,6 +25,10 @@ import { ORCA_VERSION } from './version.js';
 
 const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI agents
 
+  orca quickstart                a project, a recorded run and an offline replay of it —
+                                 no key, no agent installed, no network
+        --dir <path>             where to put it (default: ./orca-quickstart)
+        --full                   the whole timeline and the replay as it happened
   orca record <agent>            run an agent and capture everything
   orca attach                    record an agent orca does not launch — one in a sandbox,
                                  a container, or on another machine
@@ -34,6 +39,7 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
         --replay <run>           serve a recording back to that agent instead of recording,
                                  for a run whose agent is not on this machine
   orca replay [run]              reproduce a run exactly, network off
+        --quiet                  discard the replayed agent's own output, keep the verdict
         --ui                     open the timeline when it finishes
   orca replay [run] --from N     fork from a checkpoint and continue live
         --model <id>             continue on a different model
@@ -130,6 +136,16 @@ For a script, an agent, or CI — every command below also answers as data:
 Docs: https://github.com/Continuum-AI-Corp/OrcaReplay
 `;
 
+/**
+ * The commands `--json` answers and the terminal does not.
+ *
+ * A set rather than a special case. It holds one name today, and the point of the shape is that
+ * adding a second `--json`-only view does not quietly bring back `orca events` telling a reader
+ * that a command `--help` had just listed does not exist. `json-only.test.ts` derives the same set
+ * from the two switches in this file and fails when this disagrees with them.
+ */
+const JSON_ONLY = new Set(['events']);
+
 export async function main(argv: string[], cwd = process.cwd()): Promise<number> {
   const args = parseArgs(argv);
   if (args.bool('json')) return jsonMain(args, cwd);
@@ -167,6 +183,10 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
     assertNoStrayPositionals(args);
 
     switch (args.command) {
+      case 'quickstart':
+        // Non-zero when the demo did not actually happen, so a broken environment is a failure a
+        // script can see rather than a wall of green text that says the opposite.
+        return (await quickstartCommand(args, out, cwd)).ok ? 0 : 1;
       case 'record':
         return (await recordCommand(args, out, cwd)).exitCode;
       case 'attach':
@@ -221,6 +241,19 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
         await serveMcp({ orca: new Orca({ cwd }), input: process.stdin, output: process.stdout });
         return 0;
       default:
+        // `--json` answers one view that the terminal does not, and `--help` lists it beside seven
+        // that it does. A reader scanning that line reasonably types `orca events`, and being told
+        // there is no such command — by the same tool that had just named it — reads as the CLI
+        // contradicting itself. Name the route instead.
+        if (JSON_ONLY.has(args.command)) {
+          out.failure({
+            event: 'json_only_command',
+            what: `${args.command} answers as data, not as a table`,
+            why: 'these are the raw trace records; `orca show` is the same events, rendered',
+            next: `orca ${args.command} --json`,
+          });
+          return 2;
+        }
         out.failure({
           event: 'unknown_command',
           what: `there is no "${args.command}" command`,

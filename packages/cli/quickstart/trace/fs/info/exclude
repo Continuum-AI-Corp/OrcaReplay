@@ -1,0 +1,11 @@
+.env*
+.ssh/
+.aws/
+.netrc
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+.orca/
+node_modules/
+.git/

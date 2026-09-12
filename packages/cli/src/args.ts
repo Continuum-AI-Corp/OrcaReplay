@@ -15,6 +15,15 @@ export interface ParsedArgs {
   flags: Record<string, FlagValue>;
   /** Everything after a bare `--`, forwarded verbatim to the agent. */
   passthrough: string[];
+  /**
+   * Flags that became `true` only because nothing followed them.
+   *
+   * Recorded rather than inferred from the value: `--model=true` is also `true`, and telling a
+   * person their value is missing when they typed one is its own kind of wrong.
+   */
+  missingValue: Set<string>;
+  /** Flags given more than once with values that disagree. The last one silently won. */
+  conflicting: Set<string>;
   /** Read a flag as a comma-separated list. */
   list(name: string): string[];
   has(name: string): boolean;
@@ -53,6 +62,13 @@ export const VALUELESS = new Set([
   'tls-intercept',
   'version',
   'help',
+  // Added with the flags themselves and, the first time, not: `orca replay --quiet run_a1b2c3`
+  // parsed as `quiet="run_a1b2c3"` with no positional left, so replay fell back to `last` and
+  // reproduced a different run than the one asked for, in silence. `flags.test.ts` now reads the
+  // source and holds this list to every flag the code treats as a boolean, so the next one added
+  // without an entry here fails a test rather than a user.
+  'quiet',
+  'full',
   // `-h` parses to the body "h" (short flags take one dash), and main.ts reads it with
   // args.bool('h'). Found by the derived invariant test the day it was written, which is the
   // point of deriving it — the hand-written list had missed this one too.
@@ -64,6 +80,17 @@ export const VALUELESS = new Set([
   // than trusted.
   'force',
 ]);
+
+/**
+ * Flags read as a number.
+ *
+ * The counterpart to `VALUELESS`, and needed for the same reason: `num()` returns its fallback for
+ * anything it cannot parse, so `--from four` replayed the whole run instead of forking at a
+ * checkpoint, and `--port eighty` bound a random port and printed it as though that were the
+ * request. Knowing which flags are numeric is what lets a value be checked once, up front, rather
+ * than nine times by hand — which is what `orca gc --keep` had been doing alone.
+ */
+export const NUMERIC = new Set(['from', 'to', 'port', 'keep']);
 
 function coerce(raw: string): FlagValue {
   if (raw === 'true') return true;
@@ -80,6 +107,13 @@ function isFlag(token: string): boolean {
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const flags: Record<string, FlagValue> = {};
+  const missingValue = new Set<string>();
+  const conflicting = new Set<string>();
+  /** Record an assignment, noticing when it silently overwrites a different one. */
+  const set = (name: string, value: FlagValue): void => {
+    if (name in flags && flags[name] !== value) conflicting.add(name);
+    flags[name] = value;
+  };
   const positionals: string[] = [];
   let passthrough: string[] = [];
 
@@ -99,21 +133,28 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
     const eq = body.indexOf('=');
     if (eq !== -1) {
-      flags[body.slice(0, eq)] = coerce(body.slice(eq + 1));
+      const name = body.slice(0, eq);
+      set(name, coerce(body.slice(eq + 1)));
+      // An explicit value, however wrong its shape, was given. It is not missing.
+      missingValue.delete(name);
       continue;
     }
 
     if (isLong && body.startsWith('no-')) {
-      flags[body.slice(3)] = false;
+      const name = body.slice(3);
+      set(name, false);
+      missingValue.delete(name);
       continue;
     }
 
     const next = own[i + 1];
     if (!VALUELESS.has(body) && next !== undefined && !isFlag(next)) {
-      flags[body] = coerce(next);
+      set(body, coerce(next));
+      missingValue.delete(body);
       i += 1;
     } else {
-      flags[body] = true;
+      set(body, true);
+      if (!VALUELESS.has(body)) missingValue.add(body);
     }
   }
 
@@ -124,6 +165,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
     positionals,
     flags,
     passthrough,
+    missingValue,
+    conflicting,
     list(name) {
       const v = flags[name];
       if (v === undefined || typeof v === 'boolean') return [];

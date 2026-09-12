@@ -3,8 +3,15 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import type { ShellFrame } from './runner.js';
 
-/** Shells an agent actually reaches for. Shimming more binaries buys detail and costs blast radius. */
-export const DEFAULT_SHIMS = ['sh', 'bash'] as const;
+/**
+ * Shells an agent actually reaches for. Shimming more binaries buys detail and costs blast radius.
+ *
+ * `zsh` is here because of how harnesses resolve their shell rather than despite it: OpenCode
+ * reads `$SHELL` and execs that binary by absolute path, so a PATH shim in front of `bash` and
+ * `sh` alone sat unused on every macOS run while the shell tool happily used `/bin/zsh`. The
+ * adapter points `$SHELL` at the shim instead, which requires a shim named `zsh` to exist.
+ */
+export const DEFAULT_SHIMS = ['sh', 'bash', 'zsh'] as const;
 
 export interface InstallOptions {
   runDir: string;

@@ -33,6 +33,19 @@ writes no bare `fetch(` for a scan to find.
 So the scope is now every package's `src`, and an alias assignment of the global
 `fetch` is treated as a raw fetch in its own right. A fence that only looks where
 the last bug was is not a fence.
+
+THE ONE EXEMPTION IS BOUND TO THE CALL'S SHAPE, NOT TO ITS FILE NAME.
+`refreshOpenCodeApiBases` cannot call `fetchPinned`: it is serialised with
+`.toString()` into the OpenCode plugin orca emits (see `opencode-capture.ts`),
+so an imported name would be a free variable in the generated module and throw
+at run time rather than pin anything. It is exempt because of what the call IS,
+not where it lives — a hard-coded public URL, `credentials: 'omit'`, and
+`redirect: 'error'`, which refuses a redirect outright rather than following it.
+EXEMPT_FETCHES asserts all three on the lines that follow the call, so the day
+that file grows a second fetch, or this one starts carrying a credential or
+following redirects, the fence reports it. Each entry must also still MATCH:
+an exemption that has stopped covering anything is a hole waiting for the next
+line to fall into, so it fails rather than sitting there looking satisfied.
 */
 describe('gateway requests', () => {
   async function tsFilesUnder(dir: string): Promise<string[]> {
@@ -56,6 +69,22 @@ describe('gateway requests', () => {
       files.push(...(await tsFilesUnder(src)));
     }
     expect(files.length, 'the scan found no sources, so it proves nothing').toBeGreaterThan(50);
+
+    // file -> why it may hold a raw fetch, and the shape that earns it.
+    // `requires` is checked against the call line and the few lines after it,
+    // which is where a fetch's init object is written.
+    const EXEMPT_FETCHES = [
+      {
+        file: join('adapters', 'src', 'opencode-catalog.ts'),
+        why: 'serialised into the emitted OpenCode plugin, so it cannot import fetchPinned',
+        requires: [
+          /https:\/\/models\.opencode\.ai\//,
+          /credentials:\s*'omit'/,
+          /redirect:\s*'error'/,
+        ],
+      },
+    ];
+    const exemptionUsed = new Map(EXEMPT_FETCHES.map((e) => [e.file, false]));
 
     const offenders: string[] = [];
     let sawDefinition = false;
@@ -91,6 +120,15 @@ describe('gateway requests', () => {
         // bare identifier `fetch` is the same thing.
         const aliased = /(=|\?\?)\s*fetch\s*(;|,|\)|$)/.test(code);
         if (called || aliased) {
+          const exempt = EXEMPT_FETCHES.find(
+            (e) =>
+              file.endsWith(e.file) &&
+              e.requires.every((re) => re.test(lines.slice(i, i + 6).join('\n'))),
+          );
+          if (exempt) {
+            exemptionUsed.set(exempt.file, true);
+            continue;
+          }
           offenders.push(`${file}:${i + 1}: ${line.trim()}`);
         }
       }
@@ -99,6 +137,12 @@ describe('gateway requests', () => {
     // The scan must still be able to find the one legitimate raw fetch, or it
     // has stopped looking at anything.
     expect(sawDefinition, 'fetchPinned was not found; this scan is no longer anchored').toBe(true);
+
+    // An exemption that matches nothing is not harmless: it stays behind as a
+    // standing permission for whatever that file is rewritten into next.
+    for (const [file, used] of exemptionUsed) {
+      expect(used, `EXEMPT_FETCHES still lists ${file}, but nothing there matched it`).toBe(true);
+    }
 
     expect(
       offenders,

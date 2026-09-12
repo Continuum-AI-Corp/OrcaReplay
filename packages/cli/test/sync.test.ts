@@ -1102,9 +1102,9 @@ describe('push and pull', () => {
     let probes = 0;
     const stillHeld = async (): Promise<boolean> => ++probes <= 1;
 
-    await expect(swapStagedRun({ dest, staging, retired, existing: true }, stillHeld)).rejects.toThrow(
-      /lock/i,
-    );
+    await expect(
+      swapStagedRun({ dest, staging, retired, existing: true }, stillHeld),
+    ).rejects.toThrow(/lock/i);
 
     expect(
       await readFile(join(dest, 'events.jsonl'), 'utf8').catch(() => undefined),
@@ -1221,7 +1221,9 @@ describe('push and pull', () => {
       written,
       'the evicted pull wrote the whole archive into the new holder’s staging directory',
     ).toBeLessThan(entries.length);
-    expect(probes, 'ownership was asked once, after the loop — not while writing').toBeGreaterThan(1);
+    expect(probes, 'ownership was asked once, after the loop — not while writing').toBeGreaterThan(
+      1,
+    );
 
     // And while the lock IS ours it must stage everything, or the check has simply broken pull.
     await rm(staging, { recursive: true, force: true });
