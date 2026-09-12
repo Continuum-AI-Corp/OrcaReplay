@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { rewriteMcpConfig } from '@orcareplay/adapters';
 import type { TraceWriter } from '@orcareplay/core';
+import { isMcpFrameRecord } from '@orcareplay/mcp-shim';
 import type { McpFrameRecord } from '@orcareplay/mcp-shim';
 import type { Output } from './out.js';
 
@@ -142,7 +143,9 @@ const LATEST_MS = 253_402_300_799_999;
  * is not enough for `ts`; the instant has to exist.
  */
 function usableFrame(value: unknown): value is McpFrameRecord {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  // The shape check belongs to the package that owns the format, so the two readers of this file
+  // cannot drift apart — they already had, and the one without it died on a `null` line.
+  if (!isMcpFrameRecord(value)) return false;
   const ts = (value as { ts?: unknown }).ts;
   if (ts === undefined) return true;
   if (typeof ts !== 'string') return false;

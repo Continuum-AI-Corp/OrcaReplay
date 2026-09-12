@@ -273,7 +273,8 @@ describe('a capture line that parsed is not yet a frame', () => {
     kind: 'req',
     method: 'tools/call',
     id: 1,
-    raw: {},
+    // A string, as the shim writes it: the line exactly as it arrived.
+    raw: '{"jsonrpc":"2.0","id":1,"method":"tools/call"}',
   };
 
   async function framesFrom(lines: string[]) {

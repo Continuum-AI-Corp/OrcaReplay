@@ -132,10 +132,13 @@ export async function readShellFrames(framesPath: string): Promise<ShellFrame[]>
     if (parsed === null || typeof parsed !== 'object') continue;
     const frame = parsed as ShellFrame;
     if (typeof frame.name !== 'string' || !Array.isArray(frame.argv)) continue;
-    if (typeof frame.startedAt !== 'string' || !Number.isFinite(frame.durationMs)) continue;
-    // Only when it parses. A `startedAt` that does not is already handled: the consumer drops
-    // `occurredAt` for it and stamps the event with the drain's own clock, which is a degraded
-    // field rather than a failure — so rejecting the frame there would lose a command that ran.
+    if (!Number.isFinite(frame.durationMs)) continue;
+    // Only when there is an instant to bound. A `startedAt` that is absent, or present and
+    // unparseable, is already handled: the consumer drops `occurredAt` for it and stamps the event
+    // with the drain's own clock, which is a degraded field rather than a failure — so rejecting
+    // the frame here would lose a command that ran. `Date.parse` is NaN for both, which is why one
+    // check covers them; requiring a *string* rejected the absent case, out of step with the MCP
+    // reader written in the same change and with the sentence above it.
     const startedMs = Date.parse(frame.startedAt);
     if (!Number.isNaN(startedMs)) {
       const endedMs = startedMs + frame.durationMs;
