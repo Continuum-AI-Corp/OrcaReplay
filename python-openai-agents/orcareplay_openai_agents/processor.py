@@ -235,17 +235,20 @@ class OrcaTracingProcessor:
             pass
 
     # ── the SDK's interface ───────────────────────────────────────────────────
+    # The trace half reads through `_read` for the same reason the span half does: the SDK wraps
+    # `Trace` in properties, a property is user code, and both of these are called synchronously
+    # from inside `Runner.run()` — so a raise here surfaces as the user's own run failing.
     def on_trace_start(self, trace: Any) -> None:
         self._write(
             {
                 "kind": "trace.start",
-                "trace_id": getattr(trace, "trace_id", None),
-                "name": getattr(trace, "name", None),
+                "trace_id": _read(trace, "trace_id"),
+                "name": _read(trace, "name"),
             }
         )
 
     def on_trace_end(self, trace: Any) -> None:
-        self._write({"kind": "trace.end", "trace_id": getattr(trace, "trace_id", None)})
+        self._write({"kind": "trace.end", "trace_id": _read(trace, "trace_id")})
 
     def on_span_start(self, span: Any) -> None:
         # Nothing worth keeping yet: the payload is filled in by the time the span ends, and writing

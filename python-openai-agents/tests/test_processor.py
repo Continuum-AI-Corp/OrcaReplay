@@ -408,3 +408,33 @@ def test_two_threads_cannot_glue_a_record_onto_a_torn_one(tmp_path, monkeypatch)
             pass
     kept = sorted(r["data"]["from_agent"] for r in survived if r.get("kind") == "span")
     assert len(kept) == 1, f"the record written after the tear must survive, got {kept}"
+
+
+def test_a_raising_trace_attribute_does_not_reach_the_agent(tmp_path):
+    # The same rule as the span hooks, on the other half of the same interface. `on_trace_start` and
+    # `on_trace_end` are called synchronously from trace start and `Trace.finish()` inside
+    # `Runner.run()`, so an escape here is the user's own run failing — and the SDK wraps `Trace` in
+    # properties, which is exactly what `_read` exists for.
+    class RaisingName:
+        trace_id = "t1"
+
+        @property
+        def name(self):
+            raise RuntimeError("a raising property")
+
+    class RaisingId:
+        name = "w"
+
+        @property
+        def trace_id(self):
+            raise RuntimeError("a raising property")
+
+    processor = OrcaTracingProcessor(str(tmp_path / "spans.jsonl"))
+    processor.on_trace_start(RaisingName())
+    processor.on_trace_end(RaisingId())
+    processor.shutdown()
+
+    records = spans_of(processor)
+    assert [r["kind"] for r in records] == ["trace.start", "trace.end"]
+    assert records[0]["name"] is None, "what it could not read becomes None, not an exception"
+    assert records[1]["trace_id"] is None
