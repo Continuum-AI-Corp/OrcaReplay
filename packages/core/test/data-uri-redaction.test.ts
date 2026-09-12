@@ -638,6 +638,41 @@ describe('a whole PNG is excluded from the entropy sweep', () => {
     ).not.toThrow();
   }, 60_000);
 
+  /**
+   * The other shape a large payload comes in: not one enormous image, but very many small ones.
+   *
+   * `spansOf` used to finish with `spans.push(...rasterSpans(value))`, and a spread passes one
+   * argument per element — V8 stops at about 125k of them. There is one span per image, and the
+   * smallest PNG this file accepts is a 1×1 greyscale at 92 base64 characters, so roughly 12 MB of
+   * payload raised `RangeError: Maximum call stack size exceeded` out of `redactString`, which
+   * nothing on the write path catches. A tool result, a page, or an MCP frame can carry that.
+   *
+   * The cost mattered as much as the throw: the sweep tested containment with `spans.some(...)`
+   * per token, which is quadratic once a value holds many images — 120k of them took 27 s before
+   * this, against 0.14 s for the same body under the redactor that had no exemption at all.
+   */
+  it('handles a value holding more images than a spread can carry', () => {
+    // 1×1 greyscale: the smallest thing the exemption accepts, so the most spans per byte.
+    const ihdr = ihdrOf(1, 1, 8, 0);
+    const tiny = Buffer.concat([
+      SIG,
+      chunk('IHDR', ihdr),
+      chunk('IDAT', deflateSync(Buffer.alloc(2))), // 1 * (1 + 1)
+      chunk('IEND', Buffer.alloc(0)),
+    ]).toString('base64');
+
+    const many = 150_000; // past V8's argument limit, which is around 125k
+    const body = JSON.stringify({ images: Array.from({ length: many }, () => tiny) });
+    const started = Date.now();
+    const { value } = new Redactor({}).redactString(body);
+    const elapsed = Date.now() - started;
+
+    expect(value).toBe(body); // every one of them intact, none of them recorded
+    // Linear, not quadratic. Generous by two orders of magnitude against the 27 s this used to
+    // take at a smaller size — the claim is the shape of the curve, not a stopwatch.
+    expect(elapsed, `${many} images took ${(elapsed / 1000).toFixed(1)} s`).toBeLessThan(20_000);
+  }, 120_000);
+
   it('covers a payload carrying escaped characters, as a JSON-encoded body does', () => {
     // A body reaches the trace inside JSON, so a `/` in the payload can arrive as `\/`.
     const image = png();

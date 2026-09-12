@@ -452,7 +452,19 @@ const PROTOCOL_ID_VALUE = /(\\*")(?:id|tool_use_id|tool_call_id)\1\s*:\s*\1[A-Za
  */
 const PROTOCOL_SIGNATURE_VALUE = /(\\*")signature\1\s*:\s*\1[A-Za-z0-9+/=_-]*\1/g;
 
-/** Regions the entropy sweep must not touch: what it already replaced, and what is not a secret. */
+/**
+ * Regions the entropy sweep must not touch: what it already replaced, and what is not a secret.
+ *
+ * Returned sorted by start, which is what {@link Redactor.redactString}'s sweep relies on to test
+ * containment in one pass rather than one scan of the whole list per token.
+ *
+ * The rasters are appended one at a time, not spread. `push(...spans)` passes one argument per
+ * element and V8 stops at about 125k of them — and a string can hold one span per image, so ~130k
+ * of the smallest PNG this file accepts (a 1×1 greyscale, 92 base64 characters: about 12 MB of
+ * payload, which any tool result or MCP frame can carry) raised
+ * `RangeError: Maximum call stack size exceeded` from here, out through `redactString`, with
+ * nothing on the write path to catch it.
+ */
 function spansOf(value: string): [number, number][] {
   const spans: [number, number][] = [];
   for (const m of value.matchAll(PLACEHOLDER)) spans.push([m.index, m.index + m[0].length]);
@@ -460,8 +472,8 @@ function spansOf(value: string): [number, number][] {
   for (const m of value.matchAll(PROTOCOL_SIGNATURE_VALUE)) {
     spans.push([m.index, m.index + m[0].length]);
   }
-  spans.push(...rasterSpans(value));
-  return spans;
+  for (const span of rasterSpans(value)) spans.push(span);
+  return spans.sort((a, b) => a[0] - b[0]);
 }
 
 export interface RedactionOptions {
@@ -564,14 +576,26 @@ export class Redactor {
     const spans = spansOf(value);
     let out = '';
     let cut = 0;
+    // `spans.some(...)` per token walked the whole list every time, which is quadratic once a value
+    // holds many images — measured, 40k small PNGs cost 2.7 s against 0.14 s before the exemption
+    // existed. Spans arrive sorted by start and `matchAll` yields tokens the same way, so one
+    // cursor carrying the furthest end seen so far answers the same question in a single pass:
+    // `reach` is max(b) over every span with a <= start, and a token is inside one of them exactly
+    // when it ends at or before that.
+    let cursor = 0;
+    let reach = -1;
     for (const m of value.matchAll(TOKEN)) {
       const token = m[0];
       const start = m.index;
+      while (cursor < spans.length && spans[cursor]![0] <= start) {
+        if (spans[cursor]![1] > reach) reach = spans[cursor]![1];
+        cursor += 1;
+      }
       // Wholly inside, not merely starting inside. A TOKEN is `[A-Za-z0-9_-]+`, which runs on
       // past an image payload through a `_` or `-` that base64 has no use for — so a token that
       // began in the image and ended in a credential was skipped entire, and the credential with
       // it. Overlap would be wrong the other way: it would exempt text outside the image.
-      if (spans.some(([a, b]) => start >= a && start + token.length <= b)) continue;
+      if (start + token.length <= reach) continue;
       if (token.length < MIN_ENTROPY_LENGTH || !looksRandom(token)) continue;
       if (entropy(token) <= ENTROPY_BITS_PER_CHAR) continue;
       out += value.slice(cut, start) + this.#hit('high_entropy', token, context, hits);
