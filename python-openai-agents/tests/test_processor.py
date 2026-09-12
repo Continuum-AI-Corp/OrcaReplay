@@ -324,3 +324,21 @@ def test_a_span_error_payload_is_not_written(tmp_path):
     record = spans_of(processor)[0]
     assert record["failed"] is True, "that it failed is worth keeping; what it said is not"
     assert "error" not in record
+
+
+def test_a_name_that_will_not_encode_does_not_reach_the_agent(tmp_path):
+    # `json.dumps(..., ensure_ascii=False)` copies a lone surrogate through unchanged and CPython
+    # refuses to encode one, so encoding is a second way a record can fail to serialise — and the
+    # kept fields are names the agent's author chose, where a non-UTF-8 byte read through
+    # `surrogateescape` lands unchanged. The buffered writer this replaced encoded inside the guard.
+    processor = OrcaTracingProcessor(str(tmp_path / "spans.jsonl"))
+    processor.on_span_end(
+        FakeSpan(HandoffSpanData({"from_agent": "agent-\ud800-name", "to_agent": "B"}))
+    )
+    assert processor._dropped == 1
+
+    # And the next record still lands: a drop is one span, not the rest of the run.
+    processor.on_span_end(FakeSpan(HandoffSpanData({"from_agent": "A", "to_agent": "B"})))
+    processor.shutdown()
+    kept = [r for r in spans_of(processor) if r["kind"] == "span"]
+    assert [r["data"]["from_agent"] for r in kept] == ["A"]

@@ -181,8 +181,18 @@ class OrcaTracingProcessor:
     def _write(self, record: dict[str, Any]) -> None:
         if not self._path:
             return
+        # Encoded here, not at the write. `ensure_ascii=False` copies a lone surrogate into `line`
+        # verbatim and CPython refuses to encode one, so `.encode("utf-8")` is a second way a
+        # record can fail to serialise — and one a kept field really can carry: these are names the
+        # agent's author chose, and a non-UTF-8 byte read through `surrogateescape` lands in one
+        # unchanged. The buffered `open(..., encoding="utf-8")` this replaced encoded inside the
+        # guard; moving to `os.write` moved the encode out from under it.
         try:
             line = json.dumps(record, ensure_ascii=False)
+            # A leading newline after a failed write. A short write leaves the file mid-record, and
+            # the next record appended straight on would glue to it — the reader then loses *both*,
+            # the torn one and the intact one whose bytes were fine. One byte closes that.
+            payload = (("\n" if self._torn else "") + line + "\n").encode("utf-8")
         except Exception:  # noqa: BLE001 - a span that will not serialise must not end the run
             self._dropped += 1
             return
@@ -191,10 +201,6 @@ class OrcaTracingProcessor:
             if fd is None:
                 self._dropped += 1
                 return
-            # A leading newline after a failed write. A short write leaves the file mid-record, and
-            # the next record appended straight on would glue to it — the reader then loses *both*,
-            # the torn one and the intact one whose bytes were fine. One byte closes that.
-            payload = (("\n" if self._torn else "") + line + "\n").encode("utf-8")
             try:
                 written = os.write(fd, payload)
                 self._torn = written != len(payload)
