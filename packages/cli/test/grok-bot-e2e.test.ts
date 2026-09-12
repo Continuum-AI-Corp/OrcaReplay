@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { TraceReader, listRuns } from '@orcareplay/core';
@@ -17,7 +17,15 @@ import { replayCommand } from '../src/commands/replay.js';
 const run = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
 const IDE_PARENT = join(here, 'fixtures', 'ide-parent.mjs');
-const PROXY_CALL = join(here, 'fixtures', 'proxy-call.mjs');
+/**
+ * As a `file://` URL, because it is written into a generated `.mjs` as an import specifier.
+ *
+ * A bare absolute path works on POSIX and is rejected outright on Windows:
+ * `ERR_UNSUPPORTED_ESM_URL_SCHEME — on Windows, absolute paths must be valid file:// URLs`. The bot
+ * then failed to start, the recording came back empty, and all six tests in this file reported the
+ * counts that follow from nothing having run rather than the loader error that caused it.
+ */
+const PROXY_CALL = pathToFileURL(join(here, 'fixtures', 'proxy-call.mjs')).href;
 
 /**
  * A Grok bot, and any other agent whose origin is a string in its own source.
