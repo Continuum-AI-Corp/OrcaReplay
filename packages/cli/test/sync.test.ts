@@ -526,6 +526,53 @@ describe('push and pull', () => {
       '{"seq":1,"type":"run.start"}\n',
     );
   }, 20000);
+  /*
+   * PUSH MUST NOT SHIP THE RUN'S INTERCEPTION CA.
+   *
+   * Every other thing that takes a run off disk enumerates the NAMED artifacts — `orca export`,
+   * `gc`, `scrub` all read `manifest.json`, `events.jsonl` and the blobs events reference, and none
+   * of them can pick up what else a run directory happens to hold. `runEntries` sweeps the whole
+   * directory instead, so whatever is in there leaves the machine.
+   *
+   * `RunCa.create` mints the run's interception CA into `<run>/tls/` — `ca.key` at 0600 — and only
+   * `dispose()` removes it. SECURITY.md states the CA is "deleted when the run ends, including when
+   * the run fails, is interrupted", and record.ts does NOT guarantee that: it warns
+   * `tls.ca_not_removed` and seals the trace normally, so the run looks finished with the private
+   * key still inside it. SIGKILL leaves it too, with no handler at all.
+   *
+   * Pushing such a run POSTs the key to a gateway, which stores it and serves it to everyone who
+   * pulls the run. The gateway's secret scan is the only thing left in the way — and `--force`
+   * exists to bypass exactly that.
+   */
+  it('never packs the run’s TLS CA, whatever the sweep finds', async () => {
+    await seedRun();
+    const dir = join(workspace, '.orca', 'runs', runId);
+    await mkdir(join(dir, 'tls'), { recursive: true });
+    await writeFile(
+      join(dir, 'tls', 'ca.key'),
+      '-----BEGIN PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END PRIVATE KEY-----\n',
+    );
+    await writeFile(join(dir, 'tls', 'ca.crt'), '-----BEGIN CERTIFICATE-----\nMIIB\n');
+    await writeFile(join(dir, 'tls', 'ca-bundle.crt'), '-----BEGIN CERTIFICATE-----\nMIIB\n');
+
+    await pushCommand(parseArgs(['push', runId, '--gateway', url]), out, workspace, env());
+
+    const sent = received.find((r) => r.method === 'POST');
+    expect(sent, 'the push must have happened').toBeTruthy();
+    const body = sent!.body.toString('latin1');
+    // THE ENTRY NAME IS THE LOAD-BEARING ASSERTION. Zip names are stored uncompressed while the
+    // payload is deflated, so scanning the archive for "PRIVATE KEY" can pass over a key that is
+    // very much in there — it did, on the unfixed code, while the name assertion below caught it.
+    // Both are kept: the name proves the file was excluded, the payload scan is the backstop for
+    // anything that arrives by another route.
+    expect(body).not.toContain(`${runId}/tls/`);
+    expect(body).not.toContain('PRIVATE KEY');
+
+    // And the archive really is the trace — this must not pass by having pushed nothing.
+    expect(body).toContain(`${runId}/events.jsonl`);
+    expect(body).toContain(`${runId}/manifest.json`);
+  });
+
   /**
    * A PULL RELEASES ONLY THE LOCK IT IS HOLDING.
    *

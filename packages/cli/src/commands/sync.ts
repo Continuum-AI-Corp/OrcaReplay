@@ -147,12 +147,38 @@ function refusal(status: number, body: string): string {
 }
 
 /** Every file under a run directory, as archive entries named `<run_id>/<path>`. */
+/**
+ * Directories inside a run that are NOT trace content and must never leave the machine.
+ *
+ * A RUN DIRECTORY HOLDS MORE THAN THE TRACE, and this is the only thing here that walks it.
+ * `orca export`, `gc` and `scrub` all enumerate the NAMED artifacts — `manifest.json`,
+ * `events.jsonl`, and the blobs events reference — so none of them can pick up a neighbour.
+ * `runEntries` sweeps, which is what makes push the one path that can ship something nobody meant
+ * to send.
+ *
+ * `tls/` is the run's own interception CA: `RunCa.create` writes `ca.key` there at 0600, and
+ * `dispose()` is the only thing that removes it. SECURITY.md says the CA is "deleted when the run
+ * ends, including when the run fails, is interrupted" — and the code does not guarantee that.
+ * record.ts warns `tls.ca_not_removed` and then seals the trace normally, so the run looks finished
+ * with the private key still in it; a SIGKILL leaves it with no handler running at all. Pushing
+ * such a run POSTs the key to a gateway that stores it and serves it to everyone who pulls the run,
+ * with only the gateway's secret scan in the way — and `--force` exists to bypass that.
+ *
+ * A NAMED SET rather than one `if`, because the next thing written beside a trace will be found the
+ * same way this was: by someone reading a packed archive. Anything that is not trace content
+ * belongs here the day it is created.
+ */
+const NEVER_PUSHED = new Set(['tls']);
+
 async function runEntries(runDir: string, runId: string): Promise<ArchiveEntry[]> {
   const entries: ArchiveEntry[] = [];
   const walk = async (dir: string): Promise<void> => {
     for (const item of await readdir(dir, { withFileTypes: true })) {
       const full = join(dir, item.name);
       if (item.isDirectory()) {
+        // Top level only: NEVER_PUSHED names the run's own subdirectories, and a `tls/` nested
+        // inside a recorded workspace snapshot is content the user recorded on purpose.
+        if (dir === runDir && NEVER_PUSHED.has(item.name)) continue;
         await walk(full);
         continue;
       }

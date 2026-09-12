@@ -36,7 +36,7 @@ export interface ParsedArgs {
  * token, and `orca compare --models last` would guess wrong. `--flag=value` and `--no-flag` still
  * work for these; they are handled before this point.
  */
-const VALUELESS = new Set([
+export const VALUELESS = new Set([
   'ui',
   'json',
   'loose',
@@ -53,6 +53,16 @@ const VALUELESS = new Set([
   'tls-intercept',
   'version',
   'help',
+  // `-h` parses to the body "h" (short flags take one dash), and main.ts reads it with
+  // args.bool('h'). Found by the derived invariant test the day it was written, which is the
+  // point of deriving it — the hand-written list had missed this one too.
+  'h',
+  // push / pull: "store this even though the scan found something", and "replace the local copy".
+  // Missing here it was VALUE-TAKING, so `orca push --force run_abc` ate the selector and pushed
+  // the workspace's NEWEST run to the gateway instead, without ?force=1, reporting success under
+  // the other run's name. See the invariant test below for why the list is now derived rather
+  // than trusted.
+  'force',
 ]);
 
 function coerce(raw: string): FlagValue {
