@@ -21,6 +21,7 @@ import {
   namedPushDestination,
   sameOrigin,
   type OrcaConfig,
+  fetchPinned,
 } from '../config.js';
 import { readArchive, writeArchive, type ArchiveEntry } from '../archive.js';
 
@@ -685,42 +686,6 @@ export async function revertStagedSwap(
   await rm(staging, { recursive: true, force: true });
 }
 
-/**
- * fetch with the DESTINATION PINNED — a redirect is a hard failure, never a hand-off.
- *
- * THE ORIGIN CHECK VALIDATES THE URL WE PASS, NOT THE URL THE REQUEST REACHES (orcacode-review).
- * `resolveGateway` decides whether the key may go to this host, and then `fetch` was free to follow
- * a `Location` anywhere. undici strips `authorization` across origins but NOT `x-api-key`, and
- * gatewayHeaders sets both to the same key — so one header from whoever answers for the gateway
- * carried the replay-scoped credential to a host it was never issued for, defeating the promise the
- * README makes in writing: "Never a key to a host it was not set up for."
- *
- * Push had a second failure on top: a 301/302/303 is re-issued as a GET with no body, so the
- * target's 200 satisfied `res.ok` and the CLI printed `push.done` for a run that went nowhere. A
- * 307/308 instead failed with an opaque "fetch failed", because undici cannot replay a detached
- * body — so a legitimately redirecting gateway could not be talked to either.
- *
- * `manual` rather than `error`: Node resolves it with the real status and Location, so the refusal
- * can NAME the destination. `error` rejects with a bare TypeError whose only distinguishing mark is
- * an undici-internal cause string ("unexpected redirect"), which a genuine connection failure
- * ("bad port") is indistinguishable from without matching on that string.
- *
- * Following a same-origin redirect would be safe and is deliberately not implemented: no gateway
- * this CLI talks to issues one, and an unused branch that forwards credentials is the wrong thing
- * to carry.
- */
-async function fetchPinned(target: string, init: RequestInit): Promise<Response> {
-  const res = await fetch(target, { ...init, redirect: 'manual' });
-  if (res.status >= 300 && res.status < 400) {
-    const to = res.headers.get('location') ?? '(no Location header)';
-    throw new Error(
-      `${target} answered ${res.status} redirecting to ${to}. orca does not follow it: your key is ` +
-        `attached to the host you named, and following would hand it to whatever answers there. ` +
-        `Point --gateway (or ORCA_GATEWAY_URL) at the final address instead.`,
-    );
-  }
-  return res;
-}
 
 /**
  * push — send a local run to the gateway.
@@ -852,6 +817,61 @@ export async function stageRunEntries(
 }
 
 /**
+ * Move the staged copy into place, refusing — and undoing the move-aside — if the lock is lost.
+ *
+ * Returns whether the old run was moved aside, so the caller's revert knows whether it is
+ * entitled to move anything back.
+ *
+ * Exported for the test: the window is the gap between two renames, and this file already
+ * learned that a test aiming at such a window by timing is a coin flip.
+ */
+export async function swapStagedRun(
+  paths: { dest: string; staging: string; retired: string; existing: boolean },
+  stillHeld: () => Promise<boolean>,
+): Promise<boolean> {
+  const { dest, staging, retired, existing } = paths;
+  let movedAside = false;
+  // PROBED ON BOTH SIDES OF THE MOVE-ASIDE, AND THE MOVE IS UNDONE (orcacode-review).
+  //
+  // One probe before the two renames was not enough, and the previous comment here —
+  // "this one is what stops the DESTRUCTIVE half" — overstated it in exactly the case it
+  // was written for. A pull stopped between the probe and `rename(dest, retired)` resumes
+  // after its lock has been broken and a whole other pull has completed: the move-aside
+  // then succeeds and carries away the run THAT pull just installed. The second rename
+  // fails (the shared staging is gone), `revertStagedSwap` correctly refuses to put
+  // anything back because the lock is not ours — and the result is a store where `<run>`
+  // does not exist and the only copy sits at `<run>.replaced`, which matches no
+  // RUN_ID_PATTERN and is therefore invisible to list, show, scrub, gc, export and push.
+  // The "run that no command can reach again" this file's comments exist to rule out,
+  // reached through the very guard added to prevent it.
+  //
+  // So: probe as late as possible before each destructive step, and UNDO the move-aside
+  // when the second probe refuses. Still a narrowing rather than a proof — the same
+  // standard the other three sites document — but the window shrinks from "the whole
+  // swap" to "one rename", and the failure mode changes from a vanished run to litter
+  // that `recoverInterruptedSwap` reclaims.
+  //
+  // THE ROLLBACK IS GATED ON HAVING DONE THE MOVE, not on `existing`. `<run>.replaced`
+  // can also be another pull's move-aside, and renaming THAT over `dest` is the same
+  // class of fault this whole sequence is about: only the process that moved a thing may
+  // move it back.
+  const abortUnlessOurs = async (): Promise<void> => {
+    if (await stillHeld()) return;
+    if (movedAside) await rename(retired, dest).catch(() => undefined);
+    throw lostTheLock();
+  };
+
+  await abortUnlessOurs();
+  if (existing) {
+    await rename(dest, retired);
+    movedAside = true;
+  }
+  await abortUnlessOurs();
+  await rename(staging, dest);
+  return movedAside;
+}
+
+/**
  * pull — fetch a gateway run into the local store.
  *
  * `orca pull <run> [--gateway URL] [--force]`
@@ -969,24 +989,16 @@ export async function pullCommand(
     // `dest` itself; a race is recoverable, a disappearance is not.
     const staging = `${dest}.incoming`;
     const retired = `${dest}.replaced`;
+    // Declared out here so the catch can read it: whether WE moved the old run
+    // aside decides whether the revert may move anything back.
+    let movedAside = false;
 
     try {
       await stageRunEntries(entries, runId, staging, stillHeld);
 
-      // INSIDE the try: if another process recreated `dest` between the stat above and here, this
-      // move is what fails, and leaving it outside stranded the staging directory while reporting
-      // an error.
-      //
-      // KEPT, even though stageRunEntries now probes as it writes. The last probe inside the loop
-      // is followed by the last entries and then by two renames; this one is what stops the
-      // DESTRUCTIVE half from running on a lock lost in that tail.
-      if (!(await stillHeld())) {
-        throw lostTheLock();
-      }
-      if (existing) await rename(dest, retired);
-      await rename(staging, dest);
+      movedAside = await swapStagedRun({ dest, staging, retired, existing: !!existing }, stillHeld);
     } catch (err) {
-      await revertStagedSwap(stillHeld, { dest, staging, retired, existing: !!existing });
+      await revertStagedSwap(stillHeld, { dest, staging, retired, existing: movedAside });
       throw err;
     }
     await rm(retired, { recursive: true, force: true });

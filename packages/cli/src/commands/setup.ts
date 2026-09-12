@@ -4,6 +4,7 @@ import type { ParsedArgs } from '../args.js';
 import type { Output } from '../out.js';
 import {
   configPath,
+  fetchPinned,
   gatewayHeaders,
   ORCAROUTER_CONSOLE,
   ORCAROUTER_URL,
@@ -33,7 +34,13 @@ export interface SetupDeps {
 
 /** OpenAI-compatible model listing, which every gateway worth pointing orca at implements. */
 async function probeModels(gateway: string, headers: Record<string, string>): Promise<string[]> {
-  const res = await fetch(`${gateway.replace(/\/+$/, '')}/v1/models`, { headers });
+  // PINNED, like push and pull (orcacode-review). These are the same headers
+  // gatewayHeaders builds — authorization AND x-api-key, both the stored key —
+  // and undici forwards x-api-key across an origin it strips authorization on,
+  // so a gateway answering /v1/models with a 3xx handed the configured key to
+  // whatever the Location named. `orca setup --gateway http://gw --key sk-…`
+  // was enough to reach it.
+  const res = await fetchPinned(`${gateway.replace(/\/+$/, '')}/v1/models`, { headers });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   const body = (await res.json()) as { data?: { id?: unknown }[] };
   return (body.data ?? [])

@@ -14,6 +14,7 @@ import {
   restoreLockFile,
   revertStagedSwap,
   stageRunEntries,
+  swapStagedRun,
   withRunLockForTest,
 } from '../src/commands/sync.js';
 import { readArchive, writeArchive } from '../src/archive.js';
@@ -1069,6 +1070,53 @@ describe('push and pull', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  /*
+  AND THE MOVE-ASIDE MUST BE UNDONE WHEN THE LOCK IS LOST BETWEEN THE TWO RENAMES.
+
+  One probe before the swap was not enough. A pull stopped between that probe and
+  `rename(dest, retired)` resumes after its lock has been broken and ANOTHER pull has completed
+  a whole install: the move-aside then succeeds and carries away the run that pull just put
+  there. The second rename fails, `revertStagedSwap` correctly refuses to put anything back
+  (the lock is not ours), and the store is left with no `<run>` and only `<run>.replaced` — a
+  name matching no RUN_ID_PATTERN, so list, show, scrub, gc, export and push all skip it. The
+  run has not moved, it has VANISHED, reached through the guard added to prevent exactly that.
+
+  Driven through the pull command with an ownership answer that flips after the move, rather
+  than by racing a SIGSTOP: the property is what the code does once the lock is gone, and a
+  test that tries to hit the window by timing is the coin flip this file already learned about.
+  */
+  it('puts the old run back when the lock is lost between the two renames', async () => {
+    const runs = join(workspace, '.orca', 'runs');
+    const dest = join(runs, runId);
+    await mkdir(dest, { recursive: true });
+    await writeFile(join(dest, 'events.jsonl'), 'the run that was already here\n');
+
+    const staging = `${dest}.incoming`;
+    const retired = `${dest}.replaced`;
+    await mkdir(staging, { recursive: true });
+    await writeFile(join(staging, 'events.jsonl'), 'staged\n');
+
+    // Ours for the pre-move probe, gone for the one after it.
+    let probes = 0;
+    const stillHeld = async (): Promise<boolean> => ++probes <= 1;
+
+    await expect(swapStagedRun({ dest, staging, retired, existing: true }, stillHeld)).rejects.toThrow(
+      /lock/i,
+    );
+
+    expect(
+      await readFile(join(dest, 'events.jsonl'), 'utf8').catch(() => undefined),
+      'the run was carried away to <run>.replaced and never put back — invisible to every command',
+    ).toBe('the run that was already here\n');
+    expect(probes, 'ownership was not re-checked after the destructive rename').toBeGreaterThan(1);
+
+    // And while the lock stays ours the swap still swaps, or the guard has broken pull.
+    await mkdir(staging, { recursive: true }).catch(() => undefined);
+    await writeFile(join(staging, 'events.jsonl'), 'the new one\n').catch(() => undefined);
+    await swapStagedRun({ dest, staging, retired, existing: true }, async () => true);
+    expect(await readFile(join(dest, 'events.jsonl'), 'utf8')).toBe('the new one\n');
   });
 
   /*
