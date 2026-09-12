@@ -91,6 +91,64 @@ describe('a data: URI is excluded from the entropy sweep', () => {
     expect(redactor.rulesFired()).toEqual({});
   });
 
+  /**
+   * The exemption is about pixels, so it has to stop at pixels.
+   *
+   * Every argument for sparing a data URI is an argument about raster bytes: they cannot hide a
+   * credential a reader could recover, and the sweep was never protecting them. None of it carries
+   * over to base64 in general — and base64 is exactly the form in which the named rules go blind,
+   * so for an encoded payload the sweep is the only thing left. `data:application/pdf;base64,…` is
+   * how OpenAI's `input_file` takes a file, and an agent attaching one it just read sends the same
+   * shape; sparing that would put its bytes on disk verbatim with nothing in `redactions.json`.
+   */
+  it.each([
+    'application/pdf',
+    'text/plain',
+    'application/octet-stream',
+    'application/json',
+    // Text, not pixels: a key inside it is one the named rules would have caught unencoded.
+    'image/svg+xml',
+  ])('still sweeps a data: URI of type %s', (mediaType) => {
+    const redactor = new Redactor({});
+    const { value } = redactor.redactString(
+      JSON.stringify({ file_data: `data:${mediaType};base64,${PNG}` }),
+    );
+    expect(value, `${mediaType} was spared the entropy sweep`).toContain('<secret:high_entropy');
+    expect(value, `${mediaType} payload was written verbatim`).not.toContain(PNG);
+  });
+
+  it.each(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])(
+    'still spares a raster %s, which is what the exemption is for',
+    (mediaType) => {
+      const redactor = new Redactor({});
+      const { value } = redactor.redactString(
+        JSON.stringify({ image_url: { url: `data:${mediaType};base64,${PNG}` } }),
+      );
+      expect(value).not.toContain('<secret:high_entropy');
+      expect(value).toContain(PNG);
+    },
+  );
+
+  /**
+   * The reason the line above matters, stated as a test rather than as a claim in a comment.
+   *
+   * A named rule finds `sk-…` by its shape. Base64 destroys that shape, so once a credential is
+   * encoded the entropy sweep is the only thing that can still see it — which is why the exemption
+   * may not cover an encoded payload that is not pixels.
+   */
+  it('a base64-encoded key is invisible to the named rules, so the sweep has to see it', () => {
+    const key = 'sk-abcdefghijklmnopqrstuvwxyz0123456789ABCD';
+    const encoded = Buffer.from(key).toString('base64');
+    expect(encoded, 'the shape really is gone').not.toContain('sk-');
+    expect(Buffer.from(encoded, 'base64').toString(), 'and it decodes back').toBe(key);
+
+    const redactor = new Redactor({});
+    const { value } = redactor.redactString(
+      JSON.stringify({ file_data: `data:application/pdf;base64,${encoded}${PNG}` }),
+    );
+    expect(value, 'the encoded key reached the trace').not.toContain(encoded);
+  });
+
   it('covers a payload carrying escaped characters, as a JSON-encoded body does', () => {
     // A body reaches the trace inside JSON, so the span has to include `\` or it ends one byte
     // early and the sweep resumes mid-image.

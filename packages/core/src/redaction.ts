@@ -102,10 +102,27 @@ const RULES: Rule[] = [
  *
  * Excluded from the entropy sweep only. The named rules still run over the whole value, so an
  * `sk-…` that happens to sit in a data URI is still caught by shape.
+ *
+ * **Raster image types only**, and listed rather than `image/*`. Everything above is an argument
+ * about *pixels*: bytes that cannot hide a credential a reader could ever recover, and that the
+ * sweep was never protecting. It is not an argument about base64, and base64 is precisely the form
+ * in which the named rules go blind — `sk-…`, `ghp_…`, `AKIA…` and a PEM header all lose their
+ * shape when encoded, so for an encoded payload the sweep is the only thing left. A data URI is
+ * ordinary for uploads too: OpenAI's `input_file` takes `file_data` as
+ * `data:application/pdf;base64,…`, and an agent attaching a file it just read sends the same
+ * shape. Sparing those would put a credential on disk verbatim with nothing recorded in
+ * `redactions.json`, against what SECURITY.md promises in writing.
+ *
+ * `image/svg+xml` is left out for the same reason: it is text, so a key inside it is one the named
+ * rules would have caught had the agent not encoded it.
+ *
+ * This is the convention the other two exemptions in this file already follow —
+ * {@link PROTOCOL_ID_VALUE} fires only under the keys it names, and never on a value that merely
+ * looks like one. An exemption is a hole; it should be exactly the shape of what goes through it.
  */
 // The trailing `\\` is not decoration: a body reaches the trace JSON-encoded, so the payload can
 // carry escaped characters and the span has to cover them or it stops one byte early.
-const DATA_URI = /data:[a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\\]+/g;
+const RASTER_DATA_URI = /data:image\/(?:png|jpeg|jpg|gif|webp|avif|bmp);base64,[A-Za-z0-9+/=\\]+/g;
 
 const TOKEN = /[A-Za-z0-9_-]{20,}/g;
 const PLACEHOLDER = /<secret:[a-z_]+:[0-9a-f]{8}>/g;
@@ -180,7 +197,7 @@ function spansOf(value: string): [number, number][] {
   for (const m of value.matchAll(PROTOCOL_SIGNATURE_VALUE)) {
     spans.push([m.index, m.index + m[0].length]);
   }
-  for (const m of value.matchAll(DATA_URI)) spans.push([m.index, m.index + m[0].length]);
+  for (const m of value.matchAll(RASTER_DATA_URI)) spans.push([m.index, m.index + m[0].length]);
   return spans;
 }
 
