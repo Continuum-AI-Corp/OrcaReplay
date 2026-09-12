@@ -1,4 +1,5 @@
-import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
 /**
@@ -95,14 +96,30 @@ export interface AgentSpanCapture {
   spansPath: string;
   /** Prepended to PYTHONPATH so Python finds the bootstrap. */
   pythonPath: string;
+  /** The directory orca owns for the transport. Removed whole, so nothing can be left in it. */
+  transportDir: string;
 }
 
-/** Write the bootstrap into the run directory and say how to point a child at it. */
+/**
+ * Write the bootstrap into the run directory, and put the transport somewhere else.
+ *
+ * The bootstrap is inert and belongs with the run. The transport does not: the path is
+ * inherited by everything the agent starts, and a worker it left behind writes whenever it gets
+ * round to it. While that path pointed inside the run directory, a write arriving after the
+ * ingest re-created the file *in the trace* — un-redacted, with the writer’s umask rather than
+ * the 0600 SECURITY.md promises, holding the `ResponseSpanData` the ingest deliberately drops,
+ * on a run that reported success and warned about nothing. `orca scrub` does not reach it.
+ *
+ * No amount of deleting fixes that, because the next write recreates it. Somewhere orca owns
+ * does: a late write lands in a directory that is removed whole on every exit path, and never
+ * in a trace.
+ */
 export async function installAgentSpans(runDir: string): Promise<AgentSpanCapture> {
   const dir = join(runDir, 'py');
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, SITECUSTOMIZE), SITECUSTOMIZE_SOURCE, 'utf8');
-  const spansPath = join(runDir, SPANS_FILENAME);
+  const transportDir = await mkdtemp(join(tmpdir(), 'orca-spans-'));
+  const spansPath = join(transportDir, SPANS_FILENAME);
   // Created here rather than left to the child, so it gets the mode SECURITY.md promises for
   // everything in a run directory — "trace files and blobs are written mode 0600". A file the
   // child creates gets that interpreter's umask instead, and the two capture layers that already
@@ -110,7 +127,7 @@ export async function installAgentSpans(runDir: string): Promise<AgentSpanCaptur
   // `mcp.ts`'s config). Best-effort, like theirs: a capture layer may degrade a trace and may
   // never fail the run it is watching.
   await writeFile(spansPath, '', { flag: 'a', mode: 0o600 }).catch(() => undefined);
-  return { spansPath, pythonPath: dir };
+  return { spansPath, pythonPath: dir, transportDir };
 }
 
 /**
@@ -132,6 +149,22 @@ export async function installAgentSpans(runDir: string): Promise<AgentSpanCaptur
  * Returns what went wrong, for the caller to warn about. Failing to delete one is worth saying and
  * never worth losing the trace over — the same posture as the run CA's `dispose`.
  */
+/**
+ * Remove the whole transport directory.
+ *
+ * Preferred over removing the files a listing found: a producer that outlives the agent can
+ * create one after that listing, and a per-file discard leaves it. Nothing else is in this
+ * directory — orca made it for this and nothing else writes there.
+ */
+export async function discardAgentSpanTransport(dir: string): Promise<string | undefined> {
+  try {
+    await rm(dir, { recursive: true, force: true });
+    return undefined;
+  } catch (err) {
+    return String(err);
+  }
+}
+
 export async function discardAgentSpans(files: string[]): Promise<string | undefined> {
   const failures: string[] = [];
   for (const file of files) {

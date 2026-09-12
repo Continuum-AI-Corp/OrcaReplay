@@ -12,6 +12,7 @@ import { Output } from './../src/out.js';
 import { recordCommand } from './../src/commands/record.js';
 import {
   discardAgentSpans,
+  discardAgentSpanTransport,
   eventForSpan,
   installAgentSpans,
   pythonPathWith,
@@ -347,4 +348,104 @@ describe('an abandoned run does not leave the spans file behind', () => {
     const left = ids.filter((id) => existsSync(join(runs, id, 'agent-spans.jsonl')));
     expect(left, 'the raw spans file outlived an abandoned run').toEqual([]);
   });
+});
+
+/**
+ * The transport lives where orca can take it away, which is not the run directory.
+ *
+ * The path is inherited by everything the agent starts, so a worker it left behind writes
+ * whenever it gets round to it. While that path pointed inside the run directory, a write
+ * arriving after the ingest re-created the file *in the trace*: un-redacted, at the writer’s
+ * umask rather than the 0600 SECURITY.md promises, holding the `ResponseSpanData` the ingest
+ * deliberately drops, on a run that reported success and warned about nothing — and `orca scrub`
+ * rewrites only `events.jsonl`, the manifest and the blobs, so it would report `removed=N` with
+ * that sitting beside it.
+ *
+ * Deleting harder does not fix it, because the next write recreates the file. Somewhere orca owns
+ * does.
+ */
+describe('the transport is not in the run directory', () => {
+  const exec = promisify(execFile);
+  let workspace: string;
+
+  beforeEach(async () => {
+    workspace = await mkdtemp(join(tmpdir(), 'orca-transport-'));
+    await exec('git', ['init', '-q'], { cwd: workspace });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: workspace });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: workspace });
+    await writeFile(join(workspace, 'auth.ts'), 'export const fixed = false;\n');
+  });
+
+  afterEach(async () => {
+    await rm(workspace, { recursive: true, force: true });
+  });
+
+  it('installAgentSpans puts it outside, and the bootstrap inside', async () => {
+    const runDir = await mkdtemp(join(tmpdir(), 'orca-run-'));
+    const capture = await installAgentSpans(runDir);
+    expect(capture.spansPath.startsWith(runDir), 'the transport is in the run directory').toBe(
+      false,
+    );
+    expect(capture.transportDir.startsWith(runDir)).toBe(false);
+    expect(capture.pythonPath.startsWith(runDir), 'the bootstrap belongs with the run').toBe(true);
+    await rm(runDir, { recursive: true, force: true });
+    await rm(capture.transportDir, { recursive: true, force: true });
+  });
+
+  it('discardAgentSpanTransport takes the directory, not a listing of it', async () => {
+    const runDir = await mkdtemp(join(tmpdir(), 'orca-run-'));
+    const capture = await installAgentSpans(runDir);
+    // A producer that appeared after any listing would have been taken.
+    await writeFile(`${capture.spansPath}.9999`, '{}\n');
+    expect(await discardAgentSpanTransport(capture.transportDir)).toBeUndefined();
+    expect(existsSync(capture.transportDir)).toBe(false);
+    await rm(runDir, { recursive: true, force: true });
+  });
+
+  /**
+   * The case that matters, end to end: an agent leaves a worker behind and the run succeeds.
+   */
+  it('a worker that writes after the run cannot land a file in the trace', async () => {
+    const late = join(workspace, 'late.mjs');
+    await writeFile(
+      late,
+      [
+        'import { appendFileSync } from "node:fs";',
+        'const p = process.env.ORCA_AGENT_SPANS;',
+        'setTimeout(() => { try { appendFileSync(p, JSON.stringify({ kind: "span", type: "ResponseSpanData", data: { text: "sk-LATE-SECRET-0123456789" } }) + "\\n"); } catch {} }, 1500);',
+      ].join('\n'),
+    );
+    const agent = join(workspace, 'agent.mjs');
+    await writeFile(
+      agent,
+      [
+        'import { spawn } from "node:child_process";',
+        'import { appendFileSync } from "node:fs";',
+        'const p = process.env.ORCA_AGENT_SPANS;',
+        'if (p) appendFileSync(p, JSON.stringify({ kind: "span", type: "AgentSpanData", data: { name: "Triage" } }) + "\\n");',
+        `spawn(process.execPath, [${JSON.stringify(late)}], { detached: true, stdio: "ignore" }).unref();`,
+        'console.log("GOT: done");',
+      ].join('\n'),
+    );
+
+    const out = new Output({ write: () => {}, isTTY: false });
+    const result = await recordCommand(
+      parseArgs(['record', 'generic-openai', '--', process.execPath, agent]),
+      out,
+      workspace,
+    );
+    expect(result.runId).toBeTruthy();
+
+    // Past the worker’s write.
+    await new Promise((r) => setTimeout(r, 3000));
+
+    const runs = join(workspace, '.orca', 'runs');
+    for (const id of await readdir(runs)) {
+      const left = await readdir(join(runs, id));
+      expect(
+        left.filter((f) => f.startsWith('agent-spans')),
+        'a worker put an un-redacted file in a sealed trace',
+      ).toEqual([]);
+    }
+  }, 60_000);
 });
