@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -153,5 +153,55 @@ describe('main', () => {
       stderr,
     });
     expect(await done).toBe(3);
+  });
+
+  it('answers from a recording that has a line which is not a frame', async () => {
+    // There was no `--replay` test at all, which is how this reader escaped the rule the other
+    // readers of this same file got. Several shims share one capture, so an interleaved write can
+    // leave a line that parses to `null` — and this reader cast straight through and read
+    // `record.name`, so the shim died with `Cannot read properties of null (reading 'name')`
+    // *before serving a single recorded answer*. A torn line at record time then made the whole
+    // recording unreplayable, which is the asymmetry worth closing.
+    const recorded = join(scratch, 'recorded.jsonl');
+    const base = { ts: '2026-09-12T00:00:00.000Z', name: 'fs', id: 1, method: 'tools/list' };
+    const request = {
+      ...base,
+      dir: 'in',
+      kind: 'request',
+      raw: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+    };
+    const response = {
+      ...base,
+      dir: 'out',
+      kind: 'response',
+      raw: '{"jsonrpc":"2.0","id":1,"result":{"ok":true}}',
+    };
+    // The three bad lines are interleaved with the good pair, not merely appended, because a reader
+    // that stopped at the first one would otherwise still look correct.
+    writeFileSync(
+      recorded,
+      ['null', JSON.stringify(request), '7', JSON.stringify(response), '[1,2]', ''].join('\n'),
+      'utf8',
+    );
+
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const seen: Buffer[] = [];
+    const errors: Buffer[] = [];
+    stdout.on('data', (c: Buffer) => seen.push(Buffer.from(c)));
+    stderr.on('data', (c: Buffer) => errors.push(Buffer.from(c)));
+
+    const done = main(
+      ['--name', 'fs', '--out', join(scratch, 'mcp.jsonl'), '--replay', recorded, '--', 'unused'],
+      { stdin, stdout, stderr },
+    );
+    stdin.write('{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n');
+    stdin.end();
+
+    expect(await done, Buffer.concat(errors).toString()).toBe(0);
+    expect(Buffer.concat(seen).toString(), 'the recorded answer must still be served').toContain(
+      '"ok":true',
+    );
   });
 });

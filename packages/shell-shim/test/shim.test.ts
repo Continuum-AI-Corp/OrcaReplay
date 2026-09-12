@@ -219,7 +219,6 @@ describe('shell shim', () => {
       // `RangeError: Invalid time value` inside `TraceWriter.append`, where the trace is sealed.
       JSON.stringify({ ...good, durationMs: undefined }),
       JSON.stringify({ ...good, durationMs: '5' }),
-      JSON.stringify({ ...good, startedAt: 1757630000000 }),
       // Right type, unusable magnitude: a splice can leave one duration's digits followed by the
       // tail of the neighbour's number. `Number.isFinite` passes all three. From a 2026 stamp, 3e14
       // formats as `+011533-…` and the schema types `ts` as `date-time`, which admits a four-digit
@@ -237,6 +236,33 @@ describe('shell shim', () => {
     expect(frames).toHaveLength(1);
     expect(frames[0]!.argv).toEqual(['-c', 'true']);
     expect(frames[0]!.durationMs).toBe(1);
+    // A `startedAt` that is not a string is *not* on that list: `Date.parse` is NaN for it, the
+    // consumer degrades the same way it does for an absent one, and the frame is a command that
+    // ran. Only the three above reach the arithmetic.
+  });
+
+  it('keeps a frame whose startedAt is absent, which the consumer also handles', async () => {
+    // The bound applies only when there is an instant to bound, and "absent" is one of the two
+    // ways there is none. Requiring a *string* rejected it — out of step with the MCP reader
+    // written in the same change, and with this file's own reasoning: `Date.parse` is NaN either
+    // way, and the consumer guards both uses of the instant with the same test.
+    const frame = {
+      name: 'sh',
+      argv: ['-c', 'true'],
+      cwd: '/tmp',
+      exitCode: 0,
+      signal: null,
+      durationMs: 5,
+      stdoutBytes: 0,
+      stderrBytes: 0,
+    };
+    await writeFile(
+      shim.framesPath,
+      `${JSON.stringify(frame)}
+`,
+      'utf8',
+    );
+    expect(await readShellFrames(shim.framesPath)).toHaveLength(1);
   });
 
   it('keeps a frame whose startedAt does not parse, because that one degrades a field', async () => {
