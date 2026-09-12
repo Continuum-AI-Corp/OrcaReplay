@@ -33,6 +33,11 @@ describe('a data: URI is excluded from the entropy sweep', () => {
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
   const dataUri = `data:image/png;base64,${PNG}`;
 
+  // Incompressible, so the entropy sweep would take it if it were allowed to look.
+  const NOISE = Buffer.from(
+    'sk-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOP'.repeat(6),
+  ).toString('base64');
+
   it('leaves the image byte for byte', () => {
     const redactor = new Redactor({});
     const { value } = redactor.redactString(JSON.stringify({ image_url: { url: dataUri } }));
@@ -117,15 +122,48 @@ describe('a data: URI is excluded from the entropy sweep', () => {
     expect(value, `${mediaType} payload was written verbatim`).not.toContain(PNG);
   });
 
-  it.each(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])(
-    'still spares a raster %s, which is what the exemption is for',
+  /**
+   * Real bytes for each format, because the exemption is granted on the payload and not on the
+   * label — an earlier version of this test dressed the same PNG in four different labels, which
+   * is exactly the thing that must not work.
+   */
+  const raster = (head: number[]) =>
+    Buffer.concat([Buffer.from(head), Buffer.from(NOISE, 'base64')]).toString('base64');
+
+  it.each([
+    ['image/png', raster([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])],
+    ['image/jpeg', raster([0xff, 0xd8, 0xff, 0xe0])],
+    ['image/gif', raster([...Buffer.from('GIF89a', 'latin1')])],
+    ['image/bmp', raster([0x42, 0x4d])],
+    [
+      'image/webp',
+      raster([...Buffer.from('RIFF', 'latin1'), 0, 0, 0, 0, ...Buffer.from('WEBP', 'latin1')]),
+    ],
+  ])('still spares a real %s, which is what the exemption is for', (mediaType, payload) => {
+    const redactor = new Redactor({});
+    const { value } = redactor.redactString(
+      JSON.stringify({ image_url: { url: `data:${mediaType};base64,${payload}` } }),
+    );
+    expect(value, `${mediaType} was swept`).not.toContain('<secret:high_entropy');
+    expect(value).toContain(payload);
+  });
+
+  /**
+   * The label is not evidence.
+   *
+   * It is text the agent wrote in front of the bytes, so an exemption granted on it is one any
+   * caller can claim. The same encoded credential must not be spared behind `image/png` and swept
+   * behind `application/pdf`.
+   */
+  it.each(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp', 'image/avif'])(
+    'sweeps a payload that is not an image however it is labelled %s',
     (mediaType) => {
       const redactor = new Redactor({});
       const { value } = redactor.redactString(
-        JSON.stringify({ image_url: { url: `data:${mediaType};base64,${PNG}` } }),
+        JSON.stringify({ url: `data:${mediaType};base64,${NOISE}` }),
       );
-      expect(value).not.toContain('<secret:high_entropy');
-      expect(value).toContain(PNG);
+      expect(value, `${mediaType} label bought an exemption`).toContain('<secret:high_entropy');
+      expect(value).not.toContain(NOISE);
     },
   );
 
@@ -153,7 +191,9 @@ describe('a data: URI is excluded from the entropy sweep', () => {
     // A body reaches the trace inside JSON, so the span has to include `\` or it ends one byte
     // early and the sweep resumes mid-image.
     const redactor = new Redactor({});
-    const escaped = `data:image/png;base64,AAAA\\/BBBB${PNG}`;
+    // The escape sits after the signature, because the signature is what earns the exemption;
+    // the span still has to cover the rest or the sweep resumes mid-image.
+    const escaped = `data:image/png;base64,${PNG.slice(0, 16)}\\/${PNG.slice(16)}`;
     const { value } = redactor.redactString(escaped);
     expect(value).not.toContain('<secret:high_entropy');
   });

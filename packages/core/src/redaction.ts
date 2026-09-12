@@ -122,7 +122,7 @@ const RULES: Rule[] = [
  */
 // The trailing `\\` is not decoration: a body reaches the trace JSON-encoded, so the payload can
 // carry escaped characters and the span has to cover them or it stops one byte early.
-const RASTER_DATA_URI = /data:image\/(?:png|jpeg|jpg|gif|webp|avif|bmp);base64,[A-Za-z0-9+/=\\]+/g;
+const RASTER_DATA_URI = /data:image\/(png|jpeg|jpg|gif|webp|avif|bmp);base64,([A-Za-z0-9+/=\\]+)/g;
 
 const TOKEN = /[A-Za-z0-9_-]{20,}/g;
 const PLACEHOLDER = /<secret:[a-z_]+:[0-9a-f]{8}>/g;
@@ -190,6 +190,49 @@ const PROTOCOL_ID_VALUE = /(\\*")(?:id|tool_use_id|tool_call_id)\1\s*:\s*\1[A-Za
 const PROTOCOL_SIGNATURE_VALUE = /(\\*")signature\1\s*:\s*\1[A-Za-z0-9+/=_-]*\1/g;
 
 /** Regions the entropy sweep must not touch: what it already replaced, and what is not a secret. */
+/**
+ * The first bytes of each raster format, so the exemption can be granted on the payload rather
+ * than on the label in front of it.
+ *
+ * The label is agent-controlled text that arrived in a request body. Without this, `data:
+ * image/png;base64,` followed by anything at all is spared: the same encoded credential is swept
+ * behind `application/pdf` and written verbatim behind `image/png`, decided by four bytes of type
+ * string. The argument for the exemption is about pixels, so it has to be pixels that get it.
+ */
+const RASTER_SIGNATURES: Record<string, (b: Buffer) => boolean> = {
+  png: (b) =>
+    b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+  jpeg: (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
+  jpg: (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
+  gif: (b) => /^GIF8[79]a$/.test(b.subarray(0, 6).toString('latin1')),
+  bmp: (b) => b[0] === 0x42 && b[1] === 0x4d,
+  webp: (b) =>
+    b.subarray(0, 4).toString('latin1') === 'RIFF' &&
+    b.subarray(8, 12).toString('latin1') === 'WEBP',
+  avif: (b) => b.subarray(4, 8).toString('latin1') === 'ftyp',
+};
+
+/**
+ * Whether a payload really is the raster format its label claims.
+ *
+ * Only the first bytes are decoded — the longest signature is twelve — so this costs one short
+ * decode per match, not one per image. A payload that will not decode, or decodes to something
+ * else, keeps no span and falls back to the sweep, which is what every other data URI gets.
+ */
+function isDeclaredRaster(subtype: string, payload: string): boolean {
+  const check = RASTER_SIGNATURES[subtype.toLowerCase()];
+  if (check === undefined) return false;
+  // A body reaches the trace JSON-encoded, so the payload can carry escapes that are not base64.
+  const head = payload.split('\\').join('').slice(0, 24);
+  if (head.length < 8) return false;
+  try {
+    const bytes = Buffer.from(head, 'base64');
+    return bytes.length >= 3 && check(bytes);
+  } catch {
+    return false;
+  }
+}
+
 function spansOf(value: string): [number, number][] {
   const spans: [number, number][] = [];
   for (const m of value.matchAll(PLACEHOLDER)) spans.push([m.index, m.index + m[0].length]);
@@ -197,7 +240,11 @@ function spansOf(value: string): [number, number][] {
   for (const m of value.matchAll(PROTOCOL_SIGNATURE_VALUE)) {
     spans.push([m.index, m.index + m[0].length]);
   }
-  for (const m of value.matchAll(RASTER_DATA_URI)) spans.push([m.index, m.index + m[0].length]);
+  for (const m of value.matchAll(RASTER_DATA_URI)) {
+    // The label is not evidence. Only a payload that decodes to the format it claims is spared.
+    if (!isDeclaredRaster(m[1]!, m[2]!)) continue;
+    spans.push([m.index, m.index + m[0].length]);
+  }
   return spans;
 }
 
