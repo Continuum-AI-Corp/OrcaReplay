@@ -1,13 +1,16 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { inflateSync } from 'node:zlib';
+import { crc32, inflateSync } from 'node:zlib';
 import type { RedactionRecord } from '@orcareplay/schema';
 
 /** Bump when a rule is added or changed, so old traces stay interpretable. */
 // Bumped when a rule's *name* or pattern changes, because both reach the trace: the placeholder is
 // `<secret:<kind>:<hash>>`, and a reader comparing two traces needs to know the policy differed
 // rather than the content. v2 renamed `openai_key` to `sk_api_key`; v3 stopped the entropy sweep
-// eating protocol identifiers (`id`, `tool_use_id`, `tool_call_id`).
-export const REDACTION_POLICY_VERSION = 3;
+// eating protocol identifiers (`id`, `tool_use_id`, `tool_call_id`); v4 stopped it eating whole
+// PNGs, which is a change in what reaches the trace for exactly the same reason — the same body
+// recorded under v3 and v4 differs, and a reader has to be able to tell that from the content
+// differing.
+export const REDACTION_POLICY_VERSION = 4;
 
 /** Environment capture is allowlist-only (spec §5). Everything else is denied. */
 export const DEFAULT_ENV_ALLOWLIST = [
@@ -100,10 +103,12 @@ const RULES: Rule[] = [
  *
  * So the rule is now the narrowest one that still serves the case this exists for: **every chunk
  * has to be a chunk whose bytes the exemption can account for.** Structure (`IHDR`, `IEND`), the
- * pixel stream (`IDAT`, `PLTE`), and a short list of fixed-size ancillary chunks each held to its
- * spec length. Anything else — `tEXt`, `iTXt`, `zTXt`, `iCCP`, `cHRM`, an unknown type — is a place
- * a caller can put bytes of their choosing, so its presence costs the whole run its exemption and
- * the sweep runs as it always did.
+ * pixel stream (`IDAT`), and a short list of fixed-size ancillary chunks each held to its spec
+ * length, with every chunk's CRC checked so its four CRC bytes are not four more of the caller's.
+ * Anything else — `tEXt`, `iTXt`, `zTXt`, `iCCP`, `cHRM`, `PLTE`, an unknown type — is a place a
+ * caller can put bytes of their choosing, so its presence costs the whole run its exemption and the
+ * sweep runs as it always did. Indexed PNGs therefore have no exemption at all, since they cannot
+ * be valid without a palette.
  *
  * The pixel stream is checked, not assumed: the concatenated `IDAT` has to inflate, to consume
  * every byte of itself doing so (`inflateSync` stops at the end of the zlib stream and ignores
@@ -171,6 +176,11 @@ const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0
  * admission criterion — not that the chunk is harmless, but that exempting it cannot hide anything
  * the sweep was protecting. Every variable-length chunk is therefore absent, and so is `cHRM`:
  * fixed at 32 bytes, but 32 bytes is long enough to matter.
+ *
+ * The lengths here are what the caller gets, because the CRCs are checked: four more bytes per
+ * chunk that would otherwise be theirs to fill. The largest of these is `pHYs` at nine, so the
+ * longest run of chosen bytes any admitted chunk can contribute is twelve base64 characters,
+ * against the sweep's threshold of twenty.
  */
 const PNG_FIXED_ANCILLARY: Record<string, number> = {
   gAMA: 4,
@@ -181,14 +191,23 @@ const PNG_FIXED_ANCILLARY: Record<string, number> = {
   bKGD: 6,
 };
 
-/** Bytes per pixel for each PNG colour type; an unlisted type is not a colour type. */
-const PNG_CHANNELS: Record<number, number> = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 };
+/**
+ * Bytes per pixel for each PNG colour type; an unlisted type is not one this exemption accepts.
+ *
+ * Indexed (3) is absent, which means indexed PNGs are swept like any other unvalidated payload. It
+ * was here, on the argument that an indexed image's palette *is* its pixels — but that argument
+ * does not survive: `PLTE` is up to 768 uncompressed caller-chosen bytes sitting verbatim in the
+ * trace, its entries need not be referenced by any pixel, and nothing about it is checked beyond a
+ * length that the bit depth alone bounds. `IDAT` is not analogous, because it has to inflate to
+ * exactly the size the header declares. Admitting 768 free bytes while rejecting `cHRM` at 32 as
+ * "long enough to matter" was the file contradicting its own admission criterion.
+ */
+const PNG_CHANNELS: Record<number, number> = { 0: 1, 2: 3, 4: 2, 6: 4 };
 
 /** The bit depths each colour type allows. A pairing outside this is not an image a decoder reads. */
 const PNG_DEPTHS: Record<number, number[]> = {
   0: [1, 2, 4, 8, 16],
   2: [8, 16],
-  3: [1, 2, 4, 8],
   4: [8, 16],
   6: [8, 16],
 };
@@ -230,6 +249,20 @@ function pngRawLength(
 }
 
 /**
+ * Whether the chunk beginning at `at` carries the CRC its own bytes imply.
+ *
+ * A caller who can set a length can set a CRC too, so this proves nothing about intent. What it
+ * does is stop the four CRC bytes of every admitted chunk being four bytes of the caller's
+ * choosing — which is the difference between "`pHYs` contributes nine chosen bytes" and "thirteen",
+ * and the whole fixed-length argument is a counting argument.
+ *
+ * The CRC covers the type and the data, not the length field.
+ */
+function hasValidCrc(b: Buffer, at: number, len: number): boolean {
+  return crc32(b.subarray(at + 4, at + 8 + len)) >>> 0 === b.readUInt32BE(at + 8 + len) >>> 0;
+}
+
+/**
  * Whether these bytes are a PNG this exemption can account for, byte for byte.
  *
  * IHDR is read before the walk rather than during it. The spec puts it first, at a fixed size, and
@@ -245,6 +278,7 @@ function isWholePng(b: Buffer): boolean {
   // Signature, then IHDR's length and type: 13 bytes of data at a known offset.
   if (b.length < 33) return false;
   if (b.readUInt32BE(8) !== 13 || b.subarray(12, 16).toString('latin1') !== 'IHDR') return false;
+  if (!hasValidCrc(b, 8, 13)) return false;
   const width = b.readUInt32BE(16);
   const height = b.readUInt32BE(20);
   const depth = b[24]!;
@@ -258,7 +292,6 @@ function isWholePng(b: Buffer): boolean {
 
   let at = 33; // 8 signature + 4 length + 4 type + 13 data + 4 CRC
   let sawEnd = false;
-  let sawPalette = false;
   const idat: Buffer[] = [];
   while (!sawEnd) {
     if (at + 12 > b.length) return false;
@@ -267,19 +300,12 @@ function isWholePng(b: Buffer): boolean {
     const next = at + 12 + len; // length + type + data + CRC
     if (next > b.length) return false;
 
+    if (!hasValidCrc(b, at, len)) return false;
+
     if (type === 'IDAT') {
       idat.push(Buffer.from(b.subarray(at + 8, at + 8 + len)));
-    } else if (type === 'PLTE') {
-      // The palette of an indexed image *is* its colours, so it is exempt on the same footing as
-      // the pixel stream. For truecolour it is only a suggestion, and a suggestion is up to 768
-      // bytes a caller chooses.
-      if (colour !== 3 || sawPalette) return false;
-      if (len === 0 || len % 3 !== 0 || len / 3 > 1 << depth) return false;
-      sawPalette = true;
     } else if (type === 'IEND') {
       if (len !== 0 || next !== b.length || idat.length === 0) return false;
-      // An indexed image without its palette is not an image.
-      if (colour === 3 && !sawPalette) return false;
       sawEnd = true;
     } else if (type === 'IHDR') {
       return false; // exactly one, already read

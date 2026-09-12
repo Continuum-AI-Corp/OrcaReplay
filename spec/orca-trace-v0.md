@@ -154,6 +154,20 @@ mostly source code, an unguarded rule corrupts exactly the payloads the trace ex
 Recall is essentially unaffected: random base64url of 20+ characters contains a digit with
 probability ≈0.98.
 
+High-entropy detection MAY exempt a payload it can prove is a whole image, because a base64
+screenshot is a long random-looking run by construction and shredding one protects nothing while
+destroying the payload the trace exists to preserve. An implementation that does so MUST grant the
+exemption on the decoded content and MUST be able to account for every byte it covers: structural
+and pixel data whose size the header declares and whose stream is verified to produce it, plus
+chunks whose length the format fixes below the detector's own threshold. A container carrying
+caller-chosen bytes of unbounded length — PNG `tEXt`/`iTXt`/`zTXt`/`iCCP`/`PLTE`, JPEG `COM`/`APPn`,
+or a format with no way to validate its payload at all — MUST NOT be exempted, because those bytes
+reach the trace uncompressed and a credential is indistinguishable from any other content in them.
+
+The exemption's stated limitation: a secret written into the pixels themselves is not detectable,
+and no content rule could be. Implementations MUST bump `policy_version` when the exemption's
+extent changes, so a reader can tell a trace recorded under one policy from another.
+
 Redaction is best-effort mitigation, not a guarantee. A trace is sensitive material.
 
 ## 6. Integrity

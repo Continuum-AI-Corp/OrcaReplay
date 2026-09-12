@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { deflateSync } from 'node:zlib';
+import { crc32, deflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import { Redactor } from '../src/redaction.js';
 
@@ -38,12 +38,14 @@ describe('a whole PNG is excluded from the entropy sweep', () => {
 
   const SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
-  function chunk(type: string, data: Buffer): Buffer {
+  /** A well-formed chunk. `crc` writes a wrong one instead, which is its own case below. */
+  function chunk(type: string, data: Buffer, crc?: number): Buffer {
     const len = Buffer.alloc(4);
     len.writeUInt32BE(data.length);
-    // The CRC is not checked — a caller who can set a length can set a CRC — so it is not faked
-    // here either.
-    return Buffer.concat([len, Buffer.from(type, 'latin1'), data, Buffer.alloc(4)]);
+    const body = Buffer.concat([Buffer.from(type, 'latin1'), data]);
+    const check = Buffer.alloc(4);
+    check.writeUInt32BE(crc ?? crc32(body) >>> 0);
+    return Buffer.concat([len, body, check]);
   }
 
   function ihdrOf(w: number, h: number, depth = 8, colour = 2, interlace = 0): Buffer {
@@ -263,29 +265,76 @@ describe('a whole PNG is excluded from the entropy sweep', () => {
   });
 
   /**
-   * An indexed image is its palette, so the palette is exempt on the same footing as the pixel
-   * stream — but only where it is the pixels. On a truecolour image PLTE is a *suggested* palette,
-   * which is up to 768 bytes a caller picks and nothing reads.
+   * An indexed PNG has no exemption, because `PLTE` has no bound worth having.
+   *
+   * It had one, on the argument that an indexed image's palette *is* its pixels. The argument does
+   * not survive: a palette is up to 768 uncompressed bytes of the caller's choosing, sitting
+   * verbatim in the trace, and its entries need not be referenced by any pixel — so an entirely
+   * valid one-pixel image can carry a credential in entries no decoder will ever draw. `IDAT` is
+   * not analogous; it has to inflate to exactly the size the header declares. Admitting 768 free
+   * bytes while refusing `cHRM` at 32 was this file contradicting its own admission criterion.
+   *
+   * Since a valid indexed PNG cannot exist without a palette, colour type 3 is simply not accepted.
    */
-  it('spares an indexed PNG, palette and all', () => {
-    const palette = Buffer.alloc(768);
-    randomBytes(768).copy(palette);
-    const raw = Buffer.alloc(16 * (1 + 16));
+  it('sweeps a valid indexed PNG carrying a credential in palette entries nothing references', () => {
+    // Positioned so the credential lands on a 3-byte group boundary and survives base64 intact.
+    const palette = Buffer.concat([
+      Buffer.alloc(4),
+      Buffer.from(NOISE.slice(0, 32), 'base64'),
+      Buffer.alloc(2),
+    ]);
+    const image = Buffer.concat([
+      SIG,
+      chunk('IHDR', ihdrOf(1, 1, 8, 3)),
+      chunk('PLTE', palette),
+      chunk('IDAT', deflateSync(Buffer.alloc(2))), // one pixel, referencing entry 0
+      chunk('IEND', Buffer.alloc(0)),
+    ]).toString('base64');
+    const { value } = new Redactor({}).redactString(
+      JSON.stringify({
+        messages: [{ content: [{ image_url: { url: `data:image/png;base64,${image}` } }] }],
+      }),
+    );
+    expect(value, 'a palette bought an exemption for its contents').not.toContain(image);
+    expect(value).toContain('<secret:high_entropy');
+  });
+
+  /**
+   * The CRCs are checked, which is a counting argument rather than an integrity one: a caller who
+   * can set a length can set a CRC, so this proves nothing about intent. What it does is stop the
+   * four CRC bytes of every admitted chunk being four more of the caller's own — the difference
+   * between `pHYs` contributing nine chosen bytes and thirteen.
+   */
+  it('refuses a chunk whose CRC is not the one its bytes imply', () => {
+    const raw = Buffer.alloc(16 * (1 + 48));
     randomBytes(raw.length).copy(raw);
     const image = Buffer.concat([
       SIG,
-      chunk('IHDR', ihdrOf(16, 16, 8, 3)),
-      chunk('PLTE', palette),
+      chunk('IHDR', ihdrOf(16, 16)),
+      chunk('IDAT', deflateSync(raw), 0xdeadbeef),
+      chunk('IEND', Buffer.alloc(0)),
+    ]).toString('base64');
+    const { value } = new Redactor({}).redactString(JSON.stringify({ url: image }));
+    expect(value).not.toContain(image);
+    expect(value).toContain('<secret:high_entropy');
+  });
+
+  it('refuses IHDR with a wrong CRC, which the walk never reaches', () => {
+    const raw = Buffer.alloc(16 * (1 + 48));
+    randomBytes(raw.length).copy(raw);
+    const image = Buffer.concat([
+      SIG,
+      chunk('IHDR', ihdrOf(16, 16), 0),
       chunk('IDAT', deflateSync(raw)),
       chunk('IEND', Buffer.alloc(0)),
     ]).toString('base64');
     const { value } = new Redactor({}).redactString(JSON.stringify({ url: image }));
-    expect(value).toContain(image);
+    expect(value).not.toContain(image);
   });
 
   it.each([
     [
-      'a suggested palette on a truecolour image',
+      'a palette on a truecolour image',
       () =>
         Buffer.concat([
           SIG,
@@ -296,7 +345,7 @@ describe('a whole PNG is excluded from the entropy sweep', () => {
         ]).toString('base64'),
     ],
     [
-      'an indexed image with no palette at all',
+      'an indexed image, palette or no palette',
       () =>
         Buffer.concat([
           SIG,
