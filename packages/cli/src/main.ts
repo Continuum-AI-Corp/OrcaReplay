@@ -56,6 +56,7 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
   orca ui [run]                  serve the viewer locally
   orca push [run]                send a run to the gateway, for the rest of the team
         --gateway <url>          where to send it (a gateway you named; no default)
+        --fs                     include the workspace snapshots (scrub cannot clean them)
         --force                  push even though the gateway's scan found a secret
   orca pull <run>                fetch a gateway run into this machine's store
         --gateway <url>          where to fetch from (a gateway you named; no default)

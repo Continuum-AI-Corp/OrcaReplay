@@ -400,9 +400,18 @@ key you exported for your own gateway.
   fills in for you when you press Enter does not count, however well it serves your model traffic.
   Running plain `orca setup` and then `orca push last` is refused, and says why. `push.packed` also
   reports the file count and byte size *before* the request goes out rather than after.
+- **Never the workspace snapshots, unless you ask.** `orca scrub` rewrites `events.jsonl` and the
+  blobs, but it cannot rewrite the shadow git store under `fs/` — its objects are deflated and
+  addressed by the hash of their contents, so it searches them, tells you what is still in there,
+  and offers `--drop-fs`. Push therefore leaves `fs/` at home by default: a scrub that reports
+  "objects still hold the material" must not be followed by a push that ships them anyway. `--fs`
+  sends them for the case that needs them — a teammate reproducing against the tree — and says so
+  on the way out, because that is the one part of the payload the scan on either end cannot read
+  (the objects are compressed, so a plaintext scan sees nothing).
 - **Never a key to a host it was not set up for.** Every credential has a home — the stored key's
-  is `orca setup`'s gateway, an exported key's is `ORCA_GATEWAY_URL` — and it is attached only when
-  the destination matches that home. `--gateway` changes where the run goes, not what the key was
+  is `orca setup`'s gateway, an exported key's is `ORCA_GATEWAY_URL`, and a key exported
+  with no URL beside it has no home at all — and it is attached only when the destination matches
+  that home. `--gateway` changes where the run goes, not what the key was
   issued for, so pointing it elsewhere refuses the push rather than authenticating it with someone
   else's credential. The one case left through is a key whose only destination is the one this
   invocation names: nothing earlier associated it with a host, which is the CI shape.

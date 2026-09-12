@@ -8,6 +8,7 @@ import {
   rename,
   rm,
   stat,
+  utimes,
   writeFile,
 } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
@@ -127,24 +128,39 @@ async function resolveGateway(
   // Each key therefore has a HOME: the origin it was configured for.
   //
   //   stored key -> config.gateway.url
-  //   env key    -> ORCA_GATEWAY_URL, or the configured gateway when that is unset
+  //   env key    -> ORCA_GATEWAY_URL
   //
-  // and a key is only sent when the destination matches its home. An env key with NO home is the
-  // one case left through: nothing but this invocation named a URL at all, so `--gateway` and the
-  // key arrived together and there is no earlier association to contradict. That is the CI shape
-  // the env key exists for.
+  // and a key is only sent when the destination matches its home.
+  //
+  // AN ENV KEY WITH NO HOME IS NOT HOMED AT THE CONFIGURED GATEWAY (orcacode-review). This read
+  // `env.ORCA_GATEWAY_URL ?? configured`, which substituted a home the key had never been
+  // associated with — and the README's CI recipe exports the KEY ALONE, so the substitution fired
+  // on the common case rather than an exotic one. A key exported for host A then travelled to the
+  // configured host B, in place of B's OWN stored key, because the stored branch is this branch's
+  // `else`. That is the fail-open shape the whole gate exists to prevent, and it contradicted both
+  // the README ("an exported key's [home] is ORCA_GATEWAY_URL") and the sentence two lines above
+  // it: the exemption is for a key whose only destination is the one THIS INVOCATION named, and
+  // here nothing in the invocation named it — the config did.
+  //
+  // So a homeless env key travels only when `--gateway` named the destination on this command
+  // line. That is exactly the CI shape the env key exists for, and nothing else.
   const envKey = env.ORCA_GATEWAY_KEY?.trim();
   const configured = config.gateway?.url;
-  const envHome = env.ORCA_GATEWAY_URL ?? configured;
+  const envHome = env.ORCA_GATEWAY_URL?.trim() || undefined;
+  const invocationNamedTheHost = args.str('gateway') !== undefined;
+  const envKeyApplies =
+    envKey !== undefined &&
+    envKey !== '' &&
+    (envHome === undefined ? invocationNamedTheHost : sameOrigin(url, envHome));
 
   let headers: Record<string, string> = {};
-  if (envKey) {
-    if (envHome === undefined || sameOrigin(url, envHome)) {
-      // gatewayHeaders() returns {} rather than an empty bearer when it has no key — see its own
-      // note — so an env key is folded in here rather than relying on that.
-      headers = { authorization: `Bearer ${envKey}`, 'x-api-key': envKey };
-    }
+  if (envKeyApplies) {
+    // gatewayHeaders() returns {} rather than an empty bearer when it has no key — see its own
+    // note — so an env key is folded in here rather than relying on that.
+    headers = { authorization: `Bearer ${envKey}`, 'x-api-key': envKey };
   } else if (configured !== undefined && sameOrigin(url, configured)) {
+    // Falling THROUGH rather than refusing: an env key that does not apply here is not a reason to
+    // withhold the credential the user configured for this very host.
     headers = gatewayHeaders(config, env);
   }
 
@@ -217,21 +233,51 @@ function refusal(status: number, body: string): string {
  * Nested copies are untouched: a `tls/` or `shims/` INSIDE a recorded workspace snapshot is
  * something the user recorded, and the filter applies at the top level only.
  */
-const PUSHED_TOP_LEVEL = new Set([
-  'manifest.json',
-  'events.jsonl',
-  'redactions.json',
-  'blobs',
-  'fs',
-]);
+const PUSHED_TOP_LEVEL = new Set(['manifest.json', 'events.jsonl', 'redactions.json', 'blobs']);
+
+/**
+ * The workspace snapshots, which ship only when the user asks for them with `--fs`.
+ *
+ * THIS WAS ON THE ALLOWLIST AND SHOULD NOT HAVE BEEN (orcacode-review). I kept `fs/` on the
+ * grounds that it is "content the user recorded ON PURPOSE, and README says a run carries them",
+ * and that does not distinguish it from anything else here: the user ran the shell commands on
+ * purpose too, and `shell-frames.jsonl` came off this list all the same.
+ *
+ * What actually decides it is the rule the rest of the allowlist is built on — push must not ship
+ * a file `orca scrub` cannot reach. The shadow git store is the largest such file by far. Scrub
+ * says so itself: it cannot rewrite the store (the objects are zlib-deflated and addressed by the
+ * hash of their contents, so editing one rewrites every id that reaches it), so it SEARCHES and
+ * REPORTS instead and offers `--drop-fs`. SECURITY.md states the same in the same words: after a
+ * scrub, "objects still hold the material".
+ *
+ * So the sequence was: scrub finds a secret in the workspace, tells the user it is still in the
+ * store, the user pushes, and the whole workspace — including whatever the fixed pattern list
+ * misses, which SECURITY.md names `id_ecdsa` as an example of — goes to a shared gateway and is
+ * served to everyone who pulls it. The gateway's own scan does not see it either: the objects are
+ * deflated, so a plaintext scan of the archive reads nothing.
+ *
+ * `--fs` keeps the capability for the case it exists for (a teammate who needs the tree to
+ * reproduce), as a decision the pusher makes rather than a default they inherit, and push says out
+ * loud what it is about to send. `orca scrub --drop-fs` remains the way to make the run safe
+ * rather than merely quiet.
+ */
+const FS_SNAPSHOT_DIR = 'fs';
 
 /** Every pushable file under a run directory, as archive entries named `<run_id>/<path>`. */
-async function runEntries(runDir: string, runId: string): Promise<ArchiveEntry[]> {
+async function runEntries(
+  runDir: string,
+  runId: string,
+  includeFs: boolean,
+): Promise<ArchiveEntry[]> {
   const entries: ArchiveEntry[] = [];
   const walk = async (dir: string): Promise<void> => {
     for (const item of await readdir(dir, { withFileTypes: true })) {
       // Top level only — see PUSHED_TOP_LEVEL.
-      if (dir === runDir && !PUSHED_TOP_LEVEL.has(item.name)) continue;
+      if (dir === runDir) {
+        const allowed =
+          PUSHED_TOP_LEVEL.has(item.name) || (includeFs && item.name === FS_SNAPSHOT_DIR);
+        if (!allowed) continue;
+      }
       const full = join(dir, item.name);
       if (item.isDirectory()) {
         await walk(full);
@@ -294,6 +340,15 @@ function multipart(
 const STALE_LOCK_MS = 10 * 60 * 1000;
 
 /**
+ * How often a held lock's mtime is refreshed. A third of the stale window, so two beats can be lost
+ * — a suspended laptop, a stalled disk — before the lock looks abandoned.
+ *
+ * Exported so the heartbeat test names this value instead of re-deriving the arithmetic, which is
+ * the sort of duplicate that keeps passing after the real one changes.
+ */
+export const LOCK_HEARTBEAT_MS = Math.max(1_000, Math.floor(STALE_LOCK_MS / 3));
+
+/**
  * Release a run lock — but ONLY the one this process is holding.
  *
  * The unconditional `rm` this replaces was unsafe because of the stale-break above, not in spite of
@@ -314,76 +369,126 @@ const STALE_LOCK_MS = 10 * 60 * 1000;
  * interpose on that window through pullCommand.
  */
 export async function releaseRunLock(lock: string, token: string): Promise<void> {
-  let holder: string;
-  try {
-    holder = await readFile(lock, 'utf8');
-  } catch {
-    // Gone already (a stale-break, a tidy-up) — nothing to release. Any other error means we
-    // cannot PROVE the lock is ours, and removing one we do not own is the failure being fixed, so
-    // leave it: the stale-break reclaims it within STALE_LOCK_MS.
+  // CLAIM, THEN VERIFY — read-then-unlink was never a compare-and-swap (orcacode-review).
+  //
+  // The old body read the bytes at the path and unlinked THE PATH two awaits later, so a
+  // stale-break landing in between made the comparison describe a lock that no longer existed and
+  // the unlink destroy the one that had replaced it. The comment here called that "a narrowing
+  // rather than a proof", which accurately described a hole and was not a reason to leave it: the
+  // one line in this file that can delete another holder's lock is exactly that unlink.
+  const aside = await claimLockFile(lock, 'releasing');
+  if (aside === undefined) return;
+  const holder = await readFile(aside, 'utf8').catch(() => undefined);
+  if (holder === token) {
+    await rm(aside, { force: true }).catch(() => undefined);
     return;
   }
-  if (holder !== token) return;
-  await rm(lock, { force: true }).catch(() => undefined);
+  // Not ours — or unreadable, which is not evidence that it IS ours. Either way it belongs to
+  // somebody else now, so it goes back rather than away.
+  await restoreLockFile(aside, lock);
+}
+
+/**
+ * Take exclusive possession of whatever file is at `lock`, or of nothing.
+ *
+ * `rename` moves an INODE: exactly one racer can take it and the rest get ENOENT, so afterwards the
+ * caller holds something no other process can reach and can examine it without it changing
+ * underneath. That is what makes the checks in releaseRunLock and breakStaleRunLock actual
+ * compare-and-swaps, rather than two independent reads of a path that agree with each other about
+ * nothing.
+ */
+async function claimLockFile(lock: string, why: string): Promise<string | undefined> {
+  const aside = `${lock}.${why}.${process.pid}.${randomUUID()}`;
+  try {
+    await rename(lock, aside);
+    return aside;
+  } catch {
+    // Someone else claimed it first, or it is already gone.
+    return undefined;
+  }
+}
+
+/**
+ * Put a claimed lock file back, and destroy the claim ONLY once that has succeeded.
+ *
+ * `link` fails EEXIST rather than clobbering, so it cannot overwrite a lock another waiter took
+ * while this one was held aside.
+ *
+ * WHEN IT CANNOT BE RETURNED, THE FILE STAYS (orcacode-review). The previous version removed the
+ * aside unconditionally after a swallowed `link` failure — deleting the only copy of a live
+ * holder's lock, which is the precise outcome the break exists to prevent, reached through its own
+ * cleanup. A left-behind `.releasing.*` / `.breaking.*` file holds no lock and matches no
+ * RUN_ID_PATTERN, so every command ignores it; that is strictly better than a live holder whose
+ * lock has evaporated while it is mid-swap.
+ */
+async function restoreLockFile(aside: string, lock: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await link(aside, lock);
+      await rm(aside, { force: true }).catch(() => undefined);
+      return true;
+    } catch {
+      // EEXIST: another waiter holds the path right now. Brief retries cover the case where it is
+      // about to release; past that, leaving the file is the safe answer.
+      await new Promise((ok) => setTimeout(ok, 20));
+    }
+  }
+  return false;
 }
 
 /**
  * Break a lock judged stale, without ever removing a LIVE one.
  *
- * The previous version read the lock's bytes by PATH after judging it stale and then asked
- * `releaseRunLock` to remove "that" token — which re-read the same path. Both reads can land on a
- * DIFFERENT lock than the one the staleness verdict was about, and the two agreeing with each
- * other is not evidence, because they are the same read twice:
+ * Two waiters can judge one abandoned lock stale. The first breaks it and acquires; the second must
+ * not then delete the FRESH lock that replaced it. So the break claims the file atomically and
+ * re-checks the age on the copy it now exclusively owns — winning the claim is not the same as the
+ * file having been stale, because the path can be re-acquired between the verdict and the claim.
  *
- *   W1 stats the abandoned lock, stale.
- *   W2 stats the same lock, stale.
- *   W1 reads it, removes it, and acquires — a FRESH lock now sits at that path.
- *   W2 reads the path and gets W1's fresh token, hands it to releaseRunLock, which reads the path
- *     again, sees the same bytes, and deletes it.
- *   W2 acquires beside W1 — two pulls doing recovery-and-swap on one run, which is the exact
- *     thing this lock exists to prevent.
- *
- * So the break claims the file ATOMICALLY first. `rename` moves an inode: exactly one racer can
- * take it and the rest get ENOENT, and afterwards we hold something nobody else can reach, so it
- * can be examined without anything changing under us.
- *
- * And it is examined, because winning the rename does not mean the file was stale — the same
- * window above can hand us a lock created between the `stat` and the `rename`. An aside whose
- * mtime is recent is put BACK, with `link`, which fails EEXIST rather than clobbering whoever
- * claimed the path meanwhile; either way this waiter keeps waiting instead of acquiring.
- *
- * A crash between the rename and the unlink leaves a `.breaking.*` file beside the run. It matches
- * no RUN_ID_PATTERN, so every command ignores it, and it holds no lock — strictly better than the
- * failure it replaces.
+ * A crash between the claim and the unlink leaves a `.breaking.*` file beside the run. It matches
+ * no RUN_ID_PATTERN, so every command ignores it, and it holds no lock.
  *
  * Exported for the test that drives the interleaving directly: the window between the `stat` and
  * the break is inside `withRunLock`'s retry loop, and no caller can reach into it.
  */
 export async function breakStaleRunLock(lock: string): Promise<void> {
-  const aside = `${lock}.breaking.${process.pid}.${randomUUID()}`;
-  try {
-    await rename(lock, aside);
-  } catch {
-    // Someone else took it first, or it is already gone. Either way this waiter has nothing to
-    // break and should go round again.
-    return;
-  }
+  const aside = await claimLockFile(lock, 'breaking');
+  if (aside === undefined) return;
   const age = await stat(aside)
     .then((st) => Date.now() - st.mtimeMs)
-    // Unreadable after we moved it: treat as stale rather than restoring a lock we cannot
-    // describe. The alternative is putting an unknowable file back and spinning on it forever.
-    .catch(() => Number.POSITIVE_INFINITY);
-  if (age > STALE_LOCK_MS) {
+    .catch(() => undefined);
+  if (age !== undefined && age > STALE_LOCK_MS) {
     await rm(aside, { force: true }).catch(() => undefined);
     return;
   }
-  // NOT stale after all — created between the stat and the rename. Put it back where its holder
-  // expects it, and only if nothing has claimed the path since.
-  await link(aside, lock).catch(() => undefined);
-  await rm(aside, { force: true }).catch(() => undefined);
+  // NOT STALE ON THE COPY WE NOW HOLD — a live holder's lock that arrived between the verdict and
+  // the claim, and it goes back untouched.
+  //
+  // An unreadable stat lands here too, which REVERSES what this used to do. It treated that as
+  // stale "rather than restoring a lock we cannot describe" — the same fail-open reasoning the
+  // whole function is against. Failing to read a file is not evidence that its holder is dead.
+  await restoreLockFile(aside, lock);
 }
 
-async function withRunLock<T>(dest: string, fn: () => Promise<T>): Promise<T> {
+/**
+ * withRunLock, exported for the test that observes the heartbeat.
+ *
+ * The heartbeat is an interval armed inside the lock's own scope, so nothing a caller can reach
+ * observes it; the test needs the real thing on a real file, because the failures worth catching
+ * are "never armed", "armed on the wrong path" and "cleared too early".
+ */
+export function withRunLockForTest<T>(
+  dest: string,
+  fn: (stillHeld: () => Promise<boolean>) => Promise<T>,
+): Promise<T> {
+  return withRunLock(dest, fn);
+}
+
+async function withRunLock<T>(
+  dest: string,
+  // The callback is handed a `stillHeld` probe rather than the lock's path and token, so the swap
+  // can re-check ownership without any caller being able to forge or release it.
+  fn: (stillHeld: () => Promise<boolean>) => Promise<T>,
+): Promise<T> {
   const lock = `${dest}.lock`;
   // See releaseRunLock for why this is a token and not just a pid.
   const token = `${process.pid} ${randomUUID()}\n`;
@@ -415,11 +520,45 @@ async function withRunLock<T>(dest: string, fn: () => Promise<T>): Promise<T> {
         `remove that file if no pull is running.`,
     );
   }
+  // A LIVE HOLDER MUST NEVER LOOK STALE (orcacode-review).
+  //
+  // The lock was written once and never touched again, so its mtime is its CREATION time and
+  // "stale" meant "older than ten minutes", not "dead". The work under this lock is the staging
+  // write — one mkdir/writeFile/chmod per archive entry, up to writeArchive's own bound of 65 534
+  // — so a large `fs/` snapshot on a slow or network-backed store genuinely takes longer than
+  // STALE_LOCK_MS. Its lock was then broken WHILE IT WAS WRITING, and the second pull entered the
+  // same critical section over the same deterministic scratch names: the two interleave, and the
+  // run that lands is a blend of both copies or is missing half its workspace snapshot, with
+  // nothing reporting it.
+  //
+  // The heartbeat makes staleness mean what the break assumes it means. A process killed outright
+  // stops beating and its lock ages out exactly as before, so the break still works on the case it
+  // was written for.
+  //
+  // unref'd, or the interval would hold the CLI open after the pull finishes.
+  const beat = setInterval(() => {
+    const now = new Date();
+    void utimes(lock, now, now).catch(() => undefined);
+  }, LOCK_HEARTBEAT_MS);
+  beat.unref?.();
   try {
-    return await fn();
+    return await fn(() => lockStillHeld(lock, token));
   } finally {
+    clearInterval(beat);
     await releaseRunLock(lock, token);
   }
+}
+
+/**
+ * Whether `lock` still holds our token — checked immediately before the swap's destructive renames.
+ *
+ * Belt and braces behind the heartbeat, for the one case the heartbeat cannot cover: a process
+ * stopped long enough (SIGSTOP, a suspended laptop) that its beats did not land, whose lock was
+ * then legitimately broken and re-taken. Resuming into the two renames from there is what deletes
+ * both copies of the run, so the swap asks once more rather than trusting a claim made minutes ago.
+ */
+async function lockStillHeld(lock: string, token: string): Promise<boolean> {
+  return (await readFile(lock, 'utf8').catch(() => undefined)) === token;
 }
 
 /**
@@ -505,9 +644,24 @@ export async function pushCommand(
   const runId = typeof manifest.run_id === 'string' ? manifest.run_id : '';
   if (runId === '') throw new Error(`${ref.dir}/manifest.json has no run_id`);
 
-  const entries = await runEntries(ref.dir, runId);
+  const includeFs = args.bool('fs');
+  const entries = await runEntries(ref.dir, runId, includeFs);
   const archive = await writeArchive(entries);
-  out.phase('push.packed', { run: runId, files: entries.length, bytes: archive.length });
+  out.phase('push.packed', {
+    run: runId,
+    files: entries.length,
+    bytes: archive.length,
+    // Said on the way out, beside the count, because it is the one part of the payload scrub
+    // cannot have cleaned — see FS_SNAPSHOT_DIR.
+    fs: includeFs ? 'included' : 'withheld',
+  });
+  if (includeFs) {
+    out.warn('push.fs_included', {
+      note:
+        'workspace file contents travel raw: `orca scrub` cannot rewrite the snapshot store, ' +
+        'so anything it reported as still present is going with this push',
+    });
+  }
 
   // `force` is the gateway's own flag for "store this even though the scan found something". It is
   // opt-in on purpose: the default refusal is what stops a secret reaching a shared server.
@@ -616,7 +770,7 @@ export async function pullCommand(
   // These three steps are one critical section: recovery decides what exists, staging writes the
   // new copy under a name another pull would also use, and the swap moves both. Locking only the
   // swap would leave recovery free to delete what staging just wrote.
-  await withRunLock(dest, async () => {
+  await withRunLock(dest, async (stillHeld) => {
     await recoverInterruptedSwap(dest);
 
     const existing = await stat(dest).catch(() => undefined);
@@ -658,6 +812,21 @@ export async function pullCommand(
         const rel = entry.name.slice(entry.name.indexOf('/') + 1);
         if (rel === '' || entry.name.indexOf('/') < 0) continue;
         const path = join(staging, ...rel.split('/'));
+        // A TRAILING SLASH NAMES A DIRECTORY (orcacode-review). `runEntries` walks files and skips
+        // directories, so nothing this CLI writes produces such an entry — but pull is documented
+        // to read archives from the gateway's Go writer and from whatever produced them before
+        // that, and every general-purpose zip writer emits them (`zip -r`, shutil.make_archive, a
+        // filepath.Walk that appends "/" for a dir).
+        //
+        // Written as a file, the empty payload lands AS the directory: the next entry under it
+        // dies with ENOTDIR and the whole pull rolls back, or — when the archive has no file under
+        // it — the pull SUCCEEDS and installs a run whose `blobs` is a zero-byte file. That last
+        // one is the silent-wrong-store outcome the rest of this function exists to avoid.
+        if (entry.name.endsWith('/')) {
+          await mkdir(path, { recursive: true, mode: DIR_MODE });
+          await chmod(path, DIR_MODE).catch(() => undefined);
+          continue;
+        }
         await mkdir(dirname(path), { recursive: true, mode: DIR_MODE });
         await writeFile(path, entry.bytes, { mode: FILE_MODE });
         await chmod(path, FILE_MODE).catch(() => undefined);
@@ -666,6 +835,12 @@ export async function pullCommand(
       // INSIDE the try: if another process recreated `dest` between the stat above and here, this
       // move is what fails, and leaving it outside stranded the staging directory while reporting
       // an error.
+      if (!(await stillHeld())) {
+        throw new Error(
+          'another orca pull took this run\u2019s lock while this one was staging; nothing was ' +
+            'installed. Re-run the pull.',
+        );
+      }
       if (existing) await rename(dest, retired);
       await rename(staging, dest);
     } catch (err) {

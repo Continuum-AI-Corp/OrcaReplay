@@ -2,14 +2,16 @@ import { createServer, type Server } from 'node:http';
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseArgs } from '../src/args.js';
 import { Output, type LogEntry } from '../src/out.js';
 import {
   breakStaleRunLock,
   pullCommand,
   pushCommand,
+  LOCK_HEARTBEAT_MS,
   releaseRunLock,
+  withRunLockForTest,
 } from '../src/commands/sync.js';
 import { readArchive, writeArchive } from '../src/archive.js';
 import { writeConfig } from '../src/config.js';
@@ -738,10 +740,11 @@ describe('push and pull', () => {
     await writeFile(join(dir, 'shims', 'curl'), '#!/bin/sh\nexec orca-shell-shim "$@"\n');
     // Kept: the scrub ledger says a run WAS scrubbed, by rule and count and never by value.
     await writeFile(join(dir, 'redactions.json'), '{"records":[{"rule":"scrub","count":2}]}\n');
-    // Kept: the workspace snapshots are content the user recorded on purpose.
+    // WITHHELD unless --fs: the shadow store is the largest thing scrub cannot rewrite, and a
+    // scrub that reports "objects still hold the material" must not be followed by a push that
+    // ships them anyway. See FS_SNAPSHOT_DIR.
     await mkdir(join(dir, 'fs', 'objects'), { recursive: true });
-    await writeFile(join(dir, 'fs', 'objects', 'aa'), 'snapshot\n');
-    // A NESTED copy of an excluded name is content, not scaffolding: the filter is top-level only.
+    await writeFile(join(dir, 'fs', 'objects', 'aa'), 'workspace_snapshot_secret\n');
     await mkdir(join(dir, 'fs', 'shims'), { recursive: true });
     await writeFile(join(dir, 'fs', 'shims', 'recorded'), 'the user recorded this\n');
 
@@ -757,17 +760,56 @@ describe('push and pull', () => {
     expect(names).toEqual([
       `${runId}/blobs/ab/abcdef`,
       `${runId}/events.jsonl`,
-      `${runId}/fs/objects/aa`,
-      `${runId}/fs/shims/recorded`,
       `${runId}/manifest.json`,
       `${runId}/redactions.json`,
     ]);
 
     // The payload backstop, for anything that arrives by another route.
     const body = sent!.body.toString('latin1');
-    for (const secret of ['ghp_scaffolding_secret', 'shell_frame_secret', 'mcp_frame_secret']) {
+    for (const secret of [
+      'ghp_scaffolding_secret',
+      'shell_frame_secret',
+      'mcp_frame_secret',
+      'workspace_snapshot_secret',
+    ]) {
       expect(body).not.toContain(secret);
     }
+  });
+
+  /*
+  --fs IS THE OPT-IN, AND IT SAYS SO.
+
+  The snapshots are still pushable for the case they exist for — a teammate who needs the tree to
+  reproduce — but as a decision the pusher makes rather than a default they inherit, because
+  `orca scrub` cannot rewrite the store and says as much itself.
+  */
+  it('ships the workspace snapshots only when --fs asks, and warns when it does', async () => {
+    await seedRun();
+    const dir = join(workspace, '.orca', 'runs', runId);
+    await mkdir(join(dir, 'fs', 'objects'), { recursive: true });
+    await writeFile(join(dir, 'fs', 'objects', 'aa'), 'snapshot\n');
+    await mkdir(join(dir, 'fs', 'shims'), { recursive: true });
+    await writeFile(join(dir, 'fs', 'shims', 'recorded'), 'the user recorded this\n');
+
+    await pushCommand(parseArgs(['push', runId, '--gateway', url, '--fs']), out, workspace, env());
+
+    const sent = received.find((r) => r.method === 'POST');
+    const start = sent!.body.indexOf('PK');
+    const end = sent!.body.lastIndexOf('\r\n--');
+    const names = (await readArchive(new Uint8Array(sent!.body.subarray(start, end))))
+      .map((e) => e.name)
+      .sort();
+    expect(names).toContain(`${runId}/fs/objects/aa`);
+    // A NESTED copy of an excluded name is content, not scaffolding: the filter is top-level only.
+    expect(names).toContain(`${runId}/fs/shims/recorded`);
+
+    // The disclosure is stated rather than left to be discovered.
+    const packed = logs.find((e) => e.event === 'push.packed');
+    expect(packed?.fields?.fs).toBe('included');
+    expect(
+      logs.some((e) => e.event === 'push.fs_included'),
+      'shipping the snapshots must say that scrub could not clean them',
+    ).toBe(true);
   });
 
   /**
@@ -810,6 +852,216 @@ describe('push and pull', () => {
     await breakStaleRunLock(lock);
     expect(await readFile(lock, 'utf8').catch(() => undefined)).toBeUndefined();
     expect((await readdir(runs)).filter((n) => n.includes('.breaking.'))).toEqual([]);
+  });
+
+  /*
+  A RELEASE MUST NOT DELETE A LOCK IT NO LONGER OWNS, AND READ-THEN-UNLINK CANNOT PROMISE THAT.
+
+  The old body compared the bytes at the path with its token and unlinked THE PATH two awaits
+  later. Reachable whenever a stale-break has handed the path on: the read still returns our own
+  token (taken before the break), the comparison passes, and the unlink removes the FRESH lock that
+  replaced it. A third pull then walks in beside the second — the concurrent recovery-and-swap this
+  lock exists to prevent.
+
+  WHAT THIS TEST DOES AND DOES NOT PROVE, because the distinction matters. It pins the CONTRACT —
+  a release never removes a lock whose bytes are not ours — and the old read-then-unlink body
+  satisfies that for a file that is already someone else’s when the call starts. What it cannot
+  stage without mocking fs is the interleaving itself: the swap landing between the read and the
+  unlink. That window is closed structurally rather than by assertion, by deciding on a copy no
+  other process can reach.
+
+  It is not toothless: removing the claim’s restore-before-delete rule fails this test along with
+  the two below it, because the released file then disappears instead of going back.
+  */
+  it('releases only the exact lock file it claimed, never the path', async () => {
+    const runs = join(workspace, '.orca', 'runs');
+    await mkdir(runs, { recursive: true });
+    const lock = join(runs, `${runId}.lock`);
+    const mine = `${process.pid} mine\n`;
+    const theirs = '424242 a-newer-pull\n';
+
+    // What a stale-break leaves behind: someone else's lock at the path we were holding.
+    await writeFile(lock, theirs);
+    await releaseRunLock(lock, mine);
+    expect(
+      await readFile(lock, 'utf8').catch(() => undefined),
+      'a newer pull’s lock was deleted by the previous holder’s release',
+    ).toBe(theirs);
+    expect((await readdir(runs)).filter((n) => n.includes('.releasing.'))).toEqual([]);
+
+    // And the ordinary case still works, or the lock would never come off.
+    await writeFile(lock, mine);
+    await releaseRunLock(lock, mine);
+    expect(await readFile(lock, 'utf8').catch(() => undefined)).toBeUndefined();
+    expect((await readdir(runs)).filter((n) => n.includes('.releasing.'))).toEqual([]);
+  });
+
+  /*
+  A BREAK THAT CANNOT RETURN A LIVE LOCK MUST LEAVE IT, NOT DELETE IT.
+
+  breakStaleRunLock claims the file before it judges the age, which is what makes the judgement
+  sound — but the previous version then removed the aside UNCONDITIONALLY after a swallowed `link`
+  failure. So when the path had been re-taken in that window, the live holder's only lock file was
+  deleted by the very function whose contract is "without ever removing a LIVE one", and two pulls
+  ran in the same critical section.
+
+  Here the path is occupied by a third party before the restore, which is exactly that window.
+  */
+  it('leaves a live holder’s lock behind rather than deleting it when the path is taken', async () => {
+    const runs = join(workspace, '.orca', 'runs');
+    await mkdir(runs, { recursive: true });
+    const lock = join(runs, `${runId}.lock`);
+    await writeFile(lock, 'live-holder\n');
+
+    // Occupy the path the instant the break claims the file, so `link` cannot put it back. Done by
+    // racing a writer against the break rather than by mocking, so the EEXIST is the real one.
+    const broke = breakStaleRunLock(lock);
+    await writeFile(lock, 'a-third-pull\n', { flag: 'w' });
+    await broke;
+
+    // The third pull's lock is intact — the break did not clobber it …
+    expect(await readFile(lock, 'utf8')).toBe('a-third-pull\n');
+    // … and the live holder's token still exists somewhere rather than having been destroyed.
+    const asides = (await readdir(runs)).filter((n) => n.includes('.breaking.'));
+    const survived =
+      asides.length > 0 && (await readFile(join(runs, asides[0]!), 'utf8')) === 'live-holder\n';
+    expect(
+      survived,
+      'the break deleted a lock it could not return — the outcome it exists to prevent',
+    ).toBe(true);
+  });
+
+  /*
+  A LIVE HOLDER MUST NEVER LOOK STALE.
+
+  The lock was written once and never touched again, so "stale" meant "created more than ten
+  minutes ago", not "dead" — and the work under the lock is the staging write, one file per archive
+  entry. A pull whose staging outruns STALE_LOCK_MS had its lock broken WHILE IT WAS WRITING.
+
+  The heartbeat is asserted by observing the mtime advance under a held lock, with STALE_LOCK_MS
+  left alone: a real timer on a real file, so it fails if the interval is never armed, is armed on
+  the wrong path, or is cleared too early.
+  */
+  it('keeps a held lock’s mtime fresh while the critical section runs', async () => {
+    const runs = join(workspace, '.orca', 'runs');
+    await mkdir(runs, { recursive: true });
+    const dest = join(runs, runId);
+    const lock = `${dest}.lock`;
+
+    // Fake timers so the real LOCK_HEARTBEAT_MS (a third of the ten-minute stale window) can be
+    // crossed without the test waiting for it. The value comes from the source rather than being
+    // re-derived here, so changing one does not silently stop exercising the other.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let aged = 0;
+      let beaten = 0;
+      await withRunLockForTest(dest, async () => {
+        // Age the lock by hand: without a heartbeat nothing ever writes this file again, so the
+        // mtime stays exactly where it was put and the break judges a working pull abandoned.
+        const old = new Date(Date.now() - 60 * 60 * 1000);
+        await utimes(lock, old, old);
+        aged = (await stat(lock)).mtimeMs;
+        await vi.advanceTimersByTimeAsync(LOCK_HEARTBEAT_MS + 50);
+        beaten = (await stat(lock)).mtimeMs;
+      });
+      expect(
+        beaten > aged,
+        'the lock’s mtime never advanced while it was held, so a pull whose staging outruns ' +
+          'STALE_LOCK_MS still has its lock broken underneath it',
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // …and the beat stops with the lock, rather than keeping the process alive or writing to a
+    // path that no longer belongs to it.
+    await writeFile(lock, 'someone-else\n');
+    const settled = (await stat(lock)).mtimeMs;
+    await new Promise((ok) => setTimeout(ok, 120));
+    expect((await stat(lock)).mtimeMs).toBe(settled);
+  });
+
+  /*
+  A ZIP NAMES A DIRECTORY WITH A TRAILING SLASH, and pull wrote it as a file.
+
+  Nothing this CLI produces emits such an entry (runEntries walks files), but pull reads archives
+  from the gateway and from whatever wrote them before that, and every general-purpose zip writer
+  emits them. The silent case is the one that matters: an archive whose directory entry has no file
+  under it installed a run whose `blobs` was a zero-byte FILE, and the pull printed pull.done.
+  */
+  it('creates a directory for a trailing-slash zip entry instead of writing it as a file', async () => {
+    const dirEntry = { name: `${runId}/blobs/`, bytes: new Uint8Array() };
+    const manifest = {
+      name: `${runId}/manifest.json`,
+      bytes: new TextEncoder().encode(
+        `${JSON.stringify({ run_id: runId, schema_version: '0.1.0' })}\n`,
+      ),
+    };
+    const events = {
+      name: `${runId}/events.jsonl`,
+      bytes: new TextEncoder().encode('{"seq":1,"type":"run.start"}\n'),
+    };
+    // Directory entry FIRST is what `zip -r` emits, and is the ordering that used to fail the
+    // whole pull with ENOTDIR on the next entry under it.
+    reply = {
+      status: 200,
+      body: Buffer.from(
+        await writeArchive([
+          manifest,
+          dirEntry,
+          { name: `${runId}/blobs/ab/abcdef`, bytes: new Uint8Array([1, 2, 3]) },
+          events,
+        ]),
+      ),
+      headers: { 'content-type': 'application/zip' },
+    };
+
+    await pullCommand(parseArgs(['pull', runId, '--gateway', url]), out, workspace, env());
+
+    const blobs = join(workspace, '.orca', 'runs', runId, 'blobs');
+    expect((await stat(blobs)).isDirectory()).toBe(true);
+    expect(await readFile(join(blobs, 'ab', 'abcdef'))).toEqual(Buffer.from([1, 2, 3]));
+  });
+
+  /*
+  AN EXPORTED KEY IS HOMED AT ORCA_GATEWAY_URL, AND NOWHERE ELSE.
+
+  `envHome` read `ORCA_GATEWAY_URL ?? configured`, which substituted a home the key had never been
+  associated with — and the README’s own CI recipe exports the KEY ALONE, so the substitution fired
+  on the common case. A key exported for host A then travelled to the configured host B, in place
+  of B’s own stored key, because the stored branch is the env branch’s `else`.
+
+  Both directions are asserted, since the fix must not simply withhold everything: the configured
+  host still gets its OWN key, and the CI shape still works.
+  */
+  it('does not send an exported key to a host only the config named', async () => {
+    await seedRun();
+    await writeConfig(
+      { gateway: { url, url_source: 'named', api_key: 'sk-stored-for-this-host' } },
+      { XDG_CONFIG_HOME: home },
+    );
+    // The README’s CI recipe: the key is exported, no URL is.
+    const keyOnly = {
+      XDG_CONFIG_HOME: home,
+      ORCA_GATEWAY_KEY: 'sk-exported-for-somewhere-else',
+    };
+
+    await pushCommand(parseArgs(['push', runId]), out, workspace, keyOnly);
+
+    const req = received[0]!;
+    expect(req.auth, 'a key with no home of its own was sent to a host only the config named').toBe(
+      'Bearer sk-stored-for-this-host',
+    );
+    expect(req.body.toString('utf8')).not.toContain('sk-exported-for-somewhere-else');
+
+    // The CI shape is untouched: nothing earlier associated the key with a host, and THIS
+    // invocation names the destination.
+    received.length = 0;
+    await pushCommand(parseArgs(['push', runId, '--gateway', url]), out, workspace, {
+      XDG_CONFIG_HOME: home,
+      ORCA_GATEWAY_KEY: 'sk-ci',
+    });
+    expect(received[0]!.auth).toBe('Bearer sk-ci');
   });
 
   /**
