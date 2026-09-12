@@ -123,14 +123,18 @@ export async function installAgentSpans(runDir: string): Promise<AgentSpanCaptur
  * having no scrubber at all. Deleting it is cheaper and more honest than teaching three other
  * components about a file that has no reason to outlive the ingest.
  *
- * Returns what went wrong, for the caller to warn about. Failing to delete it is worth saying and
+ * Takes the files the read actually ingested, never a path to look up again. Listing a second time
+ * would delete a different set than was read: a process that begins tracing between the two — the
+ * case one file per process exists for — has its file removed with nothing parsed out of it, and
+ * because the `dropped` record lives in that same file, the loss cannot even be reported. A file
+ * the reader *skipped*, because it could not be read at all, would go the same way.
+ *
+ * Returns what went wrong, for the caller to warn about. Failing to delete one is worth saying and
  * never worth losing the trace over — the same posture as the run CA's `dispose`.
  */
-export async function discardAgentSpans(path: string): Promise<string | undefined> {
+export async function discardAgentSpans(files: string[]): Promise<string | undefined> {
   const failures: string[] = [];
-  // The whole set, not just the base: one file per tracing process, and leaving any of them behind
-  // leaves the same uncovered file in the run directory that this exists to remove.
-  for (const file of await spansFiles(path)) {
+  for (const file of files) {
     try {
       await rm(file, { force: true });
     } catch (err) {
@@ -161,6 +165,17 @@ export interface AgentSpan {
   data?: Record<string, unknown>;
 }
 
+/** What a read of the spans files found, and which files it actually read. */
+export interface AgentSpansRead {
+  spans: AgentSpan[];
+  /**
+   * Only these may be deleted.
+   *
+   * Re-listing at delete time destroys a different set than was read — see `discardAgentSpans`.
+   */
+  ingested: string[];
+}
+
 /**
  * Read what the processor wrote.
  *
@@ -172,10 +187,15 @@ export interface AgentSpan {
  * producer writes as its could-not-serialise fallback, and it used to reach `eventForSpan`, which
  * dereferenced it — one such line took the whole run down and left the trace unsealed. So a line
  * is kept only if it parsed to an object.
+ *
+ * Reports which files it ingested, not only what it found in them. That list is what may be
+ * deleted — see `discardAgentSpans`. A file that could not be read is not on it, so it survives to
+ * be warned about rather than being destroyed as though it had been read.
  */
-export async function readAgentSpans(path: string): Promise<AgentSpan[]> {
+export async function readAgentSpans(path: string): Promise<AgentSpansRead> {
   const spans: AgentSpan[] = [];
-  for (const file of await spansFiles(path)) {
+  const ingested: string[] = [];
+  for (const file of await agentSpansFiles(path)) {
     let raw: string;
     try {
       raw = await readFile(file, 'utf8');
@@ -183,6 +203,7 @@ export async function readAgentSpans(path: string): Promise<AgentSpan[]> {
       // No file means the SDK was never used, or the package is not installed. Both are ordinary.
       continue;
     }
+    ingested.push(file);
     for (const line of raw.split('\n')) {
       if (line.trim() === '') continue;
       let parsed: unknown;
@@ -196,7 +217,7 @@ export async function readAgentSpans(path: string): Promise<AgentSpan[]> {
       }
     }
   }
-  return spans;
+  return { spans, ingested };
 }
 
 /**
@@ -210,7 +231,7 @@ export async function readAgentSpans(path: string): Promise<AgentSpan[]> {
  * `<base>` itself is still read. It is what `installAgentSpans` pre-creates for the mode, and it is
  * where a processor that predates the per-pid split would have written.
  */
-async function spansFiles(base: string): Promise<string[]> {
+export async function agentSpansFiles(base: string): Promise<string[]> {
   const dir = dirname(base);
   const prefix = `${basename(base)}.`;
   let siblings: string[] = [];

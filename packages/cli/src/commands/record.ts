@@ -16,6 +16,7 @@ import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
 import { installShellShim, readShellFrames } from '@orcareplay/shell-shim';
 import {
+  agentSpansFiles,
   discardAgentSpans,
   droppedSpanCount,
   eventForSpan,
@@ -356,7 +357,11 @@ async function runRecording(
     // `finishRun`, which this is the short-circuit for — so every throw after `installAgentSpans`
     // used to leave an un-redacted transport in the run directory, where `orca scrub` does not
     // reach it. The likeliest such throw is the first statement of `finishRun`.
-    if (agentSpans) await discardAgentSpans(agentSpans.spansPath).catch(() => undefined);
+    // Nothing was ingested on this path, so the whole set goes: what it holds is about to be
+    // unreachable either way, and leaving it is the one outcome that must not happen.
+    if (agentSpans) {
+      await discardAgentSpans(await agentSpansFiles(agentSpans.spansPath)).catch(() => undefined);
+    }
     await writer
       .append({ type: 'run.end', actor: 'orca', turn, attrs: { error: String(err) } })
       .catch(() => undefined);
@@ -567,7 +572,7 @@ async function runRecording(
       // Timestamped from the span, like the shell frames above and for the same reason: these are
       // read off disk after the agent exited, so stamping them now would file every handoff at the
       // end of the run rather than between the turns it happened between.
-      const spans = await readAgentSpans(agentSpans.spansPath);
+      const { spans, ingested } = await readAgentSpans(agentSpans.spansPath);
       for (const span of spans) {
         const derived = eventForSpan(span);
         if (derived === undefined) continue;
@@ -592,7 +597,9 @@ async function runRecording(
         // this, the trace would otherwise just have fewer agent events than the run did.
         out.warn('agent_spans.dropped', { count: lost });
       }
-      const failed = await discardAgentSpans(agentSpans.spansPath);
+      // Exactly what was read, never a fresh listing: a process that starts tracing between the
+      // two would have its file removed with nothing parsed out of it.
+      const failed = await discardAgentSpans(ingested);
       if (failed !== undefined) {
         out.warn('agent_spans.not_removed', { path: agentSpans.spansPath, reason: failed });
       }

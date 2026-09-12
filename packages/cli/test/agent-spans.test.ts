@@ -119,11 +119,11 @@ describe('reading what the processor wrote', () => {
       '{"kind":"span","type":"HandoffSpanData","data":{}}\n{"kind":"span",\n\n',
       'utf8',
     );
-    expect(await readAgentSpans(path)).toHaveLength(1);
+    expect((await readAgentSpans(path)).spans).toHaveLength(1);
   });
 
   it('is empty when there is no file, because that is the ordinary case', async () => {
-    expect(await readAgentSpans(join(dir, 'nothing.jsonl'))).toEqual([]);
+    expect((await readAgentSpans(join(dir, 'nothing.jsonl'))).spans).toEqual([]);
   });
 
   it('skips a line that parses to something that is not a span', async () => {
@@ -141,7 +141,7 @@ describe('reading what the processor wrote', () => {
       '',
     ];
     await writeFile(path, lines.join('\n'), 'utf8');
-    const spans = await readAgentSpans(path);
+    const { spans } = await readAgentSpans(path);
     expect(spans).toHaveLength(1);
     expect(spans[0]?.type).toBe('HandoffSpanData');
   });
@@ -177,7 +177,8 @@ describe('the spans file is a transport, not part of the trace', () => {
     // `orca scrub` all miss: a scrub would print `removed=N` with the same material beside it.
     const capture = await installAgentSpans(dir);
     await writeFile(capture.spansPath, '{"kind":"span","type":"HandoffSpanData","data":{}}\n');
-    expect(await discardAgentSpans(capture.spansPath)).toBeUndefined();
+    const { ingested } = await readAgentSpans(capture.spansPath);
+    expect(await discardAgentSpans(ingested)).toBeUndefined();
     expect(existsSync(capture.spansPath)).toBe(false);
   });
 
@@ -186,7 +187,28 @@ describe('the spans file is a transport, not part of the trace', () => {
     // manifest all over again. Failing to delete it is worth a warning and never worth the trace.
     const asDirectory = join(dir, 'occupied.jsonl');
     await mkdir(join(asDirectory, 'in-the-way'), { recursive: true });
-    expect(await discardAgentSpans(asDirectory)).toEqual(expect.stringMatching(/./));
+    expect(await discardAgentSpans([asDirectory])).toEqual(expect.stringMatching(/./));
+  });
+
+  it('deletes what the read ingested, never a fresh listing', async () => {
+    // The set that is destroyed has to be the set that was read. Listing again at delete time
+    // removes whatever matches *then* — and a process that begins tracing between the two is the
+    // case one file per process exists for. Its file would go unparsed, and because the `dropped`
+    // record lives in that same file, the loss could not even be reported.
+    const span = '{"kind":"span","type":"HandoffSpanData"}\n';
+    const capture = await installAgentSpans(dir);
+    await writeFile(`${capture.spansPath}.111`, span);
+    const { spans, ingested } = await readAgentSpans(capture.spansPath);
+    expect(spans).toHaveLength(1);
+
+    // Two processes start tracing after the read.
+    await writeFile(`${capture.spansPath}.222`, span);
+    await writeFile(`${capture.spansPath}.333`, '{"kind":"dropped","count":7}\n');
+
+    expect(await discardAgentSpans(ingested)).toBeUndefined();
+    expect(existsSync(`${capture.spansPath}.222`), 'deleted without being read').toBe(true);
+    expect(existsSync(`${capture.spansPath}.333`), 'deleted without being read').toBe(true);
+    expect(existsSync(`${capture.spansPath}.111`)).toBe(false);
   });
 });
 
