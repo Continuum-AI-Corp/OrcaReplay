@@ -49,8 +49,16 @@ class TestSchemaParity:
         required = set(schema("event.schema.json")["required"])
         assert required == {"seq", "ts", "mono_us", "turn", "type", "actor"}
 
-    def test_schema_version_matches_the_example_manifest(self) -> None:
-        assert SCHEMA_VERSION == "0.1.0"
+    def test_schema_version_matches_the_example_manifest(self, example_run: Path) -> None:
+        """Against the manifest this is named for, not against a literal.
+
+        The literal said `0.1.0` and went on saying it after the format moved to `0.2.0`, which is
+        the one thing this test exists to notice. `test_conformance.py` asserts the same equality
+        from the other side; between them the constant, the example and the writer cannot drift
+        apart without something going red.
+        """
+        manifest = json.loads((example_run / "manifest.json").read_text(encoding="utf-8"))
+        assert SCHEMA_VERSION == manifest["schema_version"]
 
 
 class TestBlobRef:
