@@ -131,6 +131,11 @@ export interface AgentSpan {
  * A malformed line is skipped rather than thrown on: the file is appended to by another process
  * that may have been killed mid-write, and losing the last span is a much better outcome than
  * failing to seal a trace that is otherwise complete.
+ *
+ * "Malformed" has to mean more than "does not parse". `null` is valid JSON and is exactly what a
+ * producer writes as its could-not-serialise fallback, and it used to reach `eventForSpan`, which
+ * dereferenced it — one such line took the whole run down and left the trace unsealed. So a line
+ * is kept only if it parsed to an object.
  */
 export async function readAgentSpans(path: string): Promise<AgentSpan[]> {
   let raw: string;
@@ -143,19 +148,31 @@ export async function readAgentSpans(path: string): Promise<AgentSpan[]> {
   const spans: AgentSpan[] = [];
   for (const line of raw.split('\n')) {
     if (line.trim() === '') continue;
+    let parsed: unknown;
     try {
-      spans.push(JSON.parse(line) as AgentSpan);
+      parsed = JSON.parse(line);
     } catch {
       continue;
+    }
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      spans.push(parsed as AgentSpan);
     }
   }
   return spans;
 }
 
-/** A trace event, or undefined for a span that carries nothing the proxy lacks. */
+/**
+ * A trace event, or undefined for a span that carries nothing the proxy lacks.
+ *
+ * Takes `unknown` rather than `AgentSpan` on purpose. The only caller reads a file another process
+ * appends to, so the type is a description of what is expected rather than a guarantee, and a
+ * translator that trusts it is one bad line away from ending the run it was watching.
+ */
 export function eventForSpan(
-  span: AgentSpan,
+  value: unknown,
 ): { type: string; attrs: Record<string, unknown> } | undefined {
+  if (value === null || typeof value !== 'object') return undefined;
+  const span = value as AgentSpan;
   if (span.kind !== 'span') return undefined;
   const data = span.data ?? {};
   const at = span.started_at === undefined ? {} : { started_at: span.started_at };
