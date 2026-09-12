@@ -101,7 +101,22 @@ export async function installShellShim(options: InstallOptions): Promise<Install
  * The second pair is the one a narrower check missed. A frame torn between `startedAt` and
  * `durationMs`, closed by a brace from the neighbouring write, is valid JSON with a string `name`,
  * an array `argv` and a parseable `startedAt` — and it ended the run and left the trace unsealed.
+ *
+ * For those two, being the right *type* is not enough: what the consumer needs is an instant that
+ * exists. A splice can leave the digits of one duration followed by the tail of the neighbour's
+ * number, and `Number.isFinite` is happy with a sixteen-digit result. Measured from a 2026 stamp:
+ *
+ *     durationMs 2.5e14  →  9948-11-18T…              accepted
+ *     durationMs 3e14    →  +011533-04-27T…           `ts must match format "date-time"`
+ *     durationMs 9e15    →  RangeError: Invalid time value
+ *
+ * Both throw inside `TraceWriter.append`, where the trace is being sealed — the schema types `ts`
+ * as `date-time`, which admits a four-digit year and nothing else. So the bound is the range the
+ * format can express, not the range a `number` can hold.
  */
+/** `0000-01-01T00:00:00.000Z` and `9999-12-31T23:59:59.999Z`: what a `date-time` `ts` can express. */
+const EARLIEST_MS = -62_167_219_200_000;
+const LATEST_MS = 253_402_300_799_999;
 export async function readShellFrames(framesPath: string): Promise<ShellFrame[]> {
   const raw = await readFile(framesPath, 'utf8').catch(() => '');
   const frames: ShellFrame[] = [];
@@ -118,6 +133,15 @@ export async function readShellFrames(framesPath: string): Promise<ShellFrame[]>
     const frame = parsed as ShellFrame;
     if (typeof frame.name !== 'string' || !Array.isArray(frame.argv)) continue;
     if (typeof frame.startedAt !== 'string' || !Number.isFinite(frame.durationMs)) continue;
+    // Only when it parses. A `startedAt` that does not is already handled: the consumer drops
+    // `occurredAt` for it and stamps the event with the drain's own clock, which is a degraded
+    // field rather than a failure — so rejecting the frame there would lose a command that ran.
+    const startedMs = Date.parse(frame.startedAt);
+    if (!Number.isNaN(startedMs)) {
+      const endedMs = startedMs + frame.durationMs;
+      if (startedMs < EARLIEST_MS || startedMs > LATEST_MS) continue;
+      if (endedMs < EARLIEST_MS || endedMs > LATEST_MS) continue;
+    }
     frames.push(frame);
   }
   return frames;

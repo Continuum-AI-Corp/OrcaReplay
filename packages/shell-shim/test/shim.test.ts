@@ -220,6 +220,14 @@ describe('shell shim', () => {
       JSON.stringify({ ...good, durationMs: undefined }),
       JSON.stringify({ ...good, durationMs: '5' }),
       JSON.stringify({ ...good, startedAt: 1757630000000 }),
+      // Right type, unusable magnitude: a splice can leave one duration's digits followed by the
+      // tail of the neighbour's number. `Number.isFinite` passes all three. From a 2026 stamp, 3e14
+      // formats as `+011533-…` and the schema types `ts` as `date-time`, which admits a four-digit
+      // year and nothing else; 9e15 does not format at all.
+      JSON.stringify({ ...good, durationMs: 1234567890000000 }),
+      JSON.stringify({ ...good, durationMs: 3e14 }),
+      JSON.stringify({ ...good, durationMs: -9e15 }),
+      JSON.stringify({ ...good, startedAt: '+275760-09-13T00:00:00.000Z' }),
       JSON.stringify(good),
       '{"name":"sh","argv":[',
       '',
@@ -229,5 +237,24 @@ describe('shell shim', () => {
     expect(frames).toHaveLength(1);
     expect(frames[0]!.argv).toEqual(['-c', 'true']);
     expect(frames[0]!.durationMs).toBe(1);
+  });
+
+  it('keeps a frame whose startedAt does not parse, because that one degrades a field', async () => {
+    // The bound applies only when there is an instant to bound. An unparseable `startedAt` already
+    // has a defined outcome — the consumer drops `occurredAt` and stamps the event from the drain's
+    // own clock — so rejecting it here would throw away a command the agent really ran.
+    const frame = {
+      name: 'sh',
+      argv: ['-c', 'true'],
+      cwd: '/tmp',
+      exitCode: 0,
+      signal: null,
+      startedAt: 'not a date',
+      durationMs: 9e15,
+      stdoutBytes: 0,
+      stderrBytes: 0,
+    };
+    await writeFile(shim.framesPath, `${JSON.stringify(frame)}\n`, 'utf8');
+    expect(await readShellFrames(shim.framesPath)).toHaveLength(1);
   });
 });
