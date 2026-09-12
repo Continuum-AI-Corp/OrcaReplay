@@ -84,34 +84,47 @@ const RULES: Rule[] = [
 ];
 
 /**
- * A base64 run that decodes to a whole raster image, wherever it sits in the value.
+ * A base64 run that decodes to a whole PNG, wherever it sits in the value.
  *
  * The exemption is granted on the payload, not on the syntax around it or the label in front of
- * it, because every argument for it is an argument about *pixels* — bytes that cannot hide a
- * credential a reader could recover, and that the sweep was never protecting. Three earlier drafts
- * each granted it on something a caller writes, and each was a hole:
+ * it, because every argument for it is an argument about *pixels* — and every draft that granted
+ * it on something a caller writes was a hole:
  *
  *   - the media type, so `data:image/png;base64,<credential>` bought one
  *   - the signature, so `iVBORw0KGgo<credential>` bought one
- *   - the *framing*, so `PNG signature + IHDR + IDAT{<credential>} + IEND` with self-consistent
- *     lengths bought one — five bytes of decoration for JPEG, seven for GIF
+ *   - the framing, so `signature + IHDR + IDAT{<credential>} + IEND` with self-consistent lengths
+ *     bought one
+ *   - a *valid* container, so a 1×1 image with the credential in a `tEXt` chunk bought one, and a
+ *     real screenshot with the credential appended inside `IDAT` past the end of the zlib stream
+ *     bought one, and flipping IHDR's interlace byte skipped the size check altogether
  *
- * The last of those is why the check now looks at the content. A PNG has to have an IDAT stream
- * that actually inflates, to exactly the size its own IHDR declares; a JPEG has to have a marker
- * chain that reaches EOI with a frame header in it. A credential wrapped in framing is neither.
+ * So the rule is now the narrowest one that still serves the case this exists for: **every chunk
+ * has to be a chunk whose bytes the exemption can account for.** Structure (`IHDR`, `IEND`), the
+ * pixel stream (`IDAT`, `PLTE`), and a short list of fixed-size ancillary chunks each held to its
+ * spec length. Anything else — `tEXt`, `iTXt`, `zTXt`, `iCCP`, `cHRM`, an unknown type — is a place
+ * a caller can put bytes of their choosing, so its presence costs the whole run its exemption and
+ * the sweep runs as it always did.
+ *
+ * The pixel stream is checked, not assumed: the concatenated `IDAT` has to inflate, to consume
+ * every byte of itself doing so (`inflateSync` stops at the end of the zlib stream and ignores
+ * whatever follows, which is where a credential went), and to yield exactly the byte count `IHDR`
+ * describes — including the seven-pass sum when the image is interlaced.
  *
  * Measured, on a 1 MB PNG: the chunk walk costs 0.2 ms and the inflate 1.2 ms, against the 55 ms
- * the base64 decode already costs. The cheap version of this check was not cheaper in any way that
- * matters.
+ * the base64 decode already costs.
  *
- * Only PNG and JPEG. Earlier drafts listed GIF, BMP, WebP and AVIF as well, on no evidence — the
- * case this exists for is a browser screenshot, which is one of these two, and every one of those
- * formats validated by a size field the same caller computes. A format with no validator does not
- * get an exemption; it gets the sweep, as it did before any of this.
+ * **PNG only.** JPEG was here and is gone. Its ancillary segments (`COM`, `APPn`) carry arbitrary
+ * bytes, its `DQT`/`DHT` payloads are arbitrary within a shape, and its entropy-coded scan cannot
+ * be told from a credential without a full Huffman decode — so a JPEG exemption can only ever mean
+ * "a marker chain that closes", which is framing, which is what this file kept getting wrong. GIF,
+ * BMP, WebP and AVIF went earlier for the same reason. A format with no validator does not get an
+ * exemption; it gets the sweep, as it did before any of this. The cost is real and is the right way
+ * round: an agent that sends JPEG screenshots still gets them shredded.
  *
- * What this still does not claim: a secret hidden *inside* real pixel data is not detectable here,
- * and no content rule could be. The line is that the payload has to be a picture — not that a
- * picture cannot be abused.
+ * What this still does not claim: a secret written into the pixels themselves is not detectable
+ * here, and no content rule could be — a stored-mode deflate block whose "pixels" are a credential
+ * inflates to the declared size like any other. The line is that the payload has to be a picture;
+ * a picture cannot be proved innocent.
  */
 // Padding only where padding belongs. `Buffer.from(x, 'base64')` stops at the first `=` and
 // ignores the rest, so a run of `<image>==<credential>` decoded to a valid image and the span
@@ -122,119 +135,168 @@ const BASE64_RUN = /(?:[A-Za-z0-9+/]|\\[/\\])+={0,2}/g;
 /** Shortest run worth decoding: below this it cannot hold a header and any pixels. */
 const MIN_RASTER_CHARS = 40;
 
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
 /**
- * Whether these bytes are a PNG whose pixel data is really pixel data.
+ * Ancillary chunks whose length the spec fixes, mapped to that length.
  *
- * The chunk walk has to close at `IEND` having consumed the buffer, *and* the concatenated `IDAT`
- * stream has to inflate to exactly the size `IHDR` describes. The walk alone is framing — lengths
- * a caller sets — and framing is what the previous version accepted.
+ * A caller cannot choose how many bytes these hold, and every one of them is shorter than
+ * `MIN_ENTROPY_LENGTH`, so none can carry a run the sweep would have redacted. That is the whole
+ * admission criterion — not that the chunk is harmless, but that exempting it cannot hide anything
+ * the sweep was protecting. Every variable-length chunk is therefore absent, and so is `cHRM`:
+ * fixed at 32 bytes, but 32 bytes is long enough to matter.
+ */
+const PNG_FIXED_ANCILLARY: Record<string, number> = {
+  gAMA: 4,
+  sRGB: 1,
+  pHYs: 9,
+  tIME: 7,
+  sBIT: 4,
+  bKGD: 6,
+};
+
+/** Bytes per pixel for each PNG colour type; an unlisted type is not a colour type. */
+const PNG_CHANNELS: Record<number, number> = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 };
+
+/** The bit depths each colour type allows. A pairing outside this is not an image a decoder reads. */
+const PNG_DEPTHS: Record<number, number[]> = {
+  0: [1, 2, 4, 8, 16],
+  2: [8, 16],
+  3: [1, 2, 4, 8],
+  4: [8, 16],
+  6: [8, 16],
+};
+
+/** Adam7: `[xOffset, yOffset, xStep, yStep]` for each of the seven passes. */
+const ADAM7 = [
+  [0, 0, 8, 8],
+  [4, 0, 8, 8],
+  [0, 4, 4, 8],
+  [2, 0, 4, 4],
+  [0, 2, 2, 4],
+  [1, 0, 2, 2],
+  [0, 1, 1, 2],
+] as const;
+
+/**
+ * The exact length of the inflated pixel stream for these image parameters.
  *
- * Adam7 is not reconstructed: an interlaced image is accepted on a successful inflate alone,
- * because the seven passes do not sum to the plain formula and a wrong rejection here puts a real
- * screenshot back through the shredder. Inflating at all is the part a wrapped credential fails.
+ * Each scanline is a filter byte plus its packed samples, and an interlaced image is seven smaller
+ * images by the same rule — a pass with no rows or no columns contributes nothing at all, which is
+ * what the guard is for rather than tidiness. Skipping this for interlaced images was a hole: it
+ * let one IHDR byte buy the exemption for an IDAT holding no pixels.
+ */
+function pngRawLength(
+  width: number,
+  height: number,
+  channels: number,
+  depth: number,
+  interlaced: boolean,
+): number {
+  const rows = (w: number, h: number) =>
+    w <= 0 || h <= 0 ? 0 : h * (1 + Math.ceil((w * channels * depth) / 8));
+  if (!interlaced) return rows(width, height);
+  let total = 0;
+  for (const [x0, y0, dx, dy] of ADAM7) {
+    total += rows(Math.ceil((width - x0) / dx), Math.ceil((height - y0) / dy));
+  }
+  return total;
+}
+
+/**
+ * Whether these bytes are a PNG this exemption can account for, byte for byte.
+ *
+ * IHDR is read before the walk rather than during it. The spec puts it first, at a fixed size, and
+ * every later decision depends on its fields — so reading it up front is the difference between
+ * checking those fields and checking them after something has already used them.
+ *
+ * The walk then rejects on the first chunk it cannot account for, so an unknown type never reaches
+ * the part that grants anything.
  */
 function isWholePng(b: Buffer): boolean {
-  if (!b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
-    return false;
-  }
-  let at = 8;
-  let ihdr: Buffer | undefined;
+  if (!b.subarray(0, 8).equals(PNG_SIGNATURE)) return false;
+
+  // Signature, then IHDR's length and type: 13 bytes of data at a known offset.
+  if (b.length < 33) return false;
+  if (b.readUInt32BE(8) !== 13 || b.subarray(12, 16).toString('latin1') !== 'IHDR') return false;
+  const width = b.readUInt32BE(16);
+  const height = b.readUInt32BE(20);
+  const depth = b[24]!;
+  const colour = b[25]!;
+  const interlace = b[28]!;
+  const channels = PNG_CHANNELS[colour];
+  if (width === 0 || height === 0 || channels === undefined) return false;
+  if (!PNG_DEPTHS[colour]!.includes(depth)) return false;
+  // Compression and filter: the spec defines one value each, and two interlace methods.
+  if (b[26] !== 0 || b[27] !== 0 || interlace > 1) return false;
+
+  let at = 33; // 8 signature + 4 length + 4 type + 13 data + 4 CRC
+  let sawEnd = false;
+  let sawPalette = false;
   const idat: Buffer[] = [];
-  for (;;) {
+  while (!sawEnd) {
     if (at + 12 > b.length) return false;
     const len = b.readUInt32BE(at);
     const type = b.subarray(at + 4, at + 8).toString('latin1');
     const next = at + 12 + len; // length + type + data + CRC
-    if (len < 0 || next > b.length) return false;
-    const data = b.subarray(at + 8, at + 8 + len);
-    if (type === 'IHDR') ihdr = Buffer.from(data);
-    else if (type === 'IDAT') idat.push(Buffer.from(data));
-    else if (type === 'IEND') {
-      if (next !== b.length || ihdr === undefined || ihdr.length < 13 || idat.length === 0) {
-        return false;
-      }
-      break;
+    if (next > b.length) return false;
+
+    if (type === 'IDAT') {
+      idat.push(Buffer.from(b.subarray(at + 8, at + 8 + len)));
+    } else if (type === 'PLTE') {
+      // The palette of an indexed image *is* its colours, so it is exempt on the same footing as
+      // the pixel stream. For truecolour it is only a suggestion, and a suggestion is up to 768
+      // bytes a caller chooses.
+      if (colour !== 3 || sawPalette) return false;
+      if (len === 0 || len % 3 !== 0 || len / 3 > 1 << depth) return false;
+      sawPalette = true;
+    } else if (type === 'IEND') {
+      if (len !== 0 || next !== b.length || idat.length === 0) return false;
+      // An indexed image without its palette is not an image.
+      if (colour === 3 && !sawPalette) return false;
+      sawEnd = true;
+    } else if (type === 'IHDR') {
+      return false; // exactly one, already read
+    } else {
+      const fixed = PNG_FIXED_ANCILLARY[type];
+      // A chunk whose size the caller picks is a chunk the caller can fill.
+      if (fixed === undefined || len > fixed) return false;
     }
     at = next;
   }
 
-  const width = ihdr!.readUInt32BE(0);
-  const height = ihdr!.readUInt32BE(4);
-  const depth = ihdr![8]!;
-  const colour = ihdr![9]!;
-  const interlace = ihdr![12]!;
-  if (width === 0 || height === 0) return false;
-
+  const stream = Buffer.concat(idat);
   let raw: Buffer;
   try {
-    raw = inflateSync(Buffer.concat(idat));
+    // `info: true` for `bytesWritten`, which is the input the stream actually consumed. Without it
+    // anything past the end of the zlib stream is never looked at, and `IDAT{<pixels><credential>}`
+    // inflates to the declared size with the credential still in the trace. `@types/node` models
+    // only the plain-Buffer overload, so the shape is spelled out here; only `bytesWritten` and
+    // `buffer` are read from it.
+    const result = inflateSync(stream, { info: true }) as unknown as {
+      buffer: Buffer;
+      engine: { bytesWritten: number };
+    };
+    if (result.engine.bytesWritten !== stream.length) return false;
+    raw = result.buffer;
   } catch {
     // Not a zlib stream, which is what a credential wrapped in an IDAT chunk is.
     return false;
   }
-  if (interlace !== 0) return raw.length > 0;
-
-  const channels = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[colour];
-  if (channels === undefined) return false;
-  const rowBytes = Math.ceil((width * channels * depth) / 8);
-  return raw.length === height * (rowBytes + 1);
+  return raw.length === pngRawLength(width, height, channels, depth, interlace === 1);
 }
 
-/**
- * Whether these bytes are a JPEG whose marker chain closes.
- *
- * Segment by segment to `EOI`, requiring a frame header along the way, and requiring the scan's
- * entropy-coded data to be delimited the way a decoder would read it. `FF D8 FF <credential> FF D9`
- * — the previous version's whole test — has no frame and no coherent chain.
- */
-function isWholeJpeg(b: Buffer): boolean {
-  if (b[0] !== 0xff || b[1] !== 0xd8) return false;
-  let at = 2;
-  let sawFrame = false;
-  while (at + 1 < b.length) {
-    if (b[at] !== 0xff) return false;
-    let marker = b[at + 1]!;
-    // Fill bytes are legal between segments.
-    while (marker === 0xff && at + 2 < b.length) {
-      at += 1;
-      marker = b[at + 1]!;
-    }
-    at += 2;
-    if (marker === 0xd9) return at === b.length; // EOI, and nothing after it
-    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue; // standalone
-    if (at + 2 > b.length) return false;
-    const len = b.readUInt16BE(at);
-    if (len < 2 || at + len > b.length) return false;
-    // SOF0..SOF15, excluding the huffman/arithmetic/restart markers in that range.
-    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
-      sawFrame = true;
-    }
-    at += len;
-    if (marker === 0xda) {
-      if (!sawFrame) return false;
-      // Entropy-coded data: any `FF` that is not a stuffed `FF 00` or a restart ends it.
-      while (at + 1 < b.length) {
-        if (b[at] === 0xff && b[at + 1] !== 0x00 && !(b[at + 1]! >= 0xd0 && b[at + 1]! <= 0xd7)) {
-          break;
-        }
-        at += 1;
-      }
-    }
-  }
-  return false;
-}
-
-/** Whether these bytes are one complete raster image and nothing else. */
+/** Whether these bytes are one complete image this exemption can account for. */
 function isWholeRasterImage(b: Buffer): boolean {
   if (b.length < 16) return false;
-  return isWholePng(b) || isWholeJpeg(b);
+  return isWholePng(b);
 }
 
 /**
  * The spans of `value` that are whole raster images.
  *
  * The signature is checked before anything is decoded, so a long run that is not an image costs
- * two bytes rather than a decode — which matters because this runs over every string a trace
+ * six characters rather than a decode — which matters because this runs over every string a trace
  * writes.
  */
 function rasterSpans(value: string): [number, number][] {
@@ -242,10 +304,8 @@ function rasterSpans(value: string): [number, number][] {
   for (const m of value.matchAll(BASE64_RUN)) {
     const run = m[0];
     if (run.length < MIN_RASTER_CHARS) continue;
-    // `iVBORw` and `/9j/` are what PNG and JPEG signatures look like once base64-encoded.
-    if (!run.startsWith('iVBORw') && !run.startsWith('/9j/') && !run.startsWith('\\/9j\\/')) {
-      continue;
-    }
+    // `iVBORw` is what a PNG signature looks like once base64-encoded.
+    if (!run.startsWith('iVBORw')) continue;
     // `\/` and `\\` stand for payload characters; they are stripped before decoding and the span
     // still covers them, or the sweep would resume inside the image.
     const payload = run.replace(/\\(.)/g, '$1');
