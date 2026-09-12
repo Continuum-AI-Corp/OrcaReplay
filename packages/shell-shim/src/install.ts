@@ -88,9 +88,19 @@ export async function installShellShim(options: InstallOptions): Promise<Install
  * Two shims appending at once is enough to produce one: an interleaved write can leave a line that
  * is valid JSON and not a frame.
  *
- * The check is deliberately narrow. `name` and `argv` are the two fields the consumer dereferences;
- * anything else missing degrades a field rather than ending a run, and rejecting on it would throw
- * away frames over a detail nobody reads.
+ * What has to be checked is every field whose absence is *unsafe*, which is not the same as every
+ * field that is read. `cwd`, `exitCode`, `signal` and the byte counts go into `attrs`, which the
+ * schema types as a bare object — a missing one degrades a field and nothing more. Four are
+ * different:
+ *
+ *   - `name` and `argv` are spread into an array, so a non-array `argv` throws
+ *   - `startedAt` and `durationMs` are *added* — the consumer builds
+ *     `new Date(Date.parse(startedAt) + durationMs)`, and a missing `durationMs` makes that an
+ *     Invalid Date, which throws `RangeError: Invalid time value` inside `TraceWriter.append`
+ *
+ * The second pair is the one a narrower check missed. A frame torn between `startedAt` and
+ * `durationMs`, closed by a brace from the neighbouring write, is valid JSON with a string `name`,
+ * an array `argv` and a parseable `startedAt` — and it ended the run and left the trace unsealed.
  */
 export async function readShellFrames(framesPath: string): Promise<ShellFrame[]> {
   const raw = await readFile(framesPath, 'utf8').catch(() => '');
@@ -107,6 +117,7 @@ export async function readShellFrames(framesPath: string): Promise<ShellFrame[]>
     if (parsed === null || typeof parsed !== 'object') continue;
     const frame = parsed as ShellFrame;
     if (typeof frame.name !== 'string' || !Array.isArray(frame.argv)) continue;
+    if (typeof frame.startedAt !== 'string' || !Number.isFinite(frame.durationMs)) continue;
     frames.push(frame);
   }
   return frames;
