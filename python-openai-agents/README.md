@@ -113,6 +113,11 @@ passed to `custom_span(data=…)`; `AgentSpanData.instructions` is the system pr
 are scrubbed in `events.jsonl`, and `orca scrub` does not rewrite this file — so anything written
 here would survive a scrub that reported success.
 
+The record around them carries only identifiers and a `failed` boolean. Not the SDK's `SpanError`:
+its `data` is free-form — a tool's input, an API error echoed back, a guardrail's `output_info` —
+so writing it would put back exactly the payload this whitelist exists to keep out. That it failed
+is worth keeping; what it said is not.
+
 A fourth type is supported by listing its fields in `KEEP`, never by widening this to the whole
 export.
 

@@ -300,3 +300,27 @@ def test_it_says_nothing_when_it_lost_nothing(tmp_path):
     processor.on_span_end(FakeSpan(HandoffSpanData({"from_agent": "A", "to_agent": "B"})))
     processor.shutdown()
     assert [r for r in spans_of(processor) if r["kind"] == "dropped"] == []
+
+
+def test_a_span_error_payload_is_not_written(tmp_path):
+    # `SpanError.data` is free-form: a tool's input, an API error echoed back, a guardrail's
+    # `output_info`. It was written verbatim while every other non-whitelisted field was dropped,
+    # which is the one hole the whitelist above is supposed to have closed. Nothing read it.
+    class Failing(FakeSpan):
+        pass
+
+    span = FakeSpan(HandoffSpanData({"from_agent": "A", "to_agent": "B"}))
+    span.error = {
+        "message": "tool call failed",
+        "data": {"headers": {"Authorization": "Bearer sk-abcdefghijklmnop12345"}},
+    }
+    processor = OrcaTracingProcessor(str(tmp_path / "spans.jsonl"))
+    processor.on_span_end(span)
+    processor.shutdown()
+
+    text = Path(processor._path).read_text(encoding="utf-8")
+    assert "sk-abcdefghijklmnop12345" not in text
+    assert "tool call failed" not in text
+    record = spans_of(processor)[0]
+    assert record["failed"] is True, "that it failed is worth keeping; what it said is not"
+    assert "error" not in record

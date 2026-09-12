@@ -246,7 +246,15 @@ class OrcaTracingProcessor:
                 "trace_id": _read(span, "trace_id"),
                 "started_at": _read(span, "started_at"),
                 "ended_at": _read(span, "ended_at"),
-                "error": _plain(_read(span, "error")),
+                # No `error`. The SDK's `SpanError` carries a free-form `data` dict — a tool's
+                # input, an API error echoed back, a guardrail's `output_info` — and `_plain` walks
+                # it deeply, so writing it puts exactly the kind of payload here that `KEEP` exists
+                # to keep out. Nothing read it: `eventForSpan` maps three types and their listed
+                # fields, and `AgentSpan.error` on the reader side is declared and never used.
+                #
+                # If "this span failed" is ever wanted, whitelist a derived scalar rather than the
+                # SDK's object. A field nothing reads is how the payload got in.
+                "failed": _read(span, "error") is not None,
                 "data": _kept(data, fields),
             }
         )
