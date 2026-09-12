@@ -16,6 +16,7 @@ import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
 import { installShellShim, readShellFrames } from '@orcareplay/shell-shim';
 import {
+  agentSpansFiles,
   discardAgentSpans,
   droppedSpanCount,
   eventForSpan,
@@ -91,11 +92,26 @@ export async function recordCommand(
   cwd = process.cwd(),
 ): Promise<RecordResult> {
   const minted: RunCa[] = [];
+  /**
+   * Sinks the child writes to directly, which therefore never pass the write-path redactor.
+   *
+   * `agent-spans.jsonl` is the one: the SDK appends to it from inside the agent’s interpreter,
+   * and `orca scrub` rewrites only `events.jsonl`, the manifest and the blobs — so a scrub would
+   * report `removed=N` with the same material still sitting beside it. The success path deletes
+   * it after ingest; this is the other paths. A throw anywhere in `runRecording` reaches here,
+   * including everything routed through `abandon`, which rethrows.
+   */
+  const rawSinks: string[] = [];
   try {
-    return await runRecording(args, out, cwd, minted);
+    return await runRecording(args, out, cwd, minted, rawSinks);
   } catch (err) {
     for (const ca of minted) {
       await ca.dispose().catch(() => undefined);
+    }
+    for (const path of rawSinks) {
+      // Expanded here rather than stored: one file per tracing process, and which processes
+      // existed is not known until the run is over.
+      await discardAgentSpans(await agentSpansFiles(path)).catch(() => undefined);
     }
     throw err;
   }
@@ -106,6 +122,7 @@ async function runRecording(
   out: Output,
   cwd: string,
   minted: RunCa[],
+  rawSinks: string[],
 ): Promise<RecordResult> {
   const registry = defaultAdapters();
   const agentName = args.positionals[0];
@@ -221,6 +238,8 @@ async function runRecording(
   if (args.bool('agent-spans', true)) {
     try {
       agentSpans = await installAgentSpans(writer.runDir);
+      // Registered the moment it exists, so nothing between here and the ingest can leave it.
+      rawSinks.push(agentSpans.spansPath);
     } catch (err) {
       // Same posture as the other optional layers: degrade the trace, never abort the run.
       out.warn('agent_spans.unavailable', { reason: String(err) });
@@ -356,7 +375,6 @@ async function runRecording(
     // `finishRun`, which this is the short-circuit for — so every throw after `installAgentSpans`
     // used to leave an un-redacted transport in the run directory, where `orca scrub` does not
     // reach it. The likeliest such throw is the first statement of `finishRun`.
-    if (agentSpans) await discardAgentSpans(agentSpans.spansPath).catch(() => undefined);
     await writer
       .append({ type: 'run.end', actor: 'orca', turn, attrs: { error: String(err) } })
       .catch(() => undefined);
@@ -567,7 +585,7 @@ async function runRecording(
       // Timestamped from the span, like the shell frames above and for the same reason: these are
       // read off disk after the agent exited, so stamping them now would file every handoff at the
       // end of the run rather than between the turns it happened between.
-      const spans = await readAgentSpans(agentSpans.spansPath);
+      const { spans, ingested } = await readAgentSpans(agentSpans.spansPath);
       for (const span of spans) {
         const derived = eventForSpan(span);
         if (derived === undefined) continue;
@@ -592,7 +610,9 @@ async function runRecording(
         // this, the trace would otherwise just have fewer agent events than the run did.
         out.warn('agent_spans.dropped', { count: lost });
       }
-      const failed = await discardAgentSpans(agentSpans.spansPath);
+      // Exactly what was read, never a fresh listing: a process that starts tracing between the
+      // two would have its file removed with nothing parsed out of it.
+      const failed = await discardAgentSpans(ingested);
       if (failed !== undefined) {
         out.warn('agent_spans.not_removed', { path: agentSpans.spansPath, reason: failed });
       }

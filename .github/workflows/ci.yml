@@ -63,10 +63,15 @@ jobs:
       # failed, so a contributor can run the suite without all of them.
       - run: >
           pip install openai anthropic litellm langgraph langchain-openai browser-use
-          crewai openai-agents openhands-sdk
+          crewai openai-agents openhands-sdk llama-index-core llama-index-llms-openai
       # From the tree, not PyPI: the `openai-agents-handoff` check exists to prove the tracing layer
       # in *this* commit works, and installing a published copy would test the last release instead.
       - run: pip install -e python-openai-agents
+      # Mastra is the one framework here that is JS, and it is 130 MB — more than this repo's whole
+      # dependency tree. `--no-save` keeps it out of package.json so it costs this job and nothing
+      # else: no npm ci anywhere else gets slower, and a contributor who has not run this line gets
+      # a skip rather than a failure, exactly as the pip line above behaves.
+      - run: npm install --no-save @mastra/core @ai-sdk/openai
       # `--require-all`, because installing them above was never what enforced it. Two checks were
       # added without a line here and CI stayed green on the skips, while the README said "in CI"
       # about both. A skip is now a failure on this runner, so forgetting the line above fails
@@ -80,6 +85,11 @@ jobs:
         working-directory: .
         env:
           OPENAI_API_KEY: unused-but-crewai-wants-one
+      # Same shape, same reason: LlamaIndex refuses any model name outside a list compiled into it,
+      # before a request is made. That is a real limit on pointing it at a gateway, `docs/integrations.md`
+      # now says so, and this is what fails when it stops being true.
+      - run: python test/integrations/agents/llama_index_model_names.py
+        working-directory: .
 
   python-sdk:
     name: python sdk

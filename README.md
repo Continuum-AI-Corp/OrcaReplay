@@ -97,8 +97,9 @@ OrcaReplay answers that by giving you the run back.
 The last two rows are the ones an SDK wrapper structurally cannot reach. Capture happens *below*
 the agent — at the process and socket boundary — so it does not matter whether the agent is
 yours, whether you can edit it, or whether it even holds an API key: a Codex CLI signed in with
-a ChatGPT subscription talks to its own backend over TLS and has no base URL to point anywhere,
-and orca can still record it. See
+a ChatGPT subscription talks to its own backend over TLS, with a credential that only that backend
+accepts, so it cannot be pointed elsewhere and stay the same session — and orca can still record
+it. See
 [when the harness will not be redirected](#when-the-harness-will-not-be-redirected).
 
 ## How it works
@@ -543,8 +544,16 @@ If you record an agent this way and it works, an adapter is about twenty lines �
 ## When the harness will not be redirected
 
 Base-URL injection captures every harness that reads a base-URL variable, and the fetch hook covers
-the Node ones that do not. A Codex CLI signed in with a ChatGPT subscription is neither: it talks to
-its own backend over TLS, so there is no origin to rewrite and no `fetch` of ours to reach.
+the Node ones that do not. A Codex CLI signed in with a ChatGPT subscription is neither — but not
+for the reason this section used to give.
+
+It *does* read a provider base URL, and an explicit one overrides the ChatGPT backend; both paths
+even speak the same wire protocol. What is bound to that backend is the **credential**: a signed-in
+subscription carries a plan token the ChatGPT backend accepts and `api.openai.com` does not. Point
+the URL somewhere else and Codex asks for an API key instead — you are no longer recording the
+subscription session, you are recording a different one. Codex is Rust, so there is no `fetch` of
+ours to reach either.
+
 `--tls-intercept` is the answer to that, and it is deliberately a separate decision you have to
 make, because it mints a certificate authority.
 
@@ -640,7 +649,7 @@ Early. `v0` is the walking skeleton of the three commands above. Everything belo
 | Non-model network capture | working — opt in with `--tls-intercept`; mints a per-run CA the launched agent alone trusts, decrypts an allowlist of hosts, tunnels the rest unread, and deletes the key when the run ends |
 | Codex subscription model capture/replay | working — recognizes the `/backend-api/codex/responses` HTTPS fallback, decodes zstd request bodies for matching, and serves the recorded SSE response without opening the origin during replay |
 | Validated against a real agent | Claude Code, recording a real fix to a real bug: recorded, replayed offline end to end, forked from a checkpoint and exported. It broke four things no fixture could have produced, all since fixed — [what a real agent found](docs/validation.md) |
-| Subscription-auth harnesses | Claude Code works. A Codex CLI signed in with a ChatGPT subscription talks to its own backend, so there is no origin to rewrite: it needs `--tls-intercept`. With an API key it needs nothing special |
+| Subscription-auth harnesses | Claude Code works. A Codex CLI signed in with a ChatGPT subscription carries a plan credential only its own backend accepts, so redirecting the URL would record a different session rather than that one: it needs `--tls-intercept`. With an API key it needs nothing special |
 
 ## Replaying a session you typed into
 

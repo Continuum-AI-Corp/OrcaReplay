@@ -29,15 +29,22 @@ describe('config', () => {
     await rm(home, { recursive: true, force: true });
   });
 
-  it('stores the file where only its owner can read it', async () => {
-    // It holds an API key. 0600 is the same bar ~/.aws/credentials and ~/.npmrc set, and the
-    // directory has to match or the file's mode is decoration.
-    await writeConfig({ gateway: { url: 'https://gw.example', api_key: 'sk-secret' } }, env);
+  // POSIX only. Windows has no mode bits: `chmod 0o600` is a no-op on NTFS and `stat` answers
+  // 0o666 whatever was asked for, so this asserts something the platform cannot provide. Skipped
+  // rather than loosened — the guarantee is real where it can be made, and a test that accepted
+  // 0o666 would stop noticing if it were lost on Linux too.
+  it.skipIf(process.platform === 'win32')(
+    'stores the file where only its owner can read it',
+    async () => {
+      // It holds an API key. 0600 is the same bar ~/.aws/credentials and ~/.npmrc set, and the
+      // directory has to match or the file's mode is decoration.
+      await writeConfig({ gateway: { url: 'https://gw.example', api_key: 'sk-secret' } }, env);
 
-    const path = configPath(env);
-    expect((await stat(path)).mode & 0o777).toBe(0o600);
-    expect((await stat(join(home, 'orca'))).mode & 0o777).toBe(0o700);
-  });
+      const path = configPath(env);
+      expect((await stat(path)).mode & 0o777).toBe(0o600);
+      expect((await stat(join(home, 'orca'))).mode & 0o777).toBe(0o700);
+    },
+  );
 
   it('round-trips what was written', async () => {
     await writeConfig(

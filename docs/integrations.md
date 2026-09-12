@@ -114,6 +114,42 @@ no longer applies.
 
 ---
 
+## LlamaIndex
+
+```console
+orca record generic-openai -- python your_agent.py
+```
+
+The one framework here that does **not** read `OPENAI_BASE_URL`. Measured, both ways:
+
+| set | `llm._get_client().base_url` |
+|---|---|
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1/` — ignored |
+| `OPENAI_API_BASE` | the value you set — honoured |
+
+`generic-openai` sets both, which is why this works without you doing anything. It is worth knowing
+because it is also why `orca record exec` does not: that adapter redirects nothing on purpose.
+
+**Measured:** recorded and replayed at `exact=1 divergences=0`.
+
+### The model name has to be one LlamaIndex knows
+
+`OpenAI(model=…)` is validated against a list compiled into `llama_index.llms.openai.utils`, and
+anything outside it raises `ValueError: Unknown model '…'`. There is no `context_window` argument to
+supply instead. So the usual gateway case — a model name the vendor never published, a local model,
+an internal router — does not work, and no orca setting changes that, because nothing has reached
+the wire when it fails.
+
+Where it raises is worth knowing too: **not** in the constructor. `OpenAI(model='my-gateway-model')`
+returns fine and the error arrives from `.metadata`, which the chat path reads on every call — so it
+surfaces at the first message rather than at setup.
+
+`test/integrations/agents/llama_index_model_names.py` pins all of this, including the absence of
+`context_window`: if LlamaIndex adds one, that becomes the recommended answer and this section is
+wrong until it is rewritten.
+
+---
+
 ## Aider
 
 ```console
@@ -259,6 +295,25 @@ the one place every JS client agrees on.
 
 **Measured:** an agent posting to a hardcoded `https://api.openai.com/v1/chat/completions`,
 recorded and replayed at `exact=1 divergences=0`.
+
+---
+
+## Mastra
+
+```console
+orca record node -- node your_agent.mjs
+```
+
+Mastra takes its model from `@ai-sdk/openai`, so it inherits that provider's behaviour exactly: the
+origin is a constructor argument and the environment is not consulted. The `node` adapter's fetch
+preload is what captures it.
+
+**Measured:** an `Agent` calling `generate()`, recorded and replayed at `exact=1 divergences=0` with
+the origin stopped.
+
+Worth having as its own check rather than leaning on the Vercel AI SDK one above: a preload that
+works against a bare `fetch` can still be defeated by a framework that wraps or replaces it, and
+that is not something to find out from a user.
 
 ---
 

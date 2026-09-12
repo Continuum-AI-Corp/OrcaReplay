@@ -12,6 +12,7 @@
  *   node test/integrations/run.mjs --require-all # a skip is a failure, which is what CI wants
  */
 import { execFile, spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { cp, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -117,6 +118,31 @@ const CHECKS = [
     exchanges: 1,
   },
   {
+    id: 'mastra',
+    what: 'Mastra, whose model provider takes its origin in code rather than from the environment',
+    adapter: 'node',
+    run: ['node', 'agents/mastra_agent.mjs'],
+    needsNode: '@mastra/core/agent',
+    /**
+     * Run from the agent's place in the repo rather than the copy in the temp directory.
+     *
+     * ESM resolves a bare specifier from the *importing file's* location, not from the working
+     * directory, and `NODE_PATH` does not apply to it. A copy under the system temp directory
+     * therefore cannot see `@mastra/core` however the environment is arranged. Running the
+     * original leaves the recording where every other check puts it — the run directory follows
+     * the working directory, which is still the temp one.
+     */
+    fromRepo: true,
+    exchanges: 1,
+  },
+  {
+    id: 'llama-index',
+    what: "LlamaIndex's own OpenAI LLM, which reads the older base-URL variable and not the new one",
+    run: ['python', 'agents/llama_index_agent.py'],
+    needs: 'llama_index.llms.openai',
+    exchanges: 1,
+  },
+  {
     id: 'fetch-hook',
     what: 'a JS agent with its origin compiled in',
     adapter: 'node',
@@ -143,6 +169,22 @@ async function installed(needs) {
     }
   }
   return undefined;
+}
+
+/**
+ * The same question for a JS dependency.
+ *
+ * Resolved rather than imported: importing runs the package's top-level code, and a check that is
+ * only asking whether something is present should not be able to fail because of what it does.
+ */
+function installedNode(specifier) {
+  if (specifier === undefined) return true;
+  try {
+    createRequire(join(here, 'agents', 'x.mjs')).resolve(specifier);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Start the stub and resolve once it has printed the port it took. */
@@ -186,8 +228,12 @@ async function orca(argv, cwd) {
 }
 
 async function runCheck(check) {
+  // `installed` names the module that is missing rather than answering yes or no, because a check
+  // can need more than one and "agents is not installed" is the wrong sentence when it is the
+  // other one. `installedNode` is the same question for a JS dependency.
   const absent = await installed(check.needs);
   if (absent !== undefined) return { skipped: `${absent} is not installed` };
+  if (!installedNode(check.needsNode)) return { skipped: `${check.needsNode} is not installed` };
 
   const dir = await mkdtemp(join(tmpdir(), `orca-int-${check.id}-`));
   const origin = await startOrigin();
@@ -204,7 +250,9 @@ async function runCheck(check) {
         '--upstream-anthropic',
         `http://127.0.0.1:${origin.port}`,
         '--',
-        ...check.run,
+        ...(check.fromRepo
+          ? [check.run[0], join(here, ...check.run.slice(1).join('/').split('/'))]
+          : check.run),
       ],
       dir,
     );
