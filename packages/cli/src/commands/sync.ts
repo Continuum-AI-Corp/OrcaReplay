@@ -626,6 +626,37 @@ async function recoverInterruptedSwap(dest: string): Promise<void> {
 }
 
 /**
+ * Undo a staging attempt that threw, putting the original run back — but only while this pull still
+ * owns the lock.
+ *
+ * Put the original back before reporting the failure: the caller is about to be told the pull did
+ * not happen, and that has to be true of the store as well as of the message. If even this fails,
+ * the deterministic scratch names mean the next pull recovers it rather than the copy being lost —
+ * which is exactly why the revert may swallow its own error and the version before it may not have.
+ *
+ * THE REVERT IS LOCK-PROTECTED WORK LIKE THE STAGING IT UNDOES. Both scratch paths are deterministic
+ * per destination, so once the lock has moved they name ANOTHER pull's in-flight state: the `rm`
+ * below would delete the staging directory the new holder is writing into, and the rename would put
+ * a run back over the one it had moved aside. That is the destructive resume the ownership re-check
+ * before the swap exists to prevent, performed by the check's own abort path.
+ *
+ * Gated on ownership rather than on which error was thrown, because the error does not identify the
+ * case: an ENOENT raised by the new holder's own recovery arrives here indistinguishable from a
+ * corrupt archive. Fail-closed toward NOT TOUCHING: an unreadable lock leaves litter, which
+ * `recoverInterruptedSwap` reclaims under the lock at the head of every pull, while the other
+ * direction destroys a copy that is nobody's to destroy.
+ */
+export async function revertStagedSwap(
+  stillHeld: () => Promise<boolean>,
+  paths: { dest: string; staging: string; retired: string; existing: boolean },
+): Promise<void> {
+  const { dest, staging, retired, existing } = paths;
+  if (!(await stillHeld())) return;
+  if (existing) await rename(retired, dest).catch(() => undefined);
+  await rm(staging, { recursive: true, force: true });
+}
+
+/**
  * push — send a local run to the gateway.
  *
  * `orca push [run] [--gateway URL] [--force]`
@@ -844,13 +875,7 @@ export async function pullCommand(
       if (existing) await rename(dest, retired);
       await rename(staging, dest);
     } catch (err) {
-      // Put the original back before reporting the failure: the caller is about to be told the pull
-      // did not happen, and that has to be true of the store as well as of the message. If even this
-      // fails, the deterministic names above mean the next pull recovers it rather than the copy
-      // being lost — which is exactly why the revert may swallow its own error here and the previous
-      // version may not have.
-      if (existing) await rename(retired, dest).catch(() => undefined);
-      await rm(staging, { recursive: true, force: true });
+      await revertStagedSwap(stillHeld, { dest, staging, retired, existing: !!existing });
       throw err;
     }
     await rm(retired, { recursive: true, force: true });

@@ -11,6 +11,7 @@ import {
   pushCommand,
   LOCK_HEARTBEAT_MS,
   releaseRunLock,
+  revertStagedSwap,
   withRunLockForTest,
 } from '../src/commands/sync.js';
 import { readArchive, writeArchive } from '../src/archive.js';
@@ -979,6 +980,62 @@ describe('push and pull', () => {
     const settled = (await stat(lock)).mtimeMs;
     await new Promise((ok) => setTimeout(ok, 120));
     expect((await stat(lock)).mtimeMs).toBe(settled);
+  });
+
+  /*
+  A PULL THAT LOST THE LOCK MUST NOT TIDY UP AFTER THE ONE THAT TOOK IT.
+
+  The ownership re-check added before the swap stops an interrupted pull from resuming INTO the
+  renames — but it aborts by throwing, and the catch that follows was written for the ordinary
+  failure, where this pull is still the owner and the scratch paths are its own. Under the very
+  interleaving the check exists to describe they are not:
+
+    A holds the lock and is part-way through writing `<run>.incoming`; A is stopped.
+    More than STALE_LOCK_MS later, B breaks the lock and stages into the SAME path — the scratch
+      names are deterministic per destination, which is what makes a half-done swap recoverable.
+    A resumes, its `stillHeld()` reports false, and A throws.
+    A's catch then `rm -rf`s `<run>.incoming` — B's in-flight staging — and renames `<run>.replaced`
+      back over the run B moved aside.
+
+  So the check meant to prevent a destructive resume performed the destruction itself, on state that
+  by then belonged to another process. B finishes by renaming a gutted staging into place and prints
+  `pull.done`.
+
+  The revert is lock-protected work like everything else in that critical section, so it is gated on
+  ownership rather than on which error was thrown — an ENOENT raised BY B's own recovery reaches the
+  same catch with no flag to distinguish it. Leaving the litter is safe and already designed for:
+  `recoverInterruptedSwap` runs under the lock at the head of every pull and reclaims both siblings.
+  */
+  it('leaves the shared scratch alone when the swap aborts because the lock was taken', async () => {
+    const runs = join(workspace, '.orca', 'runs');
+    await mkdir(runs, { recursive: true });
+    const dest = join(runs, runId);
+    const staging = `${dest}.incoming`;
+    const retired = `${dest}.replaced`;
+
+    // What the new holder is part-way through writing, under the shared deterministic name …
+    await mkdir(staging, { recursive: true });
+    await writeFile(join(staging, 'events.jsonl'), 'the new holder\n');
+    // … and the run it moved aside to make room for it.
+    await mkdir(retired, { recursive: true });
+    await writeFile(join(retired, 'events.jsonl'), 'the old run\n');
+
+    await revertStagedSwap(async () => false, { dest, staging, retired, existing: true });
+
+    expect(
+      await readFile(join(staging, 'events.jsonl'), 'utf8').catch(() => undefined),
+      'the aborting pull deleted the staging directory the lock’s new holder was writing into',
+    ).toBe('the new holder\n');
+    expect(
+      await readFile(join(retired, 'events.jsonl'), 'utf8').catch(() => undefined),
+      'the aborting pull moved back a run it no longer owns, out from under the new holder’s swap',
+    ).toBe('the old run\n');
+
+    // …and while the lock IS still ours the revert must still revert, or an ordinary failed pull
+    // would report "the pull did not happen" with the run missing and the litter left in place.
+    await revertStagedSwap(async () => true, { dest, staging, retired, existing: true });
+    expect(await readFile(join(dest, 'events.jsonl'), 'utf8')).toBe('the old run\n');
+    expect(await stat(staging).catch(() => undefined)).toBeUndefined();
   });
 
   /*
