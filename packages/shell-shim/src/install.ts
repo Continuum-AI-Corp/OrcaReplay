@@ -79,17 +79,73 @@ export async function installShellShim(options: InstallOptions): Promise<Install
   };
 }
 
-/** Read back what the shims observed. Tolerates a partial final line, like events.jsonl. */
+/**
+ * Read back what the shims observed. Tolerates a partial final line, like events.jsonl.
+ *
+ * Tolerating has to mean more than surviving `JSON.parse`. Every shim writes this file
+ * concurrently, and the only consumer spreads `frame.argv` into an event — so a line that parsed
+ * to `null`, or to an object whose `argv` is not an array, threw where the run was being sealed.
+ * Two shims appending at once is enough to produce one: an interleaved write can leave a line that
+ * is valid JSON and not a frame.
+ *
+ * What has to be checked is every field whose absence is *unsafe*, which is not the same as every
+ * field that is read. `cwd`, `exitCode`, `signal` and the byte counts go into `attrs`, which the
+ * schema types as a bare object — a missing one degrades a field and nothing more. Four are
+ * different:
+ *
+ *   - `name` and `argv` are spread into an array, so a non-array `argv` throws
+ *   - `startedAt` and `durationMs` are *added* — the consumer builds
+ *     `new Date(Date.parse(startedAt) + durationMs)`, and a missing `durationMs` makes that an
+ *     Invalid Date, which throws `RangeError: Invalid time value` inside `TraceWriter.append`
+ *
+ * The second pair is the one a narrower check missed. A frame torn between `startedAt` and
+ * `durationMs`, closed by a brace from the neighbouring write, is valid JSON with a string `name`,
+ * an array `argv` and a parseable `startedAt` — and it ended the run and left the trace unsealed.
+ *
+ * For those two, being the right *type* is not enough: what the consumer needs is an instant that
+ * exists. A splice can leave the digits of one duration followed by the tail of the neighbour's
+ * number, and `Number.isFinite` is happy with a sixteen-digit result. Measured from a 2026 stamp:
+ *
+ *     durationMs 2.5e14  →  9948-11-18T…              accepted
+ *     durationMs 3e14    →  +011533-04-27T…           `ts must match format "date-time"`
+ *     durationMs 9e15    →  RangeError: Invalid time value
+ *
+ * Both throw inside `TraceWriter.append`, where the trace is being sealed — the schema types `ts`
+ * as `date-time`, which admits a four-digit year and nothing else. So the bound is the range the
+ * format can express, not the range a `number` can hold.
+ */
+/** `0000-01-01T00:00:00.000Z` and `9999-12-31T23:59:59.999Z`: what a `date-time` `ts` can express. */
+const EARLIEST_MS = -62_167_219_200_000;
+const LATEST_MS = 253_402_300_799_999;
 export async function readShellFrames(framesPath: string): Promise<ShellFrame[]> {
   const raw = await readFile(framesPath, 'utf8').catch(() => '');
   const frames: ShellFrame[] = [];
   for (const line of raw.split('\n')) {
     if (line.trim() === '') continue;
+    let parsed: unknown;
     try {
-      frames.push(JSON.parse(line) as ShellFrame);
+      parsed = JSON.parse(line);
     } catch {
       // A process killed mid-write leaves a partial line. That is the run we most want to read.
+      continue;
     }
+    if (parsed === null || typeof parsed !== 'object') continue;
+    const frame = parsed as ShellFrame;
+    if (typeof frame.name !== 'string' || !Array.isArray(frame.argv)) continue;
+    if (!Number.isFinite(frame.durationMs)) continue;
+    // Only when there is an instant to bound. A `startedAt` that is absent, or present and
+    // unparseable, is already handled: the consumer drops `occurredAt` for it and stamps the event
+    // with the drain's own clock, which is a degraded field rather than a failure — so rejecting
+    // the frame here would lose a command that ran. `Date.parse` is NaN for both, which is why one
+    // check covers them; requiring a *string* rejected the absent case, out of step with the MCP
+    // reader written in the same change and with the sentence above it.
+    const startedMs = Date.parse(frame.startedAt);
+    if (!Number.isNaN(startedMs)) {
+      const endedMs = startedMs + frame.durationMs;
+      if (startedMs < EARLIEST_MS || startedMs > LATEST_MS) continue;
+      if (endedMs < EARLIEST_MS || endedMs > LATEST_MS) continue;
+    }
+    frames.push(frame);
   }
   return frames;
 }

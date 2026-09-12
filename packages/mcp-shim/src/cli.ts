@@ -83,6 +83,24 @@ export interface McpFrameRecord {
   method?: string;
 }
 
+/**
+ * Whether a parsed capture line is a frame, rather than merely valid JSON.
+ *
+ * One predicate for the format, used by both readers of this file. Several shims share one capture
+ * — see the `--out` comment below — so an interleaved write can leave a line that parses to `null`,
+ * to a number, or to an object with none of these fields, and *every* reader has to survive it. The
+ * two that dereference `name` are one file apart and both used to cast straight through.
+ *
+ * `name` and `raw` only: those are what the readers touch before they know anything else. The rest
+ * is checked where it is used, because what is unsafe differs between them — the recorder builds an
+ * instant out of `ts`, and this file does not.
+ */
+export function isMcpFrameRecord(value: unknown): value is McpFrameRecord {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Partial<McpFrameRecord>;
+  return typeof record.name === 'string' && typeof record.raw === 'string';
+}
+
 function toRecord(name: string, dir: FrameDirection, frame: JsonRpcFrame): string {
   const record: McpFrameRecord = {
     ts: new Date().toISOString(),
@@ -123,12 +141,17 @@ async function readFrames(path: string, name: string): Promise<RecordedFrame[]> 
   const frames: RecordedFrame[] = [];
   for (const line of text.split(/\r?\n/)) {
     if (line.trim() === '') continue;
-    let record: McpFrameRecord;
+    let value: unknown;
     try {
-      record = JSON.parse(line) as McpFrameRecord;
+      value = JSON.parse(line);
     } catch {
       continue;
     }
+    // The `--replay` reader, so a torn line in a *recording* used to kill the replay of it rather
+    // than cost one frame: the shim died before serving a single recorded answer, every MCP server
+    // in the run with it.
+    if (!isMcpFrameRecord(value)) continue;
+    const record = value;
     if (record.name !== name) continue;
     let message: unknown;
     try {
