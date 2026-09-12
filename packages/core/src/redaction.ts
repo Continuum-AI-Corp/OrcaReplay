@@ -83,46 +83,128 @@ const RULES: Rule[] = [
 ];
 
 /**
- * A `data:` URI's payload, which is base64 by construction and therefore one long high-entropy run.
+ * A base64 run that decodes to a whole raster image, wherever it sits in the value.
  *
- * The same reasoning `#scan` already skips a base64-encoded body on, arriving through a different
- * door — there the proxy did the encoding, here the agent did. A browser-using agent puts a
- * screenshot of the page in every request it makes, and the entropy
- * sweep shredded one Wikipedia run's six screenshots into **47,314 placeholders** — 1.96 MB of the
- * 3.39 MB trace, rewritten into holes.
+ * The exemption is granted on the payload, not on the syntax around it or the label in front of
+ * it, because every argument for it is an argument about *pixels* — bytes that cannot hide a
+ * credential a reader could recover, and that the sweep was never protecting. Three things follow
+ * from putting it that way, each of which was a hole when this keyed on `data:image/<type>;base64,`
+ * instead:
  *
- * That protects nothing and costs three things:
+ *   - **The spelling stops mattering.** OpenAI puts an image on the wire as a `data:` URI;
+ *     Anthropic sends `{"type":"base64","media_type":"image/png","data":"…"}` with no prefix at
+ *     all, so a screenshot in a `/v1/messages` recording was still being shredded. A rule about the
+ *     bytes covers both, and whatever the next dialect does.
+ *   - **The label stops being evidence.** It is text an agent wrote in front of the payload, so an
+ *     exemption granted on it is one any caller can claim: the same encoded credential was spared
+ *     behind `image/png` and swept behind `application/pdf`.
+ *   - **The run cannot walk off the end of the payload.** The old class admitted `\`, so a
+ *     JSON-escaped newline — `\` then `n`, both in the class — did not end it, and a token on the
+ *     next line was swallowed into the span and never swept.
  *
- *   - the recorded bytes stop being the bytes that were sent, so a request carrying an image can
- *     never match on replay, whatever else is true of it
- *   - `redactions.json` fills with tens of thousands of records that are not secrets, which is the
- *     one file a reader consults to find out what *was* removed
- *   - a credential is no safer for it: one visible in a screenshot is pixels, not a token, and
- *     entropy cannot see it either way
+ * Validated end to end rather than by its first bytes, because a signature is also just text a
+ * caller can write: `iVBORw0KGgo` followed by a base64 credential passed a head-only check, and
+ * the credential landed in the trace verbatim with nothing in `redactions.json`. A structure that
+ * has to close — PNG's chunk walk ending at `IEND`, JPEG's `FF D9`, GIF's `0x3B`, a declared size
+ * for BMP, WebP and AVIF — is not something an appended secret survives.
  *
- * Excluded from the entropy sweep only. The named rules still run over the whole value, so an
- * `sk-…` that happens to sit in a data URI is still caught by shape.
- *
- * **Raster image types only**, and listed rather than `image/*`. Everything above is an argument
- * about *pixels*: bytes that cannot hide a credential a reader could ever recover, and that the
- * sweep was never protecting. It is not an argument about base64, and base64 is precisely the form
- * in which the named rules go blind — `sk-…`, `ghp_…`, `AKIA…` and a PEM header all lose their
- * shape when encoded, so for an encoded payload the sweep is the only thing left. A data URI is
- * ordinary for uploads too: OpenAI's `input_file` takes `file_data` as
- * `data:application/pdf;base64,…`, and an agent attaching a file it just read sends the same
- * shape. Sparing those would put a credential on disk verbatim with nothing recorded in
- * `redactions.json`, against what SECURITY.md promises in writing.
- *
- * `image/svg+xml` is left out for the same reason: it is text, so a key inside it is one the named
- * rules would have caught had the agent not encoded it.
- *
- * This is the convention the other two exemptions in this file already follow —
- * {@link PROTOCOL_ID_VALUE} fires only under the keys it names, and never on a value that merely
- * looks like one. An exemption is a hole; it should be exactly the shape of what goes through it.
+ * What this does not claim: a secret hidden *inside* otherwise valid pixel data is not detectable
+ * here, and no content rule could. The line is that a payload which is not a picture does not get
+ * a picture's exemption.
  */
-// The trailing `\\` is not decoration: a body reaches the trace JSON-encoded, so the payload can
-// carry escaped characters and the span has to cover them or it stops one byte early.
-const RASTER_DATA_URI = /data:image\/(png|jpeg|jpg|gif|webp|avif|bmp);base64,([A-Za-z0-9+/=\\]+)/g;
+const BASE64_RUN = /(?:[A-Za-z0-9+/=]|\\[/\\])+/g;
+
+/** Shortest run worth decoding: below this it cannot hold a header and any pixels. */
+const MIN_RASTER_CHARS = 40;
+
+/** Reads a big-endian uint32 without throwing past the end. */
+function be32(b: Buffer, at: number): number {
+  return at + 4 <= b.length ? b.readUInt32BE(at) : Number.NaN;
+}
+
+/**
+ * Whether these bytes are one complete raster image and nothing else.
+ *
+ * Each walk has to *close* — consume exactly the buffer, or end on the format's terminator — so
+ * appending to a real image breaks it, which is the case a head-only check let through.
+ */
+function isWholeRasterImage(b: Buffer): boolean {
+  if (b.length < 8) return false;
+  const ascii = (at: number, n: number) => b.subarray(at, at + n).toString('latin1');
+
+  // PNG: signature, then length-prefixed chunks, ending at IEND with nothing after it.
+  if (b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    let at = 8;
+    for (;;) {
+      const len = be32(b, at);
+      if (!Number.isFinite(len) || len < 0) return false;
+      const type = ascii(at + 4, 4);
+      const next = at + 12 + len; // length + type + data + CRC
+      if (next > b.length) return false;
+      if (type === 'IEND') return next === b.length;
+      at = next;
+    }
+  }
+
+  // JPEG: SOI at the front, EOI at the very end.
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) {
+    return b[b.length - 2] === 0xff && b[b.length - 1] === 0xd9;
+  }
+
+  // GIF: header, and the trailer byte last.
+  if (ascii(0, 6) === 'GIF87a' || ascii(0, 6) === 'GIF89a') {
+    return b[b.length - 1] === 0x3b;
+  }
+
+  // BMP: the file-size field is the whole file.
+  if (b[0] === 0x42 && b[1] === 0x4d) {
+    return b.length >= 6 && b.readUInt32LE(2) === b.length;
+  }
+
+  // WebP: the RIFF size covers everything after the first eight bytes.
+  if (ascii(0, 4) === 'RIFF' && ascii(8, 12 - 8) === 'WEBP') {
+    return b.length >= 12 && b.readUInt32LE(4) === b.length - 8;
+  }
+
+  // AVIF and friends: top-level boxes, which must tile the buffer exactly.
+  if (ascii(4, 4) === 'ftyp') {
+    let at = 0;
+    while (at < b.length) {
+      const size = be32(b, at);
+      if (!Number.isFinite(size) || size < 8 || at + size > b.length) return false;
+      at += size;
+    }
+    return at === b.length;
+  }
+
+  return false;
+}
+
+/**
+ * The spans of `value` that are whole raster images.
+ *
+ * The head is checked before decoding, so a long run that is not an image costs four bytes rather
+ * than a full decode — which matters because this runs over every string a trace writes.
+ */
+function rasterSpans(value: string): [number, number][] {
+  const spans: [number, number][] = [];
+  for (const m of value.matchAll(BASE64_RUN)) {
+    const run = m[0];
+    if (run.length < MIN_RASTER_CHARS) continue;
+    // `\/` and `\\` stand for payload characters; they are stripped before decoding and the span
+    // still covers them, or the sweep would resume inside the image.
+    const payload = run.replace(/\\(.)/g, '$1');
+    let bytes: Buffer;
+    try {
+      bytes = Buffer.from(payload, 'base64');
+    } catch {
+      continue;
+    }
+    if (!isWholeRasterImage(bytes)) continue;
+    spans.push([m.index, m.index + run.length]);
+  }
+  return spans;
+}
 
 const TOKEN = /[A-Za-z0-9_-]{20,}/g;
 const PLACEHOLDER = /<secret:[a-z_]+:[0-9a-f]{8}>/g;
@@ -190,49 +272,6 @@ const PROTOCOL_ID_VALUE = /(\\*")(?:id|tool_use_id|tool_call_id)\1\s*:\s*\1[A-Za
 const PROTOCOL_SIGNATURE_VALUE = /(\\*")signature\1\s*:\s*\1[A-Za-z0-9+/=_-]*\1/g;
 
 /** Regions the entropy sweep must not touch: what it already replaced, and what is not a secret. */
-/**
- * The first bytes of each raster format, so the exemption can be granted on the payload rather
- * than on the label in front of it.
- *
- * The label is agent-controlled text that arrived in a request body. Without this, `data:
- * image/png;base64,` followed by anything at all is spared: the same encoded credential is swept
- * behind `application/pdf` and written verbatim behind `image/png`, decided by four bytes of type
- * string. The argument for the exemption is about pixels, so it has to be pixels that get it.
- */
-const RASTER_SIGNATURES: Record<string, (b: Buffer) => boolean> = {
-  png: (b) =>
-    b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
-  jpeg: (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
-  jpg: (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
-  gif: (b) => /^GIF8[79]a$/.test(b.subarray(0, 6).toString('latin1')),
-  bmp: (b) => b[0] === 0x42 && b[1] === 0x4d,
-  webp: (b) =>
-    b.subarray(0, 4).toString('latin1') === 'RIFF' &&
-    b.subarray(8, 12).toString('latin1') === 'WEBP',
-  avif: (b) => b.subarray(4, 8).toString('latin1') === 'ftyp',
-};
-
-/**
- * Whether a payload really is the raster format its label claims.
- *
- * Only the first bytes are decoded — the longest signature is twelve — so this costs one short
- * decode per match, not one per image. A payload that will not decode, or decodes to something
- * else, keeps no span and falls back to the sweep, which is what every other data URI gets.
- */
-function isDeclaredRaster(subtype: string, payload: string): boolean {
-  const check = RASTER_SIGNATURES[subtype.toLowerCase()];
-  if (check === undefined) return false;
-  // A body reaches the trace JSON-encoded, so the payload can carry escapes that are not base64.
-  const head = payload.split('\\').join('').slice(0, 24);
-  if (head.length < 8) return false;
-  try {
-    const bytes = Buffer.from(head, 'base64');
-    return bytes.length >= 3 && check(bytes);
-  } catch {
-    return false;
-  }
-}
-
 function spansOf(value: string): [number, number][] {
   const spans: [number, number][] = [];
   for (const m of value.matchAll(PLACEHOLDER)) spans.push([m.index, m.index + m[0].length]);
@@ -240,11 +279,7 @@ function spansOf(value: string): [number, number][] {
   for (const m of value.matchAll(PROTOCOL_SIGNATURE_VALUE)) {
     spans.push([m.index, m.index + m[0].length]);
   }
-  for (const m of value.matchAll(RASTER_DATA_URI)) {
-    // The label is not evidence. Only a payload that decodes to the format it claims is spared.
-    if (!isDeclaredRaster(m[1]!, m[2]!)) continue;
-    spans.push([m.index, m.index + m[0].length]);
-  }
+  spans.push(...rasterSpans(value));
   return spans;
 }
 
