@@ -141,7 +141,10 @@ describe('orca record, when the run dies before the agent starts', () => {
     const runs = join(dir, '.orca', 'runs');
     const [id] = await readdir(runs);
     expect(id, 'the failed run left no trace at all').toBeDefined();
-    const left = (await readdir(join(runs, id!))).filter((name) => name.startsWith('agent-spans'));
+    // Recursive, because the transport lives in a directory of its own now — a check on the top
+    // level would pass without looking at the place the file actually is.
+    const entries = await readdir(join(runs, id!), { recursive: true, withFileTypes: true });
+    const left = entries.filter((e) => e.name.startsWith('agent-spans')).map((e) => e.name);
     expect(left, 'an un-redacted transport was left in the run directory').toEqual([]);
   }, 60_000);
 });

@@ -183,9 +183,34 @@ describe('the spans file is a transport, not part of the trace', () => {
     // `orca scrub` all miss: a scrub would print `removed=N` with the same material beside it.
     const capture = await installAgentSpans(dir);
     await writeFile(capture.spansPath, '{"kind":"span","type":"HandoffSpanData","data":{}}\n');
-    const { ingested } = await readAgentSpans(capture.spansPath);
-    expect(await discardAgentSpans(ingested)).toBeUndefined();
+    expect(await discardAgentSpans(capture.scratchDir)).toBeUndefined();
     expect(existsSync(capture.spansPath)).toBe(false);
+    // The directory too, not only the file: that is what makes a late reopen fail rather than
+    // silently re-create an un-redacted file where the trace lives.
+    expect(existsSync(capture.scratchDir)).toBe(false);
+  });
+
+  it('leaves nothing for a writer that outlives the agent to land in', async () => {
+    // The path is handed to the child and inherited by everything it starts, so a producer the
+    // agent did not wait for — a worker pool, a server — reopens it after the ingest. Measured
+    // before this: `agent-spans.jsonl` back in the run directory of a *successful* run, mode 0644
+    // because the pre-created 0600 file was the one unlinked, holding a span nothing had read.
+    const capture = await installAgentSpans(dir);
+    await discardAgentSpans(capture.scratchDir);
+
+    // What a late `open(path, 'a')` does once the directory is gone.
+    await expect(writeFile(capture.spansPath, 'late\n')).rejects.toThrow();
+    expect(existsSync(capture.scratchDir)).toBe(false);
+  });
+
+  it('keeps everything it creates under the run directory', async () => {
+    // `installAgentSpans(runDir)` making something outside `runDir` is how a temp directory leaks:
+    // a caller that cleans up the run would not clean that, and nothing does when a process dies
+    // between the ingest and the delete.
+    const capture = await installAgentSpans(dir);
+    expect(capture.scratchDir.startsWith(dir)).toBe(true);
+    expect(capture.spansPath.startsWith(dir)).toBe(true);
+    expect(capture.pythonPath.startsWith(dir)).toBe(true);
   });
 
   it('reports a removal it could not do rather than throwing', async () => {
@@ -196,25 +221,29 @@ describe('the spans file is a transport, not part of the trace', () => {
     expect(await discardAgentSpans([asDirectory])).toEqual(expect.stringMatching(/./));
   });
 
-  it('deletes what the read ingested, never a fresh listing', async () => {
-    // The set that is destroyed has to be the set that was read. Listing again at delete time
-    // removes whatever matches *then* — and a process that begins tracing between the two is the
-    // case one file per process exists for. Its file would go unparsed, and because the `dropped`
-    // record lives in that same file, the loss could not even be reported.
+  it('takes a file that appeared after the read with it, deliberately', async () => {
+    // An earlier revision deleted only the files the read had ingested, so that a process which
+    // began tracing between the read and the delete did not lose its file unparsed. That trade was
+    // the wrong way round: what it actually bought was an un-redacted transport surviving a
+    // *successful* run, in the run directory, outside everything `orca scrub` rewrites.
+    //
+    // The spans it drops were already lost — the run is over and nothing will read them. A file
+    // left beside the trace is not.
     const span = '{"kind":"span","type":"HandoffSpanData"}\n';
     const capture = await installAgentSpans(dir);
     await writeFile(`${capture.spansPath}.111`, span);
-    const { spans, ingested } = await readAgentSpans(capture.spansPath);
+    const { spans } = await readAgentSpans(capture.spansPath);
     expect(spans).toHaveLength(1);
 
     // Two processes start tracing after the read.
     await writeFile(`${capture.spansPath}.222`, span);
     await writeFile(`${capture.spansPath}.333`, '{"kind":"dropped","count":7}\n');
 
-    expect(await discardAgentSpans(ingested)).toBeUndefined();
-    expect(existsSync(`${capture.spansPath}.222`), 'deleted without being read').toBe(true);
-    expect(existsSync(`${capture.spansPath}.333`), 'deleted without being read').toBe(true);
-    expect(existsSync(`${capture.spansPath}.111`)).toBe(false);
+    expect(await discardAgentSpans(capture.scratchDir)).toBeUndefined();
+    for (const suffix of ['.111', '.222', '.333']) {
+      expect(existsSync(`${capture.spansPath}${suffix}`), suffix).toBe(false);
+    }
+    expect(existsSync(capture.scratchDir)).toBe(false);
   });
 });
 
