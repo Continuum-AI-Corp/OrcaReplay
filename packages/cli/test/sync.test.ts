@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parseArgs } from '../src/args.js';
 import { Output, type LogEntry } from '../src/out.js';
-import { pullCommand, pushCommand } from '../src/commands/sync.js';
+import { pullCommand, pushCommand, releaseRunLock } from '../src/commands/sync.js';
 import { readArchive, writeArchive } from '../src/archive.js';
 import { writeConfig } from '../src/config.js';
 
@@ -526,6 +526,69 @@ describe('push and pull', () => {
       '{"seq":1,"type":"run.start"}\n',
     );
   }, 20000);
+  /**
+   * A PULL RELEASES ONLY THE LOCK IT IS HOLDING.
+   *
+   * The stale-break is what makes an unconditional release unsafe — not an oversight beside it, but
+   * its direct consequence. A pull that overruns STALE_LOCK_MS has its lock broken by a second
+   * pull, which acquires a FRESH lock; the first pull's `finally` then removed the PATH rather than
+   * its own lock, deleting the second's. A third pull walks in beside the second, and the two of
+   * them are exactly the concurrent recovery-and-swap this lock exists to prevent — the case where
+   * both copies of the run can go.
+   *
+   * Driven against the release helper rather than through `pullCommand`: the release runs inside a
+   * `finally`, and nothing a caller can reach interposes on that window. The pull's own happy path
+   * is covered below — its lock does come off.
+   */
+  it('leaves a lock it no longer owns alone', async () => {
+    const runs = join(workspace, '.orca', 'runs');
+    await mkdir(runs, { recursive: true });
+    const lock = join(runs, `${runId}.lock`);
+    const mine = `${process.pid} mine\n`;
+    const theirs = '424242 another-holder\n';
+
+    // Someone else's lock sits at the path we were holding — what a stale-break leaves behind.
+    await writeFile(lock, theirs);
+    await releaseRunLock(lock, mine);
+    expect(
+      await readFile(lock, 'utf8'),
+      'releasing deleted a lock another process holds, so a third pull can now run beside it',
+    ).toBe(theirs);
+
+    // Our own lock does come off, or the first pull would make the run permanently unpullable.
+    await writeFile(lock, mine);
+    await releaseRunLock(lock, mine);
+    await expect(readFile(lock, 'utf8')).rejects.toThrow();
+
+    // A lock already gone is not an error — the stale-break may have taken it.
+    await releaseRunLock(lock, mine);
+  });
+
+  /**
+   * …and the ordinary path still leaves nothing behind. A lock that is never released is a run
+   * nobody can pull until it goes stale, which is the failure the ownership rule must not cause.
+   */
+  it('removes its own lock when the pull finishes', async () => {
+    await seedRun();
+    reply = {
+      status: 200,
+      body: Buffer.from(
+        await writeArchive([
+          {
+            name: `${runId}/manifest.json`,
+            bytes: new TextEncoder().encode(`{"run_id":"${runId}"}\n`),
+          },
+          { name: `${runId}/events.jsonl`, bytes: new TextEncoder().encode('{"seq":9}\n') },
+        ]),
+      ),
+    };
+
+    await pullCommand(parseArgs(['pull', runId, '--force']), out, workspace, env());
+    await expect(
+      readFile(join(workspace, '.orca', 'runs', `${runId}.lock`), 'utf8'),
+    ).rejects.toThrow();
+  });
+
   /**
    * AND THE SAME RULE FOR THE ENVIRONMENT KEY, which the first version of this gate exempted.
    *

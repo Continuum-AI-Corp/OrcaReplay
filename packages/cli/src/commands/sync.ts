@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 import { ensureRunsDir, resolveRunSelector, runDirFor } from '@orcareplay/core';
@@ -211,12 +212,48 @@ function multipart(
  */
 const STALE_LOCK_MS = 10 * 60 * 1000;
 
+/**
+ * Release a run lock — but ONLY the one this process is holding.
+ *
+ * The unconditional `rm` this replaces was unsafe because of the stale-break above, not in spite of
+ * it. A pull that overruns STALE_LOCK_MS has its lock broken by a second pull, which then holds a
+ * FRESH lock of its own; the first pull's `finally` removed the PATH rather than its own lock, so
+ * it deleted the second pull's. A third pull then walks in beside the second, and the two of them
+ * are exactly the concurrent recovery-and-swap this lock exists to prevent — where both copies of
+ * the run can go.
+ *
+ * The token is a pid AND a uuid. A pid alone is not an identity across a ten-minute stale window on
+ * a busy machine: pids wrap, and the process that inherits ours would be granted our lock.
+ *
+ * Read-then-unlink is not atomic, so this is a narrowing rather than a proof — which is the right
+ * shape for an advisory lock whose worst case is already bounded by the stale-break. What it
+ * removes is the case that happens deterministically rather than by interleaving.
+ *
+ * Exported for the test that pins the rule: the release runs inside a `finally`, and no caller can
+ * interpose on that window through pullCommand.
+ */
+export async function releaseRunLock(lock: string, token: string): Promise<void> {
+  let holder: string;
+  try {
+    holder = await readFile(lock, 'utf8');
+  } catch {
+    // Gone already (a stale-break, a tidy-up) — nothing to release. Any other error means we
+    // cannot PROVE the lock is ours, and removing one we do not own is the failure being fixed, so
+    // leave it: the stale-break reclaims it within STALE_LOCK_MS.
+    return;
+  }
+  if (holder !== token) return;
+  await rm(lock, { force: true }).catch(() => undefined);
+}
+
 async function withRunLock<T>(dest: string, fn: () => Promise<T>): Promise<T> {
   const lock = `${dest}.lock`;
+  // See releaseRunLock for why this is a token and not just a pid.
+  const token = `${process.pid} ${randomUUID()}\n`;
   let held = false;
   for (let attempt = 0; attempt < 60 && !held; attempt++) {
     try {
-      await writeFile(lock, `${process.pid}\n`, { flag: 'wx', mode: FILE_MODE });
+      await writeFile(lock, token, { flag: 'wx', mode: FILE_MODE });
       held = true;
     } catch (err) {
       // ONLY EEXIST MEANS "someone else holds it". Anything else — a missing parent, a read-only
@@ -225,11 +262,16 @@ async function withRunLock<T>(dest: string, fn: () => Promise<T>): Promise<T> {
       // took six seconds to fail on a workspace whose .orca/runs did not exist yet, which is the
       // ordinary first-pull case.
       if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') throw err;
-      const age = await stat(lock)
+      const stale = await stat(lock)
         .then((st) => Date.now() - st.mtimeMs)
         .catch(() => 0);
-      if (age > STALE_LOCK_MS) {
-        await rm(lock, { force: true }).catch(() => undefined);
+      if (stale > STALE_LOCK_MS) {
+        // BREAK THE LOCK WE JUDGED STALE, not whatever is at that path now. Two waiters can both
+        // read the same abandoned lock as stale; without this, the first breaks it and acquires,
+        // and the second then deletes that fresh lock and acquires alongside it — the same
+        // own-only rule as releaseRunLock, at the other end of the lock's life.
+        const abandoned = await readFile(lock, 'utf8').catch(() => undefined);
+        if (abandoned !== undefined) await releaseRunLock(lock, abandoned);
         continue;
       }
       await new Promise((ok) => setTimeout(ok, 100));
@@ -244,7 +286,7 @@ async function withRunLock<T>(dest: string, fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } finally {
-    await rm(lock, { force: true }).catch(() => undefined);
+    await releaseRunLock(lock, token);
   }
 }
 
