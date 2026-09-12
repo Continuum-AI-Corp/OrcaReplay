@@ -445,6 +445,24 @@ async function runRecording(
 
   await writes.drain();
 
+  /*
+   * The drain reaches `abandon` too.
+   *
+   * The guard above stops at the child's exit, which is where the failures it was written for
+   * lived. Everything below runs with the proxy still listening and the trace still open, and it
+   * reads three files another process appended to — so it has exactly the same two failure modes
+   * `abandon` documents: a throw here printed the error and then hung, because the listening proxy
+   * keeps the event loop alive, and left the trace with no `ended_at`, `counts` or `integrity`.
+   *
+   * That is the wrong run to lose. A capture layer that broke is the run a user most needs to read,
+   * and an unsealed trace reports as *tampered* rather than as unfinished.
+   */
+  try {
+    await drainIntoTrace();
+  } catch (err) {
+    await abandon(err);
+  }
+
   /** The turn an out-of-band frame belongs to: the last one that had begun when it happened. */
   function turnAt(at: number): number {
     let found = 0;
@@ -455,73 +473,75 @@ async function runRecording(
     return found;
   }
 
-  if (shell) {
-    // Timestamped from the frame, not from now. These are read off disk after the agent has
-    // exited, so stamping them at write time put every shell command at the end of the run with
-    // the final turn number — which makes `mono_us` describe the drain rather than the command,
-    // and leaves the commands unable to interleave with the model turns they happened between.
-    const frames = await readShellFrames(shell.framesPath);
-    shellFrames = frames.length;
-    for (const frame of frames) {
-      const startedAt = Date.parse(frame.startedAt);
-      const at = Number.isNaN(startedAt) ? undefined : new Date(startedAt);
-      const frameTurn = at === undefined ? turn : turnAt(startedAt);
-      const exec = await writer.append({
-        type: 'shell.exec',
-        actor: 'harness',
-        turn: frameTurn,
-        ...(at === undefined ? {} : { occurredAt: at }),
-        attrs: { argv: [frame.name, ...frame.argv], cwd: frame.cwd },
-      });
+  async function drainIntoTrace(): Promise<void> {
+    if (shell) {
+      // Timestamped from the frame, not from now. These are read off disk after the agent has
+      // exited, so stamping them at write time put every shell command at the end of the run with
+      // the final turn number — which makes `mono_us` describe the drain rather than the command,
+      // and leaves the commands unable to interleave with the model turns they happened between.
+      const frames = await readShellFrames(shell.framesPath);
+      shellFrames = frames.length;
+      for (const frame of frames) {
+        const startedAt = Date.parse(frame.startedAt);
+        const at = Number.isNaN(startedAt) ? undefined : new Date(startedAt);
+        const frameTurn = at === undefined ? turn : turnAt(startedAt);
+        const exec = await writer.append({
+          type: 'shell.exec',
+          actor: 'harness',
+          turn: frameTurn,
+          ...(at === undefined ? {} : { occurredAt: at }),
+          attrs: { argv: [frame.name, ...frame.argv], cwd: frame.cwd },
+        });
+        await writer.append({
+          type: 'shell.result',
+          actor: 'harness',
+          turn: frameTurn,
+          causes: [exec.seq],
+          // The result happened when the command finished, which is what its duration measures.
+          ...(at === undefined ? {} : { occurredAt: new Date(startedAt + frame.durationMs) }),
+          attrs: {
+            exit_code: frame.exitCode,
+            signal: frame.signal,
+            duration_ms: frame.durationMs,
+            stdout_bytes: frame.stdoutBytes,
+            stderr_bytes: frame.stderrBytes,
+          },
+        });
+      }
+    }
+
+    if (agentSpans) {
+      // Timestamped from the span, like the shell frames above and for the same reason: these are
+      // read off disk after the agent exited, so stamping them now would file every handoff at the
+      // end of the run rather than between the turns it happened between.
+      for (const span of await readAgentSpans(agentSpans.spansPath)) {
+        const derived = eventForSpan(span);
+        if (derived === undefined) continue;
+        const startedAt = Date.parse(String(span.started_at ?? ''));
+        const at = Number.isNaN(startedAt) ? undefined : new Date(startedAt);
+        agentSpanEvents += 1;
+        await writer.append({
+          type: derived.type as 'agent.start',
+          // `harness`, not `orca`: we did not observe this, we were told it.
+          actor: 'harness',
+          turn: at === undefined ? turn : turnAt(startedAt),
+          ...(at === undefined ? {} : { occurredAt: at }),
+          attrs: derived.attrs,
+        });
+      }
+    }
+
+    if (mcp) await drainMcpFrames(mcp, writer, turnAt, turn);
+
+    const orphans = deriver.unresolved();
+    if (orphans.length > 0) {
       await writer.append({
-        type: 'shell.result',
-        actor: 'harness',
-        turn: frameTurn,
-        causes: [exec.seq],
-        // The result happened when the command finished, which is what its duration measures.
-        ...(at === undefined ? {} : { occurredAt: new Date(startedAt + frame.durationMs) }),
-        attrs: {
-          exit_code: frame.exitCode,
-          signal: frame.signal,
-          duration_ms: frame.durationMs,
-          stdout_bytes: frame.stdoutBytes,
-          stderr_bytes: frame.stderrBytes,
-        },
+        type: 'note',
+        actor: 'orca',
+        turn,
+        attrs: { rule: 'unresolved_tool_calls', ids: orphans.map((o) => o.id) },
       });
     }
-  }
-
-  if (agentSpans) {
-    // Timestamped from the span, like the shell frames above and for the same reason: these are
-    // read off disk after the agent exited, so stamping them now would file every handoff at the
-    // end of the run rather than between the turns it happened between.
-    for (const span of await readAgentSpans(agentSpans.spansPath)) {
-      const derived = eventForSpan(span);
-      if (derived === undefined) continue;
-      const startedAt = Date.parse(String(span.started_at ?? ''));
-      const at = Number.isNaN(startedAt) ? undefined : new Date(startedAt);
-      agentSpanEvents += 1;
-      await writer.append({
-        type: derived.type as 'agent.start',
-        // `harness`, not `orca`: we did not observe this, we were told it.
-        actor: 'harness',
-        turn: at === undefined ? turn : turnAt(startedAt),
-        ...(at === undefined ? {} : { occurredAt: at }),
-        attrs: derived.attrs,
-      });
-    }
-  }
-
-  if (mcp) await drainMcpFrames(mcp, writer, turnAt, turn);
-
-  const orphans = deriver.unresolved();
-  if (orphans.length > 0) {
-    await writer.append({
-      type: 'note',
-      actor: 'orca',
-      turn,
-      attrs: { rule: 'unresolved_tool_calls', ids: orphans.map((o) => o.id) },
-    });
   }
 
   // Before the trace is sealed, not after. A tunnel's record is only complete when its socket

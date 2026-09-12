@@ -123,6 +123,38 @@ describe('reading what the processor wrote', () => {
   it('is empty when there is no file, because that is the ordinary case', async () => {
     expect(await readAgentSpans(join(dir, 'nothing.jsonl'))).toEqual([]);
   });
+
+  it('skips a line that parses to something that is not a span', async () => {
+    // "Malformed" cannot mean only "does not parse". `null` is valid JSON and is exactly what a
+    // producer writes when it could not serialise a span, and it used to be handed to
+    // `eventForSpan`, which dereferenced it — one line ended the run and left the trace with no
+    // `ended_at`, `counts` or `integrity`, which reads as *tampered* rather than as unfinished.
+    const path = join(dir, 'not-objects.jsonl');
+    const lines = [
+      'null',
+      '42',
+      '"a string"',
+      '[1,2]',
+      '{"kind":"span","type":"HandoffSpanData","data":{}}',
+      '',
+    ];
+    await writeFile(path, lines.join('\n'), 'utf8');
+    const spans = await readAgentSpans(path);
+    expect(spans).toHaveLength(1);
+    expect(spans[0]?.type).toBe('HandoffSpanData');
+  });
+});
+
+describe('a translator that cannot be handed something it does not expect', () => {
+  // `eventForSpan` takes `unknown` rather than `AgentSpan` deliberately: its only caller reads a
+  // file another process appends to, so the type is a description of what is expected rather than
+  // a guarantee. Belt and braces with the filter above — the failure it prevents is not worth one
+  // layer of defence.
+  it('returns undefined for anything that is not an object', () => {
+    for (const value of [null, undefined, 42, 'span', [], true]) {
+      expect(eventForSpan(value)).toBeUndefined();
+    }
+  });
 });
 
 describe('the bootstrap orca writes', () => {
