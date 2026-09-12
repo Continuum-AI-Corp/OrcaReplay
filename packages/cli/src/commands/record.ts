@@ -16,7 +16,9 @@ import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
 import { installShellShim, readShellFrames } from '@orcareplay/shell-shim';
 import {
+  agentSpansFiles,
   discardAgentSpans,
+  discardAgentSpanTransport,
   droppedSpanCount,
   eventForSpan,
   installAgentSpans,
@@ -107,8 +109,10 @@ export async function recordCommand(
     for (const ca of minted) {
       await ca.dispose().catch(() => undefined);
     }
-    for (const scratch of rawSinks) {
-      await discardAgentSpans(scratch).catch(() => undefined);
+    for (const path of rawSinks) {
+      // Expanded here rather than stored: one file per tracing process, and which processes
+      // existed is not known until the run is over.
+      await discardAgentSpanTransport(path).catch(() => undefined);
     }
     throw err;
   }
@@ -236,7 +240,7 @@ async function runRecording(
     try {
       agentSpans = await installAgentSpans(writer.runDir);
       // Registered the moment it exists, so nothing between here and the ingest can leave it.
-      rawSinks.push(agentSpans.scratchDir);
+      rawSinks.push(agentSpans.transportDir);
     } catch (err) {
       // Same posture as the other optional layers: degrade the trace, never abort the run.
       out.warn('agent_spans.unavailable', { reason: String(err) });
@@ -582,7 +586,7 @@ async function runRecording(
       // Timestamped from the span, like the shell frames above and for the same reason: these are
       // read off disk after the agent exited, so stamping them now would file every handoff at the
       // end of the run rather than between the turns it happened between.
-      const { spans } = await readAgentSpans(agentSpans.spansPath);
+      const { spans, ingested } = await readAgentSpans(agentSpans.spansPath);
       for (const span of spans) {
         const derived = eventForSpan(span);
         if (derived === undefined) continue;
@@ -607,12 +611,25 @@ async function runRecording(
         // this, the trace would otherwise just have fewer agent events than the run did.
         out.warn('agent_spans.dropped', { count: lost });
       }
-      // The whole scratch directory, which is orca's own and holds nothing else. A producer that
-      // outlives the agent then reopens a path inside a directory that is gone, rather than
-      // re-creating an un-redacted file beside the trace.
-      const failed = await discardAgentSpans(agentSpans.scratchDir);
+      // Said out loud rather than counted and forgotten, the same reason as the line above: a
+      // producer that outlived the agent — a worker pool, an MCP server, anything the agent did
+      // not wait for — has its file read up to this instant, and whatever it writes afterwards
+      // goes nowhere. Comparing the listing before and after the read is enough to notice: a
+      // file that grew, or one that appeared, means someone is still tracing.
+      const after = await agentSpansFiles(agentSpans.spansPath);
+      const stillWriting = after.filter((f) => !ingested.includes(f));
+      if (stillWriting.length > 0) {
+        out.warn('agent_spans.still_writing', { files: stillWriting.length });
+      }
+
+      // The whole directory, not the files the read listed. Two reasons, and the second is why
+      // the directory is outside the run in the first place: a producer that outlives the agent
+      // creates a file after that listing, and a per-file discard leaves it — where, when the
+      // transport lived in the run directory, it was an un-redacted file in a sealed trace that
+      // `orca scrub` does not reach. Nothing else is in this directory; orca made it for this.
+      const failed = await discardAgentSpanTransport(agentSpans.transportDir);
       if (failed !== undefined) {
-        out.warn('agent_spans.not_removed', { path: agentSpans.scratchDir, reason: failed });
+        out.warn('agent_spans.not_removed', { path: agentSpans.spansPath, reason: failed });
       }
     }
 

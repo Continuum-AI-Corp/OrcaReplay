@@ -1,4 +1,5 @@
-import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
 /**
@@ -95,43 +96,38 @@ export interface AgentSpanCapture {
   spansPath: string;
   /** Prepended to PYTHONPATH so Python finds the bootstrap. */
   pythonPath: string;
-  /** Orca's own directory for the transport. Removed whole; see `discardAgentSpans`. */
-  scratchDir: string;
+  /** The directory orca owns for the transport. Removed whole, so nothing can be left in it. */
+  transportDir: string;
 }
 
 /**
- * Write the bootstrap, and name a place for the spans that is **not** the run directory.
+ * Write the bootstrap into the run directory, and put the transport somewhere else.
  *
- * The transport used to live beside the trace, and one delete was not enough to keep it out. The
- * path is handed to the child and inherited by everything it starts, so a producer that outlives
- * the agent — a worker pool, a server, anything the agent did not wait for — reopens it *after* the
- * ingest has deleted it. Measured on a successful run: `agent-spans.jsonl` back in the run
- * directory, mode 0644 because the pre-created 0600 file is the one that was unlinked, holding a
- * span the ingest never saw, and nothing warned.
+ * The bootstrap is inert and belongs with the run. The transport does not: the path is
+ * inherited by everything the agent starts, and a worker it left behind writes whenever it gets
+ * round to it. While that path pointed inside the run directory, a write arriving after the
+ * ingest re-created the file *in the trace* — un-redacted, with the writer’s umask rather than
+ * the 0600 SECURITY.md promises, holding the `ResponseSpanData` the ingest deliberately drops,
+ * on a run that reported success and warned about nothing. `orca scrub` does not reach it.
  *
- * That file is the one thing in a run directory with no redactor in front of it and no coverage
- * from `orca scrub`, so it being there at all is the problem, not how many times it is deleted.
- *
- * So it gets a directory of its own, `py/spans/`, which is removed whole once ingested. A late
- * write then reopens a path inside a directory that is gone and fails, instead of silently
- * re-creating an un-redacted file beside the trace. Under the run directory rather than the system
- * temp: everything this function creates should be somewhere the run already owns, so a caller that
- * cleans up the run cleans up all of it, and nothing leaks when a process dies between the two.
+ * No amount of deleting fixes that, because the next write recreates it. Somewhere orca owns
+ * does: a late write lands in a directory that is removed whole on every exit path, and never
+ * in a trace.
  */
 export async function installAgentSpans(runDir: string): Promise<AgentSpanCapture> {
   const dir = join(runDir, 'py');
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, SITECUSTOMIZE), SITECUSTOMIZE_SOURCE, 'utf8');
-  // 0700, like the run directory itself: whatever lands here is un-redacted by construction. The
-  // bootstrap stays outside it, in `py/`, because that one is orca's own source and worth keeping.
-  const scratchDir = join(dir, 'spans');
-  await mkdir(scratchDir, { recursive: true, mode: 0o700 });
-  const spansPath = join(scratchDir, SPANS_FILENAME);
-  // Pre-created so it gets 0600 rather than the writing interpreter's umask, the same reason the
-  // shell shim pre-creates its frames file. Best-effort: a capture layer may degrade a trace and
-  // may never fail the run it is watching.
+  const transportDir = await mkdtemp(join(tmpdir(), 'orca-spans-'));
+  const spansPath = join(transportDir, SPANS_FILENAME);
+  // Created here rather than left to the child, so it gets the mode SECURITY.md promises for
+  // everything in a run directory — "trace files and blobs are written mode 0600". A file the
+  // child creates gets that interpreter's umask instead, and the two capture layers that already
+  // leave a side file here both pre-create it for the same reason (`shell-shim`'s frames,
+  // `mcp.ts`'s config). Best-effort, like theirs: a capture layer may degrade a trace and may
+  // never fail the run it is watching.
   await writeFile(spansPath, '', { flag: 'a', mode: 0o600 }).catch(() => undefined);
-  return { spansPath, pythonPath: dir, scratchDir };
+  return { spansPath, pythonPath: dir, transportDir };
 }
 
 /**
@@ -144,24 +140,41 @@ export async function installAgentSpans(runDir: string): Promise<AgentSpanCaptur
  * having no scrubber at all. Deleting it is cheaper and more honest than teaching three other
  * components about a file that has no reason to outlive the ingest.
  *
- * The whole scratch directory goes, not a list of files. Deleting only what was read left anything
- * created after the read behind — the un-redacted transport surviving a *successful* run — and
- * deleting a fresh listing destroyed files nobody had parsed. Neither question arises once the
- * directory is orca's own and nothing else is in it: it is removed whole, at the end, once.
- *
- * It lives under the run directory, so a caller that cleans up the run cleans up this too — nothing
- * is left behind when a process dies between the ingest and the delete.
+ * Takes the files the read actually ingested, never a path to look up again. Listing a second time
+ * would delete a different set than was read: a process that begins tracing between the two — the
+ * case one file per process exists for — has its file removed with nothing parsed out of it, and
+ * because the `dropped` record lives in that same file, the loss cannot even be reported. A file
+ * the reader *skipped*, because it could not be read at all, would go the same way.
  *
  * Returns what went wrong, for the caller to warn about. Failing to delete one is worth saying and
  * never worth losing the trace over — the same posture as the run CA's `dispose`.
  */
-export async function discardAgentSpans(scratchDir: string): Promise<string | undefined> {
+/**
+ * Remove the whole transport directory.
+ *
+ * Preferred over removing the files a listing found: a producer that outlives the agent can
+ * create one after that listing, and a per-file discard leaves it. Nothing else is in this
+ * directory — orca made it for this and nothing else writes there.
+ */
+export async function discardAgentSpanTransport(dir: string): Promise<string | undefined> {
   try {
-    await rm(scratchDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    await rm(dir, { recursive: true, force: true });
     return undefined;
   } catch (err) {
     return String(err);
   }
+}
+
+export async function discardAgentSpans(files: string[]): Promise<string | undefined> {
+  const failures: string[] = [];
+  for (const file of files) {
+    try {
+      await rm(file, { force: true });
+    } catch (err) {
+      failures.push(String(err));
+    }
+  }
+  return failures.length === 0 ? undefined : failures.join('; ');
 }
 
 /** PYTHONPATH with our directory in front, keeping whatever was already there. */
