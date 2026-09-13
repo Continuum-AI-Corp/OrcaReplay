@@ -19,6 +19,7 @@ import {
   eventForSpan,
   discardAgentSpanTransport,
   installAgentSpans,
+  sweepStaleTransports,
   pythonPathWith,
   readAgentSpans,
   SPANS_ENV,
@@ -76,6 +77,12 @@ export async function recordCommand(
   out: Output,
   cwd = process.cwd(),
 ): Promise<RecordResult> {
+  // Before anything else, and never fatal: an orphan left by a killed run holds the same
+  // un-redacted material a live one does, and the next recording is the only thing that will ever
+  // come across it.
+  const sweptStale = await sweepStaleTransports().catch(() => 0);
+  if (sweptStale > 0) out.info('transports.swept', { stale: sweptStale });
+
   const minted: RunCa[] = [];
   // Transport directories, disposed here if the run throws before their drain reaches them. Both
   // hold material written by a process orca does not own — the agent's shells, the agent's own
@@ -200,7 +207,9 @@ async function runRecording(
   if (args.bool('shell', true)) {
     try {
       shell = await installShellShim({ runDir: writer.runDir });
-      transports.push(shell.transportDir);
+      // Only when orca minted it. A caller-supplied `framesPath` leaves the directory theirs,
+      // and this list is deleted wholesale on a failure.
+      if (shell.transportDir !== undefined) transports.push(shell.transportDir);
     } catch (err) {
       // Same posture as filesystem capture: degrade the trace, never abort the run.
       out.warn('shell.unavailable', { reason: String(err) });
@@ -273,7 +282,7 @@ async function runRecording(
   let commandToolCalls = 0;
   /** Commands the shim actually saw. Zero against a non-zero `commandToolCalls` is the warning. */
   let shellFrames = 0;
-  let agentSpanEvents = 0;
+  // (the count this used to keep was read by nothing; the layer reports through its events)
   /**
    * Exchanges the upstream answered with an error status.
    *
@@ -476,7 +485,8 @@ async function runRecording(
     // appended through `writer.append`, which redacts, and what is left on disk afterwards is a
     // verbatim copy of every command line the agent ran that nothing reads and `orca scrub` never
     // rewrites. Before the appends rather than after, so an append that throws still takes it.
-    const framesLeft = await discardShellFrames(shell.transportDir);
+    const framesLeft =
+      shell.transportDir === undefined ? undefined : await discardShellFrames(shell.transportDir);
     if (framesLeft !== undefined) out.warn('shell_frames.not_removed', { reason: framesLeft });
     shellFrames = frames.length;
     for (const frame of frames) {
@@ -524,7 +534,6 @@ async function runRecording(
       if (derived === undefined) continue;
       const startedAt = Date.parse(String(span.started_at ?? ''));
       const at = Number.isNaN(startedAt) ? undefined : new Date(startedAt);
-      agentSpanEvents += 1;
       await writer.append({
         type: derived.type as 'agent.start',
         // `harness`, not `orca`: we did not observe this, we were told it.

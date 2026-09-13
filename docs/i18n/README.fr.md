@@ -546,7 +546,6 @@ répertoire d'exécution est une chose qui se décrit elle-même :
     events.jsonl      # la chronologie, un objet JSON par ligne, en ajout seul
     blobs/            # charges utiles de plus de 4 Ko, adressées par contenu et dédupliquées
     fs/               # index git fantôme : l'espace de travail à chaque tour
-    shell-frames.jsonl
     redactions.json   # ce qui a été retiré, par règle et par nombre — jamais par valeur
 ```
 

@@ -48,7 +48,7 @@ a matrix that only exercised a plain completion would have said nothing about ei
 | `browser-use` | its own `ChatOpenAI` passes an unset `base_url` through | browser-use, and the pattern any wrapper using the official SDK follows |
 | `fetch-hook` | `NODE_OPTIONS` preload on `globalThis.fetch` | the Vercel AI SDK, and any JS agent with its origin compiled in |
 
-Eleven checks. Covering the layer underneath still covers what stands on it — that is what the
+Twelve checks. Covering the layer underneath still covers what stands on it — that is what the
 `litellm` row is for — but three of these exist because that stopped being enough, and each of the
 three was added after running the framework itself said something the layer could not.
 

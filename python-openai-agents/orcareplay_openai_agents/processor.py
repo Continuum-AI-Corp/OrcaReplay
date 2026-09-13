@@ -94,24 +94,69 @@ def _kept(data: Any, fields: tuple[str, ...]) -> dict[str, Any]:
     return out
 
 
-def _plain(value: Any) -> Any:
+#: Ceilings on what one payload may become. A span the SDK produces is a handful of nodes a few
+#: levels deep; these are orders of magnitude above that and still bound the worst case.
+_MAX_NODES = 10_000
+_MAX_DEPTH = 32
+
+
+def _plain(
+    value: Any,
+    _budget: list[int] | None = None,
+    _stack: set[int] | None = None,
+    _depth: int = 0,
+) -> Any:
     """Whatever survives JSON, without pretending a rich object is simple.
 
     Every branch is guarded, including the `repr` fallback. That is not paranoia about hypothetical
     objects: a span payload is whatever the agent put in it, `asdict` walks arbitrary user types, and
     an object whose `__repr__` raises would otherwise take the run down from inside a debugging aid.
     A value we cannot describe becomes a placeholder; the run continues.
+
+    **Bounded in three ways, and the node budget is the one that matters.** This used to walk every
+    *path* through a payload rather than every node, so a structure with shared sub-objects — no
+    cycle required, just a diamond repeated — cost 2^n. Measured: forty shared diamonds did not
+    return in twenty seconds, and `on_span_end` hung with no error and no output inside the agent's
+    own process, which is exactly what this module's docstrings promise cannot happen. Doing nothing
+    would have been safer: `json.dumps` rejects a circular reference in microseconds.
+
+    A visited set alone does not fix it. Even with each node rendered once, the *result* is a tree,
+    and `json.dumps` writes a shared node once per path it appears under — so the output explodes
+    even when the walk does not. Only a ceiling on how many nodes are produced bounds both, which is
+    what `_budget` is. `_stack` catches the cycle separately, because "this payload refers back to
+    itself" is worth saying plainly rather than reporting as truncation.
+
+    Truncation is visible: `<truncated>`, `<too deep>` and `<circular>` all reach the trace, so a
+    reader sees a payload that was abridged rather than one that quietly lost a field.
     """
+    budget = [_MAX_NODES] if _budget is None else _budget
+    stack = set() if _stack is None else _stack
     try:
-        if is_dataclass(value) and not isinstance(value, type):
-            return {k: _plain(v) for k, v in asdict(value).items()}
-        if isinstance(value, dict):
-            return {str(k): _plain(v) for k, v in value.items()}
-        if isinstance(value, (list, tuple)):
-            return [_plain(v) for v in value]
         if isinstance(value, (str, int, float, bool)) or value is None:
             return value
-        return repr(value)
+        if budget[0] <= 0:
+            return "<truncated>"
+        budget[0] -= 1
+        if _depth >= _MAX_DEPTH:
+            return "<too deep>"
+        marker = id(value)
+        if marker in stack:
+            return "<circular>"
+        stack.add(marker)
+        try:
+            if is_dataclass(value) and not isinstance(value, type):
+                return {
+                    k: _plain(v, budget, stack, _depth + 1) for k, v in asdict(value).items()
+                }
+            if isinstance(value, dict):
+                return {
+                    str(k): _plain(v, budget, stack, _depth + 1) for k, v in value.items()
+                }
+            if isinstance(value, (list, tuple)):
+                return [_plain(v, budget, stack, _depth + 1) for v in value]
+            return repr(value)
+        finally:
+            stack.discard(marker)
     except Exception:  # noqa: BLE001 - see the docstring: never raise out of here
         return "<unrepresentable>"
 

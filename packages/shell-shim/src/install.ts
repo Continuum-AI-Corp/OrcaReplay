@@ -38,8 +38,17 @@ export interface InstalledShim {
   /** Prepend this to PATH. */
   dir: string;
   framesPath: string;
-  /** The directory holding {@link framesPath}, for {@link discardShellFrames}. */
-  transportDir: string;
+  /**
+   * The directory holding {@link framesPath}, for {@link discardShellFrames} — and **only** when
+   * orca minted it.
+   *
+   * `undefined` when the caller supplied `framesPath`, because then the directory is theirs and
+   * `discardShellFrames` is `rm -rf`. Returning `dirname(framesPath)` here made a caller who put
+   * the frames in a directory they cared about one `discardShellFrames` away from losing all of it
+   * — a run directory, if `record` ever wired the option through, which is exactly what the option
+   * is for.
+   */
+  transportDir: string | undefined;
   shimmed: string[];
   /** Environment overlay the child needs for the shims to work. */
   env: Record<string, string>;
@@ -55,9 +64,9 @@ export interface InstalledShim {
 export async function installShellShim(options: InstallOptions): Promise<InstalledShim> {
   const dir = join(options.runDir, 'shims');
   const transportDir = options.framesPath
-    ? dirname(options.framesPath)
+    ? undefined
     : await mkdtemp(join(tmpdir(), 'orca-shell-'));
-  const framesPath = options.framesPath ?? join(transportDir, 'shell-frames.jsonl');
+  const framesPath = options.framesPath ?? join(transportDir!, 'shell-frames.jsonl');
   const shims = options.shims ?? DEFAULT_SHIMS;
 
   await mkdir(dir, { recursive: true });
@@ -99,7 +108,6 @@ export async function installShellShim(options: InstallOptions): Promise<Install
   };
 }
 
-/** Read back what the shims observed. Tolerates a partial final line, like events.jsonl. */
 /**
  * Take the transport away once it has been read.
  *
@@ -116,6 +124,7 @@ export async function discardShellFrames(dir: string): Promise<string | undefine
   }
 }
 
+/** Read back what the shims observed. Tolerates a partial final line, like events.jsonl. */
 export async function readShellFrames(framesPath: string): Promise<ShellFrame[]> {
   const raw = await readFile(framesPath, 'utf8').catch(() => '');
   const frames: ShellFrame[] = [];

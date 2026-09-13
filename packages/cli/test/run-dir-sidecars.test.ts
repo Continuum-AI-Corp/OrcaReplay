@@ -1,12 +1,25 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TraceWriter } from '@orcareplay/core';
 import { installShellShim, discardShellFrames } from '@orcareplay/shell-shim';
+import { sweepStaleTransports } from '../src/agent-spans.js';
 
 /**
  * Watching the transport rather than looking for it.
@@ -66,6 +79,29 @@ describe('what a run directory is left holding', () => {
     await rm(workspace, { recursive: true, force: true });
   });
 
+  /** One recorded run in the workspace, and where it landed. */
+  async function record(): Promise<{ runDir: string; runId: string }> {
+    const agent = join(workspace, 'agent.mjs');
+    await writeFile(agent, "console.log('GOT: done');\n");
+    const result = await recordCommand(
+      parseArgs(['record', 'generic-openai', '--', process.execPath, agent]),
+      new Output({ write: () => {}, isTTY: false }),
+      workspace,
+    );
+    return { runDir: join(workspace, '.orca', 'runs', result.runId), runId: result.runId };
+  }
+
+  /** Everything `orca scrub` said, as one string. */
+  async function scrub(runId: string, match: string): Promise<string> {
+    const lines: string[] = [];
+    await scrubCommand(
+      parseArgs(['scrub', runId, '--match', match]),
+      new Output({ write: (text: string) => lines.push(text), isTTY: false }),
+      workspace,
+    );
+    return lines.join('\n');
+  }
+
   describe('the shell frames transport', () => {
     it('is not in the run directory, and the bootstrap still is', async () => {
       const runDir = await mkdtemp(join(tmpdir(), 'orca-run-'));
@@ -80,13 +116,21 @@ describe('what a run directory is left holding', () => {
       await rm(shim.transportDir, { recursive: true, force: true });
     });
 
-    it('honours an explicit path, which is how doctor keeps its own teardown', async () => {
+    /**
+     * A caller who names the path owns the directory, and orca does not get to delete it.
+     *
+     * This asserted the opposite — `transportDir === runDir` — with a comment calling it fine
+     * because "their cleanup covers it". It does not: `discardShellFrames` is `rm -rf`, and
+     * `record` deletes every registered transport when a run throws. Nothing wired the two
+     * together, so nothing was broken, but the test had written the shape into the specification,
+     * which is where the next person would have read it.
+     */
+    it('claims no transport when the caller named the path', async () => {
       const runDir = await mkdtemp(join(tmpdir(), 'orca-run-'));
       const framesPath = join(runDir, 'shell-frames.jsonl');
       const shim = await installShellShim({ runDir, framesPath });
       expect(shim.framesPath).toBe(framesPath);
-      // The transport is the directory the caller already owns, so their cleanup covers it.
-      expect(shim.transportDir).toBe(runDir);
+      expect(shim.transportDir, 'orca claimed a directory it did not mint').toBeUndefined();
       await rm(runDir, { recursive: true, force: true });
     });
 
@@ -94,9 +138,10 @@ describe('what a run directory is left holding', () => {
       const runDir = await mkdtemp(join(tmpdir(), 'orca-run-'));
       const shim = await installShellShim({ runDir });
       await writeFile(`${shim.framesPath}.late`, '{}\n');
-      expect(await discardShellFrames(shim.transportDir)).toBeUndefined();
-      expect(existsSync(shim.transportDir)).toBe(false);
-      expect(await discardShellFrames(shim.transportDir)).toBeUndefined();
+      const transportDir = shim.transportDir!;
+      expect(await discardShellFrames(transportDir)).toBeUndefined();
+      expect(existsSync(transportDir)).toBe(false);
+      expect(await discardShellFrames(transportDir)).toBeUndefined();
       await rm(runDir, { recursive: true, force: true });
     });
 
@@ -169,6 +214,62 @@ describe('what a run directory is left holding', () => {
       );
       expect(existsSync(shimSpy.minted[0]!), 'the transport directory is still there').toBe(false);
     }, 60_000);
+  });
+
+  /**
+   * A transport outlives its run when orca is killed — `SIGKILL`, `taskkill`, a power cut — because
+   * the drain and the failure path both need orca's own process to still be running. Nothing at
+   * exit can help, so the only thing that ever comes across an orphan is the next run.
+   */
+  describe('transports left by a run that never came back', () => {
+    // In a directory of its own. Sweeping the machine's temp directory with a clock reached
+    // forward takes the live transports of every recording running in parallel — which this test
+    // did, and the suite failed a test file it had never heard of.
+    it('sweeps one older than a day and leaves a live one alone', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'orca-sweep-root-'));
+      const stale = join(root, 'orca-shell-stale');
+      const fresh = join(root, 'orca-spans-fresh');
+      await mkdir(stale);
+      await mkdir(fresh);
+      await writeFile(join(stale, 'shell-frames.jsonl'), '{"argv":["sh","-c","echo hi"]}\n');
+      await writeFile(join(fresh, 'agent-spans.jsonl'), '{"kind":"span"}\n');
+
+      const now = Date.now();
+      const old = new Date(now - 48 * 60 * 60 * 1000);
+      await utimes(stale, old, old);
+
+      expect(await sweepStaleTransports(now, root)).toBe(1);
+      expect(existsSync(stale), 'a two-day-old transport was left behind').toBe(false);
+      expect(existsSync(fresh), 'a transport younger than a day was taken').toBe(true);
+      await rm(root, { recursive: true, force: true });
+    });
+
+    /**
+     * Through `record`, not by calling the sweep: what has to hold is that a recording collects
+     * what a killed one left, and a test that calls the sweep itself keeps passing when nothing
+     * calls it.
+     */
+    it('is what a recording does before anything else', async () => {
+      const orphan = await mkdtemp(join(tmpdir(), 'orca-shell-'));
+      await writeFile(join(orphan, 'shell-frames.jsonl'), '{"argv":["sh","-c","echo hi"]}\n');
+      const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+      await utimes(orphan, old, old);
+
+      await record();
+
+      expect(existsSync(orphan), 'a recording walked past an orphaned transport').toBe(false);
+    }, 60_000);
+
+    it('is silent about a temp directory it has no business in', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'orca-sweep-root-'));
+      const other = join(root, 'not-orca-at-all');
+      await mkdir(other);
+      await writeFile(join(other, 'x'), 'x');
+      await utimes(other, new Date(0), new Date(0));
+      expect(await sweepStaleTransports(Date.now(), root)).toBe(0);
+      expect(existsSync(other), 'the sweep took a directory that was not orca’s').toBe(true);
+      await rm(root, { recursive: true, force: true });
+    });
   });
 
   describe('orca scrub over what it does not rewrite', () => {
@@ -255,6 +356,83 @@ describe('what a run directory is left holding', () => {
       // appear is the warning for files it never opened.
       expect(said, 'scrub named a file it was about to rewrite').not.toContain('not_scrubbed');
     }, 60_000);
+
+    /**
+     * The all-clear must never be printed over a file nobody opened, and every reason a read fails
+     * is a reason to say so: a file another process holds open, a path this user cannot read, a
+     * file past the runtime's string limit. Swallowing them was a clean bill over a file the scan
+     * skipped — the one failure SECURITY.md says a scrubber must not have.
+     *
+     * The fixture is the string-limit one because it is the only portable one: `ftruncate` makes a
+     * sparse file of any size in no time and costs no disk, while a locked file needs Windows and a
+     * mode-zero file needs POSIX.
+     */
+    it('says it could not read a file rather than calling the run clean', async () => {
+      const { runDir, runId } = await record();
+      const handle = await open(join(runDir, 'mcp-frames.jsonl'), 'w');
+      try {
+        await handle.truncate(600 * 1024 * 1024); // past MAX_STRING_LENGTH; sparse, so instant
+      } finally {
+        await handle.close();
+      }
+
+      const said = await scrub(runId, 'sk-whatever0000000000000000000');
+      expect(said, 'a clean bill over a file it could not open').not.toContain('nothing matched');
+      expect(said).toContain('not_searched');
+      expect(said).toContain('mcp-frames.jsonl');
+    }, 60_000);
+
+    /**
+     * Two answers, two messages. "the hostname you named is still in this file" and "this file
+     * contains a base64 image" have different correct next steps, and one sentence serving both
+     * made the alarming case indistinguishable from the routine one — a recorded screenshot trips
+     * the entropy sweep on every MCP run.
+     */
+    it('separates a file holding what was asked for from one the detectors merely flag', async () => {
+      const { runDir, runId } = await record();
+      const frames = join(runDir, 'mcp-frames.jsonl');
+
+      // Nothing but an image: the detectors flag it, the caller never asked about it.
+      const image = randomBytes(400).toString('base64');
+      await writeFile(frames, `${JSON.stringify({ result: { image } })}\n`);
+      const onlyDetected = await scrub(runId, 'sk-absent00000000000000000000');
+      expect(onlyDetected).toContain('not_scrubbed_detected');
+      expect(
+        onlyDetected,
+        'an image was reported as the thing the caller asked to remove',
+      ).not.toContain('not_scrubbed path');
+      expect(onlyDetected).not.toContain('nothing matched');
+
+      // The literal the caller named.
+      const secret = `sk-named${process.pid}abcdefghijklmnop`;
+      await writeFile(frames, `${JSON.stringify({ result: { token: secret } })}\n`);
+      const named = await scrub(runId, secret);
+      expect(named).toContain('not_scrubbed path');
+      expect(named).toContain('still hold what you asked to remove');
+    }, 60_000);
+
+    // POSIX only: NTFS needs an ACL edit to make a directory unlistable, and the suite should not
+    // be editing ACLs. The file case above is portable and covers the same swallow.
+    it.skipIf(process.platform === 'win32')(
+      'says it could not list a directory rather than calling the run clean',
+      async () => {
+        const { runDir, runId } = await record();
+        const hidden = join(runDir, 'logs');
+        await mkdir(hidden);
+        await writeFile(join(hidden, 'agent.log'), 'sk-inthere000000000000000000000\n');
+        await chmod(hidden, 0o000);
+        try {
+          const said = await scrub(runId, 'sk-inthere000000000000000000000');
+          expect(said, 'a clean bill over a directory it could not list').not.toContain(
+            'nothing matched',
+          );
+          expect(said).toContain('not_searched');
+        } finally {
+          await chmod(hidden, 0o700);
+        }
+      },
+      60_000,
+    );
 
     it('still says nothing matched when there is genuinely nothing', async () => {
       const agent = join(workspace, 'agent.mjs');

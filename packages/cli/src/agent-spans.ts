@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -128,6 +128,58 @@ export async function installAgentSpans(runDir: string): Promise<AgentSpanCaptur
   // still lands inside a directory only this user can enter.
   await writeFile(spansPath, '', { flag: 'a', mode: 0o600 }).catch(() => undefined);
   return { spansPath, pythonPath: dir, transportDir };
+}
+
+/** Prefixes of the transport directories orca mints, for {@link sweepStaleTransports}. */
+const TRANSPORT_PREFIXES = ['orca-spans-', 'orca-shell-'];
+
+/** A transport older than this was left by a run that is not coming back. */
+const STALE_TRANSPORT_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Remove transports that outlived the run that made them.
+ *
+ * The drain removes one, and `recordCommand` removes one whose run threw. Neither runs when orca
+ * itself is killed — `SIGKILL`, a `taskkill`, a power cut — and then the directory stays, holding
+ * every command line the agent ran, un-redacted, under a name nobody was ever shown. Deleting
+ * harder at exit does not help, because nothing gets to run at exit; the only thing that can
+ * collect an orphan is the next run.
+ *
+ * A day old, so this can never take a transport out from under a run that is still going. A
+ * recording that has lasted more than a day *and* has not written a shell frame in the last day
+ * would be swept, which is the one case this gets wrong, and it gets it wrong by deleting a
+ * transport whose run has nothing in it.
+ *
+ * Best-effort throughout: a temp directory that cannot be read, or an entry that cannot be removed,
+ * is somebody else's problem and never this run's.
+ *
+ * `root` is a parameter so a test can sweep a directory of its own. It matters more than it looks:
+ * with only `now` to vary, a test that reaches forward in time sweeps every transport on the
+ * machine, including the live ones belonging to whatever else is running — which is exactly what
+ * happened, and the suite caught it.
+ */
+export async function sweepStaleTransports(now = Date.now(), root = tmpdir()): Promise<number> {
+  let swept = 0;
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (!TRANSPORT_PREFIXES.some((prefix) => entry.name.startsWith(prefix))) continue;
+    const path = join(root, entry.name);
+    try {
+      const age = now - (await stat(path)).mtimeMs;
+      if (age < STALE_TRANSPORT_MS) continue;
+      await rm(path, { recursive: true, force: true });
+      swept += 1;
+    } catch {
+      // Another user's, or in use, or already gone. None of those is this run's business.
+    }
+  }
+  return swept;
 }
 
 /**

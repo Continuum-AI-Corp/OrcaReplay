@@ -8,6 +8,7 @@ case and has to be the reliable one.
 from __future__ import annotations
 
 import json
+import time
 import os
 
 import pytest
@@ -222,3 +223,62 @@ def test_a_payload_that_will_not_export_costs_the_span_and_not_the_run(tmp_path)
     record = _one_record(tmp_path, FakeSpan(GuardrailSpanData(None)))
     # Written, because the span type is one the reader wants; empty, because nothing could be read.
     assert record is not None and record["data"] == {}
+
+# ── what one payload may cost ─────────────────────────────────────────────────────────────────────
+#
+# This runs inside the agent's own process, on the SDK's callback. It used to walk every *path*
+# through a payload rather than every node, so shared sub-objects cost 2^n and a reference cycle cost
+# everything: `on_span_end` hung with no error and no output, which is the one thing the module's
+# docstrings promise cannot happen. Doing nothing would have been safer — `json.dumps` rejects a
+# circular reference in microseconds.
+
+
+def test_a_payload_that_refers_to_itself_is_described_rather_than_followed(tmp_path):
+    cycle = {}
+    cycle["a"] = cycle
+    cycle["b"] = cycle  # branching, which is what made it explode rather than merely recurse
+    record = _one_record(
+        tmp_path,
+        FakeSpan(AgentSpanData({"name": cycle, "handoffs": [], "tools": [], "output_type": "s"})),
+    )
+    assert record is not None
+    assert "<circular>" in json.dumps(record["data"])
+
+
+def test_a_payload_larger_than_the_budget_is_truncated_rather_than_written(tmp_path):
+    # Comfortably past _MAX_NODES, and linear either way, so this is fast whether or not the bound
+    # is there — it is the truncation marker that is being asserted, not a stopwatch.
+    wide = [{"n": i} for i in range(20_000)]
+    record = _one_record(
+        tmp_path,
+        FakeSpan(AgentSpanData({"name": wide, "handoffs": [], "tools": [], "output_type": "s"})),
+    )
+    assert record is not None
+    assert "<truncated>" in json.dumps(record["data"])
+
+
+def test_shared_sub_objects_do_not_cost_a_path_each(tmp_path):
+    """Forty shared diamonds, no cycle anywhere. This did not return in twenty seconds."""
+    node = "leaf"
+    for _ in range(40):
+        node = {"l": node, "r": node}
+    started = time.monotonic()
+    record = _one_record(
+        tmp_path,
+        FakeSpan(AgentSpanData({"name": node, "handoffs": [], "tools": [], "output_type": "s"})),
+    )
+    elapsed = time.monotonic() - started
+    assert record is not None
+    # Generous by three orders of magnitude against the 2^40 it was; the claim is the shape of the
+    # curve, not a stopwatch.
+    assert elapsed < 10, f"describing a shared structure took {elapsed:.1f}s"
+
+
+def test_an_ordinary_payload_is_still_written_whole(tmp_path):
+    payload = {"a": {"b": {"c": [1, 2, {"d": "ok"}]}}}
+    record = _one_record(
+        tmp_path,
+        FakeSpan(AgentSpanData({"name": payload, "handoffs": [], "tools": [], "output_type": "s"})),
+    )
+    assert record is not None
+    assert record["data"]["name"] == payload

@@ -27,8 +27,9 @@ Measured on a two-agent run with a handoff and a guardrail — the same script r
 The middle row is the sharp one. The SDK implements a handoff as a function tool named
 `transfer_to_<agent>`, so the proxy records an ordinary tool call and an ordinary next request. A
 rule could *guess* a handoff from that name — but a user tool may be called the same thing, and the
-agent it came **from** never reaches the wire at all. `orca graph` already distinguishes what a
-trace records from what a rule infers; this moves handoffs into the first column.
+agent it came **from** never reaches the wire at all. So a handoff is recorded rather than
+inferred: `orca show` and `orca events` name both ends, which nothing reading the wire could have
+told you.
 
 Guardrails are the plainest case: one that passes need make no request whatsoever, so it leaves
 nothing on the wire to reconstruct from.
