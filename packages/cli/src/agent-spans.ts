@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -127,14 +127,19 @@ export async function installAgentSpans(runDir: string): Promise<AgentSpanCaptur
   // Best-effort: an unwritable transport must not stop the run, and the child creating it instead
   // still lands inside a directory only this user can enter.
   await writeFile(spansPath, '', { flag: 'a', mode: 0o600 }).catch(() => undefined);
+  // Who to ask about later. A sweep that finds this directory after orca is gone has no other way
+  // to tell an abandoned transport from one a longer run is still appending to.
+  await writeFile(join(transportDir, TRANSPORT_OWNER), String(process.pid), {
+    mode: 0o600,
+  }).catch(() => undefined);
   return { spansPath, pythonPath: dir, transportDir };
 }
 
 /** Prefixes of the transport directories orca mints, for {@link sweepStaleTransports}. */
 const TRANSPORT_PREFIXES = ['orca-spans-', 'orca-shell-'];
 
-/** A transport older than this was left by a run that is not coming back. */
-const STALE_TRANSPORT_MS = 24 * 60 * 60 * 1000;
+/** Names the process that minted a transport, so a sweep can ask whether it is still running. */
+export const TRANSPORT_OWNER = 'owner.pid';
 
 /**
  * Remove transports that outlived the run that made them.
@@ -145,20 +150,24 @@ const STALE_TRANSPORT_MS = 24 * 60 * 60 * 1000;
  * harder at exit does not help, because nothing gets to run at exit; the only thing that can
  * collect an orphan is the next run.
  *
- * A day old, so this can never take a transport out from under a run that is still going. A
- * recording that has lasted more than a day *and* has not written a shell frame in the last day
- * would be swept, which is the one case this gets wrong, and it gets it wrong by deleting a
- * transport whose run has nothing in it.
+ * **Whose it is, not how old it is.** Age was the first answer and it was wrong: a transport
+ * directory's mtime is set when `mkdtemp` creates it and never moves again, because everything
+ * after that is an *append* to the one file inside, and appending does not touch the containing
+ * directory. So "older than a day" meant "this recording started more than a day ago", and any
+ * other `orca record` on the machine would collect the live transport of a recording still in
+ * progress — after which that run silently captures nothing, because both writers swallow their
+ * errors by design.
  *
- * Best-effort throughout: a temp directory that cannot be read, or an entry that cannot be removed,
- * is somebody else's problem and never this run's.
+ * The owner's pid is the honest signal, and it fails in the right direction. A pid that has been
+ * reused leaves an orphan behind; a clock that has run on deletes a live run's data. Only one of
+ * those is recoverable.
  *
- * `root` is a parameter so a test can sweep a directory of its own. It matters more than it looks:
- * with only `now` to vary, a test that reaches forward in time sweeps every transport on the
- * machine, including the live ones belonging to whatever else is running — which is exactly what
- * happened, and the suite caught it.
+ * Best-effort throughout: a directory with no owner is left alone rather than guessed at, a
+ * directory that cannot be read is somebody else's problem, and nothing here is ever fatal.
+ *
+ * `root` is a parameter so a test can sweep a directory of its own rather than the machine's.
  */
-export async function sweepStaleTransports(now = Date.now(), root = tmpdir()): Promise<number> {
+export async function sweepStaleTransports(root = tmpdir()): Promise<number> {
   let swept = 0;
   let entries;
   try {
@@ -171,15 +180,37 @@ export async function sweepStaleTransports(now = Date.now(), root = tmpdir()): P
     if (!TRANSPORT_PREFIXES.some((prefix) => entry.name.startsWith(prefix))) continue;
     const path = join(root, entry.name);
     try {
-      const age = now - (await stat(path)).mtimeMs;
-      if (age < STALE_TRANSPORT_MS) continue;
+      const owner = Number.parseInt(await readFile(join(path, TRANSPORT_OWNER), 'utf8'), 10);
+      // No owner recorded: not one of ours, or one we cannot reason about. Either way, not ours to
+      // delete.
+      // `<= 0` is not tidiness: `process.kill(0, …)` addresses this process's whole group and
+      // `-1` addresses every process a user may signal, so a malformed owner must never reach the
+      // probe.
+      if (!Number.isInteger(owner) || owner <= 0) continue;
+      if (isRunning(owner)) continue;
       await rm(path, { recursive: true, force: true });
       swept += 1;
     } catch {
-      // Another user's, or in use, or already gone. None of those is this run's business.
+      // Unreadable, in use, or already gone. None of those is this run's business.
     }
   }
   return swept;
+}
+
+/**
+ * Whether a process with this id exists.
+ *
+ * Signal `0` performs the permission and existence checks without delivering anything. `EPERM`
+ * means it is there and belongs to somebody else, which still counts as running — the point is
+ * never to delete a transport whose owner might still be writing to it.
+ */
+function isRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
 }
 
 /**

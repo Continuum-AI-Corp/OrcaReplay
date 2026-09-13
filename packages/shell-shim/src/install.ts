@@ -95,6 +95,15 @@ export async function installShellShim(options: InstallOptions): Promise<Install
     await chmod(path, 0o755);
   }
 
+  if (transportDir !== undefined) {
+    // Who to ask about later: orca's sweep decides an abandoned transport by whether the process
+    // that minted it is still running, because the directory's own mtime stops moving the moment
+    // it is created — every frame after that is an append to the file inside it.
+    await writeFile(join(transportDir, 'owner.pid'), String(process.pid), { mode: 0o600 }).catch(
+      () => undefined,
+    );
+  }
+
   await writeFile(framesPath, '', { flag: 'a', mode: 0o600 }).catch(() => {
     // An unwritable frames file must not stop the run; the shim swallows write errors too.
   });
