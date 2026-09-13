@@ -1,4 +1,5 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 /**
@@ -95,14 +96,54 @@ export interface AgentSpanCapture {
   spansPath: string;
   /** Prepended to PYTHONPATH so Python finds the bootstrap. */
   pythonPath: string;
+  /** The directory holding {@link spansPath}, for {@link discardAgentSpanTransport}. */
+  transportDir: string;
 }
 
-/** Write the bootstrap into the run directory and say how to point a child at it. */
+/**
+ * Write the bootstrap into the run directory and say how to point a child at it.
+ *
+ * The spans file is **not** in the run directory, and that is the point. It is a transport: orca
+ * reads it once, turns what it needs into events, and those go to disk through `TraceWriter`, which
+ * redacts. The file itself is written by the agent's own interpreter, so nothing orca owns can
+ * redact it on the way in — and while it sat in the run directory that made it a sink the write path
+ * never touched, `orca scrub` never rewrote (it reaches `events.jsonl`, the manifest and the blobs,
+ * and nothing else), and nobody deleted, in a directory people share. `orca scrub --match <secret>`
+ * over such a run printed "nothing matched — the trace is unchanged" with the secret still beside
+ * the trace, which is the one failure mode SECURITY.md says a scrubber must not have.
+ *
+ * Somewhere orca owns fixes it. `mkdtemp` gives a directory only this user can enter, with a name
+ * nobody can guess ahead of it, and {@link discardAgentSpanTransport} takes the whole thing away
+ * when the run is done. The file is pre-created here rather than left to the child, so it carries
+ * the 0600 SECURITY.md promises instead of whatever the agent's umask happens to be — the same thing
+ * the shell shim does with its frames file, for the same reason.
+ */
 export async function installAgentSpans(runDir: string): Promise<AgentSpanCapture> {
   const dir = join(runDir, 'py');
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, SITECUSTOMIZE), SITECUSTOMIZE_SOURCE, 'utf8');
-  return { spansPath: join(runDir, SPANS_FILENAME), pythonPath: dir };
+  const transportDir = await mkdtemp(join(tmpdir(), 'orca-spans-'));
+  const spansPath = join(transportDir, SPANS_FILENAME);
+  // Best-effort: an unwritable transport must not stop the run, and the child creating it instead
+  // still lands inside a directory only this user can enter.
+  await writeFile(spansPath, '', { flag: 'a', mode: 0o600 }).catch(() => undefined);
+  return { spansPath, pythonPath: dir, transportDir };
+}
+
+/**
+ * Take the transport away once it has been read.
+ *
+ * The directory, not the file: the whole point of minting one was that nothing else is in it, and
+ * removing the directory also takes anything a stray writer created beside the file after the drain.
+ * Returns a message rather than throwing — a run that produced a trace must not fail at teardown.
+ */
+export async function discardAgentSpanTransport(dir: string): Promise<string | undefined> {
+  try {
+    await rm(dir, { recursive: true, force: true });
+    return undefined;
+  } catch (err) {
+    return String(err);
+  }
 }
 
 /** PYTHONPATH with our directory in front, keeping whatever was already there. */

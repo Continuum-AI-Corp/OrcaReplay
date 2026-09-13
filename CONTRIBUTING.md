@@ -74,7 +74,12 @@ The highest-value contributions, in order:
 - **Replay never silently approximates.** If a match is inexact, emit a `divergence` event. A
   debugger that quietly guesses is worse than no debugger, because you will believe it.
 - **Secrets never reach disk or a TTY.** Redaction lives in the write path. If you add a new sink,
-  it goes through the redactor.
+  it goes through the redactor. If it *cannot* — a file written by the agent's own process is the
+  case that exists — then it is not a sink: keep it out of the run directory, write an allow-list of
+  the fields something actually reads rather than whatever the payload happens to hold, and delete
+  it once it has been read. A file the write path never touches is also a file `orca scrub` never
+  rewrites, and a scrubber that reports "nothing matched" over a secret it never looked at is the
+  one failure mode SECURITY.md says it must not have.
 - **A new field is a new sink.** The redactor works on payloads derived from the incoming request,
   so a value sourced from anywhere else — configuration, a flag, an environment variable — arrives
   having bypassed it. Adding an attribute, ask where its value comes from and whether that source

@@ -31,6 +31,18 @@ class ResponseSpanData(FakeSpanData):
     pass
 
 
+class AgentSpanData(FakeSpanData):
+    pass
+
+
+class FunctionSpanData(FakeSpanData):
+    pass
+
+
+class CustomSpanData(FakeSpanData):
+    pass
+
+
 class FakeSpan:
     def __init__(self, data):
         self.span_data = data
@@ -132,3 +144,81 @@ def test_keep_export_appends_instead(monkeypatch, tmp_path):
 
     assert install() is True
     assert installed and installed[0][0] == "add"
+
+# ── what reaches the file, and what does not ──────────────────────────────────────────────────────
+#
+# The file is written by the agent's own interpreter, so nothing orca owns can redact it on the way
+# in. That leaves one control: do not write it. These pin the allow-list in both directions, because
+# a list that let everything through and a list that let nothing through would both have passed the
+# suite this replaced.
+
+
+def _one_record(tmp_path, span, monkeypatch=None):
+    path = tmp_path / "spans.jsonl"
+    p = OrcaTracingProcessor(str(path))
+    p.on_span_end(span)
+    if not path.exists():
+        return None
+    lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l]
+    return json.loads(lines[0]) if lines else None
+
+
+SECRET = "sk-canary0123456789abcdefghijklmn"
+
+
+@pytest.mark.parametrize("data", [FunctionSpanData, CustomSpanData])
+def test_a_span_type_nothing_reads_is_not_written_at_all(tmp_path, data):
+    """The reader maps three span types. The other span types carry the payload.
+
+    `FunctionSpanData` holds a tool's input, output and `mcp_data`; `CustomSpanData` holds whatever
+    the user put in it. Both used to be written verbatim, and `eventForSpan` threw both away -- so
+    the file carried material the trace never kept and nothing could remove.
+    """
+    span = FakeSpan(data({"name": "run_shell", "output": SECRET, "mcp_data": {"key": SECRET}}))
+    assert _one_record(tmp_path, span) is None
+
+
+def test_an_allowed_span_carries_only_the_fields_the_reader_reads(tmp_path):
+    span = FakeSpan(
+        AgentSpanData(
+            {
+                "name": "Triage",
+                "handoffs": ["Billing"],
+                "tools": ["run_shell"],
+                "output_type": "str",
+                # Not in the list, so not written -- the SDK is free to add fields and this file is
+                # not free to carry them.
+                "instructions": SECRET,
+            }
+        )
+    )
+    record = _one_record(tmp_path, span)
+    assert record is not None
+    assert set(record["data"]) == {"name", "handoffs", "tools", "output_type"}
+    assert SECRET not in json.dumps(record)
+
+
+def test_the_error_object_is_never_written(tmp_path):
+    """`SpanError.data` is a free-form dict: a tool's input, an API error echoed back.
+
+    Nothing read it -- `AgentSpan.error` is declared on the reader side and never used -- so writing
+    it was payload for no reader at all.
+    """
+    span = FakeSpan(HandoffSpanData({"from_agent": "a", "to_agent": "b"}))
+    span.error = {"message": "boom", "data": {"echoed": SECRET}}
+    record = _one_record(tmp_path, span)
+    assert record is not None
+    assert "error" not in record
+    assert SECRET not in json.dumps(record)
+
+
+def test_a_payload_that_will_not_export_costs_the_span_and_not_the_run(tmp_path):
+    # Named for an allowed type, or the allow-list would be what dropped it and this would pass
+    # without exercising the export guard at all.
+    class GuardrailSpanData(FakeSpanData):
+        def export(self):
+            raise RuntimeError("no")
+
+    record = _one_record(tmp_path, FakeSpan(GuardrailSpanData(None)))
+    # Written, because the span type is one the reader wants; empty, because nothing could be read.
+    assert record is not None and record["data"] == {}

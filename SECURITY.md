@@ -29,6 +29,12 @@ What we do:
   that generalises: `id_ecdsa` is not on it. A shape we miss is a bug worth filing — there is an
   issue template for exactly that.
 - Trace files and blobs are written mode `0600`, run directories `0700`.
+- A capture layer that runs *inside* the agent's own process cannot be redacted on the way in, so
+  it does not write into the run directory at all. The OpenAI Agents tracing layer is the one that
+  exists today: it writes to a private temporary directory, orca reads it once and appends what it
+  keeps through the redactor like anything else, and the temporary directory is removed when the
+  run ends. What that layer writes is an allow-list of structural fields — agent and tool names,
+  which agent handed off to which, whether a guardrail tripped — never a tool's input or output.
 - The recorder opens no network connection of its own and sends no telemetry. It passes through
   only what your agent was already sending.
 - The recording proxy binds `127.0.0.1`, and the local viewer binds loopback only — it refuses any

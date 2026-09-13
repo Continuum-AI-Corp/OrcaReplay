@@ -49,9 +49,49 @@ from typing import Any
 # nothing at all — which is what makes it safe to leave installed.
 SPANS_ENV = "ORCA_AGENT_SPANS"
 
-#: Span types the proxy already has, byte for byte. Recording them again would be a second and worse
-#: copy of the model conversation.
-REDUNDANT = frozenset({"ResponseSpanData", "GenerationSpanData"})
+#: What gets written, per span type: the span types `eventForSpan` turns into events, and for each
+#: one only the fields it reads.
+#:
+#: An allow-list rather than the skip-list this began as. Skipping `ResponseSpanData` and
+#: `GenerationSpanData` — the two the proxy already has byte for byte — kept the file from being a
+#: second copy of the model conversation, but it let through every *other* span type and every field
+#: of each: `FunctionSpanData`'s `input`/`output`/`mcp_data`, `CustomSpanData`'s arbitrary user
+#: payload, `MCPListToolsSpanData`, the transcription and speech spans with their base64 audio. That
+#: is the material the write-path redactor exists to strip, and the reader threw all of it away
+#: anyway: `eventForSpan` maps three span types and returns `undefined` for the rest.
+#:
+#: So the rule is that this file carries what something reads, and nothing else. A sink that writes a
+#: superset of what anything consumes is a sink that has to be protected for no benefit.
+WRITTEN: dict[str, tuple[str, ...]] = {
+    "AgentSpanData": ("name", "handoffs", "tools", "output_type"),
+    "HandoffSpanData": ("from_agent", "to_agent"),
+    "GuardrailSpanData": ("name", "triggered"),
+}
+
+
+def _kept(data: Any, fields: tuple[str, ...]) -> dict[str, Any]:
+    """The listed fields of a span's payload, and only those.
+
+    Read off `export()` where the SDK offers one, because that is the shape the reader was written
+    against; `getattr` is the fallback for a payload object that does not implement it. A field that
+    is absent is omitted rather than written as `null`, so a reader cannot tell "the SDK did not
+    provide it" from "we chose not to write it" — it never had to.
+    """
+    export = getattr(data, "export", None)
+    source: Any = {}
+    if callable(export):
+        try:
+            source = export() or {}
+        except Exception:  # noqa: BLE001 - a payload that will not export must not end the run
+            source = {}
+    out: dict[str, Any] = {}
+    for field in fields:
+        value = source.get(field) if isinstance(source, dict) else None
+        if value is None:
+            value = getattr(data, field, None)
+        if value is not None:
+            out[field] = _plain(value)
+    return out
 
 
 def _plain(value: Any) -> Any:
@@ -129,9 +169,9 @@ class OrcaTracingProcessor:
     def on_span_end(self, span: Any) -> None:
         data = getattr(span, "span_data", None)
         type_name = type(data).__name__ if data is not None else "unknown"
-        if type_name in REDUNDANT:
+        fields = WRITTEN.get(type_name)
+        if fields is None:
             return
-        export = getattr(data, "export", None)
         self._write(
             {
                 "kind": "span",
@@ -141,8 +181,14 @@ class OrcaTracingProcessor:
                 "trace_id": getattr(span, "trace_id", None),
                 "started_at": getattr(span, "started_at", None),
                 "ended_at": getattr(span, "ended_at", None),
-                "error": _plain(getattr(span, "error", None)),
-                "data": _plain(export() if callable(export) else {}),
+                # No `error`. The SDK's `SpanError` carries a free-form `data` dict — a tool's
+                # input, an API error echoed back, a guardrail's `output_info` — and `_plain` walks
+                # it deeply, so writing it puts exactly the payload here that `WRITTEN` exists to
+                # keep out. Nothing read it either: `eventForSpan` maps three types and their listed
+                # fields, and `AgentSpan.error` on the reader side is declared and never used. If
+                # "this span failed" is ever wanted, whitelist a derived scalar rather than the SDK's
+                # object — a field nothing reads is how the payload got in.
+                "data": _kept(data, fields),
             }
         )
 

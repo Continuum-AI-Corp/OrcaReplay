@@ -17,6 +17,7 @@ import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js
 import { installShellShim, readShellFrames } from '@orcareplay/shell-shim';
 import {
   eventForSpan,
+  discardAgentSpanTransport,
   installAgentSpans,
   pythonPathWith,
   readAgentSpans,
@@ -495,7 +496,14 @@ async function runRecording(
     // Timestamped from the span, like the shell frames above and for the same reason: these are
     // read off disk after the agent exited, so stamping them now would file every handoff at the
     // end of the run rather than between the turns it happened between.
-    for (const span of await readAgentSpans(agentSpans.spansPath)) {
+    const spans = await readAgentSpans(agentSpans.spansPath);
+    // Read, then gone. Everything the trace keeps from this file is about to be appended through
+    // `writer.append`, which redacts; what is left on disk afterwards is a copy nothing reads and
+    // nothing scrubs. Before the appends rather than after, so an append that throws still takes
+    // the transport with it.
+    const spansLeft = await discardAgentSpanTransport(agentSpans.transportDir);
+    if (spansLeft !== undefined) out.warn('agent_spans.not_removed', { reason: spansLeft });
+    for (const span of spans) {
       const derived = eventForSpan(span);
       if (derived === undefined) continue;
       const startedAt = Date.parse(String(span.started_at ?? ''));

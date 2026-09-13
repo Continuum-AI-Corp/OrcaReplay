@@ -1,9 +1,14 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { validateEvent } from '@orcareplay/schema';
 import {
+  discardAgentSpanTransport,
   eventForSpan,
   installAgentSpans,
   pythonPathWith,
@@ -11,6 +16,13 @@ import {
   SITECUSTOMIZE,
   SITECUSTOMIZE_SOURCE,
 } from '../src/agent-spans.js';
+import { parseArgs } from '../src/args.js';
+import { recordCommand } from '../src/commands/record.js';
+import { Output } from '../src/out.js';
+
+const here = dirname(fileURLToPath(import.meta.url));
+let seq = 0;
+const result_seq = () => (seq += 1);
 
 let dir: string;
 beforeEach(async () => {
@@ -170,4 +182,175 @@ describe('pythonPathWith', () => {
     expect(pythonPathWith('/orca', undefined, ':')).toBe('/orca');
     expect(pythonPathWith('/orca', '', ':')).toBe('/orca');
   });
+});
+
+/**
+ * The transport is not part of the trace, and the tests say so in both directions.
+ *
+ * It is written by the agent's own interpreter, so nothing orca owns can redact it on the way in.
+ * While it sat in the run directory that made it a sink the write path never touched, `orca scrub`
+ * never rewrote — it reaches `events.jsonl`, the manifest and the blobs, and nothing else — and
+ * nobody deleted. A run whose secret was only in that file answered `orca scrub --match` with
+ * "nothing matched — the trace is unchanged", which SECURITY.md calls the one failure a scrubber
+ * must not have.
+ */
+describe('the spans transport is not in the trace', () => {
+  const exec = promisify(execFile);
+  let workspace: string;
+
+  beforeEach(async () => {
+    workspace = await mkdtemp(join(tmpdir(), 'orca-transport-'));
+    await exec('git', ['init', '-q'], { cwd: workspace });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: workspace });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: workspace });
+  });
+
+  afterEach(async () => {
+    await rm(workspace, { recursive: true, force: true });
+  });
+
+  it('puts the transport outside the run directory, and the bootstrap inside', async () => {
+    const runDir = await mkdtemp(join(tmpdir(), 'orca-run-'));
+    const capture = await installAgentSpans(runDir);
+    expect(capture.spansPath.startsWith(runDir), 'the transport is in the run directory').toBe(
+      false,
+    );
+    expect(capture.transportDir.startsWith(runDir)).toBe(false);
+    expect(capture.pythonPath.startsWith(runDir), 'the bootstrap belongs with the run').toBe(true);
+    // Existence, not mode: the mode assertion below can only run on POSIX, and without this a
+    // pre-create that stopped happening would be caught on Linux and nowhere else.
+    expect(existsSync(capture.spansPath), 'orca did not create the transport itself').toBe(true);
+    await rm(runDir, { recursive: true, force: true });
+    await rm(capture.transportDir, { recursive: true, force: true });
+  });
+
+  // POSIX only, for the reason writer.test.ts states: NTFS has no mode bits, so `stat` answers
+  // 0o666 whatever was asked for. Skipped rather than loosened.
+  it.skipIf(process.platform === 'win32')(
+    'creates the transport 0600 rather than leaving it to the agent’s umask',
+    async () => {
+      const runDir = await mkdtemp(join(tmpdir(), 'orca-run-'));
+      const capture = await installAgentSpans(runDir);
+      // SECURITY.md: "Trace files and blobs are written mode 0600."
+      expect((await stat(capture.spansPath)).mode & 0o777).toBe(0o600);
+      await rm(runDir, { recursive: true, force: true });
+      await rm(capture.transportDir, { recursive: true, force: true });
+    },
+  );
+
+  it('discardAgentSpanTransport takes the directory, not a listing of it', async () => {
+    const runDir = await mkdtemp(join(tmpdir(), 'orca-run-'));
+    const capture = await installAgentSpans(runDir);
+    // A producer that appeared after any listing would have been taken with it.
+    await writeFile(`${capture.spansPath}.9999`, '{}\n');
+    expect(await discardAgentSpanTransport(capture.transportDir)).toBeUndefined();
+    expect(existsSync(capture.transportDir)).toBe(false);
+    await rm(runDir, { recursive: true, force: true });
+  });
+
+  it('reports rather than throws when the transport cannot be removed', async () => {
+    expect(await discardAgentSpanTransport(join(tmpdir(), 'orca-spans-never-existed'))).toBe(
+      undefined,
+    );
+  });
+
+  /**
+   * End to end, which is the only level at which "nothing is left in the trace" can be asserted:
+   * the agent writes a span carrying a credential, and afterwards the run directory holds neither
+   * the file nor the credential — while the events it was for are still in `events.jsonl`.
+   */
+  it('leaves no spans file and no payload in the run directory, and still records the events', async () => {
+    const pkg = join(here, '..', '..', '..', 'python-openai-agents');
+    const secret = 'sk-transportcanary0123456789abcd';
+    // Unique to this run, and one of the fields the allow-list does keep — so it is present in the
+    // transport while the transport exists, which is what makes its absence afterwards meaningful.
+    const marker = `Triage-${process.pid}-${result_seq()}`;
+    const agent = join(workspace, 'agent.py');
+    await writeFile(
+      agent,
+      [
+        'import os, sys',
+        `sys.path.insert(0, ${JSON.stringify(pkg)})`,
+        'from orcareplay_openai_agents import OrcaTracingProcessor',
+        'secret = os.environ["CANARY"]',
+        'class AgentSpanData:',
+        '    def export(self):',
+        `        return {"name": ${JSON.stringify(marker)}, "handoffs": ["Billing"], "tools": ["t"],`,
+        '                "output_type": "str", "instructions": secret}',
+        'class FunctionSpanData:',
+        '    def export(self):',
+        '        return {"name": "run_shell", "output": secret}',
+        'class Span:',
+        '    def __init__(self, d, i):',
+        '        self.span_data = d; self.span_id = i; self.parent_id = None; self.trace_id = "t"',
+        '        self.started_at = "2026-09-13T00:00:00+00:00"',
+        '        self.ended_at = "2026-09-13T00:00:01+00:00"',
+        '        self.error = {"data": {"echoed": secret}}',
+        'p = OrcaTracingProcessor()',
+        'p.on_span_end(Span(AgentSpanData(), "a"))',
+        'p.on_span_end(Span(FunctionSpanData(), "f"))',
+        'print("GOT: done")',
+      ].join('\n'),
+    );
+
+    const out = new Output({ write: () => {}, isTTY: false });
+    const previous = process.env['CANARY'];
+    process.env['CANARY'] = secret;
+    let result;
+    try {
+      result = await recordCommand(
+        parseArgs(['record', 'generic-openai', '--', 'python', agent]),
+        out,
+        workspace,
+      );
+    } finally {
+      if (previous === undefined) delete process.env['CANARY'];
+      else process.env['CANARY'] = previous;
+    }
+    expect(result.runId).toBeTruthy();
+
+    const runDir = join(workspace, '.orca', 'runs', result.runId);
+    const left = await readdir(runDir);
+    expect(
+      left.filter((f) => f.startsWith('agent-spans')),
+      'the transport is in the trace',
+    ).toEqual([]);
+
+    const holders: string[] = [];
+    const walk = async (dir: string): Promise<void> => {
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) await walk(full);
+        else {
+          const text = await readFile(full, 'utf8').catch(() => '');
+          if (text.includes(secret)) holders.push(full.slice(runDir.length + 1));
+        }
+      }
+    };
+    await walk(runDir);
+    expect(holders, 'the credential reached the run directory').toEqual([]);
+
+    // The transport is outside the run directory, so "nothing left in the trace" cannot see it
+    // being left behind. Look where it actually lives. The marker is the agent's name rather than
+    // the credential, because the allow-list means the credential never reaches the file even when
+    // the file survives — so a canary would answer the wrong question.
+    const temp = tmpdir();
+    const strays: string[] = [];
+    for (const entry of await readdir(temp, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith('orca-spans-')) continue;
+      const file = join(temp, entry.name, 'agent-spans.jsonl');
+      const text = await readFile(file, 'utf8').catch(() => '');
+      if (text.includes(marker)) strays.push(file);
+    }
+    expect(strays, 'the transport outlived the run').toEqual([]);
+
+    // And the layer still did its job.
+    const events = await readFile(join(runDir, 'events.jsonl'), 'utf8');
+    const types = events
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => (JSON.parse(line) as { type: string }).type);
+    expect(types).toContain('agent.start');
+    expect(events).toContain(marker);
+  }, 60_000);
 });
