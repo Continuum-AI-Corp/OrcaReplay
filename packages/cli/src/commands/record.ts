@@ -14,7 +14,7 @@ import {
 import { captureSession, defaultAdapters, resolveLaunch, snapshotDir } from '@orcareplay/adapters';
 import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
-import { installShellShim, readShellFrames } from '@orcareplay/shell-shim';
+import { discardShellFrames, installShellShim, readShellFrames } from '@orcareplay/shell-shim';
 import {
   eventForSpan,
   discardAgentSpanTransport,
@@ -77,11 +77,18 @@ export async function recordCommand(
   cwd = process.cwd(),
 ): Promise<RecordResult> {
   const minted: RunCa[] = [];
+  // Transport directories, disposed here if the run throws before their drain reaches them. Both
+  // hold material written by a process orca does not own — the agent's shells, the agent's own
+  // interpreter — and a run that dies partway must not leave either behind.
+  const transports: string[] = [];
   try {
-    return await runRecording(args, out, cwd, minted);
+    return await runRecording(args, out, cwd, minted, transports);
   } catch (err) {
     for (const ca of minted) {
       await ca.dispose().catch(() => undefined);
+    }
+    for (const dir of transports) {
+      await discardShellFrames(dir).catch(() => undefined);
     }
     throw err;
   }
@@ -92,6 +99,7 @@ async function runRecording(
   out: Output,
   cwd: string,
   minted: RunCa[],
+  transports: string[],
 ): Promise<RecordResult> {
   const registry = defaultAdapters();
   const agentName = args.positionals[0];
@@ -192,6 +200,7 @@ async function runRecording(
   if (args.bool('shell', true)) {
     try {
       shell = await installShellShim({ runDir: writer.runDir });
+      transports.push(shell.transportDir);
     } catch (err) {
       // Same posture as filesystem capture: degrade the trace, never abort the run.
       out.warn('shell.unavailable', { reason: String(err) });
@@ -207,6 +216,7 @@ async function runRecording(
   if (args.bool('agent-spans', true)) {
     try {
       agentSpans = await installAgentSpans(writer.runDir);
+      transports.push(agentSpans.transportDir);
     } catch (err) {
       // Same posture as the other optional layers: degrade the trace, never abort the run.
       out.warn('agent_spans.unavailable', { reason: String(err) });
@@ -462,6 +472,12 @@ async function runRecording(
     // the final turn number — which makes `mono_us` describe the drain rather than the command,
     // and leaves the commands unable to interleave with the model turns they happened between.
     const frames = await readShellFrames(shell.framesPath);
+    // Read, then gone, for the same reason the spans transport is: every frame is about to be
+    // appended through `writer.append`, which redacts, and what is left on disk afterwards is a
+    // verbatim copy of every command line the agent ran that nothing reads and `orca scrub` never
+    // rewrites. Before the appends rather than after, so an append that throws still takes it.
+    const framesLeft = await discardShellFrames(shell.transportDir);
+    if (framesLeft !== undefined) out.warn('shell_frames.not_removed', { reason: framesLeft });
     shellFrames = frames.length;
     for (const frame of frames) {
       const startedAt = Date.parse(frame.startedAt);

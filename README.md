@@ -719,7 +719,6 @@ self-describing thing:
     events.jsonl      # the timeline, one JSON object per line, append-only
     blobs/            # content-addressed payloads over 4 KB, deduplicated
     fs/               # shadow git index: the workspace at every turn
-    shell-frames.jsonl
     redactions.json   # what was removed, by rule and count — never by value
 ```
 

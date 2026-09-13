@@ -1,6 +1,7 @@
-import { access, chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { ShellFrame } from './runner.js';
 
 /**
@@ -15,7 +16,20 @@ export const DEFAULT_SHIMS = ['sh', 'bash', 'zsh'] as const;
 
 export interface InstallOptions {
   runDir: string;
-  /** Defaults to `<runDir>/shell-frames.jsonl`. */
+  /**
+   * Defaults to a private temporary directory, not the run directory.
+   *
+   * The frames file is a transport: orca reads it once, turns each frame into a `shell.*` event,
+   * and those reach disk through `TraceWriter`, which redacts. The file itself is written by the
+   * shim running inside the agent's own shell invocations, so nothing orca owns can redact it on
+   * the way in — and a frame carries `argv` and `cwd` verbatim, which is the most secret-dense
+   * text in a run: `curl -H 'Authorization: Bearer …'`, `git clone https://user:token@host/…`,
+   * an inline `AWS_SECRET_ACCESS_KEY=…`.
+   *
+   * While it sat in the run directory that made it a sink the write path never touched, `orca
+   * scrub` never rewrote, and nobody deleted — so `orca scrub --match <secret>` answered "nothing
+   * matched — the trace is unchanged" with the secret still beside the trace.
+   */
   framesPath?: string;
   shims?: readonly string[];
 }
@@ -24,6 +38,8 @@ export interface InstalledShim {
   /** Prepend this to PATH. */
   dir: string;
   framesPath: string;
+  /** The directory holding {@link framesPath}, for {@link discardShellFrames}. */
+  transportDir: string;
   shimmed: string[];
   /** Environment overlay the child needs for the shims to work. */
   env: Record<string, string>;
@@ -38,7 +54,10 @@ export interface InstalledShim {
  */
 export async function installShellShim(options: InstallOptions): Promise<InstalledShim> {
   const dir = join(options.runDir, 'shims');
-  const framesPath = options.framesPath ?? join(options.runDir, 'shell-frames.jsonl');
+  const transportDir = options.framesPath
+    ? dirname(options.framesPath)
+    : await mkdtemp(join(tmpdir(), 'orca-shell-'));
+  const framesPath = options.framesPath ?? join(transportDir, 'shell-frames.jsonl');
   const shims = options.shims ?? DEFAULT_SHIMS;
 
   await mkdir(dir, { recursive: true });
@@ -74,12 +93,29 @@ export async function installShellShim(options: InstallOptions): Promise<Install
   return {
     dir,
     framesPath,
+    transportDir,
     shimmed: [...shims],
     env: { ORCA_SHIM_DIR: dir, ORCA_SHIM_FRAMES: framesPath },
   };
 }
 
 /** Read back what the shims observed. Tolerates a partial final line, like events.jsonl. */
+/**
+ * Take the transport away once it has been read.
+ *
+ * The directory, not the file: nothing else was ever put in it, and removing the directory also
+ * takes anything a shell that outlived the run wrote beside the file afterwards. Returns a message
+ * rather than throwing — a run that produced a trace must not fail at teardown.
+ */
+export async function discardShellFrames(dir: string): Promise<string | undefined> {
+  try {
+    await rm(dir, { recursive: true, force: true });
+    return undefined;
+  } catch (err) {
+    return String(err);
+  }
+}
+
 export async function readShellFrames(framesPath: string): Promise<ShellFrame[]> {
   const raw = await readFile(framesPath, 'utf8').catch(() => '');
   const frames: ShellFrame[] = [];

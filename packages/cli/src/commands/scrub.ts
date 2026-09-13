@@ -214,9 +214,9 @@ export async function scrubCommand(
     filesChanged += 1;
   }
 
-  const fs = await handleShadowStore(runDir, args.bool('drop-fs'), dryRun, (text) => {
-    return scrubText(text).value !== text;
-  });
+  const matches = (text: string): boolean => scrubText(text).value !== text;
+  const fs = await handleShadowStore(runDir, args.bool('drop-fs'), dryRun, matches);
+  const rest = await scanUnscrubbed(runDir, matches);
 
   const integrity = manifest.integrity;
   if (isRecord(integrity) && (eventsRewritten || moved.size > 0)) {
@@ -293,10 +293,18 @@ export async function scrubCommand(
     for (const path of stale) await rm(path, { force: true });
     out.phase('scrubbed', { run: runDir, removed: removals, files: filesChanged });
   }
-  if (removals === 0 && reverted === 0 && fs.matches === 0 && fs.unreadable === undefined) {
+  if (
+    removals === 0 &&
+    reverted === 0 &&
+    fs.matches === 0 &&
+    fs.unreadable === undefined &&
+    rest.files.length === 0 &&
+    rest.unreadable === undefined
+  ) {
     out.plain('  nothing matched — the trace is unchanged');
   }
   reportShadowStore(out, runDir, fs);
+  reportUnscrubbed(out, runDir, rest);
 
   return {
     runDir,
@@ -492,6 +500,82 @@ function manifestAdvice(runDir: string): string {
     'Nothing was changed — the match covers a field the trace format requires, and a run whose ' +
     `manifest will not parse cannot be opened at all. Narrow the match, or: rm -rf ${runDir}`
   );
+}
+
+/**
+ * What a run directory holds that scrub does not rewrite.
+ *
+ * The covered set is the trace as the spec defines it — `manifest.json`, `events.jsonl`,
+ * `redactions.json`, `blobs/` and `fs/` — and a run directory holds more than that: the MCP
+ * frames a replay answers from, the rewritten MCP config, the shim scripts, whatever a later
+ * version adds. Scrub cannot rewrite most of it and must not rewrite some of it, but reporting
+ * `nothing matched` over a file it never opened is the one thing SECURITY.md says a scrubber must
+ * never do. So it is searched and named, like the shadow store.
+ *
+ * Defined from the spec rather than as a list of the sidecars that exist today, so a file added
+ * later is reported by default instead of being silently uncovered until somebody remembers.
+ */
+const SCRUBBED_FILES = new Set(['manifest.json', 'events.jsonl', 'redactions.json']);
+const SCRUBBED_DIRS = new Set(['blobs', 'fs']);
+
+/** What scrub never opened, and whether any of it holds the material. */
+interface UnscrubbedStatus {
+  /** Paths, relative to the run directory, still holding what the scrub would have removed. */
+  files: string[];
+  /** Set when something could not be read, so `files` proves nothing either way. */
+  unreadable?: string;
+}
+
+/**
+ * `mcp-frames.jsonl` is the reason this searches rather than rewrites.
+ *
+ * A replay answers the agent's MCP calls out of the recorded frames, keyed on the request. Rewrite
+ * an inbound frame and the key changes, the exact-match lookup misses, and the mock falls through
+ * to matching on method alone — so the replay is served *a different recorded response* with no
+ * miss reported and no divergence event. A scrubber that silently corrupts a replay is worse than
+ * one that admits it did not look.
+ */
+async function scanUnscrubbed(
+  runDir: string,
+  hasMatch: (text: string) => boolean,
+): Promise<UnscrubbedStatus> {
+  const files: string[] = [];
+  let entries;
+  try {
+    entries = await readdir(runDir, { withFileTypes: true });
+  } catch (err) {
+    return { files, unreadable: String(err) };
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory() ? SCRUBBED_DIRS.has(entry.name) : SCRUBBED_FILES.has(entry.name)) {
+      continue;
+    }
+    const path = join(runDir, entry.name);
+    const found = entry.isDirectory() ? await walk(path) : [path];
+    for (const file of found) {
+      const text = await readFile(file, 'utf8').catch(() => undefined);
+      // Unreadable or not text: a binary is not searchable this way, and saying so for every
+      // `.png` in a run would drown the signal. The `unreadable` arm above is for the case that
+      // stops the scan from meaning anything at all.
+      if (text === undefined) continue;
+      if (hasMatch(text)) files.push(file.slice(runDir.length + 1));
+    }
+  }
+  return { files };
+}
+
+function reportUnscrubbed(out: Output, runDir: string, status: UnscrubbedStatus): void {
+  if (status.unreadable !== undefined) {
+    out.warn('run_dir_unverified', { path: runDir, reason: status.unreadable });
+    out.plain('  the run directory could not be listed, so only the trace itself was checked');
+    return;
+  }
+  if (status.files.length === 0) return;
+  out.warn('not_scrubbed', { path: runDir, files: status.files.length });
+  out.plain('  these are in the run directory and still hold what you asked to remove; scrub');
+  out.plain('  rewrites the trace, and a replay reads some of these back:');
+  for (const file of status.files) out.plain(`    ${file}`);
+  out.plain(`  next: delete the run, or remove the file if nothing replays it`);
 }
 
 /** What the shadow filesystem store still holds, and what was done about it. */
