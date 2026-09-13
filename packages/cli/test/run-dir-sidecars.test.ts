@@ -267,12 +267,29 @@ describe('what a run directory is left holding', () => {
       alive.child = undefined;
     });
 
-    /** A transport under `root`, belonging to `owner`, with a frame already in it. */
-    async function transport(root: string, name: string, owner: number): Promise<string> {
+    /**
+     * A transport under `root`, belonging to `owner`, with a frame already in it.
+     *
+     * `idleHours` ages its *contents*, which is what the sweep reads — appending moves the file's
+     * mtime and never the directory's, and reading the directory's is what the version before last
+     * got wrong.
+     */
+    async function transport(
+      root: string,
+      name: string,
+      owner: number,
+      idleHours = 0,
+    ): Promise<string> {
       const dir = join(root, name);
       await mkdir(dir);
       await writeFile(join(dir, 'shell-frames.jsonl'), '{"argv":["sh","-c","echo hi"]}\n');
       await writeFile(join(dir, 'owner.pid'), String(owner));
+      if (idleHours > 0) {
+        const when = new Date(Date.now() - idleHours * 60 * 60 * 1000);
+        for (const name of ['shell-frames.jsonl', 'owner.pid']) {
+          await utimes(join(dir, name), when, when);
+        }
+      }
       return dir;
     }
 
@@ -284,7 +301,7 @@ describe('what a run directory is left holding', () => {
     // whatever else is running with it.
     it('takes one whose owner has gone and leaves one whose owner has not', async () => {
       const root = await sweepRoot();
-      const gone = await transport(root, 'orca-shell-gone', await deadPid());
+      const gone = await transport(root, 'orca-shell-gone', await deadPid(), 48);
       const live = await transport(root, 'orca-spans-live', livePid());
 
       expect(await sweepStaleTransports(root)).toBe(1);
@@ -299,7 +316,9 @@ describe('what a run directory is left holding', () => {
      */
     it('leaves a long-running recording’s transport alone however old the directory is', async () => {
       const root = await sweepRoot();
-      const live = await transport(root, 'orca-shell-ancient', livePid());
+      // Owner alive, directory ancient, contents idle: the owner alone decides, and none of the
+      // rest is consulted.
+      const live = await transport(root, 'orca-shell-ancient', livePid(), 48);
       const ancient = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
       await utimes(live, ancient, ancient);
 
@@ -321,9 +340,64 @@ describe('what a run directory is left holding', () => {
       await mkdir(dir);
       await writeFile(join(dir, 'shell-frames.jsonl'), '{}\n');
       if (owner !== undefined) await writeFile(join(dir, 'owner.pid'), owner);
+      // Long silent, so the owner check is the only thing that can be keeping it. With fresh
+      // contents the idle gate saves it whatever the owner says, and the assertion passes without
+      // reaching the line it exists for.
+      const long = new Date(Date.now() - 48 * 60 * 60 * 1000);
+      for (const name of await readdir(dir)) await utimes(join(dir, name), long, long);
 
       expect(await sweepStaleTransports(root)).toBe(0);
       expect(existsSync(dir), 'a directory it could not reason about was deleted').toBe(true);
+      await rm(root, { recursive: true, force: true });
+    });
+
+    /**
+     * A pid means nothing outside the namespace it was written in.
+     *
+     * A temp directory can be shared across them — `/tmp` bind-mounted into a devcontainer, a CI
+     * job with a shared tmp volume, an NFS `/tmp` — and there the owner of a live recording is
+     * simply absent from this process's pid table. `ESRCH` then says "no such process" about a run
+     * that is still writing, which is why an unresolvable owner is not enough on its own.
+     */
+    it('leaves a transport whose owner is unresolvable but whose frames are fresh', async () => {
+      const root = await sweepRoot();
+      // Not in this pid table, and not a process that ever will be.
+      const elsewhere = await transport(root, 'orca-shell-elsewhere', 987_654);
+
+      expect(await sweepStaleTransports(root)).toBe(0);
+      expect(existsSync(elsewhere), 'a live run in a shared temp directory was collected').toBe(
+        true,
+      );
+      await rm(root, { recursive: true, force: true });
+    });
+
+    /**
+     * A transport that cannot be listed is not evidence of anything, least of all of abandonment.
+     * POSIX only: making a directory unlistable on NTFS needs an ACL edit, and the suite should not
+     * be editing ACLs.
+     */
+    it.skipIf(process.platform === 'win32')(
+      'leaves a transport it cannot look inside alone',
+      async () => {
+        const root = await sweepRoot();
+        const dir = await transport(root, 'orca-shell-sealed', 987_654, 48);
+        await chmod(dir, 0o000);
+        try {
+          expect(await sweepStaleTransports(root)).toBe(0);
+          expect(existsSync(dir), 'a transport it could not read was deleted').toBe(true);
+        } finally {
+          await chmod(dir, 0o700);
+        }
+        await rm(root, { recursive: true, force: true });
+      },
+    );
+
+    it('takes one whose owner is unresolvable and whose frames have not moved in a day', async () => {
+      const root = await sweepRoot();
+      const abandoned = await transport(root, 'orca-shell-abandoned', 987_654, 48);
+
+      expect(await sweepStaleTransports(root)).toBe(1);
+      expect(existsSync(abandoned), 'a genuine orphan was left behind').toBe(false);
       await rm(root, { recursive: true, force: true });
     });
 
@@ -336,7 +410,8 @@ describe('what a run directory is left holding', () => {
       const root = await sweepRoot();
       // A process that is certainly there and certainly not ours.
       const systemPid = process.platform === 'win32' ? 4 : 1;
-      const dir = await transport(root, 'orca-spans-elsewhere', systemPid);
+      // Silent for two days, so `EPERM counts as running` is the only thing keeping it.
+      const dir = await transport(root, 'orca-spans-elsewhere', systemPid, 48);
 
       expect(await sweepStaleTransports(root)).toBe(0);
       expect(existsSync(dir), 'another user’s live transport was deleted').toBe(true);
@@ -352,6 +427,10 @@ describe('what a run directory is left holding', () => {
       const orphan = await mkdtemp(join(tmpdir(), 'orca-shell-'));
       await writeFile(join(orphan, 'shell-frames.jsonl'), '{"argv":["sh","-c","echo hi"]}\n');
       await writeFile(join(orphan, 'owner.pid'), String(await deadPid()));
+      const long = new Date(Date.now() - 48 * 60 * 60 * 1000);
+      for (const name of ['shell-frames.jsonl', 'owner.pid']) {
+        await utimes(join(orphan, name), long, long);
+      }
 
       await record();
 

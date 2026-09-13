@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -142,6 +142,14 @@ const TRANSPORT_PREFIXES = ['orca-spans-', 'orca-shell-'];
 export const TRANSPORT_OWNER = 'owner.pid';
 
 /**
+ * How long a transport nobody can account for must sit untouched before it is taken.
+ *
+ * Only ever consulted once the owner is unresolvable, so this is not a timeout on a recording —
+ * it is the second opinion asked about a transport whose first opinion came back "no such process".
+ */
+const TRANSPORT_IDLE_MS = 24 * 60 * 60 * 1000;
+
+/**
  * Remove transports that outlived the run that made them.
  *
  * The drain removes one, and `recordCommand` removes one whose run threw. Neither runs when orca
@@ -158,16 +166,34 @@ export const TRANSPORT_OWNER = 'owner.pid';
  * progress — after which that run silently captures nothing, because both writers swallow their
  * errors by design.
  *
- * The owner's pid is the honest signal, and it fails in the right direction. A pid that has been
- * reused leaves an orphan behind; a clock that has run on deletes a live run's data. Only one of
- * those is recoverable.
+ * **Two signals, and deletion needs both.** The owner's pid comes first: while it resolves to a
+ * running process, nothing else matters. But a pid only means anything in the pid namespace it was
+ * written in, and a temp directory can be shared across them — `/tmp` bind-mounted into a
+ * devcontainer, a CI job with a shared tmp volume, an NFS `/tmp`. There the owner of a live
+ * recording is simply absent from this process's pid table, and `ESRCH` is indistinguishable from
+ * "it has exited". Reasoning that a pid fails safely is true of *reuse*, which leaves an orphan,
+ * and false of *unresolvable*, which was deleting a run's transport mid-recording.
+ *
+ * So when the owner cannot be accounted for, the transport has to have been silent as well. The
+ * mtime of the file inside is the right thing to read, and the directory's is not — appending moves
+ * the file's and never the directory's, which is the mistake the version before this one made.
+ *
+ * What is deliberately not written is a start time alongside the pid. It would only be useful for
+ * telling a reused pid from the original, and that needs the *other* process's start time, which
+ * Node cannot portably read. A field nothing can act on is how payload gets into a file.
+ *
+ * The remaining gap, stated rather than papered over: a recording in a shared temp directory that
+ * has captured nothing for a day would be collected. That needs an unresolvable owner *and* a day
+ * of silence together, where either alone used to be enough.
  *
  * Best-effort throughout: a directory with no owner is left alone rather than guessed at, a
  * directory that cannot be read is somebody else's problem, and nothing here is ever fatal.
  *
- * `root` is a parameter so a test can sweep a directory of its own rather than the machine's.
+ * `root` is a parameter so a test can sweep a directory of its own rather than the machine's, which
+ * is also what makes `now` safe to vary — reaching forward in time inside somebody else's temp
+ * directory is how an earlier test took the live transports of everything running beside it.
  */
-export async function sweepStaleTransports(root = tmpdir()): Promise<number> {
+export async function sweepStaleTransports(root = tmpdir(), now = Date.now()): Promise<number> {
   let swept = 0;
   let entries;
   try {
@@ -188,6 +214,7 @@ export async function sweepStaleTransports(root = tmpdir()): Promise<number> {
       // probe.
       if (!Number.isInteger(owner) || owner <= 0) continue;
       if (isRunning(owner)) continue;
+      if (now - (await lastTouched(path)) < TRANSPORT_IDLE_MS) continue;
       await rm(path, { recursive: true, force: true });
       swept += 1;
     } catch {
@@ -195,6 +222,34 @@ export async function sweepStaleTransports(root = tmpdir()): Promise<number> {
     }
   }
   return swept;
+}
+
+/**
+ * When anything in this transport was last written.
+ *
+ * The entries, not the directory: a frame is appended to the file inside, and appending moves that
+ * file's mtime and leaves the directory's exactly where `mkdtemp` set it. Reading the directory's
+ * was the previous version's mistake, and it meant "when this recording started".
+ *
+ * A directory that cannot be listed answers `now`, so it is treated as busy and left alone.
+ */
+async function lastTouched(dir: string, now = Date.now()): Promise<number> {
+  let newest = 0;
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return now;
+  }
+  for (const entry of entries) {
+    try {
+      const { mtimeMs } = await stat(join(dir, entry.name));
+      if (mtimeMs > newest) newest = mtimeMs;
+    } catch {
+      return now; // something is there that cannot be read; do not conclude it is abandoned
+    }
+  }
+  return newest;
 }
 
 /**
