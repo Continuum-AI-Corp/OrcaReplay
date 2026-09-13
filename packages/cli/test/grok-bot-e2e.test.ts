@@ -4,10 +4,10 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { TraceReader } from '@orcareplay/core';
+import { TraceReader, listRuns } from '@orcareplay/core';
 import { RunCa } from '@orcareplay/proxy';
 import { parseArgs } from '../src/args.js';
 import { Output } from '../src/out.js';
@@ -17,7 +17,15 @@ import { replayCommand } from '../src/commands/replay.js';
 const run = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
 const IDE_PARENT = join(here, 'fixtures', 'ide-parent.mjs');
-const PROXY_CALL = join(here, 'fixtures', 'proxy-call.mjs');
+/**
+ * As a `file://` URL, because it is written into a generated `.mjs` as an import specifier.
+ *
+ * A bare absolute path works on POSIX and is rejected outright on Windows:
+ * `ERR_UNSUPPORTED_ESM_URL_SCHEME — on Windows, absolute paths must be valid file:// URLs`. The bot
+ * then failed to start, the recording came back empty, and all six tests in this file reported the
+ * counts that follow from nothing having run rather than the loader error that caused it.
+ */
+const PROXY_CALL = pathToFileURL(join(here, 'fixtures', 'proxy-call.mjs')).href;
 
 /**
  * A Grok bot, and any other agent whose origin is a string in its own source.
@@ -304,5 +312,36 @@ if (process.env.ORCA_TEST_RESULT_OUT) {
     expect(replay.exitCode).toBe(0);
     expect(replay.matchedExact).toBe(1);
     expect(replay.unmatched).toBe(0);
+  });
+
+  /**
+   * Issue #49: `orca replay --from 1 --model <other>` on a TLS-intercepted recording accepted
+   * the flag, echoed it, and called the recorded model. `replayed=0 live=0` meant substitution
+   * never ran. Forking from before the only exchange is a legitimate thing to ask for.
+   */
+  it('honours --model on a fork of a TLS-intercepted recording', async () => {
+    const recorded = await record();
+    expect(recorded.modelExchanges).toBe(1);
+    const before = xai.calls.length;
+    lines.length = 0;
+
+    const fork = await replayCommand(
+      parseArgs(['replay', recorded.runId, '--from', '1', '--model', 'grok-4-fast']),
+      out,
+      workspace,
+    );
+
+    expect(fork.exitCode).toBe(0);
+    expect(fork.liveCalls).toBeGreaterThan(0);
+    expect(xai.calls.length).toBeGreaterThan(before);
+    const live = xai.calls[xai.calls.length - 1] as { body: { model?: string } };
+    expect(live.body.model).toBe('grok-4-fast');
+
+    const forkDir = (await listRuns(workspace)).find((r) => r.runId === fork.forkRunId)?.dir;
+    expect(forkDir, 'the fork wrote a run of its own').toBeDefined();
+    const events = await (await TraceReader.open(forkDir!)).events();
+    const request = events.find((e) => e.type === 'model.request');
+    expect(request?.attrs?.model).toBe('grok-4-fast');
+    expect(lines.join('')).toMatch(/live=1/);
   });
 });

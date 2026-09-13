@@ -62,11 +62,23 @@ export interface TlsCapture {
  * Everything `setupTlsCapture` can refuse, without creating anything.
  *
  * A caller that has a trace directory to lose needs the refusal to happen first: a run abandoned
- * by a throw leaves an unsealed directory behind, and an unsealed directory wins `last`.
+ * by a throw leaves an unsealed directory behind, and an unsealed directory wins `last`. An exact
+ * replay has more than that to lose — it calls this before `replayWorkspace`, which writes the
+ * recording over the operator's checkout.
+ *
+ * `extraOriginRoots` is here for the second reason and not the first. It reads files, so it was
+ * left out of a function whose whole point was to decide from the arguments alone — but that made
+ * this only *most* of what `setupTlsCapture` refuses, and an unreadable `ORCA_TLS_UPSTREAM_CA`
+ * went on failing late, past the restore. The roots are read again below, microseconds later and
+ * on a path the run was going to read anyway.
  */
-export function planTlsCapture(args: ParsedArgs, recordedHosts?: readonly string[]): void {
+export async function planTlsCapture(
+  args: ParsedArgs,
+  recordedHosts?: readonly string[],
+): Promise<void> {
   if (!interceptionRequested(args, recordedHosts)) return;
   HostPolicy.from([...resolveTlsHosts(args.list('tls-hosts'), recordedHosts)]);
+  await extraOriginRoots();
 }
 
 /**

@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { canonicalToAnthropicRequest, responsesToCanonicalRequest } from '@orcareplay/providers';
@@ -108,7 +108,9 @@ describe('the embedded API never lets an agent write to the caller’s stdout', 
     const file = join(workspace, 'drive.mjs');
     await writeFile(
       file,
-      `import { Orca } from '${join(here, '..', 'dist', 'api.js')}';\n` +
+      // A `file://` URL, not a bare path: written into a generated `.mjs`, an absolute Windows
+      // path is rejected by the ESM loader outright and the child dies before its first statement.
+      `import { Orca } from '${pathToFileURL(join(here, '..', 'dist', 'api.js')).href}';\n` +
         `const orca = new Orca({ cwd: ${JSON.stringify(workspace)} });\n${script}`,
     );
     const { stdout } = await run(process.execPath, [file], { cwd: workspace });

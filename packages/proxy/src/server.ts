@@ -34,6 +34,7 @@ import { decodeForwardPath, type ForwardPath } from './forward.js';
 import {
   attachTlsIntercept,
   decodeBody,
+  type InterceptDecision,
   type InterceptResponse,
   type NetExchange,
   type NetRequest,
@@ -42,7 +43,9 @@ import {
 import { RequestMatcher, type Divergence } from './matching.js';
 
 export type {
+  InterceptDecision,
   InterceptFailure,
+  InterceptForward,
   InterceptResponse,
   NetExchange,
   NetRequest,
@@ -588,8 +591,18 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
    * Replay hook for requests inside an intercepted TLS session. The ordinary HTTP proxy reaches
    * `handle()` below, but the TLS interceptor has already terminated the outer CONNECT and needs
    * the same matcher before it opens an origin connection.
+   *
+   * Live calls used to return `undefined` here, which forwarded the client's bytes unchanged —
+   * so `orca replay --from N --model X` on a TLS-intercepted recording echoed `model=X` and then
+   * called the recorded model. `replayed=0 live=0` was the tell: `goLive` never ran, substitution
+   * never had a chance. Same-provider `--model` now rewrites the body and still talks to the
+   * intercepted origin (the only origin that origin's credential can reach). A cross-provider
+   * target would have to leave that host, which this path cannot do; that fails loudly instead of
+   * succeeding with the old model.
    */
-  function onInterceptedRequest(request: NetRequest): InterceptResponse | undefined {
+  function onInterceptedRequest(
+    request: NetRequest,
+  ): InterceptDecision | undefined | Promise<InterceptDecision | undefined> {
     const path = request.path.split('?')[0] ?? '/';
     const dialect = selectDialect(dialects, path);
     if (!dialect || request.method !== 'POST' || request.requestTruncated) return undefined;
@@ -616,7 +629,59 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       };
     }
     if (result?.error) return replayError(result.error);
-    return undefined;
+    return liveIntercepted(dialect, request, rawBody);
+  }
+
+  /**
+   * A decrypted model call the recording will not serve — past the fork point, or unmatched on a
+   * hybrid / `--loose` run. Counted as live the way `handle()` → `goLive` is, so `fork.done`
+   * `live=N` is the number of exchanges the fork actually owned.
+   */
+  function liveIntercepted(
+    dialect: Dialect,
+    request: NetRequest,
+    rawBody: string,
+  ): InterceptDecision | undefined {
+    if (options.forkModel === undefined) {
+      stats.liveCalls += 1;
+      return undefined;
+    }
+
+    const target = dialect.ownsModel(options.forkModel)
+      ? dialect
+      : (dialects.find((d) => d.ownsModel(options.forkModel!)) ?? dialect);
+    const crossProvider = target.id !== dialect.id;
+
+    if (crossProvider) {
+      return replayError(
+        `--model ${options.forkModel} is served by ${target.id}, not the intercepted ` +
+          `${dialect.id} origin ${request.host}:${request.port}. A TLS-intercepted fork cannot ` +
+          `leave the host the recording talked to. Pick a model that origin serves`,
+      );
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawBody);
+    } catch (err) {
+      return replayError(`unparseable request body: ${String(err)}`);
+    }
+    const outboundBody = Buffer.from(
+      JSON.stringify(dialect.withModel(parsed, options.forkModel)),
+      'utf8',
+    );
+    stats.liveCalls += 1;
+    const origin = `https://${request.host}${request.port === 443 ? '' : `:${request.port}`}`;
+    const recordable = recordableOrigin(origin);
+    options.onRoute?.({
+      model: options.forkModel,
+      target: target.id,
+      recorded: dialect.id,
+      ...(recordable === undefined ? {} : { origin: recordable }),
+      crossProvider: false,
+      reason: `served by the recorded dialect ${dialect.id}`,
+    });
+    return { outboundBody };
   }
 
   function tryReplay(

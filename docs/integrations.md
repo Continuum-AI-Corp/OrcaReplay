@@ -82,18 +82,71 @@ caught that, which is why CrewAI has its own check now.
 
 ### Two things that changed with it
 
-**A prefixed model name no longer resolves.** `LLM(model="openai/gpt-4o-mini")` is the LiteLLM
-spelling, and on a default 1.x install it raises `ImportError: ... did not match any supported
-native provider ... and the LiteLLM fallback package is not installed`. The bare form,
-`LLM(model="gpt-4o-mini")`, is what the native provider takes. This is the shape of breakage an
-upgrade from 0.x hits, and it happens before any request is made — so orca records a run of three
-events and reports `capture.empty`, which is accurate and easy to misread as a capture problem.
+**A bare model name is unconditional; a prefixed one depends on what is installed.** This matters
+here because pointing an agent at a gateway usually means naming a model the vendor never published.
+
+| `LLM(model=…)` | resolves |
+|---|---|
+| `gpt-4o-mini`, `my-gateway-model` | always — a bare name goes to the native OpenAI provider whatever it is called |
+| `openai/gpt-4o-mini`, `openai/o3-mini` | always — a native provider claims it |
+| `openai/my-gateway-model`, `foo/anything` | **only where LiteLLM is installed** |
+
+A prefixed name no native provider claims falls through to LiteLLM, and CrewAI 1.x does not install
+LiteLLM by default (`crewai[litellm]` adds it). So the same line resolves on one machine and raises
+`ImportError: ... and the LiteLLM fallback package is not installed` on another. **Use the bare form
+for a gateway's own model names** and the question does not arise.
+
+When it does raise, it raises while the `LLM` is being built — before any request — so orca records
+three events and reports `capture.empty`, which is accurate and easy to misread as a capture problem.
+
+> This paragraph has been wrong twice. First it said a prefixed name never resolves on 1.x, from a
+> measurement that used `openai/stub-1` and blamed the prefix for what `stub-1` had done. Then the
+> correction said a prefixed *unknown* name always raises, from a machine whose LiteLLM install was
+> broken — which `crewai.llm._ensure_litellm()` cannot tell from an absent one. CI, where LiteLLM
+> works, disagreed. `test/integrations/agents/crewai_model_names.py` now pins both halves and checks
+> the conditional one against whichever way LiteLLM actually is.
 
 **`LLM(base_url=…)` is now honoured.** It used not to be: passing the origin in code did nothing,
 because it never reached LiteLLM's `api_base`. Measured again on 1.15.20 against a listener with the
 environment cleared — the listener was hit. Going through the environment is still the better route,
 because it is the one `orca record` sets up and it needs no edit to your code, but the old warning
 no longer applies.
+
+---
+
+## LlamaIndex
+
+```console
+orca record generic-openai -- python your_agent.py
+```
+
+The one framework here that does **not** read `OPENAI_BASE_URL`. Measured, both ways:
+
+| set | `llm._get_client().base_url` |
+|---|---|
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1/` — ignored |
+| `OPENAI_API_BASE` | the value you set — honoured |
+
+`generic-openai` sets both, which is why this works without you doing anything. It is worth knowing
+because it is also why `orca record exec` does not: that adapter redirects nothing on purpose.
+
+**Measured:** recorded and replayed at `exact=1 divergences=0`.
+
+### The model name has to be one LlamaIndex knows
+
+`OpenAI(model=…)` is validated against a list compiled into `llama_index.llms.openai.utils`, and
+anything outside it raises `ValueError: Unknown model '…'`. There is no `context_window` argument to
+supply instead. So the usual gateway case — a model name the vendor never published, a local model,
+an internal router — does not work, and no orca setting changes that, because nothing has reached
+the wire when it fails.
+
+Where it raises is worth knowing too: **not** in the constructor. `OpenAI(model='my-gateway-model')`
+returns fine and the error arrives from `.metadata`, which the chat path reads on every call — so it
+surfaces at the first message rather than at setup.
+
+`test/integrations/agents/llama_index_model_names.py` pins all of this, including the absence of
+`context_window`: if LlamaIndex adds one, that becomes the recommended answer and this section is
+wrong until it is rewritten.
 
 ---
 
@@ -242,6 +295,25 @@ the one place every JS client agrees on.
 
 **Measured:** an agent posting to a hardcoded `https://api.openai.com/v1/chat/completions`,
 recorded and replayed at `exact=1 divergences=0`.
+
+---
+
+## Mastra
+
+```console
+orca record node -- node your_agent.mjs
+```
+
+Mastra takes its model from `@ai-sdk/openai`, so it inherits that provider's behaviour exactly: the
+origin is a constructor argument and the environment is not consulted. The `node` adapter's fetch
+preload is what captures it.
+
+**Measured:** an `Agent` calling `generate()`, recorded and replayed at `exact=1 divergences=0` with
+the origin stopped.
+
+Worth having as its own check rather than leaning on the Vercel AI SDK one above: a preload that
+works against a bare `fetch` can still be defeated by a framework that wraps or replaces it, and
+that is not something to find out from a user.
 
 ---
 

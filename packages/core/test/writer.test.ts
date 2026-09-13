@@ -409,7 +409,11 @@ describe('TraceWriter.close', () => {
     expect(await w.close(0)).toEqual(first);
   });
 
-  it('keeps every file it writes owner-only', async () => {
+  // POSIX only. Windows has no mode bits: `chmod 0o600` is a no-op on NTFS and `stat` answers
+  // 0o666 whatever was asked for, so this asserts something the platform cannot provide. Skipped
+  // rather than loosened — the guarantee is real where it can be made, and a test that accepted
+  // 0o666 would stop noticing if it were lost on Linux too.
+  it.skipIf(process.platform === 'win32')('keeps every file it writes owner-only', async () => {
     const w = await TraceWriter.create(runs, INIT);
     await w.append({ type: 'note', actor: 'orca' });
     await w.close();
