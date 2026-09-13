@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { crc32, inflateSync } from 'node:zlib';
+import { inflateSync } from 'node:zlib';
 import type { RedactionRecord } from '@orcareplay/schema';
 
 /** Bump when a rule is added or changed, so old traces stay interpretable. */
@@ -248,6 +248,38 @@ function pngRawLength(
   return total;
 }
 
+/** The CRC-32 lookup table, built once: `0xedb88320` is the reversed polynomial PNG uses. */
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+/**
+ * CRC-32 of `data`.
+ *
+ * Not `zlib.crc32`, which arrived after the oldest runtime this repo supports: `packages/cli`
+ * declares `>=20.0.0` and `doctor` enforces major 20, while `zlib.crc32` is newer than that. A
+ * named import of it would be `undefined` on such a runtime, and the first screenshot would take
+ * the recording down with it — `intercept.ts` looks `zstdDecompressSync` up dynamically for
+ * exactly this reason, and `tls-intercept.test.ts` records what the named import did instead.
+ *
+ * Computing it here rather than looking it up dynamically leaves one implementation, always
+ * exercised, instead of a fallback branch that only some runtimes ever run. It costs 0.75 ms on a
+ * 381 KB PNG against `zlib.crc32`'s 0.10 ms, which is nothing beside the 55 ms that PNG's base64
+ * decode already costs. Every "a real PNG stays exempt" case in the tests builds its CRCs with
+ * `zlib.crc32`, so those tests pass only while this agrees with Node's.
+ */
+function crc32Of(data: Buffer): number {
+  let c = 0xffffffff;
+  for (let i = 0; i < data.length; i += 1) c = (c >>> 8) ^ CRC_TABLE[(c ^ data[i]!) & 0xff]!;
+  return (c ^ 0xffffffff) >>> 0;
+}
+
 /**
  * Whether the chunk beginning at `at` carries the CRC its own bytes imply.
  *
@@ -259,7 +291,7 @@ function pngRawLength(
  * The CRC covers the type and the data, not the length field.
  */
 function hasValidCrc(b: Buffer, at: number, len: number): boolean {
-  return crc32(b.subarray(at + 4, at + 8 + len)) >>> 0 === b.readUInt32BE(at + 8 + len) >>> 0;
+  return crc32Of(b.subarray(at + 4, at + 8 + len)) === b.readUInt32BE(at + 8 + len);
 }
 
 /**
