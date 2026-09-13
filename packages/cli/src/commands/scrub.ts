@@ -131,7 +131,8 @@ export async function scrubCommand(
    * These are too.
    */
   const blobsRoot = join(runDir, 'blobs');
-  const blobPaths = await walk(blobsRoot);
+  const blobs = await walk(blobsRoot);
+  const blobPaths = blobs.files;
   const moved = new Map<string, MovedBlob>();
   /** Old blob files, deleted only once every new one is in place. */
   const stale = new Set<string>();
@@ -293,10 +294,22 @@ export async function scrubCommand(
     for (const path of stale) await rm(path, { force: true });
     out.phase('scrubbed', { run: runDir, removed: removals, files: filesChanged });
   }
-  if (removals === 0 && reverted === 0 && fs.matches === 0 && fs.unreadable === undefined) {
+  if (
+    removals === 0 &&
+    reverted === 0 &&
+    fs.matches === 0 &&
+    fs.unreadable === undefined &&
+    blobs.unreadable.length === 0
+  ) {
     out.plain('  nothing matched — the trace is unchanged');
   }
   reportShadowStore(out, runDir, fs);
+  if (blobs.unreadable.length > 0) {
+    out.warn('blobs_not_searched', { path: blobsRoot, entries: blobs.unreadable.length });
+    out.plain('  these blobs could NOT be read, so they were not searched or rewritten:');
+    for (const entry of blobs.unreadable) out.plain(`    ${entry}`);
+    out.plain('  next: close whatever holds them open, or run again with access to them');
+  }
 
   return {
     runDir,
@@ -655,13 +668,50 @@ function placeholderFor(literal: string): string {
   return `<redacted:scrub:${hash}>`;
 }
 
-async function walk(dir: string): Promise<string[]> {
-  const out: string[] = [];
-  const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+/**
+ * Every file under `dir`, and every reason one could not be found.
+ *
+ * Both halves were wrong, in opposite directions.
+ *
+ * A directory it could not list answered `[]`. Scrub's only caller is the blob pass, so a blob
+ * directory this user cannot read made scrub scrub fewer blobs and *say a smaller number*, with no
+ * warning and no error: on a run with one unreadable prefix directory,
+ * `orca scrub --match … --dry-run` reported `would_remove=5 would_change=2` where it had reported
+ * `would_remove=6 would_change=3` a moment earlier. Under-reporting is the failure SECURITY.md
+ * names — "a scrubber that under-reports is disappointing; one that hands you a false all-clear is
+ * worse than no scrubber" — and this one did it silently, which is the half that makes it a lie
+ * rather than a limitation.
+ *
+ * An entry it could not `stat` threw instead. `readdir` reports a symlink with
+ * `isDirectory() === false`, so a link whose target is gone reaches an unguarded `stat`, and the
+ * rejection leaves `walk`, leaves the blob pass and ends the command — a scrub that was otherwise
+ * fine, abandoned because one entry went stale. A file removed between the listing and the `stat`
+ * does the same.
+ *
+ * So it reports both rather than swallowing one and throwing on the other, and the caller decides.
+ */
+async function walk(dir: string): Promise<{ files: string[]; unreadable: string[] }> {
+  const files: string[] = [];
+  const unreadable: string[] = [];
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch (err) {
+    return { files, unreadable: [`${dir} (${String(err)})`] };
+  }
   for (const entry of entries) {
     const path = join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...(await walk(path)));
-    else if ((await stat(path)).isFile()) out.push(path);
+    if (entry.isDirectory()) {
+      const under = await walk(path);
+      files.push(...under.files);
+      unreadable.push(...under.unreadable);
+      continue;
+    }
+    try {
+      if ((await stat(path)).isFile()) files.push(path);
+    } catch (err) {
+      unreadable.push(`${path} (${String(err)})`);
+    }
   }
-  return out;
+  return { files, unreadable };
 }

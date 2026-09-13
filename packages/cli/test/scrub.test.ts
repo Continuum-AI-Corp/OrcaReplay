@@ -1,5 +1,15 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -489,6 +499,75 @@ describe('scrub — false all-clears', () => {
     await writer.close(0);
     return writer.runDir;
   }
+
+  /**
+   * A blob store it could not read used to lower the count and say nothing.
+   *
+   * `walk` answered `[]` for a directory it could not list, so scrub scrubbed fewer blobs and
+   * reported the smaller number as though that were all there was — under-reporting, silently,
+   * which is the half that makes it a false answer rather than a stated limit. SECURITY.md:
+   * "a scrubber that under-reports is disappointing; one that hands you a false all-clear is worse
+   * than no scrubber."
+   *
+   * The fixture makes `blobs` itself unlistable by making it a file, which every platform agrees
+   * about. The nested case needs a directory nobody can list, and that needs POSIX.
+   */
+  it('says it could not read the blob store rather than quietly scrubbing less', async () => {
+    const runDir = await makeRun(['the host is prod-db-7.internal.example.com']);
+    await rm(join(runDir, 'blobs'), { recursive: true, force: true });
+    await writeFile(join(runDir, 'blobs'), 'not a directory\n');
+
+    // A literal that is NOT in this trace, so nothing is removed and the all-clear is what would
+    // otherwise print — over a blob store nobody could open.
+    await scrubCommand(parseArgs(['scrub', 'last', '--match', 'absent-from-this-run']), out, cwd);
+    const said = lines.join('\n');
+    expect(said, 'a clean bill over a blob store it could not read').not.toContain(
+      'nothing matched',
+    );
+    expect(said).toContain('blobs_not_searched');
+    expect(said).toContain('could NOT be read');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'says so for a blob directory it cannot list, and does not call the run clean',
+    async () => {
+      const runDir = await makeRun(['nothing interesting here']);
+      const prefix = join(runDir, 'blobs', 'ab');
+      await mkdir(prefix, { recursive: true });
+      await writeFile(join(prefix, 'abcd'), 'prod-db-7.internal.example.com\n');
+      await chmod(prefix, 0o000);
+      try {
+        await scrubCommand(parseArgs(['scrub', 'last', '--match', 'prod-db-7']), out, cwd);
+        const said = lines.join('\n');
+        expect(said, 'a clean bill over a directory it could not list').not.toContain(
+          'nothing matched',
+        );
+        expect(said).toContain('blobs_not_searched');
+      } finally {
+        await chmod(prefix, 0o700);
+      }
+    },
+  );
+
+  /**
+   * `readdir` reports a symlink with `isDirectory() === false`, so a link whose target is gone
+   * reached an unguarded `stat` and the rejection ended the whole command — a scrub that was
+   * otherwise complete, abandoned over one stale entry.
+   */
+  it.skipIf(process.platform === 'win32')(
+    'survives a dangling entry in the blob store instead of aborting',
+    async () => {
+      const runDir = await makeRun(['the host is prod-db-7.internal.example.com']);
+      const prefix = join(runDir, 'blobs', 'cd');
+      await mkdir(prefix, { recursive: true });
+      await symlink(join(prefix, 'gone'), join(prefix, 'dangling'));
+
+      await expect(
+        scrubCommand(parseArgs(['scrub', 'last', '--match', 'prod-db-7']), out, cwd),
+      ).resolves.not.toThrow();
+      expect(lines.join('\n')).toContain('blobs_not_searched');
+    },
+  );
 
   it('refuses --match with no value instead of scrubbing nothing', async () => {
     const runDir = await makeRun(['the host is prod-db-7.internal.example.com']);
