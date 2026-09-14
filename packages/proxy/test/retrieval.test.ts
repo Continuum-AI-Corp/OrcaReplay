@@ -222,6 +222,35 @@ describe('recording a retrieval call', () => {
 
     expect(up.calls[0]!.url).toBe('https://maas.example/v1/embeddings');
   });
+
+  /**
+   * And in a fork, where the rule that overrides an announced origin does not apply to this call.
+   *
+   * "A fork is a substitution, and its configured origins decide" is written for a *model* call,
+   * whose model the fork replaces. A retrieval call is forwarded byte for byte — same headers,
+   * same body, no `withModel` — so there is no substitution to justify re-addressing it, and
+   * re-addressing it anyway sent a fork's live embedding call to the chat origin carrying the
+   * embedding provider's own key. A 401 if that origin refuses it; if it is an OpenAI-compatible
+   * gateway that answers `/v1/embeddings`, vectors from another model entering the fork's index,
+   * which is the failure the whole retrieval path exists to prevent.
+   *
+   * Live by construction: a fork holding no recorded retrieval call has nothing to serve this from.
+   */
+  it('sends it there in a fork too, which substitutes nothing into a retrieval call', async () => {
+    const up = stubUpstream(VECTORS);
+    const proxy = await createProxy({
+      mode: 'hybrid',
+      forkModel: 'gpt-5.6-sol',
+      fetchImpl: up.fetchImpl,
+      upstream: { openai: 'https://chat.example', anthropic: 'https://chat.example' },
+    });
+    closers.push(proxy.close);
+
+    const base = forwardBasePath('https://maas.example/v1');
+    await post(`${proxy.url}${base}/embeddings`, { model: 'm', input: ['x'] });
+
+    expect(up.calls[0]!.url).toBe('https://maas.example/v1/embeddings');
+  });
 });
 
 describe('replaying a retrieval call', () => {

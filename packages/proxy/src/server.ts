@@ -1075,13 +1075,26 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
    * a base URL; the client's own headers say which provider that was, and its own credential is
    * already on the request addressed to them.
    */
-  function passthroughOrigin(headers: Record<string, string>, forwardBase?: string): string {
+  function passthroughOrigin(
+    headers: Record<string, string>,
+    forwardBase?: string,
+    opts: { verbatim?: boolean } = {},
+  ): string {
     if (options.passthroughUpstream !== undefined) return options.passthroughUpstream;
     // A relayed request's own destination, before anything configured: on a live call with no
     // model substitution, the request says where it was headed, and a gateway picked up from
     // setup is a default for calls orca would otherwise guess at — not a readdressing of one that
     // announces its own. A fork is a substitution, and its configured origins decide instead.
-    if (options.forkModel === undefined && forwardBase !== undefined) return forwardBase;
+    //
+    // `verbatim` is for a call the fork does *not* substitute anything in. A retrieval call is
+    // forwarded byte for byte — same headers, same body, no `withModel` — so the substitution the
+    // fork rule exists for never happens to it, and dropping its announced destination on account
+    // of one is how a fork's live embedding call left for the chat origin carrying the embedding
+    // provider's own key: a 401 at best, and at worst an OpenAI-compatible gateway that answers
+    // `/v1/embeddings` from a different model, putting foreign vectors in the fork's index.
+    if (forwardBase !== undefined && (opts.verbatim === true || options.forkModel === undefined)) {
+      return forwardBase;
+    }
     const configured = [...new Set(Object.values(options.upstream ?? {}))];
     if (configured.length === 1) return configured[0]!;
     const names = new Set(Object.keys(headers).map((h) => h.toLowerCase()));
@@ -1262,7 +1275,9 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     // is what lets `capture.empty` tell an index build, whose every call is a retrieval call and
     // every one of them replayable, apart from a run that captured nothing at all.
     if (options.mode === 'record') stats.retrievalTotal += 1;
-    const origin = passthroughOrigin(headers, forwardBase);
+    // Verbatim: everything below forwards this request unchanged, so where it says it was going
+    // stands, fork or no fork. See `passthroughOrigin`.
+    const origin = passthroughOrigin(headers, forwardBase, { verbatim: true });
     const upstreamRes = await doFetch(`${origin}${path}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...headers, ...headersForOrigin(origin) },
