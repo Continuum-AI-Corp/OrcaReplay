@@ -14,7 +14,18 @@ import {
 import { captureSession, defaultAdapters, resolveLaunch, snapshotDir } from '@orcareplay/adapters';
 import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
-import { installShellShim, readShellFrames } from '@orcareplay/shell-shim';
+import { discardShellFrames, installShellShim, readShellFrames } from '@orcareplay/shell-shim';
+import {
+  eventForSpan,
+  discardAgentSpanTransport,
+  installAgentSpans,
+  sweepStaleTransports,
+  touchTransports,
+  pythonPathWith,
+  readAgentSpans,
+  SPANS_ENV,
+  type AgentSpanCapture,
+} from '../agent-spans.js';
 import { drainMcpFrames, pointAtMcpConfig, setupMcpCapture, type McpCapture } from '../mcp.js';
 import { SerialQueue } from '../serial.js';
 import { appendSnapshot } from '../fs-events.js';
@@ -67,14 +78,33 @@ export async function recordCommand(
   out: Output,
   cwd = process.cwd(),
 ): Promise<RecordResult> {
+  // Before anything else, and never fatal: an orphan left by a killed run holds the same
+  // un-redacted material a live one does, and the next recording is the only thing that will ever
+  // come across it.
+  const sweptStale = await sweepStaleTransports().catch(() => 0);
+  if (sweptStale > 0) out.info('transports.swept', { stale: sweptStale });
+
   const minted: RunCa[] = [];
+  // Transport directories, disposed here if the run throws before their drain reaches them. Both
+  // hold material written by a process orca does not own — the agent's shells, the agent's own
+  // interpreter — and a run that dies partway must not leave either behind.
+  const transports: string[] = [];
+  // While this run holds them, they are not orphans, and a sweep that cannot resolve this pid —
+  // another container sharing `/tmp` — has no other way to know that. Started here so it covers
+  // both transports from the moment each is pushed, and stopped on every exit path below.
+  const stopHeartbeat = touchTransports(transports);
   try {
-    return await runRecording(args, out, cwd, minted);
+    return await runRecording(args, out, cwd, minted, transports);
   } catch (err) {
     for (const ca of minted) {
       await ca.dispose().catch(() => undefined);
     }
+    for (const dir of transports) {
+      await discardShellFrames(dir).catch(() => undefined);
+    }
     throw err;
+  } finally {
+    stopHeartbeat();
   }
 }
 
@@ -83,6 +113,7 @@ async function runRecording(
   out: Output,
   cwd: string,
   minted: RunCa[],
+  transports: string[],
 ): Promise<RecordResult> {
   const registry = defaultAdapters();
   const agentName = args.positionals[0];
@@ -183,9 +214,28 @@ async function runRecording(
   if (args.bool('shell', true)) {
     try {
       shell = await installShellShim({ runDir: writer.runDir });
+      // Only when orca minted it. A caller-supplied `framesPath` leaves the directory theirs,
+      // and this list is deleted wholesale on a failure.
+      if (shell.transportDir !== undefined) transports.push(shell.transportDir);
     } catch (err) {
       // Same posture as filesystem capture: degrade the trace, never abort the run.
       out.warn('shell.unavailable', { reason: String(err) });
+    }
+  }
+
+  // Agent-level structure, for a harness that reports it. The proxy sees `POST /v1/responses` and
+  // cannot say which agent sent it, that a handoff happened, or that a guardrail ran — the last of
+  // which need make no request at all. A `sitecustomize.py` on PYTHONPATH attaches the OpenAI Agents
+  // SDK's tracing to a run without editing the agent, the same trick as the fetch hook's
+  // NODE_OPTIONS. Silent and free where the SDK is absent, which is most runs.
+  let agentSpans: AgentSpanCapture | undefined;
+  if (args.bool('agent-spans', true)) {
+    try {
+      agentSpans = await installAgentSpans(writer.runDir);
+      transports.push(agentSpans.transportDir);
+    } catch (err) {
+      // Same posture as the other optional layers: degrade the trace, never abort the run.
+      out.warn('agent_spans.unavailable', { reason: String(err) });
     }
   }
 
@@ -239,6 +289,7 @@ async function runRecording(
   let commandToolCalls = 0;
   /** Commands the shim actually saw. Zero against a non-zero `commandToolCalls` is the warning. */
   let shellFrames = 0;
+  // (the count this used to keep was read by nothing; the layer reports through its events)
   /**
    * Exchanges the upstream answered with an error status.
    *
@@ -349,6 +400,16 @@ async function runRecording(
       if (shell) {
         prepared.env.PATH = `${shell.dir}${delimiter}${process.env.PATH ?? ''}`;
       }
+      if (agentSpans) {
+        // Both, or neither works: PYTHONPATH is how Python finds the bootstrap, and the variable is
+        // what tells the bootstrap this is a recording rather than an ordinary Python process.
+        prepared.env.PYTHONPATH = pythonPathWith(
+          agentSpans.pythonPath,
+          process.env.PYTHONPATH,
+          delimiter,
+        );
+        prepared.env[SPANS_ENV] = agentSpans.spansPath;
+      }
       if (mcp) {
         pointAtMcpConfig(prepared.env, mcp.configPath);
         // The variables above are belt and braces for a harness orca has not met. What actually
@@ -427,6 +488,13 @@ async function runRecording(
     // the final turn number — which makes `mono_us` describe the drain rather than the command,
     // and leaves the commands unable to interleave with the model turns they happened between.
     const frames = await readShellFrames(shell.framesPath);
+    // Read, then gone, for the same reason the spans transport is: every frame is about to be
+    // appended through `writer.append`, which redacts, and what is left on disk afterwards is a
+    // verbatim copy of every command line the agent ran that nothing reads and `orca scrub` never
+    // rewrites. Before the appends rather than after, so an append that throws still takes it.
+    const framesLeft =
+      shell.transportDir === undefined ? undefined : await discardShellFrames(shell.transportDir);
+    if (framesLeft !== undefined) out.warn('shell_frames.not_removed', { reason: framesLeft });
     shellFrames = frames.length;
     for (const frame of frames) {
       const startedAt = Date.parse(frame.startedAt);
@@ -453,6 +521,33 @@ async function runRecording(
           stdout_bytes: frame.stdoutBytes,
           stderr_bytes: frame.stderrBytes,
         },
+      });
+    }
+  }
+
+  if (agentSpans) {
+    // Timestamped from the span, like the shell frames above and for the same reason: these are
+    // read off disk after the agent exited, so stamping them now would file every handoff at the
+    // end of the run rather than between the turns it happened between.
+    const spans = await readAgentSpans(agentSpans.spansPath);
+    // Read, then gone. Everything the trace keeps from this file is about to be appended through
+    // `writer.append`, which redacts; what is left on disk afterwards is a copy nothing reads and
+    // nothing scrubs. Before the appends rather than after, so an append that throws still takes
+    // the transport with it.
+    const spansLeft = await discardAgentSpanTransport(agentSpans.transportDir);
+    if (spansLeft !== undefined) out.warn('agent_spans.not_removed', { reason: spansLeft });
+    for (const span of spans) {
+      const derived = eventForSpan(span);
+      if (derived === undefined) continue;
+      const startedAt = Date.parse(String(span.started_at ?? ''));
+      const at = Number.isNaN(startedAt) ? undefined : new Date(startedAt);
+      await writer.append({
+        type: derived.type as 'agent.start',
+        // `harness`, not `orca`: we did not observe this, we were told it.
+        actor: 'harness',
+        turn: at === undefined ? turn : turnAt(startedAt),
+        ...(at === undefined ? {} : { occurredAt: at }),
+        attrs: derived.attrs,
       });
     }
   }
