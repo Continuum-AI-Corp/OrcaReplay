@@ -73,6 +73,9 @@ Because every model turn resends the whole conversation, content addressing is w
 | `fs.snapshot` / `fs.change` | A workspace tree id, and a diff against the previous tree. |
 | `net.request` / `net.response` | Non-model HTTP seen by the proxy. A pair carrying `rule` and `replay_key` is a **retrieval call** — an endpoint whose answer is a function of its request, such as an embedding — and is replayable by looking that key up rather than by the ladder in §4. `stored: "digest"` on the response means the trace kept `response_sha256` instead of the body: enough to prove a later run agreed, not enough to serve it. |
 | `retrieval.context` | What a retriever put into a prompt, **derived** from the `model.request` that carried it — query and the retrieved passages. Same standing as `tool.call`: reconstructed from the wire, never separately captured. Scores and `top-k` are not here because they are not on the wire. |
+| `agent.start` | An agent began a turn: its name, the tools and handoffs it was given. From a harness's own tracing, not from the wire. |
+| `agent.handoff` | One agent handed control to another, naming both. A proxy sees the transfer as an ordinary tool call and cannot say which agent it came *from*. |
+| `agent.guardrail` | A guardrail ran, and whether it tripped. Guardrails need not make any request, so this can have no trace on the wire at all. |
 | `session.snapshot` | The harness's own transcript, captured at the point the run ended. Carries what the run was *asked*, which a hand-driven run leaves nowhere on the wire. |
 | `error` | A failure derived from another event or reported by the harness. |
 | `divergence` | Replay matched inexactly. See §4. |
@@ -80,6 +83,12 @@ Because every model turn resends the whole conversation, content addressing is w
 | `fork` | A run forked from this point into a child run. |
 | `route.decision` | A gateway chose a model. **Generic** — any gateway may emit it. |
 | `note` | Derived annotation from an analyzer (e.g. loop detection). |
+
+The three `agent.*` types are the first that cannot come from the proxy at all. Every other type
+above is something orca observed itself; these are reported by the harness through its own tracing
+interface, and a trace that has none of them is not missing anything — it is a run whose harness
+either has no such interface or was not asked to use it. Readers must treat them as optional, like
+any other type they do not find.
 
 Adding a type is a MINOR version bump. Removing or changing the meaning of one is MAJOR.
 
@@ -113,6 +122,16 @@ request with the same policy — and MUST compare the *kind* of secret rather th
 is the most a trace can know about a value it deliberately destroyed. A request that is equal only
 after that fold is a rung 2 `minor` divergence, never rung 1.
 
+A rendered image makes rung 1 unreachable for the same reason. Replay does not intercept the world,
+so an agent that sees through a browser or a camera renders its next frame afresh, and two renders
+of one scene are not the same bytes. Implementations MUST therefore compare image content parts
+below rung 1 on their presence and media type rather than on their payload, and MUST keep the
+payload in the comparison at rung 1, so an exact match still means exact. The text accompanying the
+image MUST remain fully compared: it is what identifies the request — a browser agent sends its
+element tree, the page URL and its own memory in the same message — and folding the payload is only
+sound because that text is untouched. A request that is equal only after this fold is a rung 2
+`minor` divergence, never rung 1, and the divergence MUST say how many images it covered.
+
 Distance MUST be measured per field rather than over the serialized body as a whole. A whole-body
 longest-common-prefix-and-suffix measure counts everything between two distant edits as changed, so
 two drifting identifiers in a large prompt score as a total rewrite and no request can reach rung 2.
@@ -135,6 +154,20 @@ both a digit and a letter. Shannon entropy alone has false positives on ordinary
 mostly source code, an unguarded rule corrupts exactly the payloads the trace exists to preserve.
 Recall is essentially unaffected: random base64url of 20+ characters contains a digit with
 probability ≈0.98.
+
+High-entropy detection MAY exempt a payload it can prove is a whole image, because a base64
+screenshot is a long random-looking run by construction and shredding one protects nothing while
+destroying the payload the trace exists to preserve. An implementation that does so MUST grant the
+exemption on the decoded content and MUST be able to account for every byte it covers: structural
+and pixel data whose size the header declares and whose stream is verified to produce it, plus
+chunks whose length the format fixes below the detector's own threshold. A container carrying
+caller-chosen bytes of unbounded length — PNG `tEXt`/`iTXt`/`zTXt`/`iCCP`/`PLTE`, JPEG `COM`/`APPn`,
+or a format with no way to validate its payload at all — MUST NOT be exempted, because those bytes
+reach the trace uncompressed and a credential is indistinguishable from any other content in them.
+
+The exemption's stated limitation: a secret written into the pixels themselves is not detectable,
+and no content rule could be. Implementations MUST bump `policy_version` when the exemption's
+extent changes, so a reader can tell a trace recorded under one policy from another.
 
 Redaction is best-effort mitigation, not a guarantee. A trace is sensitive material.
 

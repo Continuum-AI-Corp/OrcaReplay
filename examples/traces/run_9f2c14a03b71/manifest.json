@@ -1,5 +1,5 @@
 {
-  "schema_version": "0.1.0",
+  "schema_version": "0.2.0",
   "run_id": "run_9f2c14a03b71",
   "created_at": "2026-08-29T10:13:38.000Z",
   "ended_at": "2026-08-29T10:18:29.000Z",
@@ -28,7 +28,7 @@
     "node": "v22.22.2"
   },
   "counts": {
-    "events": 26,
+    "events": 29,
     "blobs": 5
   },
   "redaction": {
@@ -40,7 +40,7 @@
   },
   "exit_code": 1,
   "integrity": {
-    "events_sha256": "4c1541f0b1e64c605b2be207f77a84b63674d0a22ba67bf1ee5e8e8d16e8c93b",
+    "events_sha256": "f5664c53bd40fcddf3ab763eef2f02247278cfccd41b77af9ad9a9b3df3f984e",
     "blob_count": 5
   }
 }

@@ -32,6 +32,9 @@
         "divergence",
         "checkpoint",
         "fork",
+        "agent.start",
+        "agent.handoff",
+        "agent.guardrail",
         "route.decision",
         "session.snapshot",
         "note"

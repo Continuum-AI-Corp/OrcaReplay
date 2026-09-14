@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 
 import pytest
 from conftest import repo_root
@@ -50,23 +49,16 @@ class TestSchemaParity:
         required = set(schema("event.schema.json")["required"])
         assert required == {"seq", "ts", "mono_us", "turn", "type", "actor"}
 
-    def test_schema_version_matches_the_typescript_constant(self) -> None:
-        """The one constant with no JSON to mirror, so it is read from the source that owns it.
+    def test_schema_version_matches_the_example_manifest(self, example_run: Path) -> None:
+        """Against the manifest this is named for, not against a literal.
 
-        Pinning it to a literal — or to the shipped example's manifest, which is what it used to
-        be — meant the two SDKs could disagree about what version of the format they implement
-        the moment either moved. The example is a *trace*, written once by whichever writer made
-        it, and a reader that only accepts traces of its own exact version is not a reader.
+        The literal said `0.1.0` and went on saying it after the format moved to `0.2.0`, which is
+        the one thing this test exists to notice. `test_conformance.py` asserts the same equality
+        from the other side; between them the constant, the example and the writer cannot drift
+        apart without something going red.
         """
-        root = repo_root()
-        if root is None:
-            pytest.skip("not running inside an OrcaReplay checkout")
-        source = (root / "packages" / "schema" / "src" / "constants.ts").read_text(
-            encoding="utf-8"
-        )
-        found = re.search(r"SCHEMA_VERSION\s*=\s*'([^']+)'", source)
-        assert found is not None, "SCHEMA_VERSION is no longer declared where this test looks"
-        assert SCHEMA_VERSION == found.group(1)
+        manifest = json.loads((example_run / "manifest.json").read_text(encoding="utf-8"))
+        assert SCHEMA_VERSION == manifest["schema_version"]
 
 
 class TestBlobRef:
