@@ -23,6 +23,7 @@ import {
   type OrcaConfig,
   fetchPinned,
 } from '../config.js';
+import { recordableOrigin } from '@orcareplay/proxy';
 import { readArchive, writeArchive, type ArchiveEntry } from '../archive.js';
 
 /**
@@ -105,7 +106,7 @@ async function resolveGateway(
     // model traffic. The second reads as a bug unless it says so.
     throw new Error(
       config.gateway?.url !== undefined
-        ? `the configured gateway (${config.gateway.url}) is orca setup's default for MODEL ` +
+        ? `the configured gateway (${recordableOrigin(config.gateway.url) ?? '(unprintable)'}) is orca setup's default for MODEL ` +
             'traffic, not a destination you named for your runs, and a run carries source, shell ' +
             'output and workspace snapshots. Name it explicitly: pass --gateway <url>, set ' +
             'ORCA_GATEWAY_URL, or re-run `orca setup --gateway <url>`.'
@@ -622,12 +623,42 @@ async function lockStillHeld(lock: string, token: string): Promise<boolean> {
  * Best-effort throughout: a store we cannot tidy is not a reason to refuse a pull that would fix it
  * anyway.
  */
-async function recoverInterruptedSwap(dest: string): Promise<void> {
+export async function recoverInterruptedSwap(
+  dest: string,
+  // REQUIRED, not optional, and that is the fix (orcacode-review). This is the FIFTH site of
+  // "nothing that lost the lock may touch what the lock protects", and it was the only one that
+  // did not ask — while being the most destructive of the set, since every branch below either
+  // `rm -rf`s or promotes one of the two deterministic scratch names. `revertStagedSwap`'s own
+  // comment already stated the rule this signature now enforces: "once the lock has moved they
+  // name ANOTHER pull's in-flight state: the `rm` below would delete the staging directory the
+  // new holder is writing into".
+  //
+  // Taking the probe as a parameter rather than probing at the two call sites is deliberate. A
+  // call site can be added without one — the early-recovery site did exactly that, passing
+  // `() => recoverInterruptedSwap(early)` and discarding the probe `withRunLock` had handed it —
+  // and the next such site would reopen the hole silently. A required parameter cannot be
+  // forgotten: it fails to compile.
+  stillHeld: () => Promise<boolean>,
+): Promise<void> {
   const staging = `${dest}.incoming`;
   const retired = `${dest}.replaced`;
   const present = async (p: string): Promise<boolean> => !!(await stat(p).catch(() => undefined));
-  const drop = async (p: string): Promise<void> =>
-    void (await rm(p, { recursive: true, force: true }).catch(() => undefined));
+  // EVERY mutation asks again, not just the first. The probe is a file read, so the window between
+  // two of these is real: a recovery that decided "dest is present, the siblings are litter" and
+  // then lost the lock must not go on to delete siblings that now belong to the new holder.
+  const drop = async (p: string): Promise<void> => {
+    if (!(await stillHeld())) return;
+    await rm(p, { recursive: true, force: true }).catch(() => undefined);
+  };
+  const promote = async (from: string, to: string): Promise<void> => {
+    if (!(await stillHeld())) return;
+    await rename(from, to).catch(() => undefined);
+  };
+
+  // Fail-closed toward NOT TOUCHING, the same direction revertStagedSwap fails: an evicted pull
+  // that resumes here does nothing, leaving litter the next holder reclaims under its own lock.
+  // The other direction destroys a copy that is nobody's to destroy.
+  if (!(await stillHeld())) return;
 
   const [hasDest, hasStaging, hasRetired] = await Promise.all([
     present(dest),
@@ -641,12 +672,12 @@ async function recoverInterruptedSwap(dest: string): Promise<void> {
     return;
   }
   if (hasStaging && hasRetired) {
-    await rename(staging, dest).catch(() => undefined);
+    await promote(staging, dest);
     if (await present(dest)) await drop(retired);
     return;
   }
   if (hasRetired) {
-    await rename(retired, dest).catch(() => undefined);
+    await promote(retired, dest);
     return;
   }
   if (hasStaging) {
@@ -744,7 +775,16 @@ export async function pushCommand(
     // A 200 whose body we cannot read is still a successful push; the run key is what matters and
     // we already know it.
   }
-  out.phase('push.done', { run: runId, replaced, gateway: url });
+  // PRINTED THROUGH recordableOrigin, exactly as setup.ts:136 prints the same value. config.ts
+  // states the promise this keeps — "nothing ever prints it back" — and a success line is not
+  // exempt from it: `https://gw.example/v1?key=SECRET` is an ordinary query-authenticated gateway,
+  // and this line lands in the terminal, in --json, and in the CI log of the README's own
+  // `orca push last` recipe.
+  out.phase('push.done', {
+    run: runId,
+    replaced,
+    gateway: recordableOrigin(url) ?? '(unprintable)',
+  });
 }
 
 function lostTheLock(): Error {
@@ -940,7 +980,7 @@ export async function pullCommand(
 
   try {
     const early = runDirFor(cwd, runKey);
-    await withRunLock(early, () => recoverInterruptedSwap(early));
+    await withRunLock(early, (stillHeld) => recoverInterruptedSwap(early, stillHeld));
   } catch {
     // Not a run id — the post-fetch recovery below is the one that matters anyway.
   }
@@ -993,7 +1033,14 @@ export async function pullCommand(
   // new copy under a name another pull would also use, and the swap moves both. Locking only the
   // swap would leave recovery free to delete what staging just wrote.
   await withRunLock(dest, async (stillHeld) => {
-    await recoverInterruptedSwap(dest);
+    await recoverInterruptedSwap(dest, stillHeld);
+
+    // AND THE DECISION THAT FOLLOWS IT BELONGS TO THIS PULL TOO. Recovery declining to act (above)
+    // is not enough on its own: `existing` and the `--force` check below read state that, once the
+    // lock has moved, describes the NEW holder's run. Asking here turns a resumed pull into a
+    // clean "re-run the pull" rather than a confusing "already exists locally" about someone
+    // else's copy — and stops it staging over them.
+    if (!(await stillHeld())) throw lostTheLock();
 
     const existing = await stat(dest).catch(() => undefined);
     if (existing && !args.bool('force')) {

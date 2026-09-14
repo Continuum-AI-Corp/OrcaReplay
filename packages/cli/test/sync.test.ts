@@ -12,6 +12,7 @@ import {
   LOCK_HEARTBEAT_MS,
   releaseRunLock,
   restoreLockFile,
+  recoverInterruptedSwap,
   revertStagedSwap,
   stageRunEntries,
   swapStagedRun,
@@ -1485,5 +1486,110 @@ describe('push and pull', () => {
     await writeConfig({ gateway: { url, api_key: 'sk-x' } }, { XDG_CONFIG_HOME: home });
     await pushCommand(parseArgs(['push', runId]), out, workspace, noEnv);
     expect(received).toHaveLength(1);
+  });
+  /*
+  THE FIFTH SITE OF "nothing that lost the lock may touch what the lock protects", and the one that
+  did not ask (orcacode-review).
+
+  `recoverInterruptedSwap` runs first inside the pull's critical section, and every branch of it
+  either `rm -rf`s or promotes one of the two deterministic scratch names — so it is the most
+  destructive member of the set, not a bystander. `revertStagedSwap`'s own comment already stated
+  the rule it was breaking: "once the lock has moved they name ANOTHER pull's in-flight state".
+
+  The interleaving: pull A takes the lock and is stopped before its first statement (SIGSTOP, a
+  suspended laptop). No heartbeats land, so after STALE_LOCK_MS its lock is legitimately judged
+  abandoned; pull B breaks it, takes its own, and starts writing into `<run>.incoming`. A resumes
+  into `recoverInterruptedSwap`, finds `dest` present, takes the "the siblings are litter" branch
+  and deletes B's in-flight staging. B notices nothing — its own `stillHeld()` is true — recreates
+  directories as it writes the rest, renames the gutted staging into place and prints `pull.done`.
+
+  Asserted per branch rather than once, because each decides about a different pair of paths and an
+  early return in only one of them would still leave three ways to destroy the new holder's work.
+  */
+  it.each([
+    {
+      what: 'dest present: the two siblings look like litter',
+      dest: true,
+      staging: true,
+      retired: true,
+    },
+    {
+      what: 'dest absent with both siblings: promote staging, drop retired',
+      dest: false,
+      staging: true,
+      retired: true,
+    },
+    {
+      what: 'dest absent with only the retired copy: put it back',
+      dest: false,
+      staging: false,
+      retired: true,
+    },
+    {
+      what: 'dest absent with only staging: drop it as partial',
+      dest: false,
+      staging: true,
+      retired: false,
+    },
+  ])(
+    'recovery touches nothing once the lock has moved — $what',
+    async ({ dest: hasDest, staging: hasStaging, retired: hasRetired }) => {
+      const runs = join(workspace, '.orca', 'runs');
+      await mkdir(runs, { recursive: true });
+      const dest = join(runs, runId);
+      const staging = `${dest}.incoming`;
+      const retired = `${dest}.replaced`;
+
+      if (hasDest) {
+        await mkdir(dest, { recursive: true });
+        await writeFile(join(dest, 'events.jsonl'), 'the installed run\n');
+      }
+      if (hasStaging) {
+        await mkdir(staging, { recursive: true });
+        await writeFile(join(staging, 'events.jsonl'), 'the new holder\n');
+      }
+      if (hasRetired) {
+        await mkdir(retired, { recursive: true });
+        await writeFile(join(retired, 'events.jsonl'), 'the old run\n');
+      }
+
+      await recoverInterruptedSwap(dest, async () => false);
+
+      const read = (p: string) => readFile(join(p, 'events.jsonl'), 'utf8').catch(() => undefined);
+      expect(
+        await read(staging),
+        'an evicted pull deleted or promoted the staging directory the lock’s new holder was writing into',
+      ).toBe(hasStaging ? 'the new holder\n' : undefined);
+      expect(
+        await read(retired),
+        'an evicted pull dropped the copy the new holder had moved aside, so its own rollback cannot restore it',
+      ).toBe(hasRetired ? 'the old run\n' : undefined);
+      expect(
+        await read(dest),
+        'an evicted pull installed something over the destination it no longer owns',
+      ).toBe(hasDest ? 'the installed run\n' : undefined);
+    },
+  );
+
+  /*
+  …and the guard must not be a way of never recovering. Without this the fix above passes by doing
+  nothing at all, which would silently reintroduce the vanished-run case the deterministic scratch
+  names exist to make recoverable.
+  */
+  it('still finishes an interrupted swap while the lock is ours', async () => {
+    const runs = join(workspace, '.orca', 'runs');
+    await mkdir(runs, { recursive: true });
+    const dest = join(runs, runId);
+    const staging = `${dest}.incoming`;
+    const retired = `${dest}.replaced`;
+    await mkdir(staging, { recursive: true });
+    await writeFile(join(staging, 'events.jsonl'), 'the finished new copy\n');
+    await mkdir(retired, { recursive: true });
+    await writeFile(join(retired, 'events.jsonl'), 'the old run\n');
+
+    await recoverInterruptedSwap(dest, async () => true);
+
+    expect(await readFile(join(dest, 'events.jsonl'), 'utf8')).toBe('the finished new copy\n');
+    expect(await stat(retired).catch(() => undefined)).toBeUndefined();
   });
 });

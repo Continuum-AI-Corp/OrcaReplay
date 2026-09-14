@@ -21,6 +21,7 @@ import { scrubCommand } from './commands/scrub.js';
 import { gcCommand } from './commands/gc.js';
 import { doctorCommand } from './commands/doctor.js';
 import { modelsCommand, setupCommand } from './commands/setup.js';
+import { withoutCredentials } from '@orcareplay/proxy';
 import { ORCA_VERSION } from './version.js';
 
 const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI agents
@@ -263,14 +264,30 @@ export async function main(argv: string[], cwd = process.cwd()): Promise<number>
         return 2;
     }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    // THE ONE PLACE EVERY COMMAND'S ERROR BECOMES OUTPUT, so it is the one place the credential
+    // has to come out (orcacode-review found push/pull leaking it; setup already wrapped its own
+    // two call sites by hand).
+    //
+    // Per-command wrapping is what let this through: `push`/`pull` were new sinks for a gateway
+    // URL and simply did not do it. A failed fetch reports the URL it was given, so an origin
+    // configured as `https://user:pw@gw` or `https://gw?key=…` — both ordinary, both storable by
+    // `orca setup` — arrives inside undici's exception text ("Request cannot be constructed from
+    // a URL that includes credentials: …") and lands in the terminal and in the CI log.
+    //
+    // out.ts's own guard cannot catch it: that guard is shape-based and applies to `#line` field
+    // names, and an arbitrary password matches no pattern. Sanitising here covers every existing
+    // command and every future one, and is idempotent with setup.ts's hand-wrapping.
+    //
+    // The stack goes through it too: err.stack embeds the same message.
+    const message = withoutCredentials(err instanceof Error ? err.message : String(err));
     const [first, ...rest] = message.split('\n');
     out.failure({
       event: `${args.command}.failed`,
       what: first ?? message,
       why: rest.join('\n').trim() || undefined,
     });
-    if (out.isVerbose && err instanceof Error && err.stack) out.plain(err.stack);
+    if (out.isVerbose && err instanceof Error && err.stack)
+      out.plain(withoutCredentials(err.stack));
     return 1;
   }
 }
@@ -365,7 +382,11 @@ async function jsonMain(args: ParsedArgs, cwd: string): Promise<number> {
         return 2;
     }
   } catch (err) {
-    emit({ error: { message: err instanceof Error ? err.message : String(err) } });
+    // Same reasoning as the plain-output catch above: --json is a second sink for the same text,
+    // and a CI job is exactly where it gets captured and kept.
+    emit({
+      error: { message: withoutCredentials(err instanceof Error ? err.message : String(err)) },
+    });
     return 1;
   }
 }
