@@ -510,7 +510,15 @@ export class RequestMatcher {
     if (this.#cursor >= this.#recorded.length) {
       // The cursor is past the end, and nothing held is an exact answer to this. A near one still
       // might be: the out-of-order pair whose second half arrives last.
-      const held = this.#matchDeferred(incoming);
+      //
+      // Ranked, not first-come. This branch used to serve whichever held request matched first in
+      // insertion order, which is the same mistake the rest of this method was rewritten to stop
+      // making — and concurrency is what turned it from a corner into an ordinary state, since a
+      // worker pool routinely drives the cursor off the end while the requests it stepped over are
+      // still owed. On an indexing recording every held candidate is a rung-2 match against every
+      // other, so "first" meant the earliest document rather than this one: 2 of 4 documents, and
+      // 8 of 30 at width 10, were served a neighbour's extraction under a `minor` label.
+      const held = this.#nearestHeld(incoming);
       if (held) return held;
       return {
         matched: false,
@@ -569,6 +577,25 @@ export class RequestMatcher {
       }
     }
     return best;
+  }
+
+  /**
+   * The best rung-2 match among the held requests, ranked the way {@link #nearest} ranks its own.
+   *
+   * `#nearest` cannot serve here: it probes `#matchAt(incoming, this.#cursor)`, and past the end
+   * of the recording there is nothing at the cursor to probe.
+   */
+  #nearestHeld(incoming: CanonicalRequest): MatchResult | undefined {
+    let best: MatchResult | undefined;
+    for (const index of this.#deferred) {
+      const other = this.#matchAt(incoming, index);
+      if (!other.matched || other.rung > 2) continue;
+      if (best === undefined || rank(other, this.#cursor) < rank(best, this.#cursor)) best = other;
+    }
+    if (best === undefined) return undefined;
+    // `#matchDeferred` is what actually removes the entry from `#deferred` and labels the result
+    // as reordered; this only decides which entry it should be handed.
+    return this.#matchDeferred(incoming, undefined, best.index);
   }
 
   /** Move the cursor to `index`, holding what it stepped over, and report what was passed by. */

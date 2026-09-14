@@ -141,6 +141,47 @@ describe('a concurrent indexing pipeline', () => {
   });
 
   /**
+   * The same ordering question, in the state a worker pool reaches most easily of all.
+   *
+   * A pool that hands its last document back first drives the cursor past the end of the
+   * recording on the *first* request, and every request after that is answered out of the held
+   * set alone. That branch served whichever held request matched first in insertion order — the
+   * earliest document, not the nearest one — so the answers came back shuffled: on four documents
+   * arriving 3, 2, 1, 0, documents 2 and 0 were each served the other's extraction, and at width
+   * 10 over thirty documents eight of them were. `unmatched=0`, `exit=0`, every mis-serve a
+   * `minor` divergence, and a knowledge base built from the replay that is quietly wrong.
+   *
+   * Two held candidates are the minimum that can tell the two orderings apart, which is why
+   * nothing caught this: the recording exhaustion test holds none, and the lookahead test holds
+   * one, and with one candidate "first" and "nearest" are the same request.
+   */
+  it('ranks the held requests when the cursor has run off the end', () => {
+    const template = 'Extract the facts.\n'.repeat(60);
+    const drifted = (i: number, run: string): CanonicalRequest => ({
+      model: 'gpt-4o-mini',
+      system: `${template}Session ${run}\nDocument: ${'x'.repeat(200)}${i}`,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'Return JSON.' }] }],
+    });
+
+    const matcher = new RequestMatcher(
+      [0, 1, 2, 3].map((i) => drifted(i, 'recorded')),
+      { concurrency: () => 4 },
+    );
+
+    // Document 3 first: its own answer is the last one recorded, so the cursor lands past the end
+    // and 0, 1 and 2 are all held.
+    expect(matcher.match(drifted(3, 'replayed')).index).toBe(3);
+    expect(matcher.remaining()).toBe(3);
+
+    // From here every answer comes out of the held set, and each has to be the right one. Document
+    // 2 is where it used to go wrong: index 0 is first in the held set and matches at rung 2.
+    expect(matcher.match(drifted(2, 'replayed')).index).toBe(2);
+    expect(matcher.match(drifted(1, 'replayed')).index).toBe(1);
+    expect(matcher.match(drifted(0, 'replayed')).index).toBe(0);
+    expect(matcher.remaining()).toBe(0);
+  });
+
+  /**
    * The guard itself, isolated. Same ask, same message count, a system prompt that differs by more
    * than rung 2's tolerance: that is a different request, and the honest answer is rung 4.
    */
