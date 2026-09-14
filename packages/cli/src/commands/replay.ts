@@ -1314,6 +1314,9 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
     // Newly-made recordings no longer contain such a tree (the forced add drops gitlinks), which
     // leaves the recordings already on disk — exactly the ones a guard has to be here for.
     await assertRestorable(recorded, initial.fsTree);
+    // And the other direction: whatever the reset is about to delete has to be in the copy taken
+    // a moment ago, not merely in the recording. The two guards own different files.
+    await assertResettable(safety, ctx.cwd, artifacts);
 
     // Before the restore, not after — and that ordering is the whole definition of the reset.
     // `materialize` writes the tree's files and leaves anything else where it is, so a cache the
@@ -1389,20 +1392,9 @@ async function resetArtifacts(
   artifacts: HarnessArtifacts | undefined,
   out: Output,
 ): Promise<void> {
-  const paths = artifacts?.resetBeforeReplay ?? [];
-  if (paths.length === 0) return;
   const removed: string[] = [];
-  for (const pattern of paths) {
-    // The leading directory of the pattern, which is what a reset actually means: `cache/**` is a
-    // declaration about `cache`, and removing the directory is both what the harness needs and
-    // the only thing that can be done without a glob library. A pattern that names no directory
-    // is removed as the literal path it is.
-    const root = pattern.split(/[\\/]/)[0] ?? pattern;
-    if (root === '' || root === '.' || root === '..' || root.includes('*')) continue;
-    const target = resolve(dir, root);
-    // Never outside the workspace, whatever an adapter declares.
-    if (!isInsideDir(dir, target)) continue;
-    await rm(target, { recursive: true, force: true });
+  for (const root of resetRoots(dir, artifacts)) {
+    await rm(resolve(dir, root), { recursive: true, force: true });
     removed.push(root);
   }
   if (removed.length > 0) {
@@ -1412,6 +1404,78 @@ async function resetArtifacts(
       note: 'your files are restored when the replay ends',
     });
   }
+}
+
+/**
+ * The paths {@link resetArtifacts} will actually remove.
+ *
+ * The declared path itself, with a trailing glob stripped — `cache/**` is a declaration about
+ * `cache`, and a glob suffix is the only part of a pattern this can act on without a glob library.
+ *
+ * Not the pattern's *first segment*, which is what this took before. Nothing constrains a
+ * declaration to one segment — `resetBeforeReplay` is `readonly string[]` and the plugin docs call
+ * it "whole paths" — so an adapter declaring `data/cache` had `rm -rf <cwd>/data` run against the
+ * operator's working directory. That deletion is wider than the copy meant to reverse it: only
+ * `data/cache` is force-staged, and the rest of `data/` is in the safety tree only if the workspace
+ * does not ignore it — and a workspace that ignores its pipeline's product directory is the entire
+ * reason `artifacts.capture` exists. `data/raw-inputs/` would have been deleted permanently, under
+ * a message saying the files come back when the replay ends.
+ *
+ * Shared with the check that runs before the removal, so the two cannot disagree about what is
+ * about to be deleted — a guard looking at a different set from the `rm` would be worse than none.
+ */
+export function resetRoots(dir: string, artifacts: HarnessArtifacts | undefined): string[] {
+  const roots: string[] = [];
+  for (const pattern of artifacts?.resetBeforeReplay ?? []) {
+    const declared = pattern.replace(/[\\/]+\*{1,2}$/, '').replace(/[\\/]+$/, '');
+    if (declared === '' || declared === '.' || declared === '..' || declared.includes('*'))
+      continue;
+    // Never outside the workspace, whatever an adapter declares.
+    if (!isInsideDir(dir, resolve(dir, declared))) continue;
+    // Forward slashes: this is handed to `git ls-files` as a pathspec as well as to `resolve`.
+    roots.push(declared.split(/[\\/]/).join('/'));
+  }
+  return [...new Set(roots)];
+}
+
+/**
+ * Refuse the reset unless the safety copy holds everything the reset is about to delete.
+ *
+ * `assertRestorable` asks whether the *recording's* tree can be written back. This asks the other
+ * half, and it is the half that owns the operator's files: `resetArtifacts` deletes whole
+ * directories, and the only thing that can put back what was in them and not in the recording is
+ * the safety snapshot taken moments earlier. That snapshot is not unconditionally complete. The
+ * sensitive pathspecs are applied to its forced add as well — rightly; they are what stops an
+ * adapter sweeping a credential into a trace — and a nested repository inside a declared path is
+ * dropped because no snapshot can hold one. Both are deliberate, and both mean the copy is missing
+ * something the `rm` would take: an `.env` the operator keeps beside a cache, a prebuilt store
+ * cloned into `vector_store/`. Neither need appear in the recording's tree at all, since the
+ * operator may have put it there afterwards, so the other guard passes and the loss is permanent
+ * and silent.
+ *
+ * Refusing rather than warning, because there is no second chance after the `rm`, and the rule this
+ * replay is operating under says so in as many words: orca deletes only what it took a copy of
+ * first. In the ordinary run nothing under these paths is excluded and this asks git one question
+ * and moves on.
+ */
+async function assertResettable(
+  safety: FsCapture,
+  dir: string,
+  artifacts: HarnessArtifacts | undefined,
+): Promise<void> {
+  const roots = resetRoots(dir, artifacts);
+  if (roots.length === 0) return;
+  const missing = await safety.uncaptured(roots);
+  if (missing.length === 0) return;
+  const shown = missing.slice(0, 5).join(', ');
+  const rest = missing.length > 5 ? `, and ${missing.length - 5} more` : '';
+  throw new Error(
+    `this replay would delete ${roots.join(', ')} to put the harness back where the recording ` +
+      `started, and the copy orca took first does not hold ${shown}${rest} — a nested git ` +
+      'repository, or a path the sensitive-file rules keep out of every snapshot. Orca deletes ' +
+      'only what it has a copy of, so nothing has been deleted. Move those out of the reset ' +
+      'paths, or replay with --in-place to leave the working tree alone.',
+  );
 }
 
 /** The `--in-place` half of the same rule: say what was not done, rather than doing it unsafely. */

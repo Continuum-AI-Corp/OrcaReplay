@@ -500,6 +500,49 @@ describe('forced capture', () => {
   });
 
   /**
+   * What the snapshot did not take a copy of, for a caller about to delete these paths.
+   *
+   * Two rules keep things out of a forced add, and both are right: the sensitive pathspecs stop an
+   * adapter sweeping a credential into a trace however it declares its paths, and a nested
+   * repository cannot be held at all. Both mean the copy is missing something a reset would take —
+   * an `.env` the operator keeps beside a cache, a prebuilt store cloned into `vector_store/` —
+   * and neither need appear in the recording's own tree, since the operator may have put it there
+   * afterwards. `orca replay` deletes these paths on the strength of this copy, so it has to be
+   * able to ask what the copy is missing before it does.
+   */
+  itGit('reports what a forced snapshot could not hold under the declared paths', async () => {
+    const root = await makeTempDir();
+    const workTree = join(root, 'ws');
+    await mkdir(workTree, { recursive: true });
+    const shadow = await ShadowIndex.create({
+      gitDir: join(root, 'run', 'fs'),
+      workTree,
+      forced: ['cache', 'vector_store'],
+    });
+    await write(workTree, '.gitignore', 'cache/\nvector_store/\n');
+    await write(workTree, 'cache/mini_faqs.json', '{}\n');
+    await write(workTree, 'cache/.env', 'INDEXRAG_EMBEDDING_API_KEY=sk-live\n');
+    const prebuilt = join(workTree, 'vector_store', 'prebuilt');
+    await mkdir(prebuilt, { recursive: true });
+    await runGit(['init', '-q'], { cwd: prebuilt });
+    await write(prebuilt, 'faiss.bin', 'months of work\n');
+    await runGit(['add', '-A'], { cwd: prebuilt });
+    await runGit(['-c', 'user.email=a@b.c', '-c', 'user.name=a', 'commit', '-qm', 'p'], {
+      cwd: prebuilt,
+    });
+
+    await shadow.snapshot();
+    // The credential, kept out on purpose; and the clone, which no snapshot can hold. A trailing
+    // slash on the second because git will not look inside a repository of its own.
+    expect(await shadow.uncaptured(['cache', 'vector_store'])).toEqual([
+      'cache/.env',
+      'vector_store/prebuilt/',
+    ]);
+    // And the ordinary case says nothing, so a guard built on this is quiet in a normal run.
+    expect(await shadow.uncaptured(['cache/mini_faqs.json'])).toEqual([]);
+  });
+
+  /**
    * The same question `materialize` answers by throwing, asked without writing anything.
    *
    * `orca replay` deletes the artifacts *before* the restore that puts them back, which is the

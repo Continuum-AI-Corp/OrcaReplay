@@ -424,6 +424,26 @@ export class ShadowIndex {
    * never stored, and checkout would silently leave an empty directory in their place.
    */
   /**
+   * What is on disk under `paths` that the last snapshot did not take a copy of.
+   *
+   * Asked of the index the snapshot wrote, so it answers for that snapshot exactly: anything git
+   * calls "other" under these paths is a file in the work tree with no entry in it. Two rules put
+   * things there and both are deliberate — `SENSITIVE_PATHSPECS` keeps credentials out of a trace
+   * however an adapter declares its paths, and {@link dropForcedGitlinks} removes a nested
+   * repository whose contents no snapshot can hold — which is precisely why the answer has to be
+   * available to a caller about to delete these paths on the strength of that copy.
+   *
+   * A nested repository comes back as the directory, with a trailing slash, because git will not
+   * look inside one. That is the honest shape of the answer: what is missing is everything under
+   * it.
+   */
+  async uncaptured(paths: readonly string[]): Promise<string[]> {
+    if (paths.length === 0) return [];
+    const out = await this.run(['ls-files', '--others', '-z', '--', ...paths]);
+    return out.split('\0').filter((path) => path !== '');
+  }
+
+  /**
    * The nested repositories a tree records as gitlinks, whose contents this store never held.
    *
    * {@link materialize} refuses such a tree; this answers the same question without writing a

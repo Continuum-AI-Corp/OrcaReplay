@@ -93,6 +93,11 @@ export class FsCapture {
     return this.shadow.gitlinks(tree);
   }
 
+  /** See {@link ShadowIndex.uncaptured}: what the last snapshot left behind under these paths. */
+  async uncaptured(paths: readonly string[]): Promise<string[]> {
+    return this.shadow.uncaptured(paths);
+  }
+
   /**
    * Provenance for the manifest, read from the *user's* repository rather than the shadow store.
    * Returns `{}` for anything that is not a readable git repo; a missing head is not an error.
