@@ -506,7 +506,6 @@ workspace이고 `orca`는 `packages/cli`에 있다.
     events.jsonl      # 타임라인, 한 줄에 JSON 객체 하나, 추가 전용
     blobs/            # 4 KB를 넘는 페이로드를 내용 주소로 저장, 중복 제거
     fs/               # 그림자 git 인덱스: 매 턴의 작업 공간
-    shell-frames.jsonl
     redactions.json   # 무엇이 제거되었는지 규칙과 개수로 — 값 자체는 결코 남기지 않음
 ```
 

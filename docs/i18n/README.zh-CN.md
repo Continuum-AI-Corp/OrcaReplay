@@ -487,7 +487,6 @@ tag、带门禁的工作流——见 [`RELEASING.md`](../../RELEASING.md)。
     events.jsonl      # 时间线，一行一个 JSON 对象，只追加
     blobs/            # 超过 4 KB 的内容按内容寻址存放，自动去重
     fs/               # 影子 git 索引：每一轮的工作区
-    shell-frames.jsonl
     redactions.json   # 被移除了什么，按规则和数量记录——绝不记录值本身
 ```
 

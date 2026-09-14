@@ -540,7 +540,6 @@ ejecución es una sola cosa que se describe a sí misma:
     events.jsonl      # la línea de tiempo, un objeto JSON por línea, solo se añade
     blobs/            # payloads de más de 4 KB, direccionados por contenido y deduplicados
     fs/               # índice git en la sombra: el workspace en cada turno
-    shell-frames.jsonl
     redactions.json   # qué se quitó, por regla y recuento — nunca por valor
 ```
 

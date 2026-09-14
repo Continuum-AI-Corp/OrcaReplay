@@ -545,7 +545,6 @@ Lauf-Verzeichnis ist eine sich selbst beschreibende Einheit:
     events.jsonl      # die Zeitleiste, ein JSON-Objekt pro Zeile, nur angehängt
     blobs/            # inhaltsadressierte Payloads über 4 KB, dedupliziert
     fs/               # Schatten-git-Index: der Workspace in jeder Runde
-    shell-frames.jsonl
     redactions.json   # was entfernt wurde, nach Regel und Anzahl — nie nach Wert
 ```
 

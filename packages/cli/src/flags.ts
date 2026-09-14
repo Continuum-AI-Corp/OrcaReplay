@@ -23,7 +23,7 @@ const TLS = ['tls-intercept', 'tls-hosts'] as const;
 
 export const BY_COMMAND: Record<string, readonly string[]> = {
   quickstart: ['dir', 'full'],
-  record: ['fs', 'shell', 'mcp-config', ...TLS, ...UPSTREAM],
+  record: ['fs', 'shell', 'agent-spans', 'mcp-config', ...TLS, ...UPSTREAM],
   attach: [
     'for',
     'bind',

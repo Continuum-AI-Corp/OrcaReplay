@@ -129,7 +129,13 @@ async function checkShellShim(): Promise<DoctorCheck> {
   const name = 'shell shim';
   const dir = await mkdtemp(join(tmpdir(), 'orca-doctor-shim-'));
   try {
-    const shim = await installShellShim({ runDir: dir });
+    // `framesPath` explicitly, so the frames land inside the directory this function already
+    // removes in its `finally`. Left to the default they would go to a transport of their own, which
+    // doctor has no teardown for — a check that leaks is a check nobody wants to run.
+    const shim = await installShellShim({
+      runDir: dir,
+      framesPath: join(dir, 'shell-frames.jsonl'),
+    });
     // Run something through it, rather than trusting that writing the scripts was enough: the
     // failure this catches is the compiled runner being absent from an installed package.
     const { stdout } = await execFileAsync('sh', ['-c', 'printf ok'], {
