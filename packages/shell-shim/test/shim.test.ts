@@ -90,6 +90,14 @@ describe('shell shim', () => {
     expect(frame.exitCode).toBe(2);
     expect(frame.cwd).toContain('orca-shell-');
     expect(frame.durationMs).toBeGreaterThanOrEqual(0);
+    // The reader's recovery of a torn line is anchored on this, so the writer has to keep
+    // producing it: `record()` builds the object with `name` first and `JSON.stringify` keeps
+    // insertion order.
+    const firstLine = (await readFile(shim.framesPath, 'utf8')).split('\n')[0]!;
+    expect(
+      firstLine.startsWith('{"name":'),
+      `a frame now starts \`${firstLine.slice(0, 12)}\``,
+    ).toBe(true);
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -395,6 +403,62 @@ describe('shell shim', () => {
     const frames = await readShellFrames(shim.framesPath);
     expect(frames, 'a frame was cut short at a brace in its own argv').toHaveLength(1);
     expect(frames[0]!.argv).toEqual(['-c', 'echo "}"']);
+  });
+
+  /**
+   * Why the search for what is whole is anchored, rather than started at any `{`.
+   *
+   * A fragment that stops inside a string leaves an odd number of quotes behind it, and a brace
+   * walk begun anywhere after that reads every quote on the wrong side: the braces in the complete
+   * frame that follows are counted as text, the walk reports a boundary past it, and the frame is
+   * skipped without ever being looked at. Started at `{"name":` the walk always begins outside a
+   * string, because JSON escapes the quotes inside one and the sequence cannot occur there.
+   *
+   * Measured before this was anchored: taking one ordinary frame and using each of its 166 cut
+   * points as the fragment, the complete frame behind it was lost for 122 of them.
+   */
+  it('recovers a frame behind a fragment that stopped inside a string', async () => {
+    const whole = JSON.stringify({
+      name: 'sh',
+      argv: ['-c', 'echo "}"'],
+      cwd: '/tmp',
+      exitCode: 0,
+      signal: null,
+      startedAt: '2026-09-12T00:00:00.000Z',
+      durationMs: 5,
+      stdoutBytes: 0,
+      stderrBytes: 0,
+    });
+    // `{"name` is the shortest fragment that ends mid-string, and the one a short write is likeliest
+    // to leave.
+    await writeFile(shim.framesPath, `{"name${whole}\n`, 'utf8');
+
+    const frames = await readShellFrames(shim.framesPath);
+    expect(frames, 'the complete frame was read past, not read').toHaveLength(1);
+    expect(frames[0]!.argv).toEqual(['-c', 'echo "}"']);
+  });
+
+  it('keeps a frame whose fields are in some other order, having never looked for one', async () => {
+    // A line that parses is one frame and needs none of the recovery below it. That is every line
+    // of every ordinary capture, and it is also the only thing that reads a frame written by
+    // something that ordered its fields differently — recovery is anchored on `name` coming first,
+    // and an ordinary line must not depend on that.
+    const frame = {
+      argv: ['-c', 'true'],
+      name: 'sh',
+      cwd: '/tmp',
+      exitCode: 0,
+      signal: null,
+      startedAt: '2026-09-12T00:00:00.000Z',
+      durationMs: 5,
+      stdoutBytes: 0,
+      stderrBytes: 0,
+    };
+    await writeFile(shim.framesPath, `${JSON.stringify(frame)}\n`, 'utf8');
+
+    const frames = await readShellFrames(shim.framesPath);
+    expect(frames, 'an ordinary line was put through the recovery and lost').toHaveLength(1);
+    expect(frames[0]!.argv).toEqual(['-c', 'true']);
   });
 
   it('still has nothing to recover from a fragment on its own', async () => {

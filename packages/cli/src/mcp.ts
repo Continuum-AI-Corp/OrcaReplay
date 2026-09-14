@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { rewriteMcpConfig } from '@orcareplay/adapters';
 import type { TraceWriter } from '@orcareplay/core';
-import { isMcpFrameRecord, recordsOnLine } from '@orcareplay/mcp-shim';
+import { isMcpFrameRecord, objectsOnLine, MCP_RECORD_START } from '@orcareplay/mcp-shim';
 import type { McpFrameRecord } from '@orcareplay/mcp-shim';
 import type { Output } from './out.js';
 
@@ -162,8 +162,7 @@ export async function drainMcpFrames(
 ): Promise<void> {
   for (const frame of await mcp.drain()) {
     // Belt and braces with the filter in `drain`. This function is exported and reached from three
-    // call sites, and what it is handed comes off a file several processes append to — the same
-    // reasoning that made `eventForSpan` take `unknown`.
+    // call sites, and what it is handed comes off a file several processes append to.
     if (!usableFrame(frame)) continue;
     const at = frame.ts === undefined ? Number.NaN : Date.parse(frame.ts);
     const when = Number.isNaN(at) ? undefined : new Date(at);
@@ -245,15 +244,11 @@ export async function setupMcpCapture(opts: {
     async drain() {
       const text = await readFile(framesPath, 'utf8').catch(() => '');
       const records: McpFrameRecord[] = [];
-      for (const piece of text.split('\n').flatMap((line) => recordsOnLine(line))) {
-        if (piece.trim() === '') continue;
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(piece);
-        } catch {
-          // A malformed capture line must never break the recorder; the agent's run matters more.
-          continue;
-        }
+      // A malformed capture line must never break the recorder; the agent's run matters more, and
+      // a line that a short write left holding a fragment and a record must still yield the record.
+      for (const parsed of text
+        .split('\n')
+        .flatMap((line) => objectsOnLine(line, MCP_RECORD_START))) {
         if (usableFrame(parsed)) records.push(parsed);
       }
       return records;

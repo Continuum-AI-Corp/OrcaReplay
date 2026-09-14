@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { main, parseArgs, recordsOnLine } from '../src/index.js';
+import { main, MCP_RECORD_START, objectsOnLine, parseArgs } from '../src/index.js';
 
 let scratch: string;
 
@@ -20,35 +20,64 @@ afterEach(() => {
  *
  * Several servers append to one file and each record is one write, so a short write leaves part of
  * a record with no newline behind it and the next server's bytes land on the end. Skipping such a
- * line threw away whatever on it was complete. What decides a boundary is where a JSON object
- * *ends* — not where a key begins, which only finds the boundary when the fragment happens to be
- * longer than the key.
+ * line threw away whatever on it was complete.
  */
-describe('recordsOnLine', () => {
-  const whole = '{"ts":"2026-09-12T00:00:00.000Z","name":"fs","raw":"{\\"a\\":1}"}';
+describe('objectsOnLine', () => {
+  const record = { ts: '2026-09-12T00:00:00.000Z', name: 'fs', raw: '{"a":1}' };
+  const whole = JSON.stringify(record);
 
-  it('returns an ordinary line unchanged', () => {
-    expect(recordsOnLine(whole)).toEqual([whole]);
+  it('returns the one record an ordinary line holds', () => {
+    expect(objectsOnLine(whole, MCP_RECORD_START)).toEqual([record]);
+  });
+
+  it('returns a record whose fields are in some other order, having never looked for one', () => {
+    // The ordinary line parses, so the anchor is not consulted. A record written by something that
+    // ordered its fields differently, or that has no `ts` at all, is still a record on a line.
+    const odd = '{"name":"fs","raw":"{}"}';
+    expect(objectsOnLine(odd, MCP_RECORD_START)).toEqual([{ name: 'fs', raw: '{}' }]);
   });
 
   it('finds a record whose newline was lost, ahead of a stub too short to be an opening', () => {
-    expect(recordsOnLine(`${whole}{"t`)).toEqual([whole]);
+    expect(objectsOnLine(`${whole}{"t`, MCP_RECORD_START)).toEqual([record]);
   });
 
   it('finds a record that landed after a fragment', () => {
-    expect(recordsOnLine(`{"ts":"2026-09-12T00:00:00.000Z","name":"fs"${whole}`)).toEqual([whole]);
+    expect(
+      objectsOnLine(`{"ts":"2026-09-12T00:00:00.000Z","name":"fs"${whole}`, MCP_RECORD_START),
+    ).toEqual([record]);
+  });
+
+  /**
+   * The reason the search is anchored rather than started at any `{`.
+   *
+   * A fragment that stops inside a string leaves an odd number of quotes behind it, and a brace
+   * walk begun anywhere after that reads every quote on the wrong side: braces in the *complete*
+   * record that follows are then counted as text, the walk returns a boundary past it, and the
+   * record is skipped without ever being looked at. `{"ts":` cannot occur inside a JSON string —
+   * the quotes in one are escaped — so a search anchored on it always starts outside.
+   */
+  it('finds a record behind a fragment that stopped inside a string', () => {
+    expect(objectsOnLine(`{"ts":"2026-09-12${whole}`, MCP_RECORD_START)).toEqual([record]);
   });
 
   it('does not end a record at a brace inside the payload it carries', () => {
     // `raw` is the line a server said, kept as a string. A tool call whose argument is a lone `}`
     // puts an unmatched brace in it; read structurally, that ends the record early and the piece
     // that comes out does not parse — so the call would be missing from a trace that recorded it.
-    const braced = '{"ts":"t","name":"fs","raw":"{\\"q\\":\\"}\\"}"}';
-    expect(recordsOnLine(`${braced}{"t`)).toEqual([braced]);
+    const braced = { ts: 't', name: 'fs', raw: '{"q":"}"}' };
+    expect(objectsOnLine(`${JSON.stringify(braced)}{"t`, MCP_RECORD_START)).toEqual([braced]);
+  });
+
+  it('does not take a balanced run of bytes that is not a record', () => {
+    // Braces that close, and nothing `JSON.parse` accepts. The walk is a guess; the parse decides.
+    expect(objectsOnLine('{"ts":"a"}}{', MCP_RECORD_START)).toEqual([{ ts: 'a' }]);
+    expect(objectsOnLine('{"ts":,}{"x', MCP_RECORD_START)).toEqual([]);
   });
 
   it('has nothing to return for a fragment on its own', () => {
-    expect(recordsOnLine('{"ts":"2026-09-12T00:00:00.000Z","name":"fs"')).toEqual([]);
+    expect(objectsOnLine('{"ts":"2026-09-12T00:00:00.000Z","name":"fs"', MCP_RECORD_START)).toEqual(
+      [],
+    );
   });
 });
 
@@ -115,6 +144,12 @@ describe('main', () => {
     stdin.write('{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n');
     stdin.end();
     expect(await done).toBe(0);
+    // The reader's recovery is anchored on this, so the writer has to keep producing it.
+    const firstLine = readFileSync(out, 'utf8').split('\n')[0]!;
+    expect(
+      firstLine.startsWith(MCP_RECORD_START),
+      `a record now starts \`${firstLine.slice(0, 12)}\``,
+    ).toBe(true);
 
     const lines = readFileSync(out, 'utf8')
       .trim()

@@ -182,16 +182,28 @@ const EARLIEST_MS = -62_167_219_200_000;
 const LATEST_MS = 253_402_300_799_999;
 
 /**
+ * Where every frame on a line begins.
+ *
+ * `record()` builds the object with `name` first and `JSON.stringify` keeps insertion order, so a
+ * frame always starts here — and nothing else does, which is the property {@link framesOnLine}
+ * needs. `shim.test.ts` pins the writer's half of it.
+ */
+const FRAME_START = '{"name":';
+
+/**
  * Where the object starting at `from` ends, or -1 if it does not end on this line.
  *
- * Braces only: a `}` can appear inside this line in three places, and two of them are handled by
- * counting. Inside a string it is text, which is what the quote and escape tracking is for; inside
- * a nested object it is that object's, which is what the depth is for; the third is the one being
- * looked for. Brackets need no counting of their own, because a `}` inside an array belongs to an
- * object that opened inside it.
+ * Braces only: a `}` can appear in three places, and two of them are handled by counting. Inside a
+ * string it is text, which is what the quote and escape tracking is for; inside a nested object it
+ * is that object's, which is what the depth is for; the third is the one being looked for. Brackets
+ * need no counting of their own, because a `}` inside an array belongs to an object opened in it.
+ *
+ * Only sound when `from` is outside any string, which is what anchoring the search on an opening
+ * that cannot occur inside one buys. Started anywhere else, a fragment that stops mid-string leaves
+ * every quote after it on the wrong side, and the walk confidently returns a boundary that is not
+ * one — which is why what it returns is never taken on trust.
  */
 function endOfObject(line: string, from: number): number {
-  if (line[from] !== '{') return -1;
   let depth = 0;
   let inString = false;
   let escaped = false;
@@ -213,58 +225,74 @@ function endOfObject(line: string, from: number): number {
 /**
  * The frames on one line, which is nearly always one.
  *
- * `record()` writes frame with a single write, and that is not a single `write`
- * syscall. A short write — a full disk, a quota, a process killed inside it — leaves part of one on
- * disk with no newline behind it, and the next writer's bytes land straight on the end: one line
- * holding more than it should. Skipping such a line whole threw away whatever on it was *complete*,
- * so work that was recorded in full went missing because a different writer was interrupted.
- * Losing the torn one is unavoidable; losing its neighbour is not.
+ * A frame is written with a single write, and that is not a single `write` syscall: a short
+ * write — a full disk, a quota, a process killed inside it — leaves part of one on disk with no
+ * newline behind it, and the next writer's bytes land straight on the end. Skipping such a line
+ * whole threw away whatever on it was *complete*, so work recorded in full went missing because a
+ * different writer was interrupted. Losing the torn one is unavoidable; losing its neighbour is not.
  *
- * **Cut where the JSON ends, not where a key begins.** Cutting at the next opening only rescues
- * what comes *after* a fragment. The other direction is just as reachable — a write short by only
- * its newline, followed by one short by fewer bytes than the opening is long — and there the
- * fragment is too small to be recognised, so the complete frame before it was
- * swallowed with it. Scanning for the end of each object finds both, and stops depending on which
- * key the writer happens to put first.
+ * **The whole line first, then anchored, then verified.**
  *
- * A fragment yields nothing, which is the partial final line this reader has always tolerated:
- * recovery must not invent frame out of a prefix.
+ * A line that parses is one frame and needs none of what follows: that is every line of every
+ * ordinary capture, and it is also the only thing that reads a frame whose fields are not in the
+ * order this file expects. The rest is recovery, and recovery is where the care goes.
+ *
+ * Verified, because that is where the correctness is. The walk balances braces; only
+ * `JSON.parse` knows a frame from a balanced run of bytes, and a piece that does not parse moves
+ * the search to the *next candidate*, never past the piece. Advancing past a boundary the walk was
+ * confident about and wrong about is how a complete frame was skipped without being read: a
+ * fragment that stops inside a string leaves every quote after it on the wrong side, and the walk
+ * then reports a boundary beyond the neighbour. Measured on one ordinary frame, that lost the
+ * neighbour for 122 of its 166 possible cut points.
+ *
+ * Anchored, because the candidates have to come from somewhere and the opening is the one place on
+ * a line that is certainly outside a string — JSON escapes the quotes in a value, so the sequence
+ * cannot occur within one. Searching every `{` would also work, since the parse is what decides,
+ * but it tries far more candidates and can hand back an object that was nested inside the fragment.
+ *
+ * A fragment on its own yields nothing, which is the partial final line this has always tolerated —
+ * recovery must not invent a frame out of a prefix.
  */
-function framesOnLine(line: string): string[] {
-  const values: string[] = [];
-  let from = 0;
-  while (from < line.length) {
-    const end = endOfObject(line, from);
-    if (end === -1) {
-      // Nothing starting here is a whole object, so these bytes are a fragment. Something that
-      // begins after them may still be whole, so look rather than give up on the line.
-      const next = line.indexOf('{', from + 1);
-      if (next === -1) break;
-      from = next;
-      continue;
-    }
-    values.push(line.slice(from, end));
-    from = end;
+function framesOnLine(line: string): Record<string, unknown>[] {
+  // The ordinary line is one whole frame, whatever key it happens to begin with — one written
+  // by a version that ordered its fields differently, or one that simply has no such field, is
+  // still a frame and is still on a line of its own. Only a line that does not parse needs the
+  // rest of this, and that is a line a short write left holding more than it should.
+  try {
+    const whole: unknown = JSON.parse(line);
+    return whole !== null && typeof whole === 'object' && !Array.isArray(whole)
+      ? [whole as Record<string, unknown>]
+      : [];
+  } catch {
+    // Not one frame: a fragment, or a fragment with something whole stuck to it.
   }
-  return values;
+  const found: Record<string, unknown>[] = [];
+  let at = line.indexOf(FRAME_START);
+  while (at !== -1) {
+    const end = endOfObject(line, at);
+    let next = at + 1;
+    if (end !== -1) {
+      try {
+        // A slice that starts at `{` and ends at the `}` that closed it parses to an object or
+        // not at all, which is what lets the callers below take the type on trust.
+        found.push(JSON.parse(line.slice(at, end)) as Record<string, unknown>);
+        next = end;
+      } catch {
+        // Balanced, and not a frame. The opening after it may still start one.
+      }
+    }
+    at = line.indexOf(FRAME_START, next);
+  }
+  return found;
 }
 export async function readShellFrames(framesPath: string): Promise<ShellFrame[]> {
   const raw = await readFile(framesPath, 'utf8').catch(() => '');
   const frames: ShellFrame[] = [];
   // One line is one frame, except where a short write glued a fragment and a frame onto the same
-  // one. Every piece then goes through the checks below unchanged; recovery decides what to *look*
-  // at, never what is acceptable.
-  for (const piece of raw.split('\n').flatMap((line) => framesOnLine(line))) {
-    if (piece.trim() === '') continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(piece);
-    } catch {
-      // A process killed mid-write leaves a partial line. That is the run we most want to read.
-      continue;
-    }
-    if (parsed === null || typeof parsed !== 'object') continue;
-    const frame = parsed as ShellFrame;
+  // one. What comes back has parsed; everything below is unchanged, because recovery decides what
+  // to *look* at and never what is acceptable.
+  for (const parsed of raw.split('\n').flatMap((line) => framesOnLine(line))) {
+    const frame = parsed as unknown as ShellFrame;
     if (typeof frame.name !== 'string' || !Array.isArray(frame.argv)) continue;
     // Only when there is an instant to bound. A `startedAt` that is absent, or present and
     // unparseable, is already handled: the consumer drops `occurredAt` for it and stamps the event

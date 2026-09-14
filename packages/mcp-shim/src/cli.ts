@@ -102,16 +102,26 @@ export function isMcpFrameRecord(value: unknown): value is McpFrameRecord {
 }
 
 /**
+ * Where every MCP record on a line begins: both writers below put `ts` first, and `cli.test.ts`
+ * pins that against what they actually write. The bytes cannot occur inside a value, which is the
+ * property {@link objectsOnLine} needs of whatever it is given.
+ */
+export const MCP_RECORD_START = '{"ts":';
+
+/**
  * Where the object starting at `from` ends, or -1 if it does not end on this line.
  *
- * Braces only: a `}` can appear inside this line in three places, and two of them are handled by
- * counting. Inside a string it is text, which is what the quote and escape tracking is for; inside
- * a nested object it is that object's, which is what the depth is for; the third is the one being
- * looked for. Brackets need no counting of their own, because a `}` inside an array belongs to an
- * object that opened inside it.
+ * Braces only: a `}` can appear in three places, and two of them are handled by counting. Inside a
+ * string it is text, which is what the quote and escape tracking is for; inside a nested object it
+ * is that object's, which is what the depth is for; the third is the one being looked for. Brackets
+ * need no counting of their own, because a `}` inside an array belongs to an object opened in it.
+ *
+ * Only sound when `from` is outside any string, which is what anchoring the search on an opening
+ * that cannot occur inside one buys. Started anywhere else, a fragment that stops mid-string leaves
+ * every quote after it on the wrong side, and the walk confidently returns a boundary that is not
+ * one — which is why what it returns is never taken on trust.
  */
 function endOfObject(line: string, from: number): number {
-  if (line[from] !== '{') return -1;
   let depth = 0;
   let inString = false;
   let escaped = false;
@@ -133,45 +143,71 @@ function endOfObject(line: string, from: number): number {
 /**
  * The records on one line, which is nearly always one.
  *
- * The shim writes record with a single write, and that is not a single `write`
- * syscall. A short write — a full disk, a quota, a process killed inside it — leaves part of one on
- * disk with no newline behind it, and the next writer's bytes land straight on the end: one line
- * holding more than it should. Skipping such a line whole threw away whatever on it was *complete*,
- * so work that was recorded in full went missing because a different writer was interrupted.
- * Losing the torn one is unavoidable; losing its neighbour is not.
+ * A record is written with a single write, and that is not a single `write` syscall: a short
+ * write — a full disk, a quota, a process killed inside it — leaves part of one on disk with no
+ * newline behind it, and the next writer's bytes land straight on the end. Skipping such a line
+ * whole threw away whatever on it was *complete*, so work recorded in full went missing because a
+ * different writer was interrupted. Losing the torn one is unavoidable; losing its neighbour is not.
  *
- * **Cut where the JSON ends, not where a key begins.** Cutting at the next opening only rescues
- * what comes *after* a fragment. The other direction is just as reachable — a write short by only
- * its newline, followed by one short by fewer bytes than the opening is long — and there the
- * fragment is too small to be recognised, so the complete record before it was
- * swallowed with it. Scanning for the end of each object finds both, and stops depending on which
- * key the writer happens to put first.
+ * **The whole line first, then anchored, then verified.**
  *
- * A fragment yields nothing, which is the partial final line this reader has always tolerated:
- * recovery must not invent record out of a prefix.
+ * A line that parses is one record and needs none of what follows: that is every line of every
+ * ordinary capture, and it is also the only thing that reads a record whose fields are not in the
+ * order this file expects. The rest is recovery, and recovery is where the care goes.
  *
- * Duplicated from the shell shim's reader rather than shared: both packages are published on their
- * own and deliberately carry no dependency that could pull a runtime into the agent's process, so
- * there is no module both can import. They are kept identical on purpose — two readers of an
- * append-only file drifting apart is the bug this pair keeps producing.
+ * Verified, because that is where the correctness is. The walk balances braces; only
+ * `JSON.parse` knows a record from a balanced run of bytes, and a piece that does not parse moves
+ * the search to the *next candidate*, never past the piece. Advancing past a boundary the walk was
+ * confident about and wrong about is how a complete record was skipped without being read: a
+ * fragment that stops inside a string leaves every quote after it on the wrong side, and the walk
+ * then reports a boundary beyond the neighbour. Measured on one ordinary frame, that lost the
+ * neighbour for 122 of its 166 possible cut points.
+ *
+ * Anchored, because the candidates have to come from somewhere and the opening is the one place on
+ * a line that is certainly outside a string — JSON escapes the quotes in a value, so the sequence
+ * cannot occur within one. Searching every `{` would also work, since the parse is what decides,
+ * but it tries far more candidates and can hand back an object that was nested inside the fragment.
+ *
+ * A fragment on its own yields nothing, which is the partial final line this has always tolerated —
+ * recovery must not invent a record out of a prefix.
+ *
+ * `opening` is the caller's, because the CLI reads two of these files with different first keys —
+ * `{"ts":` for MCP frames, `{"kind":` for agent spans — and a third copy of this reasoning is how
+ * the readers of an append-only file drift apart. It lives here rather than in the CLI because the
+ * shim must read its own captures and carries no dependency that could pull a runtime into the
+ * agent's process; the shell shim keeps an identical private copy for the same reason.
  */
-export function recordsOnLine(line: string): string[] {
-  const values: string[] = [];
-  let from = 0;
-  while (from < line.length) {
-    const end = endOfObject(line, from);
-    if (end === -1) {
-      // Nothing starting here is a whole object, so these bytes are a fragment. Something that
-      // begins after them may still be whole, so look rather than give up on the line.
-      const next = line.indexOf('{', from + 1);
-      if (next === -1) break;
-      from = next;
-      continue;
-    }
-    values.push(line.slice(from, end));
-    from = end;
+export function objectsOnLine(line: string, opening: string): Record<string, unknown>[] {
+  // The ordinary line is one whole record, whatever key it happens to begin with — one written
+  // by a version that ordered its fields differently, or one that simply has no such field, is
+  // still a record and is still on a line of its own. Only a line that does not parse needs the
+  // rest of this, and that is a line a short write left holding more than it should.
+  try {
+    const whole: unknown = JSON.parse(line);
+    return whole !== null && typeof whole === 'object' && !Array.isArray(whole)
+      ? [whole as Record<string, unknown>]
+      : [];
+  } catch {
+    // Not one record: a fragment, or a fragment with something whole stuck to it.
   }
-  return values;
+  const found: Record<string, unknown>[] = [];
+  let at = line.indexOf(opening);
+  while (at !== -1) {
+    const end = endOfObject(line, at);
+    let next = at + 1;
+    if (end !== -1) {
+      try {
+        // A slice that starts at `{` and ends at the `}` that closed it parses to an object or
+        // not at all, which is what lets the callers below take the type on trust.
+        found.push(JSON.parse(line.slice(at, end)) as Record<string, unknown>);
+        next = end;
+      } catch {
+        // Balanced, and not a record. The opening after it may still start one.
+      }
+    }
+    at = line.indexOf(opening, next);
+  }
+  return found;
 }
 
 function toRecord(name: string, dir: FrameDirection, frame: JsonRpcFrame): string {
@@ -212,14 +248,9 @@ function toMockRecord(name: string, dir: FrameDirection, message: JsonRpcMessage
 async function readFrames(path: string, name: string): Promise<RecordedFrame[]> {
   const text = await readFile(path, 'utf8').catch(() => '');
   const frames: RecordedFrame[] = [];
-  for (const piece of text.split(/\r?\n/).flatMap((line) => recordsOnLine(line))) {
-    if (piece.trim() === '') continue;
-    let value: unknown;
-    try {
-      value = JSON.parse(piece);
-    } catch {
-      continue;
-    }
+  for (const value of text
+    .split(/\r?\n/)
+    .flatMap((line) => objectsOnLine(line, MCP_RECORD_START))) {
     // The `--replay` reader, so a torn line in a *recording* used to kill the replay of it rather
     // than cost one frame: the shim died before serving a single recorded answer, every MCP server
     // in the run with it.

@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { MCP_RECORD_START, objectsOnLine } from '@orcareplay/mcp-shim';
 
 /**
  * Getting the OpenAI Agents SDK's own run structure into a trace, without editing the agent.
@@ -377,16 +378,30 @@ export async function readAgentSpans(path: string): Promise<AgentSpan[]> {
     return [];
   }
   const spans: AgentSpan[] = [];
-  for (const line of raw.split('\n')) {
-    if (line.trim() === '') continue;
-    try {
-      spans.push(JSON.parse(line) as AgentSpan);
-    } catch {
-      continue;
-    }
+  // The third transport, and the same two rules as the other two. Every Python process the run
+  // starts appends to this file — the processor's lock is per-process — so a short write leaves a
+  // fragment with the next process's bytes on the end of it, and `objectsOnLine` is what gets the
+  // whole span back out of such a line rather than dropping both.
+  //
+  // And a line that parses is not yet a span. `eventForSpan` reads `.kind` off whatever it is
+  // handed, so a line that parsed to `null` threw there — in the drain, after the agent has
+  // exited, which is where the trace is being sealed. `recordCommand` catches that, disposes of
+  // the transport, and rethrows: the run ends with no `run.end`, `verifyIntegrity` calls it
+  // tampered with, and the spans that were never read are gone with the transport.
+  for (const parsed of raw.split('\n').flatMap((line) => objectsOnLine(line, SPAN_START))) {
+    spans.push(parsed as unknown as AgentSpan);
   }
   return spans;
 }
+
+/**
+ * Where every span record on a line begins.
+ *
+ * `processor.py` builds each record with `kind` first and `json.dumps` keeps insertion order —
+ * `agent-spans.test.ts` pins that against the real thing. The trailing space `json.dumps` writes
+ * after a colon comes *after* these bytes, so the same string matches what both writers produce.
+ */
+const SPAN_START = '{"kind":';
 
 /** A trace event, or undefined for a span that carries nothing the proxy lacks. */
 export function eventForSpan(
