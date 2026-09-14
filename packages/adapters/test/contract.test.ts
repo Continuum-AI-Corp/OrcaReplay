@@ -63,8 +63,12 @@ describe('every registered adapter', () => {
   it.each(registry.ids())('%s is checked by every contract check, not a subset', async (id) => {
     const adapter = registry.get(id);
     const result = await checkAdapterContract(adapter);
-    // harness-versions only applies to adapters that declare a range; everything else is universal.
-    const universal = CONTRACT_CHECKS.filter((c) => c !== 'harness-versions');
+    // Two checks ask about a declaration that is optional, so they have nothing to say about an
+    // adapter that does not make it: `harness-versions` about a version range, and
+    // `artifacts-resettable` about `artifacts.resetBeforeReplay` — which almost no adapter needs,
+    // because a coding agent's product *is* the working tree. Everything else is universal.
+    const conditional: readonly string[] = ['harness-versions', 'artifacts-resettable'];
+    const universal = CONTRACT_CHECKS.filter((c) => !conditional.includes(c));
     // An adapter that captures at the transport redirects nothing on purpose, so the one check
     // that asks "where does this point the harness" cannot apply to it. The exemption is narrow
     // by construction: it is subtracted here by name, so a transport adapter that stopped passing
@@ -517,6 +521,38 @@ describe('checkAdapterContract', () => {
     expect(await failedChecks(needsArgv)).toEqual([]);
     const bare = await checkAdapterContract(needsArgv, { ctx: { userArgs: [] } });
     expect(bare.failed.map((f) => f.check)).toContain('prepare-shape');
+  });
+
+  /**
+   * A reset path outside `capture` is a path the recording never held.
+   *
+   * `orca record` forces only `artifacts.capture`; `orca replay` deletes `resetBeforeReplay` and
+   * restores the recording over the top. Declare one without the other and the reset empties a
+   * directory instead of putting it back where the run began — and the declaration reads as
+   * though it could not. The shipped adapter asserts this by hand in its own test; this is where
+   * the next one has to answer it.
+   */
+  it('refuses a reset path the recording would not hold', async () => {
+    const orphan = goodAdapter({
+      artifacts: { capture: ['vector_store'], resetBeforeReplay: ['cache'] },
+    });
+    expect(await failedChecks(orphan)).toEqual(['artifacts-resettable']);
+    expect(await detailOf(orphan, 'artifacts-resettable')).toContain('cache');
+  });
+
+  it('accepts a reset path the capture covers, however precisely each is spelled', async () => {
+    expect(
+      await failedChecks(
+        goodAdapter({
+          artifacts: {
+            capture: ['cache', 'vector_store', 'dataset'],
+            resetBeforeReplay: ['cache/**', 'vector_store'],
+          },
+        }),
+      ),
+    ).toEqual([]);
+    // And an adapter with no artifacts at all is not asked the question.
+    expect(await failedChecks(goodAdapter())).toEqual([]);
   });
 
   it('gives a failing result a one-line summary naming the checks', async () => {
