@@ -182,42 +182,71 @@ const EARLIEST_MS = -62_167_219_200_000;
 const LATEST_MS = 253_402_300_799_999;
 
 /**
- * Where a frame begins, for {@link framesOnLine}.
+ * Where the object starting at `from` ends, or -1 if it does not end on this line.
  *
- * `record()` builds the object with `name` first and `JSON.stringify` keeps insertion order, so
- * every line it writes starts with these bytes. It is the one place this reader is coupled to that
- * ordering, and it is safe in the direction that matters: the sequence cannot occur inside a value,
- * because JSON escapes the quotes in a string and writes `{\"name\"` instead.
+ * Braces only: a `}` can appear inside this line in three places, and two of them are handled by
+ * counting. Inside a string it is text, which is what the quote and escape tracking is for; inside
+ * a nested object it is that object's, which is what the depth is for; the third is the one being
+ * looked for. Brackets need no counting of their own, because a `}` inside an array belongs to an
+ * object that opened inside it.
  */
-const FRAME_START = '{"name":';
+function endOfObject(line: string, from: number): number {
+  if (line[from] !== '{') return -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let at = from; at < line.length; at += 1) {
+    const ch = line[at];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') depth += 1;
+    else if (ch === '}' && --depth === 0) return at + 1;
+  }
+  return -1;
+}
 
 /**
  * The frames on one line, which is nearly always one.
  *
- * `record()` writes a frame with a single `appendFileSync`, and that is not a single `write`
- * syscall. A short write — a full disk, a quota, a process killed inside it — leaves a *prefix* on
- * disk with no newline behind it, and the next shim's whole line then lands straight on the end:
- * one line holding a fragment and a frame. A prefix of a balanced object is unbalanced, and gluing
- * a balanced one onto it cannot rebalance it, so `JSON.parse` threw and the line was skipped —
- * taking with it a command that ran and was recorded *in full*, because a different shim was
- * interrupted. Losing the torn frame is unavoidable; losing its neighbour is not.
+ * `record()` writes frame with a single write, and that is not a single `write`
+ * syscall. A short write — a full disk, a quota, a process killed inside it — leaves part of one on
+ * disk with no newline behind it, and the next writer's bytes land straight on the end: one line
+ * holding more than it should. Skipping such a line whole threw away whatever on it was *complete*,
+ * so work that was recorded in full went missing because a different writer was interrupted.
+ * Losing the torn one is unavoidable; losing its neighbour is not.
  *
- * So the line is cut at each frame opening and each piece is judged on its own: the fragment fails
- * to parse and is dropped, the whole frames after it are kept. An ordinary line contains the
- * opening once, at the start, and comes back unchanged.
+ * **Cut where the JSON ends, not where a key begins.** Cutting at the next opening only rescues
+ * what comes *after* a fragment. The other direction is just as reachable — a write short by only
+ * its newline, followed by one short by fewer bytes than the opening is long — and there the
+ * fragment is too small to be recognised, so the complete frame before it was
+ * swallowed with it. Scanning for the end of each object finds both, and stops depending on which
+ * key the writer happens to put first.
+ *
+ * A fragment yields nothing, which is the partial final line this reader has always tolerated:
+ * recovery must not invent frame out of a prefix.
  */
 function framesOnLine(line: string): string[] {
-  const pieces: string[] = [];
+  const values: string[] = [];
   let from = 0;
-  for (;;) {
-    // From `from + 1`, because the piece being cut starts with the opening itself.
-    const next = line.indexOf(FRAME_START, from + 1);
-    if (next === -1) break;
-    pieces.push(line.slice(from, next));
-    from = next;
+  while (from < line.length) {
+    const end = endOfObject(line, from);
+    if (end === -1) {
+      // Nothing starting here is a whole object, so these bytes are a fragment. Something that
+      // begins after them may still be whole, so look rather than give up on the line.
+      const next = line.indexOf('{', from + 1);
+      if (next === -1) break;
+      from = next;
+      continue;
+    }
+    values.push(line.slice(from, end));
+    from = end;
   }
-  pieces.push(line.slice(from));
-  return pieces;
+  return values;
 }
 export async function readShellFrames(framesPath: string): Promise<ShellFrame[]> {
   const raw = await readFile(framesPath, 'utf8').catch(() => '');

@@ -331,6 +331,72 @@ describe('shell shim', () => {
     expect(frames[0]!.argv).toEqual(['-c', 'npm test']);
   });
 
+  /**
+   * The same short write, the other way round: the complete frame comes *first*.
+   *
+   * A write can be short by only its newline, and then the next one lands a few bytes before dying
+   * too. Cutting the line at the next frame opening cannot find a boundary there — the fragment is
+   * shorter than the opening is long — so the complete frame in front of it was swallowed with it.
+   * Cutting where the JSON object *ends* finds both directions, and stops the reader depending on
+   * which key the writer happens to put first.
+   */
+  it.each([
+    ['shorter than a frame opening', '{"nam'],
+    ['a single byte', '{'],
+    ['exactly a frame opening', '{"name":'],
+    [
+      'a whole second frame',
+      '{"name":"sh","argv":["-c","echo hi"],"cwd":"/tmp","exitCode":0,"signal":null,"startedAt":"2026-09-12T00:00:01.000Z","durationMs":2,"stdoutBytes":0,"stderrBytes":0}',
+    ],
+  ])('recovers a complete frame whose newline was lost, followed by %s', async (_what, next) => {
+    const whole = JSON.stringify({
+      name: 'bash',
+      argv: ['-c', 'npm test'],
+      cwd: '/tmp',
+      exitCode: 0,
+      signal: null,
+      startedAt: '2026-09-12T00:00:00.000Z',
+      durationMs: 5,
+      stdoutBytes: 0,
+      stderrBytes: 0,
+    });
+    await writeFile(shim.framesPath, `${whole}${next}\n`, 'utf8');
+
+    const frames = await readShellFrames(shim.framesPath);
+    expect(
+      frames.map((frame) => frame.argv.join(' ')),
+      'a frame recorded in full was lost to the bytes written after it',
+    ).toContain('-c npm test');
+  });
+
+  /**
+   * A brace in a command is a brace in a string, not the end of the frame.
+   *
+   * `sh -c 'echo "}"'` is an ordinary thing for an agent to run, and it puts both of the characters
+   * the scan has to be careful about into one value: a `}` that is text, and an escaped quote in
+   * front of it. Reading either structurally cuts the frame short, and the piece that comes out
+   * does not parse — so a command that ran would be lost to what it happened to contain.
+   */
+  it('does not end a frame at a brace inside one of its own values', async () => {
+    const whole = JSON.stringify({
+      name: 'sh',
+      argv: ['-c', 'echo "}"'],
+      cwd: '/tmp',
+      exitCode: 0,
+      signal: null,
+      startedAt: '2026-09-12T00:00:00.000Z',
+      durationMs: 5,
+      stdoutBytes: 0,
+      stderrBytes: 0,
+    });
+    // Followed by a stub, so the line goes through the recovery rather than straight to JSON.parse.
+    await writeFile(shim.framesPath, `${whole}{"nam\n`, 'utf8');
+
+    const frames = await readShellFrames(shim.framesPath);
+    expect(frames, 'a frame was cut short at a brace in its own argv').toHaveLength(1);
+    expect(frames[0]!.argv).toEqual(['-c', 'echo "}"']);
+  });
+
   it('still has nothing to recover from a fragment on its own', async () => {
     // The partial final line this reader has always tolerated: a process killed mid-write with
     // nothing after it. Recovery must not turn an unreadable prefix into a frame invented from it.

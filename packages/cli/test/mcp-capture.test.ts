@@ -290,6 +290,26 @@ describe('a capture line that parsed is not yet a frame', () => {
     return frames;
   }
 
+  it('does not end a record at a brace inside the payload it captured', async () => {
+    // `raw` is the line the server said, carried as a string. A tool call whose argument is a lone
+    // `}` puts an unmatched brace in it, and reading that structurally cuts the record short.
+    const braced = {
+      ...good,
+      raw: '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"q":"}"}}',
+    };
+    const frames = await framesFrom([`${JSON.stringify(braced)}{"t`, '']);
+    expect(frames, 'a record was cut short at a brace inside its payload').toHaveLength(1);
+    expect(frames[0]!.method).toBe('tools/call');
+  });
+
+  it('recovers a complete record whose newline was the byte lost', async () => {
+    // Three bytes of the next record: fewer than its opening is long, so only the end of the
+    // complete record in front of it marks the boundary.
+    const frames = await framesFrom([`${JSON.stringify(good)}{"t`, '']);
+    expect(frames, 'a record written in full was lost to the bytes after it').toHaveLength(1);
+    expect(frames[0]!.method).toBe('tools/call');
+  });
+
   it('recovers the record a torn write glued its fragment onto', async () => {
     // The other reader of this file, kept in step with the shim's own: a prefix with the next
     // server's whole record on the end of it must not take that record down with it.

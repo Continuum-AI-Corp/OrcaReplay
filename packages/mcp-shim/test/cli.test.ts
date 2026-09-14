@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { main, parseArgs } from '../src/index.js';
+import { main, parseArgs, recordsOnLine } from '../src/index.js';
 
 let scratch: string;
 
@@ -13,6 +13,43 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(scratch, { recursive: true, force: true });
+});
+
+/**
+ * The splitter both readers of a capture share, tested where it lives.
+ *
+ * Several servers append to one file and each record is one write, so a short write leaves part of
+ * a record with no newline behind it and the next server's bytes land on the end. Skipping such a
+ * line threw away whatever on it was complete. What decides a boundary is where a JSON object
+ * *ends* — not where a key begins, which only finds the boundary when the fragment happens to be
+ * longer than the key.
+ */
+describe('recordsOnLine', () => {
+  const whole = '{"ts":"2026-09-12T00:00:00.000Z","name":"fs","raw":"{\\"a\\":1}"}';
+
+  it('returns an ordinary line unchanged', () => {
+    expect(recordsOnLine(whole)).toEqual([whole]);
+  });
+
+  it('finds a record whose newline was lost, ahead of a stub too short to be an opening', () => {
+    expect(recordsOnLine(`${whole}{"t`)).toEqual([whole]);
+  });
+
+  it('finds a record that landed after a fragment', () => {
+    expect(recordsOnLine(`{"ts":"2026-09-12T00:00:00.000Z","name":"fs"${whole}`)).toEqual([whole]);
+  });
+
+  it('does not end a record at a brace inside the payload it carries', () => {
+    // `raw` is the line a server said, kept as a string. A tool call whose argument is a lone `}`
+    // puts an unmatched brace in it; read structurally, that ends the record early and the piece
+    // that comes out does not parse — so the call would be missing from a trace that recorded it.
+    const braced = '{"ts":"t","name":"fs","raw":"{\\"q\\":\\"}\\"}"}';
+    expect(recordsOnLine(`${braced}{"t`)).toEqual([braced]);
+  });
+
+  it('has nothing to return for a fragment on its own', () => {
+    expect(recordsOnLine('{"ts":"2026-09-12T00:00:00.000Z","name":"fs"')).toEqual([]);
+  });
 });
 
 describe('parseArgs', () => {
@@ -228,6 +265,50 @@ describe('main', () => {
    * that record is the *request*, which is what ties a recorded answer to the question asked, so
    * losing it leaves the replay with nothing to say.
    */
+  /**
+   * And the other way round here too: the record that matters is complete, and what follows it is
+   * too short to be recognised as a boundary by anything but the end of the record itself.
+   */
+  it('answers from a recording whose request lost only its newline', async () => {
+    const recorded = join(scratch, 'recorded.jsonl');
+    const base = { ts: '2026-09-12T00:00:00.000Z', name: 'fs', id: 1, method: 'tools/list' };
+    const request = JSON.stringify({
+      ...base,
+      dir: 'in',
+      kind: 'request',
+      raw: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+    });
+    const response = JSON.stringify({
+      ...base,
+      dir: 'out',
+      kind: 'response',
+      raw: '{"jsonrpc":"2.0","id":1,"result":{"ok":true}}',
+    });
+    // Three bytes of the next record, which is fewer than its opening is long.
+    writeFileSync(recorded, [`${request}{"t`, response, ''].join('\n'), 'utf8');
+
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const seen: Buffer[] = [];
+    const errors: Buffer[] = [];
+    stdout.on('data', (c: Buffer) => seen.push(Buffer.from(c)));
+    stderr.on('data', (c: Buffer) => errors.push(Buffer.from(c)));
+
+    const done = main(
+      ['--name', 'fs', '--out', join(scratch, 'mcp.jsonl'), '--replay', recorded, '--', 'unused'],
+      { stdin, stdout, stderr },
+    );
+    stdin.write('{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n');
+    stdin.end();
+
+    expect(await done, Buffer.concat(errors).toString()).toBe(0);
+    expect(
+      Buffer.concat(seen).toString(),
+      'a complete request was lost to the bytes written after it, so the replay had no answer',
+    ).toContain('"ok":true');
+  });
+
   it('answers from a recording whose first record was glued onto a fragment', async () => {
     const recorded = join(scratch, 'recorded.jsonl');
     const base = { ts: '2026-09-12T00:00:00.000Z', name: 'fs', id: 1, method: 'tools/list' };

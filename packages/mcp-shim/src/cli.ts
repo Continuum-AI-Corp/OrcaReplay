@@ -102,34 +102,76 @@ export function isMcpFrameRecord(value: unknown): value is McpFrameRecord {
 }
 
 /**
- * Where a record begins, for {@link recordsOnLine}. Both writers below put `ts` first.
+ * Where the object starting at `from` ends, or -1 if it does not end on this line.
  *
- * As with the shell shim's frames, the bytes cannot occur inside a value: a `raw` payload holding
- * this text carries it escaped, as `{\"ts\"`.
+ * Braces only: a `}` can appear inside this line in three places, and two of them are handled by
+ * counting. Inside a string it is text, which is what the quote and escape tracking is for; inside
+ * a nested object it is that object's, which is what the depth is for; the third is the one being
+ * looked for. Brackets need no counting of their own, because a `}` inside an array belongs to an
+ * object that opened inside it.
  */
-const RECORD_START = '{"ts":';
+function endOfObject(line: string, from: number): number {
+  if (line[from] !== '{') return -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let at = from; at < line.length; at += 1) {
+    const ch = line[at];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') depth += 1;
+    else if (ch === '}' && --depth === 0) return at + 1;
+  }
+  return -1;
+}
 
 /**
  * The records on one line, which is nearly always one.
  *
- * Several servers share one capture file and each record is one `write` on the sink, so a short
- * write leaves a prefix with no newline and the next server's whole line lands on the end of it.
- * Skipping such a line threw away the *complete* record glued to the fragment — an answer a replay
- * then could not give, because a different server's write was interrupted. The same reasoning, and
- * the same shape, as `readShellFrames`; the two readers of a shared append-only file are kept in
- * step deliberately.
+ * The shim writes record with a single write, and that is not a single `write`
+ * syscall. A short write — a full disk, a quota, a process killed inside it — leaves part of one on
+ * disk with no newline behind it, and the next writer's bytes land straight on the end: one line
+ * holding more than it should. Skipping such a line whole threw away whatever on it was *complete*,
+ * so work that was recorded in full went missing because a different writer was interrupted.
+ * Losing the torn one is unavoidable; losing its neighbour is not.
+ *
+ * **Cut where the JSON ends, not where a key begins.** Cutting at the next opening only rescues
+ * what comes *after* a fragment. The other direction is just as reachable — a write short by only
+ * its newline, followed by one short by fewer bytes than the opening is long — and there the
+ * fragment is too small to be recognised, so the complete record before it was
+ * swallowed with it. Scanning for the end of each object finds both, and stops depending on which
+ * key the writer happens to put first.
+ *
+ * A fragment yields nothing, which is the partial final line this reader has always tolerated:
+ * recovery must not invent record out of a prefix.
+ *
+ * Duplicated from the shell shim's reader rather than shared: both packages are published on their
+ * own and deliberately carry no dependency that could pull a runtime into the agent's process, so
+ * there is no module both can import. They are kept identical on purpose — two readers of an
+ * append-only file drifting apart is the bug this pair keeps producing.
  */
 export function recordsOnLine(line: string): string[] {
-  const pieces: string[] = [];
+  const values: string[] = [];
   let from = 0;
-  for (;;) {
-    const next = line.indexOf(RECORD_START, from + 1);
-    if (next === -1) break;
-    pieces.push(line.slice(from, next));
-    from = next;
+  while (from < line.length) {
+    const end = endOfObject(line, from);
+    if (end === -1) {
+      // Nothing starting here is a whole object, so these bytes are a fragment. Something that
+      // begins after them may still be whole, so look rather than give up on the line.
+      const next = line.indexOf('{', from + 1);
+      if (next === -1) break;
+      from = next;
+      continue;
+    }
+    values.push(line.slice(from, end));
+    from = end;
   }
-  pieces.push(line.slice(from));
-  return pieces;
+  return values;
 }
 
 function toRecord(name: string, dir: FrameDirection, frame: JsonRpcFrame): string {
