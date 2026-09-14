@@ -1,4 +1,4 @@
-import { forwardBasePath } from '@orcareplay/proxy';
+import { decodeForwardPath, forwardBasePath } from '@orcareplay/proxy';
 
 /**
  * Placeholder key for runs where the user has no credential in the environment. The proxy is
@@ -17,6 +17,36 @@ export function readEnv(env: Record<string, string | undefined>, name: string): 
 export function proxyBase(proxyUrl: string, path = ''): string {
   const base = proxyUrl.replace(/\/+$/, '');
   return path ? `${base}/${path.replace(/^\/+/, '')}` : base;
+}
+
+/**
+ * A proxy base URL that carries `original` as its destination — but only where it can be carried.
+ *
+ * `forwardBasePath` encodes whatever it is handed; `decodeForwardPath` deliberately refuses a
+ * decoded URL with credentials, a query, a fragment or a non-http(s) scheme. Encoding without
+ * asking produced a `/forward/` segment nothing could read, and that failed in the worst available
+ * way: the proxy could not recover the announced origin, so the call went to the configured
+ * upstream — or to `api.openai.com` — carrying the harness's credential for a *different* gateway,
+ * which is the exact failure this rewrite exists to prevent. Worse, the undecodable segment is the
+ * request path, so a base URL like `https://tenant:pw@gw.example/v1` wrote the gateway password
+ * into the trace verbatim, where `orca show`, `orca export` and any attached bug report carry it.
+ *
+ * So: ask the decoder first, and where the answer is no, fall back to the plain proxy path. That
+ * is what this did before origins could be carried at all — the call reaches the proxy and is
+ * forwarded to the configured upstream, which fails loudly against the wrong origin instead of
+ * quietly leaking. Carrying it *without* the credential is not an option: the client reads this
+ * value to build its request, so dropping the userinfo would simply stop it authenticating.
+ */
+export function forwardOrProxyBase(
+  proxyUrl: string,
+  original: string,
+  fallbackPath = 'v1',
+): string {
+  const forward = forwardBasePath(original);
+  // Round-tripped through the decoder itself, rather than restating its rules here, so the two
+  // sides of the encoding cannot drift apart again.
+  if (decodeForwardPath(forward) !== undefined) return proxyBase(proxyUrl, forward);
+  return proxyBase(proxyUrl, fallbackPath);
 }
 
 /** Copies `name` from the run environment into the launch overlay, or a placeholder if unset. */
@@ -77,7 +107,7 @@ export function applyNamedBaseUrls(
     // it still wins: it is how someone names a non-OpenAI-shaped origin, and rewriting it as a
     // forward would silently ignore what they typed.
     if (rawPath === undefined && original !== undefined) {
-      target[name] = proxyBase(proxyUrl, forwardBasePath(original));
+      target[name] = forwardOrProxyBase(proxyUrl, original);
       continue;
     }
     // A path of `/` means the bare origin. `proxyBase` would otherwise leave the separator behind

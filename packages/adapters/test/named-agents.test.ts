@@ -215,6 +215,37 @@ describe('ORCA_BASE_URL_VARS — naming a base-URL variable orca does not know',
     expect(decoded?.base).toBe('https://embeddings.example/v1');
   });
 
+  /**
+   * A base URL the `/forward/` decoder will not accept must not become a `/forward/` path.
+   *
+   * `forwardBasePath` encodes anything; `decodeForwardPath` refuses credentials, a query, a
+   * fragment or a non-http(s) scheme. Encoding without asking produced a segment nothing could
+   * read, and the proxy then forwarded the call to the configured upstream — the very
+   * readdressing this rewrite exists to stop — with the harness's credential for another gateway
+   * on it. The segment is also the request *path*, so `https://tenant:pw@gw.example/v1` wrote the
+   * gateway password into the trace, where `orca show` and `orca export` carry it.
+   *
+   * The fallback is what this did before origins could be carried: a bare `/v1` on the proxy. The
+   * call is still recorded, and it fails against the wrong origin loudly rather than leaking
+   * quietly. Carrying the origin without its credential is not on offer — the client reads this
+   * value to build its request, so dropping the userinfo would stop it authenticating at all.
+   */
+  it.each([
+    ['credentials', 'https://tenant:s3cr3t@gw.example/v1'],
+    ['a query string', 'https://gw.example/v1?key=s3cr3t'],
+    ['a fragment', 'https://gw.example/v1#frag'],
+    ['a scheme the decoder refuses', 'ftp://gw.example/v1'],
+  ])('does not encode a base URL carrying %s', async (_what, value) => {
+    const launch = await generic().prepare({
+      ...ctx,
+      env: { ORCA_BASE_URL_VARS: 'MY_URL', MY_URL: value },
+    });
+    expect(launch.env.MY_URL).toBe('http://127.0.0.1:44100/v1');
+    expect(launch.env.MY_URL).not.toContain('forward');
+    expect(launch.env.MY_URL).not.toContain('s3cr3t');
+    expect(launch.env.MY_URL).not.toContain(encodeURIComponent('s3cr3t'));
+  });
+
   it('still honours an explicit path, which is the user saying where to point it', async () => {
     const launch = await generic().prepare({
       ...ctx,

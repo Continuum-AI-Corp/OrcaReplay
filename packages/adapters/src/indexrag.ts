@@ -2,8 +2,14 @@ import { existsSync, readFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Adapter, Launch, RecordContext } from '@orcareplay/plugin-api';
-import { forwardBasePath } from '@orcareplay/proxy';
-import { applyNamedBaseUrls, passKey, passThrough, proxyBase, readEnv } from './env.js';
+import {
+  applyNamedBaseUrls,
+  forwardOrProxyBase,
+  passKey,
+  passThrough,
+  proxyBase,
+  readEnv,
+} from './env.js';
 
 /**
  * IndexRAG — a retrieval pipeline rather than a conversational agent.
@@ -80,7 +86,9 @@ export const indexRagAdapter: Adapter = {
       readEnv(ctx.env, 'INDEXRAG_EMBEDDING_BASE_URL') ??
       dotEnv(ctx.cwd)['INDEXRAG_EMBEDDING_BASE_URL'];
     if (embedding !== undefined) {
-      env.INDEXRAG_EMBEDDING_BASE_URL = proxyBase(ctx.proxyUrl, forwardBasePath(embedding));
+      // Through the same gate as every other named origin: a base URL the `/forward/` decoder
+      // will not accept must not become a `/forward/` path. See `forwardOrProxyBase`.
+      env.INDEXRAG_EMBEDDING_BASE_URL = forwardOrProxyBase(ctx.proxyUrl, embedding);
     }
     passThrough(env, ctx.env, 'INDEXRAG_EMBEDDING_API_KEY');
     passThrough(env, ctx.env, 'INDEXRAG_EMBEDDING_PROVIDER');
