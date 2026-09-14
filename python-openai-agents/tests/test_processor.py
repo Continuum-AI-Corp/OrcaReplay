@@ -7,6 +7,7 @@ case and has to be the reliable one.
 
 from __future__ import annotations
 
+import datetime
 import json
 import time
 import os
@@ -282,3 +283,52 @@ def test_an_ordinary_payload_is_still_written_whole(tmp_path):
     )
     assert record is not None
     assert record["data"]["name"] == payload
+
+
+def test_a_datetime_timestamp_is_written_as_iso(tmp_path):
+    """The reader parses these with `Date.parse`, and the SDK hands over whatever it hands over.
+
+    Every supported version of openai-agents stores `util.time_iso()`, which is already a string,
+    so this is not today's behaviour being pinned — it is the failure mode if that ever changes.
+    The whole record would fail to serialise, the write path would swallow it, and a run would
+    capture no spans at all while `trace.start` and `trace.end` kept landing, so nothing about the
+    file would look wrong.
+
+    `str(datetime)` is not the answer either: it puts a space where the `T` belongs. Hence asking
+    the value for its own ISO form rather than leaving it to `default=str`.
+    """
+    out = tmp_path / "spans.jsonl"
+    processor = OrcaTracingProcessor(str(out))
+    span = FakeSpan(HandoffSpanData({"from_agent": "Triage", "to_agent": "Billing"}))
+    span.started_at = datetime.datetime(
+        2026, 9, 10, 3, 46, 3, 483810, tzinfo=datetime.timezone.utc
+    )
+    span.ended_at = datetime.datetime(2026, 9, 10, 3, 46, 3, 500000, tzinfo=datetime.timezone.utc)
+
+    processor.on_span_end(span)
+
+    records = read(out)
+    assert len(records) == 1, "a span whose timestamps are datetimes was dropped entirely"
+    assert records[0]["started_at"] == "2026-09-10T03:46:03.483810+00:00"
+    assert records[0]["ended_at"] == "2026-09-10T03:46:03.500000+00:00"
+    assert processor._dropped == 0
+
+
+def test_a_value_json_cannot_take_costs_that_field_and_nothing_else(tmp_path):
+    """The other half of the same guarantee, for a field that has no ISO form to ask for."""
+
+    class Unserialisable:
+        def __repr__(self):
+            return "<unserialisable>"
+
+    out = tmp_path / "spans.jsonl"
+    processor = OrcaTracingProcessor(str(out))
+    span = FakeSpan(HandoffSpanData({"from_agent": "Triage", "to_agent": "Billing"}))
+    span.started_at = Unserialisable()
+
+    processor.on_span_end(span)
+
+    records = read(out)
+    assert len(records) == 1, "one unserialisable field took the whole span with it"
+    assert records[0]["data"] == {"from_agent": "Triage", "to_agent": "Billing"}
+    assert processor._dropped == 0

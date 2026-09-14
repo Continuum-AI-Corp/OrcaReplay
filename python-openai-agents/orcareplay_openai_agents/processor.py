@@ -183,7 +183,13 @@ class OrcaTracingProcessor:
         if not self._path:
             return
         try:
-            line = json.dumps(record, ensure_ascii=False)
+            # `default=str` so that a value JSON cannot take costs that field and nothing else.
+            # Without it the failure is total and invisible: `json.dumps` raises on the whole
+            # record, the except below swallows it, and a run captures no spans at all while
+            # `trace.start` and `trace.end` keep landing, so the file looks healthy. Every field
+            # here is a string or a scalar today, and `_plain` already renders the payload — this
+            # is about what a future SDK version puts on a span, which is not ours to choose.
+            line = json.dumps(record, ensure_ascii=False, default=str)
         except Exception:  # noqa: BLE001 - a span that will not serialise must not end the run
             self._dropped += 1
             return
@@ -211,6 +217,25 @@ class OrcaTracingProcessor:
         # both halves would double the file for no added fact.
         return None
 
+    @staticmethod
+    def _iso(value: Any) -> Any:
+        """The SDK's timestamps as the reader expects them, whatever the SDK hands over.
+
+        `SpanImpl` stores `util.time_iso()`, which is `datetime.now(timezone.utc).isoformat()` —
+        a string — and the reader parses it with `Date.parse`. That is what every supported version
+        does today, and it is not a guarantee: the attribute is read off an object this package does
+        not own, and `str(datetime)` is *not* the same text (a space where the `T` belongs), so
+        `default=str` alone would hand the reader something subtly different rather than nothing.
+        Asking the value for its own ISO form costs one `getattr` and settles both cases.
+        """
+        to_iso = getattr(value, "isoformat", None)
+        if callable(to_iso):
+            try:
+                return to_iso()
+            except Exception:  # noqa: BLE001 - a timestamp must not be able to end a run either
+                return value
+        return value
+
     def on_span_end(self, span: Any) -> None:
         data = getattr(span, "span_data", None)
         type_name = type(data).__name__ if data is not None else "unknown"
@@ -224,8 +249,8 @@ class OrcaTracingProcessor:
                 "span_id": getattr(span, "span_id", None),
                 "parent_id": getattr(span, "parent_id", None),
                 "trace_id": getattr(span, "trace_id", None),
-                "started_at": getattr(span, "started_at", None),
-                "ended_at": getattr(span, "ended_at", None),
+                "started_at": self._iso(getattr(span, "started_at", None)),
+                "ended_at": self._iso(getattr(span, "ended_at", None)),
                 # No `error`. The SDK's `SpanError` carries a free-form `data` dict — a tool's
                 # input, an API error echoed back, a guardrail's `output_info` — and `_plain` walks
                 # it deeply, so writing it puts exactly the payload here that `WRITTEN` exists to
