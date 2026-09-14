@@ -20,6 +20,7 @@ import {
   discardAgentSpanTransport,
   installAgentSpans,
   sweepStaleTransports,
+  touchTransports,
   pythonPathWith,
   readAgentSpans,
   SPANS_ENV,
@@ -88,6 +89,10 @@ export async function recordCommand(
   // hold material written by a process orca does not own — the agent's shells, the agent's own
   // interpreter — and a run that dies partway must not leave either behind.
   const transports: string[] = [];
+  // While this run holds them, they are not orphans, and a sweep that cannot resolve this pid —
+  // another container sharing `/tmp` — has no other way to know that. Started here so it covers
+  // both transports from the moment each is pushed, and stopped on every exit path below.
+  const stopHeartbeat = touchTransports(transports);
   try {
     return await runRecording(args, out, cwd, minted, transports);
   } catch (err) {
@@ -98,6 +103,8 @@ export async function recordCommand(
       await discardShellFrames(dir).catch(() => undefined);
     }
     throw err;
+  } finally {
+    stopHeartbeat();
   }
 }
 

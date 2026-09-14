@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -150,6 +150,61 @@ export const TRANSPORT_OWNER = 'owner.pid';
 const TRANSPORT_IDLE_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * How often a run reasserts that its transports are not abandoned.
+ *
+ * Anything comfortably inside {@link TRANSPORT_IDLE_MS} does, and the margin is the point rather
+ * than the exact number: a beat is one `utimes`, so beating far more often than strictly necessary
+ * costs nothing, and it means a machine busy enough to drop a run of them still cannot make a live
+ * recording look idle for a day.
+ */
+const TRANSPORT_HEARTBEAT_MS = 5 * 60 * 1000;
+
+/**
+ * Say, for as long as this run lasts, that its transports are not orphans.
+ *
+ * {@link sweepStaleTransports} asks two questions and only deletes when both say abandoned. The
+ * second one — has anything in there been written in the last day — is the one that had to stand
+ * alone whenever the first could not be answered, which is the shared-temp-directory case: `/tmp`
+ * bind-mounted into a devcontainer, a CI job with a shared tmp volume, an NFS `/tmp`. And silence
+ * is not evidence of abandonment, because a transport is only written when a span *ends* or the
+ * agent *runs a command*. An agent that spends a day on one model turn, or on one long command,
+ * writes nothing for a day while being entirely alive.
+ *
+ * The consequence was not a stale directory: the next `orca record` anywhere on that machine would
+ * delete a live run's transport, and both writers swallow the `ENOENT` that follows by design
+ * (`shell-shim/src/runner.ts`, `processor.py`). Every remaining frame and span would be lost
+ * without a word, the trace would still report success, and `shell.ineffective` would go on to
+ * blame the harness for commands orca itself had deleted the evidence of.
+ *
+ * A heartbeat answers the question instead of widening the window it is asked in. While the owner
+ * lives it keeps saying so, in the one way a sweep in another pid namespace can still read; an
+ * orphan stops saying it the moment its owner dies, so the collection the sweep exists for is
+ * untouched. It is the owner file that gets touched, because that is the one entry that exists from
+ * the moment the transport does.
+ *
+ * `dirs` is read on every beat rather than copied, so a transport installed part-way into a run is
+ * covered from the next beat without the caller having to say so. Stopping is the caller's job and
+ * belongs on every exit path; the timer is `unref`ed as well, so that a stop missed on some future
+ * path can still never be what holds the process open — the hang `record-teardown.test.ts` exists
+ * to catch.
+ */
+export function touchTransports(
+  dirs: readonly string[],
+  everyMs: number = TRANSPORT_HEARTBEAT_MS,
+): () => void {
+  const timer = setInterval(() => {
+    const at = new Date();
+    for (const dir of dirs) {
+      // Best-effort, like everything else about a transport: one that has already been taken away
+      // is not this run's problem, and a heartbeat must never be what fails a recording.
+      utimes(join(dir, TRANSPORT_OWNER), at, at).catch(() => undefined);
+    }
+  }, everyMs);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
+/**
  * Remove transports that outlived the run that made them.
  *
  * The drain removes one, and `recordCommand` removes one whose run threw. Neither runs when orca
@@ -182,9 +237,11 @@ const TRANSPORT_IDLE_MS = 24 * 60 * 60 * 1000;
  * telling a reused pid from the original, and that needs the *other* process's start time, which
  * Node cannot portably read. A field nothing can act on is how payload gets into a file.
  *
- * The remaining gap, stated rather than papered over: a recording in a shared temp directory that
- * has captured nothing for a day would be collected. That needs an unresolvable owner *and* a day
- * of silence together, where either alone used to be enough.
+ * Two gates left one gap between them, and {@link touchTransports} closes it rather than accepting
+ * it: a recording in a shared temp directory that captured nothing for a day satisfied both at
+ * once, and a day of silence is what an agent thinking about one long turn looks like. Its owner
+ * now refreshes the transport for as long as the run lasts, so reaching this line means the owner
+ * has stopped saying anything, not that the agent had nothing to say.
  *
  * Best-effort throughout: a directory with no owner is left alone rather than guessed at, a
  * directory that cannot be read is somebody else's problem, and nothing here is ever fatal.

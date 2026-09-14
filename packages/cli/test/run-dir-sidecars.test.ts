@@ -19,7 +19,7 @@ import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TraceWriter } from '@orcareplay/core';
 import { installShellShim, discardShellFrames } from '@orcareplay/shell-shim';
-import { installAgentSpans, sweepStaleTransports } from '../src/agent-spans.js';
+import { installAgentSpans, sweepStaleTransports, touchTransports } from '../src/agent-spans.js';
 
 /**
  * Watching the transport rather than looking for it.
@@ -48,6 +48,28 @@ vi.mock('@orcareplay/shell-shim', async (importOriginal) => {
     },
   };
 });
+/**
+ * The other half of the same question: what a run does with a transport while it still has one.
+ *
+ * Watched rather than measured, because the heartbeat beats minutes apart by design — a recording
+ * that takes a second produces no observable beat whether it holds its transports or not. What the
+ * heartbeat does with the list it is handed is pinned beside the sweep it exists for.
+ */
+const spansSpy = vi.hoisted(() => ({ held: [] as (readonly string[])[], stopped: 0 }));
+vi.mock('../src/agent-spans.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/agent-spans.js')>();
+  return {
+    ...actual,
+    touchTransports: (dirs: readonly string[], everyMs?: number) => {
+      spansSpy.held.push(dirs);
+      const stop = actual.touchTransports(dirs, everyMs);
+      return () => {
+        spansSpy.stopped += 1;
+        stop();
+      };
+    },
+  };
+});
 import { parseArgs } from '../src/args.js';
 import { recordCommand } from '../src/commands/record.js';
 import { scrubCommand } from '../src/commands/scrub.js';
@@ -69,6 +91,8 @@ describe('what a run directory is left holding', () => {
   beforeEach(async () => {
     shimSpy.minted.length = 0;
     shimSpy.discarded.length = 0;
+    spansSpy.held.length = 0;
+    spansSpy.stopped = 0;
     workspace = await mkdtemp(join(tmpdir(), 'orca-sidecar-'));
     await exec('git', ['init', '-q'], { cwd: workspace });
     await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: workspace });
@@ -227,6 +251,23 @@ describe('what a run directory is left holding', () => {
       expect(existsSync(shimSpy.minted[0]!), 'the transport directory is still there').toBe(false);
     }, 60_000);
   });
+
+  /**
+   * Holding them, not only letting go of them.
+   *
+   * A transport is written when a span *ends* or the agent *runs a command*, so silence says
+   * nothing about whether a run is alive — and silence is the only evidence the sweep has left once
+   * the owner's pid cannot be resolved, which is what a shared temp directory does to a pid. The
+   * run has to keep saying it is there, and it has to stop saying it the moment it is over, or the
+   * orphans the sweep exists for would never be collected either.
+   */
+  it('holds its transports for as long as the run lasts, and lets go at the end', async () => {
+    await record();
+
+    expect(spansSpy.held.length, 'the run never said its transports were alive').toBe(1);
+    expect(spansSpy.held[0], 'the heartbeat was handed nothing to hold').not.toHaveLength(0);
+    expect(spansSpy.stopped, 'the heartbeat outlived the run that owns it').toBe(1);
+  }, 60_000);
 
   /**
    * A transport outlives its run when orca is killed — `SIGKILL`, `taskkill`, a power cut — because
@@ -399,6 +440,102 @@ describe('what a run directory is left holding', () => {
       expect(await sweepStaleTransports(root)).toBe(1);
       expect(existsSync(abandoned), 'a genuine orphan was left behind').toBe(false);
       await rm(root, { recursive: true, force: true });
+    });
+
+    /**
+     * The gap the two gates left between them.
+     *
+     * Both are satisfied at once by a recording that is alive and quiet: its owner is unresolvable
+     * because the pid was written in another namespace, and nothing has been appended because the
+     * agent has spent the day on one model turn or one long command. Deleting it there is not a
+     * stale directory removed — it is a live run losing every frame and span it had left, silently,
+     * since both writers swallow the ENOENT that follows by design. So the owner says so instead.
+     */
+    it('leaves a transport whose owner is unresolvable while its run is still saying it is there', async () => {
+      const root = await sweepRoot();
+
+      // The control first: this is exactly what a live quiet recording looks like to the sweep, and
+      // it is taken. Without it the half below could pass while reaching nothing.
+      const unheld = await transport(root, 'orca-spans-quiet', 987_654, 48);
+      expect(await sweepStaleTransports(root), 'the setup never reached the deletion').toBe(1);
+      expect(existsSync(unheld)).toBe(false);
+
+      const held = await transport(root, 'orca-spans-thinking', 987_654, 48);
+      const stop = touchTransports([held], 5);
+      try {
+        await vi.waitFor(async () => {
+          const { mtimeMs } = await stat(join(held, 'owner.pid'));
+          expect(Date.now() - mtimeMs, 'the transport was never refreshed').toBeLessThan(60_000);
+        });
+        expect(await sweepStaleTransports(root)).toBe(0);
+        expect(existsSync(held), 'a live recording in a shared temp directory was collected').toBe(
+          true,
+        );
+      } finally {
+        stop();
+      }
+      await rm(root, { recursive: true, force: true });
+    });
+
+    it('covers a transport installed part-way into a run, and stops when the run does', async () => {
+      const root = await sweepRoot();
+      const held: string[] = [];
+      const stop = touchTransports(held, 5);
+      try {
+        // Pushed after the heartbeat started, which is the order record installs them in: the shim
+        // first, the spans transport some way after it, and neither at the moment the run begins.
+        const late = await transport(root, 'orca-shell-late', 987_654, 48);
+        held.push(late);
+        const owner = join(late, 'owner.pid');
+        await vi.waitFor(async () => {
+          const { mtimeMs } = await stat(owner);
+          expect(Date.now() - mtimeMs, 'a transport added mid-run was never covered').toBeLessThan(
+            60_000,
+          );
+        });
+
+        stop();
+        // Past any beat that was already in flight when it was stopped.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        const after = (await stat(owner)).mtimeMs;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        expect((await stat(owner)).mtimeMs, 'the heartbeat outlived the run').toBe(after);
+      } finally {
+        stop();
+      }
+      await rm(root, { recursive: true, force: true });
+    });
+
+    it('does not fail a run over a transport that has already been taken', async () => {
+      const root = await sweepRoot();
+      const gone = await transport(root, 'orca-spans-vanished', 987_654);
+      const stop = touchTransports([gone], 5);
+      try {
+        await rm(gone, { recursive: true, force: true });
+        // Long enough for a run of beats to find it missing. An unhandled rejection fails this
+        // file, which is the assertion: a heartbeat must never be what ends a recording.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      } finally {
+        stop();
+      }
+      await rm(root, { recursive: true, force: true });
+    });
+
+    /**
+     * Far enough inside the idle window that losing a run of beats to a busy machine still cannot
+     * make a live recording look abandoned. Read off the schedule rather than waited out, because
+     * waiting out the interval is the thing whose size this is checking.
+     */
+    it('beats many times over inside the window the sweep judges by', () => {
+      const spy = vi.spyOn(globalThis, 'setInterval');
+      try {
+        touchTransports([])();
+        const everyMs = spy.mock.calls.at(-1)?.[1];
+        expect(everyMs, 'the heartbeat scheduled nothing').toBeTypeOf('number');
+        expect(everyMs as number).toBeLessThan((24 * 60 * 60 * 1000) / 10);
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     /**
