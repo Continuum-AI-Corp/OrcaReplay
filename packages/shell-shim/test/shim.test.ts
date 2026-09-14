@@ -299,6 +299,47 @@ describe('shell shim', () => {
     expect(frames[0]!.argv).toEqual(['-c', 'npm test']);
   });
 
+  /**
+   * A short write does not lose one frame, it loses two.
+   *
+   * `record()` appends a frame with one `appendFileSync`, which is not one `write` syscall — a
+   * full disk, a quota, or a process killed inside it leaves a prefix with no newline behind it,
+   * and the next shim's whole line lands straight on the end. A prefix of a balanced object is
+   * unbalanced and gluing a balanced one onto it cannot rebalance it, so the line failed to parse
+   * and was skipped entire. The torn frame is unrecoverable; the complete one behind it was being
+   * thrown away with it, so a command that ran and was recorded in full went missing from the
+   * trace because a *different* shim was interrupted.
+   */
+  it('recovers the frame a torn write glued its fragment onto', async () => {
+    const fragment =
+      '{"name":"sh","argv":["-c","interrupted"],"cwd":"/tmp","exitCode":1,"signal":null';
+    const whole = JSON.stringify({
+      name: 'bash',
+      argv: ['-c', 'npm test'],
+      cwd: '/tmp',
+      exitCode: 0,
+      signal: null,
+      startedAt: '2026-09-12T00:00:00.000Z',
+      durationMs: 5,
+      stdoutBytes: 0,
+      stderrBytes: 0,
+    });
+    await writeFile(shim.framesPath, `${fragment}${whole}\n`, 'utf8');
+
+    const frames = await readShellFrames(shim.framesPath);
+    expect(frames, 'a complete frame went with the fragment it was glued to').toHaveLength(1);
+    expect(frames[0]!.argv).toEqual(['-c', 'npm test']);
+  });
+
+  it('still has nothing to recover from a fragment on its own', async () => {
+    // The partial final line this reader has always tolerated: a process killed mid-write with
+    // nothing after it. Recovery must not turn an unreadable prefix into a frame invented from it.
+    const fragment =
+      '{"name":"sh","argv":["-c","interrupted"],"cwd":"/tmp","exitCode":1,"signal":null';
+    await writeFile(shim.framesPath, `${fragment}\n`, 'utf8');
+    expect(await readShellFrames(shim.framesPath)).toHaveLength(0);
+  });
+
   it('drops one whose timestamp is out of range even when the duration brings it back', async () => {
     // The two bounds are not one check written twice. `shell.exec` is stamped with the instant
     // alone, so `startedAt` is bounded for its own sake — and a large enough negative duration puts

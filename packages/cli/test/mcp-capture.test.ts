@@ -290,6 +290,15 @@ describe('a capture line that parsed is not yet a frame', () => {
     return frames;
   }
 
+  it('recovers the record a torn write glued its fragment onto', async () => {
+    // The other reader of this file, kept in step with the shim's own: a prefix with the next
+    // server's whole record on the end of it must not take that record down with it.
+    const fragment = '{"ts":"2026-09-12T00:00:00.000Z","name":"srv","dir":"out","kind":"unknown"';
+    const frames = await framesFrom([`${fragment}${JSON.stringify(good)}`, '']);
+    expect(frames, 'a complete record went with the fragment it was glued to').toHaveLength(1);
+    expect(frames[0]!.method).toBe('tools/call');
+  });
+
   it('skips a line that is not an object', async () => {
     const frames = await framesFrom(['null', '7', '"a string"', '[1,2]', JSON.stringify(good), '']);
     expect(frames).toHaveLength(1);

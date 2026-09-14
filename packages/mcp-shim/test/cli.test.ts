@@ -220,6 +220,54 @@ describe('main', () => {
    * whole replay at startup, every MCP server in the run with it. Recording tolerated it and replay
    * did not, which is the asymmetry this reader was fixed for.
    */
+  /**
+   * The same short write, in the file several servers share.
+   *
+   * Each record is one write on the sink, so a torn one leaves a prefix and the next server's whole
+   * record lands on the end of it. Skipping that line threw away the complete record too — and here
+   * that record is the *request*, which is what ties a recorded answer to the question asked, so
+   * losing it leaves the replay with nothing to say.
+   */
+  it('answers from a recording whose first record was glued onto a fragment', async () => {
+    const recorded = join(scratch, 'recorded.jsonl');
+    const base = { ts: '2026-09-12T00:00:00.000Z', name: 'fs', id: 1, method: 'tools/list' };
+    const fragment = '{"ts":"2026-09-12T00:00:00.000Z","name":"fs","dir":"out","kind":"unknown"';
+    const request = JSON.stringify({
+      ...base,
+      dir: 'in',
+      kind: 'request',
+      raw: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+    });
+    const response = JSON.stringify({
+      ...base,
+      dir: 'out',
+      kind: 'response',
+      raw: '{"jsonrpc":"2.0","id":1,"result":{"ok":true}}',
+    });
+    writeFileSync(recorded, [`${fragment}${request}`, response, ''].join('\n'), 'utf8');
+
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const seen: Buffer[] = [];
+    const errors: Buffer[] = [];
+    stdout.on('data', (c: Buffer) => seen.push(Buffer.from(c)));
+    stderr.on('data', (c: Buffer) => errors.push(Buffer.from(c)));
+
+    const done = main(
+      ['--name', 'fs', '--out', join(scratch, 'mcp.jsonl'), '--replay', recorded, '--', 'unused'],
+      { stdin, stdout, stderr },
+    );
+    stdin.write('{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n');
+    stdin.end();
+
+    expect(await done, Buffer.concat(errors).toString()).toBe(0);
+    expect(
+      Buffer.concat(seen).toString(),
+      'the record glued to a fragment was dropped with it, so the replay had no answer',
+    ).toContain('"ok":true');
+  });
+
   it('answers from a recording whose frames include one that is not a message', async () => {
     const recorded = join(scratch, 'recorded.jsonl');
     const base = { ts: '2026-09-12T00:00:00.000Z', name: 'fs' };

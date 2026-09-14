@@ -101,6 +101,37 @@ export function isMcpFrameRecord(value: unknown): value is McpFrameRecord {
   return typeof record.name === 'string' && typeof record.raw === 'string';
 }
 
+/**
+ * Where a record begins, for {@link recordsOnLine}. Both writers below put `ts` first.
+ *
+ * As with the shell shim's frames, the bytes cannot occur inside a value: a `raw` payload holding
+ * this text carries it escaped, as `{\"ts\"`.
+ */
+const RECORD_START = '{"ts":';
+
+/**
+ * The records on one line, which is nearly always one.
+ *
+ * Several servers share one capture file and each record is one `write` on the sink, so a short
+ * write leaves a prefix with no newline and the next server's whole line lands on the end of it.
+ * Skipping such a line threw away the *complete* record glued to the fragment — an answer a replay
+ * then could not give, because a different server's write was interrupted. The same reasoning, and
+ * the same shape, as `readShellFrames`; the two readers of a shared append-only file are kept in
+ * step deliberately.
+ */
+export function recordsOnLine(line: string): string[] {
+  const pieces: string[] = [];
+  let from = 0;
+  for (;;) {
+    const next = line.indexOf(RECORD_START, from + 1);
+    if (next === -1) break;
+    pieces.push(line.slice(from, next));
+    from = next;
+  }
+  pieces.push(line.slice(from));
+  return pieces;
+}
+
 function toRecord(name: string, dir: FrameDirection, frame: JsonRpcFrame): string {
   const record: McpFrameRecord = {
     ts: new Date().toISOString(),
@@ -139,11 +170,11 @@ function toMockRecord(name: string, dir: FrameDirection, message: JsonRpcMessage
 async function readFrames(path: string, name: string): Promise<RecordedFrame[]> {
   const text = await readFile(path, 'utf8').catch(() => '');
   const frames: RecordedFrame[] = [];
-  for (const line of text.split(/\r?\n/)) {
-    if (line.trim() === '') continue;
+  for (const piece of text.split(/\r?\n/).flatMap((line) => recordsOnLine(line))) {
+    if (piece.trim() === '') continue;
     let value: unknown;
     try {
-      value = JSON.parse(line);
+      value = JSON.parse(piece);
     } catch {
       continue;
     }

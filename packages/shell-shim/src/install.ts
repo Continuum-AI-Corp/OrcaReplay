@@ -180,14 +180,56 @@ export async function discardShellFrames(dir: string): Promise<string | undefine
 /** `0000-01-01T00:00:00.000Z` and `9999-12-31T23:59:59.999Z`: what a `date-time` `ts` can express. */
 const EARLIEST_MS = -62_167_219_200_000;
 const LATEST_MS = 253_402_300_799_999;
+
+/**
+ * Where a frame begins, for {@link framesOnLine}.
+ *
+ * `record()` builds the object with `name` first and `JSON.stringify` keeps insertion order, so
+ * every line it writes starts with these bytes. It is the one place this reader is coupled to that
+ * ordering, and it is safe in the direction that matters: the sequence cannot occur inside a value,
+ * because JSON escapes the quotes in a string and writes `{\"name\"` instead.
+ */
+const FRAME_START = '{"name":';
+
+/**
+ * The frames on one line, which is nearly always one.
+ *
+ * `record()` writes a frame with a single `appendFileSync`, and that is not a single `write`
+ * syscall. A short write — a full disk, a quota, a process killed inside it — leaves a *prefix* on
+ * disk with no newline behind it, and the next shim's whole line then lands straight on the end:
+ * one line holding a fragment and a frame. A prefix of a balanced object is unbalanced, and gluing
+ * a balanced one onto it cannot rebalance it, so `JSON.parse` threw and the line was skipped —
+ * taking with it a command that ran and was recorded *in full*, because a different shim was
+ * interrupted. Losing the torn frame is unavoidable; losing its neighbour is not.
+ *
+ * So the line is cut at each frame opening and each piece is judged on its own: the fragment fails
+ * to parse and is dropped, the whole frames after it are kept. An ordinary line contains the
+ * opening once, at the start, and comes back unchanged.
+ */
+function framesOnLine(line: string): string[] {
+  const pieces: string[] = [];
+  let from = 0;
+  for (;;) {
+    // From `from + 1`, because the piece being cut starts with the opening itself.
+    const next = line.indexOf(FRAME_START, from + 1);
+    if (next === -1) break;
+    pieces.push(line.slice(from, next));
+    from = next;
+  }
+  pieces.push(line.slice(from));
+  return pieces;
+}
 export async function readShellFrames(framesPath: string): Promise<ShellFrame[]> {
   const raw = await readFile(framesPath, 'utf8').catch(() => '');
   const frames: ShellFrame[] = [];
-  for (const line of raw.split('\n')) {
-    if (line.trim() === '') continue;
+  // One line is one frame, except where a short write glued a fragment and a frame onto the same
+  // one. Every piece then goes through the checks below unchanged; recovery decides what to *look*
+  // at, never what is acceptable.
+  for (const piece of raw.split('\n').flatMap((line) => framesOnLine(line))) {
+    if (piece.trim() === '') continue;
     let parsed: unknown;
     try {
-      parsed = JSON.parse(line);
+      parsed = JSON.parse(piece);
     } catch {
       // A process killed mid-write leaves a partial line. That is the run we most want to read.
       continue;

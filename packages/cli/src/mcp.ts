@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { rewriteMcpConfig } from '@orcareplay/adapters';
 import type { TraceWriter } from '@orcareplay/core';
-import { isMcpFrameRecord } from '@orcareplay/mcp-shim';
+import { isMcpFrameRecord, recordsOnLine } from '@orcareplay/mcp-shim';
 import type { McpFrameRecord } from '@orcareplay/mcp-shim';
 import type { Output } from './out.js';
 
@@ -245,11 +245,11 @@ export async function setupMcpCapture(opts: {
     async drain() {
       const text = await readFile(framesPath, 'utf8').catch(() => '');
       const records: McpFrameRecord[] = [];
-      for (const line of text.split('\n')) {
-        if (line.trim() === '') continue;
+      for (const piece of text.split('\n').flatMap((line) => recordsOnLine(line))) {
+        if (piece.trim() === '') continue;
         let parsed: unknown;
         try {
-          parsed = JSON.parse(line);
+          parsed = JSON.parse(piece);
         } catch {
           // A malformed capture line must never break the recorder; the agent's run matters more.
           continue;
