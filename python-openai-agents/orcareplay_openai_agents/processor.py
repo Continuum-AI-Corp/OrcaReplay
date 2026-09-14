@@ -263,6 +263,32 @@ class OrcaTracingProcessor:
         )
 
     def shutdown(self) -> None:
+        """Say how many records were lost, if any were.
+
+        `_dropped` was counted from the start and read by nothing, so the two failures `_write`
+        deliberately swallows — a payload `json.dumps` will not take, and a file it cannot append
+        to — reached the trace as an absence. That is the shape this project keeps finding: a
+        capture layer reporting success while something it held is gone. A run that lost a handoff
+        should say so, even though it is right that losing one did not end the run.
+
+        Written here rather than per-failure because a count is one line whatever happens, and
+        because the alternative — a record per drop — is most likely to be written when writing is
+        exactly what is failing.
+
+        Not via `_write`: this must not increment the counter it is reporting, and a serialisation
+        failure is impossible for two ints.
+        """
+        if not self._path or self._dropped == 0:
+            return None
+        line = json.dumps({"kind": "dropped", "count": self._dropped}, ensure_ascii=False)
+        try:
+            with self._lock, open(self._path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:  # noqa: BLE001 - reporting a loss must not itself end the run
+            return None
+        # Only once: the SDK may call `shutdown` more than once, and a second line would be read as
+        # a second, separate loss.
+        self._dropped = 0
         return None
 
     def force_flush(self) -> None:

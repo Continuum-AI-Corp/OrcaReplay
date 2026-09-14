@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { validateEvent } from '@orcareplay/schema';
 import {
+  agentSpanLosses,
   discardAgentSpanTransport,
   eventForSpan,
   installAgentSpans,
@@ -198,7 +199,16 @@ describe('the bootstrap orca writes', () => {
 
   it('does nothing at all unless orca is recording', () => {
     // It is imported by *every* Python process the run starts, including `python --version`.
-    expect(SITECUSTOMIZE_SOURCE).toContain('if not os.environ.get("ORCA_AGENT_SPANS")');
+    expect(SITECUSTOMIZE_SOURCE).toContain('path = os.environ.get("ORCA_AGENT_SPANS")');
+    expect(SITECUSTOMIZE_SOURCE).toContain('if not path:');
+  });
+
+  it('asks whether the SDK is there rather than importing it', () => {
+    // Measured on this machine: `find_spec("agents")` is 0.5ms and `import agents` is 1973ms, on an
+    // interpreter that starts in 50ms. This file is in front of every Python process the recording
+    // starts, so the import would put two seconds on each of them — including `python --version`.
+    expect(SITECUSTOMIZE_SOURCE).toContain('importlib.util.find_spec("agents")');
+    expect(SITECUSTOMIZE_SOURCE).not.toMatch(/^\s*import agents\b/m);
   });
 
   it('lets no failure of its own reach the agent', () => {
@@ -395,4 +405,225 @@ describe('the spans transport is not in the trace', () => {
     expect(types).toContain('agent.start');
     expect(events).toContain(marker);
   }, 60_000);
+
+  /**
+   * The failure this whole warning exists for, end to end.
+   *
+   * Before it, uninstalling the package and recording the same agent moved the trace from 15 events
+   * to 11 and printed nothing at all — the same `recorded … exit=0`, byte for byte. Every other
+   * capture layer says when it did not fire: MCP warns `mcp.not_wired`, the proxy warns
+   * `capture.empty`. This one was the exception, and it is the *default* state until the package is
+   * on PyPI.
+   */
+  it('says so when the SDK is there and the adapter is not', async () => {
+    // Both shadows go on PYTHONPATH rather than next to the agent, and the difference is a real
+    // property of the mechanism rather than a detail of the test: measured, `sitecustomize` runs
+    // while `sys.path[0]` is still the PYTHONPATH entry — the script's own directory is not added
+    // until afterwards. So the bootstrap's `find_spec` sees PYTHONPATH and site-packages, and
+    // nothing the agent happens to sit beside.
+    //
+    // Going through PYTHONPATH also makes this say the same thing on a machine that has the real
+    // package installed — every machine running this suite does — and on one that does not, and it
+    // exercises orca keeping the caller's PYTHONPATH rather than replacing it.
+    const shadows = join(workspace, 'shadows');
+    await mkdir(shadows, { recursive: true });
+    await writeFile(
+      join(shadows, 'orcareplay_openai_agents.py'),
+      'raise ImportError("stands in for a machine without the package")\n',
+    );
+    await writeFile(join(shadows, 'agents.py'), '# stands in for the SDK\n');
+    const agent = join(workspace, 'agent.py');
+    await writeFile(agent, 'print("GOT: done")\n');
+
+    const said: string[] = [];
+    const out = new Output({ write: (line: string) => said.push(line), isTTY: false });
+    const previousPath = process.env['PYTHONPATH'];
+    process.env['PYTHONPATH'] = shadows;
+    let result;
+    try {
+      result = await recordCommand(
+        parseArgs(['record', 'generic-openai', '--', 'python', agent]),
+        out,
+        workspace,
+      );
+    } finally {
+      if (previousPath === undefined) delete process.env['PYTHONPATH'];
+      else process.env['PYTHONPATH'] = previousPath;
+    }
+
+    const warning = said.find((line) => line.includes('agent_spans.unavailable'));
+    expect(warning, `no warning in:\n${said.join('')}`).toBeTruthy();
+    expect(warning).toContain('orcareplay-openai-agents');
+    // A warning, not a failure: the run is still a run, and the model traffic in it is still real.
+    expect(result.exitCode).toBe(0);
+  }, 60_000);
 });
+
+/**
+ * What the layer says when it captured nothing — the two ways it can come back empty.
+ *
+ * `_dropped` was counted from the first version and read by nothing, and the bootstrap's
+ * `except ImportError` was silent, so both failures reached the operator as an absence: the same
+ * `recorded … exit=0`, no agent events, no warning. Measured before this: uninstalling the package
+ * and recording the same agent moved the trace from 15 events to 11 and printed nothing at all.
+ */
+describe('agentSpanLosses', () => {
+  it('finds nothing to report in an ordinary run', () => {
+    expect(
+      agentSpanLosses([
+        { kind: 'trace.start' },
+        { kind: 'span', type: 'HandoffSpanData' },
+        { kind: 'trace.end' },
+      ]),
+    ).toEqual({ unavailable: [], dropped: 0 });
+  });
+
+  it('reports a missing adapter once however many processes said so', () => {
+    // The bootstrap runs in every Python process the recording starts, so an agent that shells out
+    // to `python` writes this line once per child. Six lines are one fact; reporting it six times
+    // reads like six failures.
+    const spans = Array.from({ length: 6 }, () => ({
+      kind: 'unavailable',
+      package: 'orcareplay-openai-agents',
+    }));
+    expect(agentSpanLosses(spans).unavailable).toEqual(['orcareplay-openai-agents']);
+  });
+
+  it('keeps two different missing adapters apart', () => {
+    expect(
+      agentSpanLosses([
+        { kind: 'unavailable', package: 'orcareplay-langgraph' },
+        { kind: 'unavailable', package: 'orcareplay-openai-agents' },
+        { kind: 'unavailable', package: 'orcareplay-langgraph' },
+      ]).unavailable,
+    ).toEqual(['orcareplay-langgraph', 'orcareplay-openai-agents']);
+  });
+
+  it('sums dropped counts rather than taking one', () => {
+    // One `dropped` line per process, and the counts are of different records, so they add.
+    expect(
+      agentSpanLosses([
+        { kind: 'dropped', count: 2 },
+        { kind: 'span', type: 'AgentSpanData' },
+        { kind: 'dropped', count: 3 },
+      ]).dropped,
+    ).toBe(5);
+  });
+
+  it('ignores a count that is not a usable number', () => {
+    // The file is appended to by a process orca does not own, and a torn line can reparse into
+    // anything. A `dropped` whose count is a string must not become `NaN` in a warning.
+    for (const count of ['4', null, undefined, Number.NaN, Number.POSITIVE_INFINITY, -1, 0]) {
+      expect(agentSpanLosses([{ kind: 'dropped', count } as never]).dropped).toBe(0);
+    }
+  });
+
+  it('falls back to the package it is written by when the name is missing', () => {
+    for (const span of [{ kind: 'unavailable' }, { kind: 'unavailable', package: '' }]) {
+      expect(agentSpanLosses([span as never]).unavailable).toEqual(['orcareplay-openai-agents']);
+    }
+  });
+
+  it('does not turn either record into a trace event', () => {
+    // They are for the operator, now, while the run is still on screen — not for the trace, which
+    // has no event type for "this did not happen".
+    expect(eventForSpan({ kind: 'unavailable', package: 'x' })).toBeUndefined();
+    expect(eventForSpan({ kind: 'dropped', count: 3 } as never)).toBeUndefined();
+  });
+});
+
+/**
+ * The bootstrap's half, run rather than read.
+ *
+ * A string assertion cannot tell whether the guard is in the right place, and this one is subtle:
+ * the marker must be written when the SDK is importable and the adapter is not, and *not* written
+ * when neither is — because `orca record` puts this file in front of every `python` in the run and
+ * most of them are not agents.
+ */
+describe('the bootstrap reports a missing adapter', () => {
+  const exec = promisify(execFile);
+  let python: string | undefined;
+  let bootRoot: string;
+
+  beforeEach(async () => {
+    bootRoot = await mkdtemp(join(tmpdir(), 'orca-bootstrap-'));
+    for (const candidate of ['python3', 'python']) {
+      try {
+        await exec(candidate, ['-c', 'pass']);
+        python = candidate;
+        break;
+      } catch {
+        python = undefined;
+      }
+    }
+  });
+
+  afterEach(async () => {
+    await rm(bootRoot, { recursive: true, force: true });
+  });
+
+  /**
+   * Run the real bootstrap against a path that has the SDK on it, or does not.
+   *
+   * `-S` and the explicit import, rather than letting `site` load it: this interpreter is whichever
+   * one is on PATH, and the one the repository uses to run its checks has both the SDK **and** the
+   * adapter installed — so neither half of this could be arranged by adding files. `-S` drops
+   * site-packages and keeps `PYTHONPATH`, which makes both halves a property of what this test
+   * writes rather than of the machine it runs on. What `-S` gives up is `site` importing
+   * `sitecustomize` by itself, and that is asserted separately, by the end-to-end record above.
+   */
+  async function runBootstrap(withSdk: boolean): Promise<string> {
+    const boot = join(bootRoot, withSdk ? 'with' : 'without');
+    const spans = join(bootRoot, `${withSdk ? 'with' : 'without'}.jsonl`);
+    await mkdir(boot, { recursive: true });
+    await writeFile(join(boot, 'sitecustomize.py'), SITECUSTOMIZE_SOURCE);
+    // A module, not an installed SDK: the bootstrap asks `find_spec`, which answers about the path.
+    if (withSdk) await writeFile(join(boot, 'agents.py'), '# stands in for the SDK\n');
+    await exec(python as string, ['-S', '-c', 'import sitecustomize'], {
+      env: { ...process.env, PYTHONPATH: boot, ORCA_AGENT_SPANS: spans },
+    });
+    return await readFile(spans, 'utf8').catch(() => '');
+  }
+
+  it('says so when the SDK is there and the adapter is not', async () => {
+    if (!python) return; // no interpreter here; CI has one and asserts this
+    const written = await runBootstrap(true);
+    expect(agentSpanLosses(readSpansText(written)).unavailable).toEqual([
+      'orcareplay-openai-agents',
+    ]);
+  });
+
+  it('stays quiet for a Python process that is not an agent', async () => {
+    if (!python) return;
+    // `orca record` exports ORCA_AGENT_SPANS to every child. Without this guard a run whose agent
+    // shells out to `python` would warn about a package that process had no use for.
+    expect(await runBootstrap(false)).toBe('');
+  });
+
+  it('never fails the process it is loaded into', async () => {
+    if (!python) return;
+    // Both directions already ran above without throwing — `exec` rejects on a non-zero exit — so
+    // this pins the promise rather than re-testing the mechanism: the bootstrap is in front of
+    // every `python` in the run, and a traceback here is a failure of the run.
+    const boot = join(bootRoot, 'boot2');
+    await mkdir(boot, { recursive: true });
+    await writeFile(join(boot, 'sitecustomize.py'), SITECUSTOMIZE_SOURCE);
+    const { stdout } = await exec(python, ['-c', 'print("ok")'], {
+      env: {
+        ...process.env,
+        PYTHONPATH: boot,
+        // A path no process can append to, which is what a wedged transport looks like.
+        ORCA_AGENT_SPANS: join(bootRoot, 'no', 'such', 'dir', 'spans.jsonl'),
+      },
+    });
+    expect(stdout.trim()).toBe('ok');
+  });
+});
+
+/** The records on a transport's text, the way `readAgentSpans` would have them. */
+function readSpansText(text: string): { kind: string }[] {
+  return text
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => JSON.parse(line) as { kind: string });
+}

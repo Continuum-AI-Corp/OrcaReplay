@@ -76,12 +76,43 @@ def _chain():
         return
 
 
+def _unavailable(path):
+    """Record that the SDK is here and the adapter is not — the one case worth reporting.
+
+    Without this, a run whose agent uses the Agents SDK on a machine without
+    \`orcareplay-openai-agents\` is byte-identical to one that never used the SDK: the same
+    \`recorded ... exit=0\`, no agent events, no warning. That is the whole structural layer off,
+    silently, and today it is the *default* — the package is not on PyPI yet.
+
+    \`find_spec\` rather than \`import\`: measured at 0.5ms against 1973ms for \`import agents\`, on
+    an interpreter that starts in 50ms. This runs in every Python process the recording starts, so
+    importing here would put two seconds on each of them.
+
+    Gated on the SDK being present because the ungated version is noise: \`orca record\` puts this
+    bootstrap in front of every \`python\` in the run, and most of them are not agents.
+    """
+    import importlib.util
+
+    try:
+        if importlib.util.find_spec("agents") is None:
+            return
+    except Exception:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write('{"kind": "unavailable", "package": "orcareplay-openai-agents"}\\n')
+    except Exception:
+        return
+
+
 def _install():
-    if not os.environ.get("ORCA_AGENT_SPANS"):
+    path = os.environ.get("ORCA_AGENT_SPANS")
+    if not path:
         return
     try:
         from orcareplay_openai_agents import install
     except Exception:
+        _unavailable(path)
         return
     try:
         install()
@@ -418,6 +449,43 @@ export async function readAgentSpans(path: string): Promise<AgentSpan[]> {
  * after a colon comes *after* these bytes, so the same string matches what both writers produce.
  */
 const SPAN_START = '{"kind":';
+
+/**
+ * What this layer captured nothing of, and why — the two ways it can come back empty.
+ *
+ * Both are read off the same records `readAgentSpans` already returns, because both are written by
+ * the only two things that know: the bootstrap, which finds out at import time that the adapter is
+ * missing, and the processor, which is the only party that saw the record it could not write.
+ *
+ * `eventForSpan` ignores them — it answers only to `kind === 'span'` — so neither reaches the trace
+ * as an event. They are for the operator, now, while the run is still on screen.
+ */
+export interface AgentSpanLosses {
+  /** The SDK was importable and the adapter was not, so nothing structural was captured at all. */
+  unavailable: string[];
+  /** Records the processor held and could not write: unserialisable, or the append failed. */
+  dropped: number;
+}
+
+export function agentSpanLosses(spans: AgentSpan[]): AgentSpanLosses {
+  const unavailable = new Set<string>();
+  let dropped = 0;
+  for (const span of spans) {
+    if (span.kind === 'unavailable') {
+      // Deduplicated by package name: the bootstrap runs in every Python process the recording
+      // starts, so an agent that shells out to `python` writes this once per child. Six lines
+      // saying the same thing is one fact, and reporting it six times reads like six failures.
+      const pkg = (span as { package?: unknown }).package;
+      unavailable.add(typeof pkg === 'string' && pkg !== '' ? pkg : 'orcareplay-openai-agents');
+    } else if (span.kind === 'dropped') {
+      // Summed rather than taken: one `dropped` line per process, same as above, and here the
+      // counts are of different records so they add rather than collapse.
+      const count = (span as { count?: unknown }).count;
+      if (typeof count === 'number' && Number.isFinite(count) && count > 0) dropped += count;
+    }
+  }
+  return { unavailable: [...unavailable].sort(), dropped };
+}
 
 /** A trace event, or undefined for a span that carries nothing the proxy lacks. */
 export function eventForSpan(
