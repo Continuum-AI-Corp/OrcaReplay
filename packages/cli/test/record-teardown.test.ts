@@ -1,10 +1,11 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { TRANSPORT_OWNER } from '../src/agent-spans.js';
 
 const run = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -125,5 +126,74 @@ describe('orca record, when the run dies before the agent starts', () => {
     const { stdout } = await run(process.execPath, [cli, 'show', id!], { cwd: dir, env: bare });
     expect(stdout).not.toMatch(/events {2}exit 0/);
     expect(stdout).toContain('never finished');
+  }, 60_000);
+
+  /**
+   * The transports go with it, like the CA.
+   *
+   * Neither `agent-spans.jsonl` nor `shell-frames.jsonl` goes through the write path's redactor —
+   * both are written by a process orca does not own, the agent's interpreter and the shell shim —
+   * and `orca scrub` does not rewrite either. So neither may outlive the run. The success path
+   * removes them after the drain, but that is inside the region this teardown is the short-circuit
+   * for, so every throw after they are minted used to leave one behind. This run reaches both
+   * installs — they happen before the spawn, and it is the spawn that fails.
+   *
+   * **Looked for where they actually are.** The obvious assertion, that nothing named
+   * `agent-spans*` is in the run directory, is vacuous: the transports are minted under the
+   * system temp directory rather than in the run, so that holds whether or not anything cleans
+   * up. Confirmed by deleting the teardown and watching that version of this test pass anyway.
+   *
+   * What is left behind is identified by its owner, not by its name: each transport records the
+   * pid that minted it, and that pid is this one subprocess. So a leftover is unambiguous, a
+   * transport belonging to a test running in parallel is never mistaken for one, and renaming the
+   * directory prefix cannot quietly turn this back into a test that looks at nothing.
+   */
+  it('takes the transports with it, like the CA', async () => {
+    const temp = tmpdir();
+    const started = Date.now();
+    const attempt = run(process.execPath, [cli, 'record', 'node', '--', 'orca-no-such-binary'], {
+      cwd: dir,
+      env: bare,
+      timeout: 60_000,
+    });
+    const pid = attempt.child.pid;
+    expect(pid, 'could not identify the recording process').toBeGreaterThan(0);
+    await attempt.catch(() => undefined);
+
+    const left: string[] = [];
+    for (const entry of await readdir(temp, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const path = join(temp, entry.name);
+      // A pid is only unique among live processes, and this one has exited — so also require the
+      // directory to be newer than this test, or an orphan from an older run that happened to be
+      // given the same pid would be read as a leak of this one.
+      const age = await stat(path).then(
+        (info) => info.mtimeMs,
+        () => 0,
+      );
+      if (age < started - 5_000) continue;
+      const owner = await readFile(join(path, TRANSPORT_OWNER), 'utf8').catch(() => '');
+      if (owner.trim() === String(pid)) left.push(entry.name);
+    }
+    try {
+      expect(left, 'a failed run left its transport behind').toEqual([]);
+    } finally {
+      // Including when the assertion above just failed: a leak this test caught is still a
+      // directory of un-redacted material, and leaving it would also hand the next run a pid to
+      // collide with.
+      for (const name of left) await rm(join(temp, name), { recursive: true, force: true });
+    }
+
+    // And nothing of theirs reached the trace either.
+    const runs = join(dir, '.orca', 'runs');
+    const [id] = await readdir(runs);
+    expect(id, 'the failed run left no trace at all').toBeDefined();
+    const entries = await readdir(join(runs, id!), { recursive: true, withFileTypes: true });
+    expect(
+      entries
+        .filter((e) => e.name.startsWith('agent-spans') || e.name.startsWith('shell-frames'))
+        .map((e) => e.name),
+      'an un-redacted transport was left in the run directory',
+    ).toEqual([]);
   }, 60_000);
 });
