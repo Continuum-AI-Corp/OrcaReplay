@@ -27,11 +27,29 @@ describe('RequestMatcher lookahead', () => {
     expect(result.skipped).toBe(1);
   });
 
-  // An exchange stepped over without mention is a replay claiming to reproduce what it passed by.
-  it('says how many it stepped over, even when the match itself was exact', () => {
+  /**
+   * An exchange stepped over without mention is a replay claiming to reproduce what it passed by
+   * — so it is reported. Not as a divergence, though: spec §4 reserves those for a match below
+   * rung 1, and this one is byte-identical after redaction. Calling a reordering a divergence
+   * made `exact=N/N` unreachable for any concurrent workload, and what was actually never
+   * reproduced is still counted by `reused=x/y`.
+   */
+  it('says it stepped over, without calling an exact match a divergence', () => {
     const m = new RequestMatcher([req('quota'), req('ask')]);
     const result = m.match(req('ask'));
+    expect(result.rung).toBe(1);
     expect(result.skipped).toBe(1);
+    expect(result.reordered).toBe(true);
+    expect(result.divergence).toBeUndefined();
+  });
+
+  // A skip onto an *inexact* match keeps its divergence, and names the skip inside it.
+  it('still reports a divergence when the match it stepped onto was approximate', () => {
+    const drifted = req('a question about the quarterly billing report for account 41');
+    const m = new RequestMatcher([req('quota'), drifted]);
+    const result = m.match(req('a question about the quarterly billing report for account 42'));
+    expect(result.matched).toBe(true);
+    expect(result.rung).toBe(2);
     expect(result.divergence?.detail ?? '').toContain('holding 1 recorded request');
   });
 
@@ -54,7 +72,10 @@ describe('RequestMatcher lookahead', () => {
     const turn = m.match(req('the first turn'));
     expect(turn.matched).toBe(true);
     expect(turn.index).toBe(0);
-    expect(turn.divergence?.detail ?? '').toContain('out of the order it was recorded in');
+    // Reported as a reordering rather than a divergence: both halves of the pair were reproduced
+    // byte for byte, and the only thing that differed was which arrived first.
+    expect(turn.reordered).toBe(true);
+    expect(turn.divergence).toBeUndefined();
   });
 
   it('serves a held request even after the cursor has run off the end', () => {

@@ -23,6 +23,7 @@ export const EVENT_TYPES = [
   'fs.change',
   'net.request',
   'net.response',
+  'retrieval.context',
   'error',
   'divergence',
   'checkpoint',

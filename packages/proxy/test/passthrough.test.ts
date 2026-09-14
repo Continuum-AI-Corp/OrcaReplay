@@ -179,6 +179,37 @@ describe('record mode — a path no dialect claims', () => {
     expect(up.calls[0]!.url).toBe('https://api.orcarouter.ai/v1/embeddings');
   });
 
+  /**
+   * A run whose two origins disagree still sends each call to one of them.
+   *
+   * The shape that found this: a machine with a gateway in `~/.orca/config.json` and a single
+   * `--upstream-openai <stub>` on the command line. `resolveUpstream` fills the openai keys from
+   * the flag and `anthropic` from the gateway, so the configured set has two values, the
+   * one-value shortcut does not fire, and the old code went straight to the vendor default —
+   * `https://api.openai.com`, which is neither of the two the operator named, reached with the
+   * agent's own credential on it. Every embedding call in a recorded retrieval run bypassed the
+   * gateway that was the whole point of configuring one.
+   */
+  it('sends it to the origin configured for its own family, not a vendor default', async () => {
+    const up = stubUpstream(EMBEDDING);
+    const proxy = await createProxy({
+      mode: 'record',
+      fetchImpl: up.fetchImpl,
+      upstream: {
+        anthropic: 'https://gw.example',
+        openai: 'https://stub.example',
+        'openai-responses': 'https://stub.example',
+      },
+    });
+    closers.push(proxy.close);
+
+    await post(`${proxy.url}/v1/embeddings`, { input: 'hello' });
+    await post(`${proxy.url}/v1/complete`, { prompt: 'x' }, { 'anthropic-version': '2023-06-01' });
+
+    expect(up.calls[0]!.url).toBe('https://stub.example/v1/embeddings');
+    expect(up.calls[1]!.url).toBe('https://gw.example/v1/complete');
+  });
+
   it('falls back to the origin the client itself was speaking to', async () => {
     // With nothing configured, orca owes the agent the destination it redirected away from. An
     // `anthropic-version` header is Anthropic's client announcing itself.

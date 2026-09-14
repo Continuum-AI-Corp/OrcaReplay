@@ -140,6 +140,25 @@ try {
     attrs: { server: 'files', kind: 'response', id: 1 },
     payload: JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools: [] } }),
   });
+  // What a retriever put into a prompt, which `orca record` derives for real from any request
+  // carrying a `Context: … Question: …` structure — the shape every RAG template writes. Derived
+  // rather than captured, like `tool.call`: the passages are in the request because putting them
+  // there is what retrieval is for.
+  await writer.append({
+    type: 'retrieval.context',
+    actor: 'harness',
+    turn: 1,
+    attrs: {
+      query: 'Where was Marie Curie born?',
+      passages: 2,
+      chars: 96,
+      derived_from: 'prompt',
+    },
+    payload: JSON.stringify({
+      query: 'Where was Marie Curie born?',
+      passages: ['Marie Curie was born in Warsaw in 1867.', 'She later moved to Paris.'],
+    }),
+  });
   // The harness's own transcript, which `orca record` captures for real whenever the adapter
   // knows where the harness keeps one. It is the only record of what a hand-driven run was
   // *asked*, so a trace missing it cannot be replayed at all — worth a line here for the same

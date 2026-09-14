@@ -49,6 +49,12 @@ export interface TlsCaptureRequest {
    * caller's turn counter moves under us.
    */
   turn: () => number;
+  /**
+   * Shared with the plaintext passthrough route, so one path is warned about once however it
+   * arrived and the run's own diagnosis can name every one of them. Left out, interception keeps
+   * its own tally as before.
+   */
+  unclaimed?: UnclaimedPaths;
 }
 
 export interface TlsCapture {
@@ -128,7 +134,7 @@ export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCaptur
 
   // One line per path, not per call: an agent that posts to the same endpoint every turn would
   // otherwise bury the run in a warning the operator already read.
-  const reported = new Set<string>();
+  const unclaimed = req.unclaimed ?? new UnclaimedPaths();
 
   return {
     ca,
@@ -138,7 +144,7 @@ export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCaptur
         hosts: [...hosts],
         trustedOriginCerts,
         onNetExchange: (exchange: NetExchange) => {
-          warnUnclaimed(out, reported, exchange);
+          unclaimed.note(out, exchange);
           if (writer) writes.push(() => persistNetExchange(writer, req.turn(), exchange));
         },
         onTunnel: (tunnel: TunnelRecord) => {
@@ -151,7 +157,39 @@ export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCaptur
 }
 
 /**
- * An intercepted call that looked like a model request and was not understood.
+ * The paths a run forwarded but could not interpret, warned about once each.
+ *
+ * Two callers, which is the point. Interception has reported this since it shipped; the ordinary
+ * plaintext route — a harness redirected by a base-URL variable, posting to an endpoint no
+ * dialect claims — reported nothing at all, and that is the commoner case by far. A retrieval
+ * pipeline is entirely made of it: `/v1/embeddings` is not a model exchange, so a run that
+ * captured every embedding call it made printed `capture.empty exchanges=0` and sent the operator
+ * to check a base-URL variable that was set correctly all along.
+ *
+ * It also keeps the list, because the diagnosis at the end of the run needs to name the paths
+ * rather than describe them.
+ */
+export class UnclaimedPaths {
+  readonly #reported = new Set<string>();
+  readonly #paths = new Set<string>();
+
+  /** Warn about this exchange if it is the first on its path, and remember the path. */
+  note(out: Output, exchange: NetExchange): void {
+    warnUnclaimed(out, this.#reported, this.#paths, exchange);
+  }
+
+  /** The distinct paths seen, in the order they were first seen. */
+  list(): string[] {
+    return [...this.#paths];
+  }
+
+  get size(): number {
+    return this.#paths.size;
+  }
+}
+
+/**
+ * A call that looked like a model request and was not understood.
  *
  * Traffic on a path no dialect claims is recorded as `net.*`: orca holds the bytes but not their
  * meaning, so it can neither match the request on replay nor rewrite its model on a fork. Strict
@@ -162,8 +200,18 @@ export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCaptur
  * Deliberately narrow. A GET, or a POST whose body is not JSON, is ordinary traffic that was never
  * a model call, and warning about it would teach the operator to ignore the warning that matters.
  */
-function warnUnclaimed(out: Output, reported: Set<string>, exchange: NetExchange): void {
+function warnUnclaimed(
+  out: Output,
+  reported: Set<string>,
+  paths: Set<string>,
+  exchange: NetExchange,
+): void {
   if (exchange.method !== 'POST') return;
+  // A retrieval rule claimed it, so every word of the warning below is false about this call: it
+  // is not unclaimed, it does replay, and there is no dialect to go and write. Recording an
+  // index build printed one of these per endpoint and told the operator the run could not be
+  // reproduced, at the moment orca had just made sure it could.
+  if (exchange.rule !== undefined) return;
   // No response ever arrived, so this one is not evidence that a path went unrecognised. It is
   // kept as network traffic because an exchange with nothing to replay cannot be a model exchange
   // whatever dialect exists -- and telling the operator to write one would not change that. A
@@ -188,13 +236,18 @@ function warnUnclaimed(out: Output, reported: Set<string>, exchange: NetExchange
   const key = `${exchange.host}:${exchange.port}${path}`;
   if (reported.has(key)) return;
   reported.add(key);
+  paths.add(path);
 
   // A body cut mid-JSON at the capture limit is a different fact from a path nobody claims, and
   // the advice differs with it: no dialect can read a truncated body, so writing one changes
   // nothing. Driving a 1.2 MiB request through an intercepted host printed the wrong one of these
   // -- `no wire dialect claims this path`, about a path the openai dialect had claimed all along.
+  // `tls.` only where TLS was actually terminated. The same fact reached by the plaintext route
+  // is not a fact about TLS, and a rule named for a mechanism that was not used sends the reader
+  // looking for an interception they never turned on.
+  const rule = exchange.intercepted === false ? 'proxy' : 'tls';
   if (exchange.requestTruncated) {
-    out.warn('tls.request_too_large', {
+    out.warn(`${rule}.request_too_large`, {
       host: exchange.host,
       path: exchange.path,
       limit_bytes: DEFAULT_MAX_CAPTURED_BYTES,
@@ -205,10 +258,13 @@ function warnUnclaimed(out: Output, reported: Set<string>, exchange: NetExchange
     return;
   }
 
-  out.warn('tls.unclaimed_path', {
+  out.warn(`${rule}.unclaimed_path`, {
     host: exchange.host,
     path: exchange.path,
-    detail: 'decrypted and recorded, but no wire dialect claims this path',
+    detail:
+      exchange.intercepted === false
+        ? 'forwarded and recorded, but no wire dialect claims this path'
+        : 'decrypted and recorded, but no wire dialect claims this path',
     consequence: 'it replays as opaque network traffic and cannot be forked to another model',
     next: 'docs/plugins.md to add a dialect for it',
   });
@@ -323,7 +379,16 @@ export async function persistNetExchange(
       method: exchange.method,
       path: exchange.path,
       ...(exchange.alpn === undefined ? {} : { alpn: exchange.alpn }),
-      intercepted: true,
+      // Absent means intercepted — every exchange the interceptor produces. The proxy's plaintext
+      // passthrough says so explicitly, because it decrypted nothing.
+      intercepted: exchange.intercepted ?? true,
+      // The two fields that make a `net.*` pair replayable rather than merely recorded: which
+      // rule claimed the call, and what a later run looks it up by. Purely additive — a reader
+      // that does not know about them sees the same pair it always did, and their absence means
+      // what it has always meant: orca holds these bytes and not their meaning.
+      ...(exchange.rule === undefined ? {} : { rule: exchange.rule }),
+      ...(exchange.replayKey === undefined ? {} : { replay_key: exchange.replayKey }),
+      ...(exchange.batchKey === undefined ? {} : { batch_key: exchange.batchKey }),
       headers: exchange.requestHeaders,
       truncated: exchange.requestTruncated,
     },
@@ -338,7 +403,7 @@ export async function persistNetExchange(
       host: exchange.host,
       port: exchange.port,
       status: exchange.status,
-      intercepted: true,
+      intercepted: exchange.intercepted ?? true,
       headers: exchange.responseHeaders,
       bytes: exchange.responseBytes,
       // What orca decompressed, next to the header set that no longer describes it. `bytes` is
@@ -350,6 +415,16 @@ export async function persistNetExchange(
       // Only when it happened, so a normal exchange carries no field saying it was normal. It
       // reads differently from `truncated`: the agent stopped reading, orca did not stop keeping.
       ...(exchange.abandoned ? { abandoned: true } : {}),
+      ...(exchange.rule === undefined ? {} : { rule: exchange.rule }),
+      ...(exchange.replayKey === undefined ? {} : { replay_key: exchange.replayKey }),
+      // A digest of the answer. Under `--retrieval-store=digest` it is *instead* of the answer,
+      // and `stored` says which, so nothing has to infer the difference from an empty payload.
+      ...(exchange.responseDigest === undefined
+        ? {}
+        : {
+            response_sha256: exchange.responseDigest,
+            stored: exchange.responseBody === '' ? 'digest' : 'full',
+          }),
       duration_ms: exchange.durationMs,
     },
     payload: exchange.responseBody as never,

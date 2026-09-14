@@ -1,0 +1,21 @@
+{
+  "adapter": "indexrag",
+  "harness_versions": ">=0.1.0 <0.2",
+  "verified_at": "2026-09-11",
+  "command": "my-agent",
+  "env_vars": ["OPENAI_API_BASE", "OPENAI_API_KEY", "OPENAI_BASE_URL"],
+  "base_urls": {
+    "OPENAI_BASE_URL": "/v1",
+    "OPENAI_API_BASE": "/v1"
+  },
+  "optional_env_vars": [
+    "INDEXRAG_EMBEDDING_API_KEY",
+    "INDEXRAG_EMBEDDING_MODEL",
+    "INDEXRAG_EMBEDDING_PROVIDER",
+    "INDEXRAG_LLM_MODEL"
+  ],
+  "redirected_env_vars": {
+    "INDEXRAG_EMBEDDING_BASE_URL": "/forward/https%3A%2F%2Fembeddings.example%2Fv1"
+  },
+  "note": "A pipeline, not a conversational agent, and the first adapter with two model origins in one run. Chat reads OPENAI_BASE_URL (three openai.OpenAI() call sites) and OPENAI_API_BASE (langchain's default embedding path). The embedding half reads INDEXRAG_EMBEDDING_BASE_URL and may point at a different provider entirely, so it is redirected through /forward/ rather than to a bare /v1 — an upstream map keyed by wire dialect cannot express two origins of the same dialect. No ANTHROPIC_*: every stage speaks OpenAI. 'command' here is the test's argv; a bare `orca record indexrag -- --data-dir …` launches python against a driver written into ctx.runDir instead."
+}

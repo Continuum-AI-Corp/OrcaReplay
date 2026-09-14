@@ -55,6 +55,72 @@ nothing, which is otherwise indistinguishable from the broken adapter the contra
 `redirects-model-traffic` check exists to catch; declaring it takes that one check's exemption and
 no other. See [SECURITY.md](../SECURITY.md) for what interception does and does not decrypt.
 
+### `artifacts` — when the harness's product is not the working tree
+
+Optional, and most adapters need none of it: a coding agent's output *is* the working tree, and
+the ordinary snapshot already holds it. A pipeline is the case this exists for — what it produces
+is an index or a cache, written to a path its own `.gitignore` excludes, because nobody wants a
+hundred megabytes of vectors in their repository.
+
+```ts
+artifacts: {
+  /** Snapshot these even where the workspace's .gitignore excludes them. */
+  capture: ['cache', 'vector_store', 'dataset'],
+  /** Delete these before a replay launches the harness. Whole paths, never "the valid parts". */
+  resetBeforeReplay: ['cache', 'vector_store'],
+  /** The flag `orca replay --serialize` reaches for. Declared; never applied on its own. */
+  concurrencyFlag: { flag: '--concurrency', serialValue: '1' },
+}
+```
+
+Three things worth knowing before you use it:
+
+- **`capture` cannot reach a credential.** The sensitive pathspecs are applied to the forced add
+  as well, and a pathspec exclusion is enforced by `git add` itself — no `-f` and no `.gitignore`
+  negation overrides it. An adapter declaring `.` still captures no `.env`.
+- **`capture` the inputs too, not only the outputs.** The corpus a pipeline reads is usually
+  ignored alongside the index it writes, and a replay in the recording's own directory finds it
+  anyway — which is what makes the omission easy to miss. A replay in a scratch worktree, or on
+  another machine, then starts with nothing to read and reproduces nothing.
+- **`resetBeforeReplay` deletes whole paths.** A pipeline that resumes skips by item id *including
+  items it recorded as failures*, so keeping what looks valid promotes the last run's failures to
+  completed work. Orca deletes only where it restores the tree afterwards; under `--in-place` it
+  warns and leaves them alone.
+
+### `replayArgs` — argv for a harness with no prompt
+
+`driveArgs` answers "what makes the agent ask the recorded question again", and it only applies to
+a harness with a transcript orca can read. A pipeline has neither: its argv *is* the whole
+instruction. `replayArgs(recorded)` is consulted before the transcript, so such an adapter can
+still adjust what a replay runs; return `undefined` to leave the recorded argv exactly as it was.
+
+### `RetrievalRule` — an endpoint whose answer is a function of its request
+
+Embeddings and rerank are not model exchanges and are not opaque traffic either. A rule claims the
+path, keys the call by its own body, and the recording serves it back:
+
+```ts
+const myEmbeddings: RetrievalRule = {
+  id: 'my-embeddings',
+  matches: (path) => path.endsWith('/embeddings'),
+  key: retrievalKey,                 // sha256 of the key-sorted request; override to narrow it
+  describe: (raw) => `${raw.input.length} inputs`,
+  forkable: false,                   // always — see below
+};
+```
+
+`forkable` is `false` and typed as the literal, not left off: changing an embedding model changes
+the vector space the index was built in, which is a rebuild rather than a fork. Keeping retrieval
+on the recording is precisely what makes `orca replay <run> --from N --model <other>` mean
+something — the chat model changes, the index does not.
+
+An optional `batch` handles the case where the same texts arrive in a different order on every run
+(a worker pool assembling the batch), but **only** where the endpoint's own contract guarantees
+which answer belongs to which input. OpenAI embeddings carries `data[i].index`; Cohere's embed
+does not, so it declares no `batch` rather than assuming one.
+
+See [integrations.md](integrations.md#rag-and-retrieval-frameworks) for the whole picture.
+
 ## The adapter contract
 
 Adapters rot. A harness renames the variable it reads for its API origin, the adapter keeps setting

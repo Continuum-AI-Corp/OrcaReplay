@@ -4,6 +4,8 @@ export interface SnapshotResult {
   tree: string;
   changes: FileChange[];
   firstSnapshot?: boolean;
+  /** See `TurnSnapshot.skippedGitlinks`: declared paths this snapshot could not hold. */
+  skippedGitlinks?: readonly string[];
 }
 
 /** The slice of FsCapture this helper needs, so it can be stubbed in tests. */

@@ -30,6 +30,13 @@ export interface FileChange {
 export interface ShadowIndexOptions {
   gitDir: string;
   workTree: string;
+  /**
+   * Paths to stage even though the workspace's own ignore rules exclude them.
+   *
+   * See {@link ShadowIndex.snapshot}. The sensitive pathspecs still apply, so this widens what a
+   * snapshot covers without widening what it may ever contain.
+   */
+  forced?: readonly string[];
 }
 
 export interface MaterializeOptions {
@@ -97,6 +104,25 @@ function toCount(field: string | undefined): number {
   return Number.isNaN(parsed) ? 0 : parsed;
 }
 
+/**
+ * The one `git add` failure a snapshot may ignore.
+ *
+ * Read off the message because git has no distinct exit code for it, and safe to read that way
+ * because `childEnv` sets `LC_ALL=C` for every child: the wording is git's, not the operator's
+ * locale's.
+ */
+function matchedNothing(stderr: string): boolean {
+  return /did not match any files/i.test(stderr);
+}
+
+/** The paths a `ls-files --stage -z` listing records as gitlinks. */
+function gitlinkPaths(staged: string): string[] {
+  return staged
+    .split('\0')
+    .filter((entry) => entry.startsWith(`${GITLINK_MODE} `))
+    .map((entry) => entry.slice(entry.indexOf('\t') + 1));
+}
+
 interface RawRecord {
   letter: string;
   path: string;
@@ -113,7 +139,21 @@ export class ShadowIndex {
   private constructor(
     readonly gitDir: string,
     readonly workTree: string,
+    /** See {@link ShadowIndexOptions.forced}. Empty for every ordinary workspace. */
+    readonly forced: readonly string[] = [],
   ) {}
+
+  /** Named once each, however many snapshots a run takes. See {@link dropForcedGitlinks}. */
+  private reportedGitlinks = new Set<string>();
+  private skipped: readonly string[] = [];
+
+  /**
+   * Nested repositories the last snapshot dropped from a declared artifact path, the first time
+   * each is seen. Empty on every ordinary snapshot.
+   */
+  get skippedGitlinks(): readonly string[] {
+    return this.skipped;
+  }
 
   static async isAvailable(): Promise<boolean> {
     return gitAvailable();
@@ -121,7 +161,7 @@ export class ShadowIndex {
 
   static async create(opts: ShadowIndexOptions): Promise<ShadowIndex> {
     if (!(await gitAvailable())) throw new Error(GIT_MISSING_MESSAGE);
-    const { gitDir, workTree } = opts;
+    const { gitDir, workTree, forced = [] } = opts;
     await mkdir(gitDir, { recursive: true });
     const init = await runGit(['init', '--bare', '-q', gitDir]);
     if (init.code !== 0) {
@@ -139,7 +179,7 @@ export class ShadowIndex {
     }
     await mkdir(join(gitDir, 'info'), { recursive: true });
     await writeFile(join(gitDir, 'info', 'exclude'), `${SENSITIVE_PATTERNS.join('\n')}\n`, 'utf8');
-    return new ShadowIndex(gitDir, workTree);
+    return new ShadowIndex(gitDir, workTree, [...forced]);
   }
 
   private opts(extra: GitOptions = {}): GitOptions {
@@ -160,10 +200,93 @@ export class ShadowIndex {
     return res.stdout;
   }
 
-  /** Stages the whole work tree and returns the resulting tree id. No commit is created. */
+  /**
+   * Stages the whole work tree and returns the resulting tree id. No commit is created.
+   *
+   * A second `add -f` covers the paths an adapter declared, and only those. `-f` is what overrides
+   * the workspace's `.gitignore`, which is otherwise honoured — right for a coding agent, where
+   * the ignored paths are build output, and wrong for a pipeline, where the ignored directory is
+   * the whole product. IndexRAG's first three ignore lines are `vector_store/`, `cache/` and
+   * `dataset/`; without this a recording of an indexing run holds every call that built the index
+   * and not one byte of the index.
+   *
+   * `SENSITIVE_PATHSPECS` is repeated on the forced add deliberately: a pathspec exclusion is
+   * applied by `git add` itself and no `-f` overrides it, so an adapter that declares `.` to try
+   * to sweep a secret in still cannot stage `.env`. That is what makes this safe to hand to
+   * third-party plugin code.
+   */
   async snapshot(): Promise<string> {
+    this.skipped = [];
     await this.run(['add', '-A', '--', '.', ...SENSITIVE_PATHSPECS]);
+    if (this.forced.length > 0) await this.addForced();
     return (await this.run(['write-tree'])).trim();
+  }
+
+  /**
+   * Stage the declared paths, tolerating the ones that do not exist yet — and only those.
+   *
+   * `git add` refuses a pathspec that matches nothing — "did not match any files" — and every
+   * run's snapshot 0 is taken before the harness has written anything, so one missing directory
+   * would fail the whole add and lose the paths that *were* there. One call in the ordinary case;
+   * the retry only runs while the product is still being built.
+   *
+   * Every *other* non-zero exit is a real failure, and telling the two apart is the whole reason
+   * to read the retry's result rather than discard it. A file inside the ignored directory that
+   * git cannot open — the harness still writing `cache/`, an editor or a scanner holding it,
+   * EACCES, a path too long on Windows — exits non-zero for an unrelated reason, and `runGit`
+   * resolves rather than throws, so nothing upstream could notice. What that produced was a
+   * snapshot silently missing the paths the adapter declared: a trace holding every call that
+   * built an index and no byte of the index, with no warning anywhere. Worse on the replay side,
+   * where the same hole lands in the safety snapshot `resetArtifacts` depends on — orca may delete
+   * only what it took a copy of first, so a failure it cannot account for stops the snapshot here.
+   *
+   * Stopping is safe at both call sites: `snapshotWithRetry` turns a throw during recording into
+   * one skipped checkpoint and an `fs.snapshot_failed` warning, and `replayWorkspace` takes its
+   * safety snapshot before anything destructive has happened.
+   */
+  private async addForced(): Promise<void> {
+    const together = await runGit(
+      ['add', '-f', '--', ...this.forced, ...SENSITIVE_PATHSPECS],
+      this.opts(),
+    );
+    if (together.code !== 0) {
+      for (const path of this.forced) {
+        const one = await runGit(['add', '-f', '--', path, ...SENSITIVE_PATHSPECS], this.opts());
+        if (one.code === 0 || matchedNothing(one.stderr)) continue;
+        throw new Error(
+          `git add failed for the declared artifact path '${path}' (${one.code}): ` +
+            one.stderr.trim(),
+        );
+      }
+    }
+    await this.dropForcedGitlinks();
+  }
+
+  /**
+   * Unstage any nested repository the forced add just recorded as a gitlink.
+   *
+   * `-f` reaches paths the workspace ignores, and an ignored directory is exactly where a cloned
+   * corpus sits — `dataset/` is one of IndexRAG's declared paths and the ordinary place to
+   * `git clone` a corpus into. `git add` stores such a directory as a gitlink whose contents live
+   * nowhere in this store, and {@link materialize} refuses a tree holding one rather than checking
+   * out an empty directory in its place. Before the forced add those paths were never staged, so
+   * the restore worked; leaving them staged makes every restore of that workspace fail — including
+   * the one `orca replay` performs *after* deleting the artifacts it could then no longer put back.
+   *
+   * Dropped rather than refused, because the other declared paths are still worth capturing and a
+   * recording missing a cloned corpus is a far smaller loss than one that cannot be replayed at
+   * all. {@link skippedGitlinks} names them, once each, so a run can say so rather than quietly
+   * omit them — which is the failure the rest of this method exists to stop repeating.
+   */
+  private async dropForcedGitlinks(): Promise<void> {
+    const staged = await this.run(['ls-files', '--stage', '-z', '--', ...this.forced]);
+    const links = gitlinkPaths(staged);
+    for (const path of links) {
+      await this.run(['update-index', '--force-remove', '--', path]);
+    }
+    const fresh = links.filter((path) => !this.reportedGitlinks.has(path));
+    for (const path of fresh) this.reportedGitlinks.add(path);
+    this.skipped = fresh;
   }
 
   async diff(fromTree: string, toTree: string): Promise<FileChange[]> {
@@ -300,16 +423,50 @@ export class ShadowIndex {
    * a tree holding a nested repository: `git add` records those as a gitlink whose contents were
    * never stored, and checkout would silently leave an empty directory in their place.
    */
+  /**
+   * What is on disk under `paths` that the last snapshot did not take a copy of.
+   *
+   * Asked of the index the snapshot wrote, so it answers for that snapshot exactly: anything git
+   * calls "other" under these paths is a file in the work tree with no entry in it. Two rules put
+   * things there and both are deliberate — `SENSITIVE_PATHSPECS` keeps credentials out of a trace
+   * however an adapter declares its paths, and {@link dropForcedGitlinks} removes a nested
+   * repository whose contents no snapshot can hold — which is precisely why the answer has to be
+   * available to a caller about to delete these paths on the strength of that copy.
+   *
+   * A nested repository comes back as the directory, with a trailing slash, because git will not
+   * look inside one. That is the honest shape of the answer: what is missing is everything under
+   * it.
+   */
+  async uncaptured(paths: readonly string[]): Promise<string[]> {
+    if (paths.length === 0) return [];
+    const out = await this.run(['ls-files', '--others', '-z', '--', ...paths]);
+    return out.split('\0').filter((path) => path !== '');
+  }
+
+  /**
+   * The nested repositories a tree records as gitlinks, whose contents this store never held.
+   *
+   * {@link materialize} refuses such a tree; this answers the same question without writing a
+   * byte, so a caller about to do something irreversible can find out *before* doing it rather
+   * than from the exception afterwards. See `replayWorkspace`, where the reset the restore is
+   * supposed to undo runs before the restore.
+   */
+  async gitlinks(tree: string): Promise<string[]> {
+    const indexFile = join(this.gitDir, `gitlinks-${randomBytes(8).toString('hex')}.index`);
+    try {
+      await this.run(['read-tree', tree], { indexFile });
+      return gitlinkPaths(await this.run(['ls-files', '--stage', '-z'], { indexFile }));
+    } finally {
+      await rm(indexFile, { force: true });
+    }
+  }
+
   async materialize(tree: string, destDir: string, opts: MaterializeOptions = {}): Promise<void> {
     await mkdir(destDir, { recursive: true });
     const indexFile = join(this.gitDir, `materialize-${randomBytes(8).toString('hex')}.index`);
     try {
       await this.run(['read-tree', tree], { indexFile });
-      const staged = await this.run(['ls-files', '--stage', '-z'], { indexFile });
-      const gitlinks = staged
-        .split('\0')
-        .filter((entry) => entry.startsWith(`${GITLINK_MODE} `))
-        .map((entry) => entry.slice(entry.indexOf('\t') + 1));
+      const gitlinks = gitlinkPaths(await this.run(['ls-files', '--stage', '-z'], { indexFile }));
       if (gitlinks.length > 0 && opts.allowIncomplete !== true) {
         throw new Error(
           `cannot materialize tree ${tree} byte for byte: it contains embedded git ` +

@@ -71,7 +71,8 @@ Because every model turn resends the whole conversation, content addressing is w
 | `mcp.request` / `mcp.response` | An MCP JSON-RPC exchange seen by the shim. |
 | `shell.exec` / `shell.result` | A shell command, from the PATH shim. |
 | `fs.snapshot` / `fs.change` | A workspace tree id, and a diff against the previous tree. |
-| `net.request` / `net.response` | Non-model HTTP seen by the proxy. |
+| `net.request` / `net.response` | Non-model HTTP seen by the proxy. A pair carrying `rule` and `replay_key` is a **retrieval call** — an endpoint whose answer is a function of its request, such as an embedding — and is replayable by looking that key up rather than by the ladder in §4. `stored: "digest"` on the response means the trace kept `response_sha256` instead of the body: enough to prove a later run agreed, not enough to serve it. |
+| `retrieval.context` | What a retriever put into a prompt, **derived** from the `model.request` that carried it — query and the retrieved passages. Same standing as `tool.call`: reconstructed from the wire, never separately captured. Scores and `top-k` are not here because they are not on the wire. |
 | `agent.start` | An agent began a turn: its name, the tools and handoffs it was given. From a harness's own tracing, not from the wire. |
 | `agent.handoff` | One agent handed control to another, naming both. A proxy sees the transfer as an ordinary tool call and cannot say which agent it came *from*. |
 | `agent.guardrail` | A guardrail ran, and whether it tripped. Guardrails need not make any request, so this can have no trace on the wire at all. |
