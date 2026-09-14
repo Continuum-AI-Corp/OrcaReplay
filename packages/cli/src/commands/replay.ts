@@ -1266,7 +1266,19 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
   const release = async (): Promise<void> => {
     if (released) return;
     released = true;
-    await safety.restore(before.tree, ctx.cwd);
+    try {
+      await safety.restore(before.tree, ctx.cwd);
+    } catch (err) {
+      // Say where the copy is before rethrowing. This is the one failure after which the scratch
+      // store holds the only copy of the operator's working tree, and until now the path it is at
+      // was printed nowhere — the directory was kept, deliberately, and nothing said so.
+      out.warn('replay.restore_failed', {
+        your_tree: before.tree,
+        copy_at: scratch,
+        note: 'your files are in that store and were not put back; it is not deleted',
+      });
+      throw err;
+    }
     // Only after the restore succeeded. This store holds the only copy of your working tree as
     // it was before the replay overwrote it, so removing it on the failure path would delete the
     // thing the failure means you still need — better a directory to clean up by hand than the
@@ -1292,6 +1304,17 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
   // and a `release` that puts it back, or it throws with the tree as it found it. That is what
   // lets the caller arm its own guard on the line after the call rather than before it.
   try {
+    // Nothing is deleted until the restore that undoes the deletion is known to be possible.
+    //
+    // `materialize` refuses a tree outright when it holds a nested repository, whose contents no
+    // snapshot ever stored — and refusing is right, because checking it out would silently leave
+    // an empty directory where a corpus was. But the reset runs first, so that refusal used to
+    // arrive with `cache/` and `vector_store/` already gone, and the safety net threw the same
+    // error for the same reason: the operator lost the index and got a message about git instead.
+    // Newly-made recordings no longer contain such a tree (the forced add drops gitlinks), which
+    // leaves the recordings already on disk — exactly the ones a guard has to be here for.
+    await assertRestorable(recorded, initial.fsTree);
+
     // Before the restore, not after — and that ordering is the whole definition of the reset.
     // `materialize` writes the tree's files and leaves anything else where it is, so a cache the
     // recording never had would survive it and the harness would resume from work the recording
@@ -1302,11 +1325,36 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
     await resetArtifacts(ctx.cwd, artifacts, out);
     await recorded.restore(initial.fsTree, ctx.cwd);
   } catch (err) {
-    await release();
+    // The original failure is the one to report. `release` can fail for its own reasons, and
+    // letting that replace this one told the operator about the cleanup and never about the cause.
+    try {
+      await release();
+    } catch {
+      // `release` has already warned, with the path to the copy it kept.
+    }
     throw err;
   }
 
   return { dir: ctx.cwd, release, restored: true };
+}
+
+/**
+ * Refuse before deleting, rather than from inside the restore that was meant to undo the deletion.
+ *
+ * Asked of the tree rather than attempted on it: this runs while the operator's artifacts are
+ * still on disk, so it has to be free of side effects. The message names the paths, because
+ * "remove the nested .git, or take that path out of the adapter's `artifacts.capture`" is
+ * something only the operator can do.
+ */
+async function assertRestorable(capture: FsCapture, tree: string): Promise<void> {
+  const gitlinks = await capture.gitlinks(tree);
+  if (gitlinks.length === 0) return;
+  throw new Error(
+    `this recording cannot be restored: its snapshot holds ${gitlinks.join(', ')} as embedded ` +
+      'git repositories, whose contents it never captured. Nothing has been deleted. Re-record ' +
+      'with the nested repository removed or outside the adapter’s artifact paths, or replay ' +
+      'with --in-place to leave the working tree alone.',
+  );
 }
 
 /** What the adapter that made this recording says about its own artifacts, if anything. */
