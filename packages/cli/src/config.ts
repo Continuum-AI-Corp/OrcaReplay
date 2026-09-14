@@ -2,6 +2,9 @@ import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { ParsedArgs } from './args.js';
+// fetchPinned lives in @orcareplay/core so the CLI and the recording proxy cannot
+// each carry their own copy — see its doc comment.
+export { fetchPinned } from '@orcareplay/core';
 
 /**
  * User-level configuration, which exists for exactly one job: let
@@ -49,6 +52,20 @@ export interface GatewayConfig {
   api_key?: string;
   /** Name of an environment variable to read the key from at call time. */
   api_key_env?: string;
+  /**
+   * Where `url` came from: a destination the user NAMED, or `orca setup`'s own default.
+   *
+   * Model traffic does not care — proxying a call your agent was already making through
+   * OrcaRouter is the default `orca setup` exists to offer. A RUN does care: it holds source,
+   * shell output and workspace snapshots, and README's "Never a default destination" promises that
+   * push has no host of its own. Without this field the two are indistinguishable in the file, so
+   * `orca setup` followed by `orca push last` sent the whole recording to a host the user never
+   * typed.
+   *
+   * Absent in configs written before this field existed — see `namedPushDestination`, which
+   * resolves that case rather than guessing here.
+   */
+  url_source?: 'named' | 'default';
 }
 
 export interface OrcaConfig {
@@ -115,6 +132,22 @@ export function gatewayHeaders(
 }
 
 /**
+ * Two URLs that name the same host, for deciding whether a stored credential may travel.
+ *
+ * Lives here rather than beside either caller because both callers are credential gates —
+ * `upstreamPlan` for model traffic and `resolveGateway` for push/pull — and two comparators that
+ * drift apart mean one of them starts leaking. Falls back to a trimmed string compare when either
+ * side does not parse, which errs towards withholding: an unparseable URL matches only itself.
+ */
+export function sameOrigin(a: string, b: string): boolean {
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch {
+    return a.replace(/\/+$/, '') === b.replace(/\/+$/, '');
+  }
+}
+
+/**
  * Where live model calls go: flag, then environment, then the configured gateway.
  *
  * Needed by record *and* by replay — `--loose` and any fork continue live, and a fork that ignored
@@ -141,4 +174,31 @@ export async function resolveUpstream(
     out['openai-responses'] = openai;
   }
   return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * The configured gateway, but ONLY when it is a destination the user named.
+ *
+ * The single funnel for "may a run go here by default". Sync reads this instead of
+ * `config.gateway?.url`, so the README's promise ("push has no default host") is one function
+ * rather than a rule each command has to remember.
+ *
+ * Three cases:
+ *
+ *   - `url_source: 'named'`   -> the user typed it, at `--gateway` or at setup's prompt. Yes.
+ *   - `url_source: 'default'` -> setup filled it in. No.
+ *   - absent (an older config) -> decided by the URL. Setup writes ORCAROUTER_URL and nothing
+ *     else without being told, so any OTHER origin can only have been named; ORCAROUTER_URL
+ *     itself is genuinely ambiguous and answers no. That refuses one case it need not — a user
+ *     who deliberately typed OrcaRouter before this field existed — and the cost is one
+ *     `--gateway` flag or one re-run of `orca setup --gateway`, against sending a recording of
+ *     someone's source to a host they never named.
+ */
+export function namedPushDestination(config: OrcaConfig): string | undefined {
+  const url = config.gateway?.url;
+  if (!url) return undefined;
+  const source = config.gateway?.url_source;
+  if (source === 'named') return url;
+  if (source === 'default') return undefined;
+  return sameOrigin(url, ORCAROUTER_URL) ? undefined : url;
 }
