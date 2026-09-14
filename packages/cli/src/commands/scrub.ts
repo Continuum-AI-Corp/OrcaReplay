@@ -697,6 +697,11 @@ async function walk(dir: string): Promise<{ files: string[]; unreadable: string[
   try {
     entries = await readdir(dir, { withFileTypes: true });
   } catch (err) {
+    // A directory that is not there held nothing, and nothing was missed by not reading it. A run
+    // with no payload over the spill threshold has no `blobs/` at all, which is most small runs —
+    // reporting those as unsearched put a warning on the ordinary case and took the all-clear with
+    // it. Every other reason is a genuine "could not look".
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { files, unreadable };
     return { files, unreadable: [`${dir} (${String(err)})`] };
   }
   for (const entry of entries) {

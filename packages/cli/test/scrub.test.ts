@@ -528,6 +528,25 @@ describe('scrub — false all-clears', () => {
     expect(said).toContain('could NOT be read');
   });
 
+  /**
+   * Most runs have no `blobs/` at all — nothing in them crossed the spill threshold — and an absent
+   * directory is not one that could not be read. Reporting it as unsearched put a warning on the
+   * ordinary case and suppressed the all-clear with it, on every small run.
+   */
+  it('says nothing about a blob store that was never written', async () => {
+    const runDir = await makeRun(['short']);
+    await rm(join(runDir, 'blobs'), { recursive: true, force: true });
+
+    await scrubCommand(parseArgs(['scrub', 'last', '--match', 'absent-from-this-run']), out, cwd);
+    const said = lines.join('\n');
+    expect(said, 'an absent blob store was reported as unreadable').not.toContain(
+      'blobs_not_searched',
+    );
+    expect(said, 'the all-clear was withheld over a directory that never existed').toContain(
+      'nothing matched',
+    );
+  });
+
   it.skipIf(process.platform === 'win32')(
     'says so for a blob directory it cannot list, and does not call the run clean',
     async () => {
