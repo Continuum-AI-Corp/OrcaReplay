@@ -204,4 +204,122 @@ describe('main', () => {
       '"ok":true',
     );
   });
+
+  /**
+   * The same tear one level in: a record whose `raw` is not an object.
+   *
+   * The case above is a capture *line* that is not a frame record, and `isMcpFrameRecord` turns
+   * those away. This is a line that is a perfectly good record — `name` a string, `raw` a string —
+   * carrying a payload that is not a message. The recorder writes them: `toFrame` keeps any line
+   * that parses to a non-object as `{ raw, kind: 'unknown' }`, so a bare `null` from a server
+   * becomes `raw: "null"`, and `toRecord` puts it in the capture verbatim.
+   *
+   * `JSON.parse` does not throw on it, so it went past the guard that exists for torn lines and was
+   * cast to `JsonRpcMessage`. `indexFrames` then read `message.id` off `null` — and `runMock` calls
+   * `indexFrames` before it serves anything, so one such line anywhere in the recording killed the
+   * whole replay at startup, every MCP server in the run with it. Recording tolerated it and replay
+   * did not, which is the asymmetry this reader was fixed for.
+   */
+  it('answers from a recording whose frames include one that is not a message', async () => {
+    const recorded = join(scratch, 'recorded.jsonl');
+    const base = { ts: '2026-09-12T00:00:00.000Z', name: 'fs' };
+    const record = (over: Record<string, unknown>) => JSON.stringify({ ...base, ...over });
+    // Each of the three is what a different non-object line looks like once recorded, and they are
+    // interleaved so that stopping at the first still fails.
+    writeFileSync(
+      recorded,
+      [
+        record({ dir: 'out', kind: 'unknown', raw: 'null' }),
+        record({
+          dir: 'in',
+          kind: 'request',
+          id: 1,
+          method: 'tools/list',
+          raw: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+        }),
+        record({ dir: 'out', kind: 'unknown', raw: '"a log line"' }),
+        record({
+          dir: 'out',
+          kind: 'response',
+          id: 1,
+          raw: '{"jsonrpc":"2.0","id":1,"result":{"ok":true}}',
+        }),
+        record({ dir: 'in', kind: 'unknown', raw: '[1,2]' }),
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const seen: Buffer[] = [];
+    const errors: Buffer[] = [];
+    stdout.on('data', (c: Buffer) => seen.push(Buffer.from(c)));
+    stderr.on('data', (c: Buffer) => errors.push(Buffer.from(c)));
+
+    const done = main(
+      ['--name', 'fs', '--out', join(scratch, 'mcp.jsonl'), '--replay', recorded, '--', 'unused'],
+      { stdin, stdout, stderr },
+    );
+    stdin.write('{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n');
+    stdin.end();
+
+    expect(await done, Buffer.concat(errors).toString()).toBe(0);
+    expect(Buffer.concat(seen).toString(), 'the recorded answer must still be served').toContain(
+      '"ok":true',
+    );
+  });
+
+  /**
+   * And the same line arriving from the client rather than out of the recording. `runMock` parsed
+   * it, cast it, and read `message.id` — inside a `'line'` handler, where a throw takes the process
+   * down rather than costing one frame.
+   */
+  it('ignores a client line that is not a message, and keeps answering', async () => {
+    const recorded = join(scratch, 'recorded.jsonl');
+    const base = { ts: '2026-09-12T00:00:00.000Z', name: 'fs', id: 1, method: 'tools/list' };
+    writeFileSync(
+      recorded,
+      [
+        JSON.stringify({
+          ...base,
+          dir: 'in',
+          kind: 'request',
+          raw: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+        }),
+        JSON.stringify({
+          ...base,
+          dir: 'out',
+          kind: 'response',
+          raw: '{"jsonrpc":"2.0","id":1,"result":{"ok":true}}',
+        }),
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const seen: Buffer[] = [];
+    const errors: Buffer[] = [];
+    stdout.on('data', (c: Buffer) => seen.push(Buffer.from(c)));
+    stderr.on('data', (c: Buffer) => errors.push(Buffer.from(c)));
+
+    const done = main(
+      ['--name', 'fs', '--out', join(scratch, 'mcp.jsonl'), '--replay', recorded, '--', 'unused'],
+      { stdin, stdout, stderr },
+    );
+    // Before the real question, so a crash here costs the answer that follows it.
+    stdin.write('null\n');
+    stdin.write('42\n');
+    stdin.write('{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n');
+    stdin.end();
+
+    expect(await done, Buffer.concat(errors).toString()).toBe(0);
+    expect(Buffer.concat(seen).toString(), 'the recorded answer must still be served').toContain(
+      '"ok":true',
+    );
+  });
 });

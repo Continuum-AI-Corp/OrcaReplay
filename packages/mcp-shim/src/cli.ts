@@ -3,7 +3,7 @@ import { createWriteStream, realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { runMock, type JsonRpcMessage, type RecordedFrame } from './mock.js';
 import { fileURLToPath } from 'node:url';
-import type { JsonRpcFrame } from './framing.js';
+import { isJsonRpcMessage, type JsonRpcFrame } from './framing.js';
 import { runShim } from './shim.js';
 import type { FrameDirection } from './shim.js';
 
@@ -160,6 +160,14 @@ async function readFrames(path: string, name: string): Promise<RecordedFrame[]> 
       // A line the shim saw but could not parse is still in the capture; it just cannot answer.
       continue;
     }
+    // Neither can one that parsed to something that is not a message, and `JSON.parse` is happy
+    // with those: a bare `null` line from a server is recorded as `raw: "null"` — a perfectly
+    // well-formed record — so it went straight past the guard above and was cast to a message.
+    // `indexFrames` then read `.id` off `null`, and `runMock` indexes before it answers anything,
+    // so one such line anywhere in a recording killed the whole replay at startup and every MCP
+    // server in the run with it. Recording tolerated it and replay did not, which is the asymmetry
+    // this reader exists to close.
+    if (!isJsonRpcMessage(message)) continue;
     frames.push({
       server: record.name,
       direction: record.dir === 'in' ? 'in' : 'out',
