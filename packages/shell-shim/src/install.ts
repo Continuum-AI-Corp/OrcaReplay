@@ -2,6 +2,7 @@ import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { EARLIEST_TS_MS, LATEST_TS_MS } from '@orcareplay/schema';
 import type { ShellFrame } from './runner.js';
 
 /**
@@ -133,17 +134,184 @@ export async function discardShellFrames(dir: string): Promise<string | undefine
   }
 }
 
-/** Read back what the shims observed. Tolerates a partial final line, like events.jsonl. */
+/**
+ * Read back what the shims observed. Tolerates a partial final line, like events.jsonl.
+ *
+ * Tolerating has to mean more than surviving `JSON.parse`. Every shim writes this file
+ * concurrently, and the only consumer spreads `frame.argv` into an event — so a line that parsed
+ * to `null`, or to an object whose `argv` is not an array, threw where the run was being sealed.
+ * Two shims appending at once is enough to produce one: an interleaved write can leave a line that
+ * is valid JSON and not a frame.
+ *
+ * What has to be checked is every field whose absence is *unsafe*, which is not the same as every
+ * field that is read. `cwd`, `exitCode`, `signal` and the byte counts go into `attrs`, which the
+ * schema types as a bare object — a missing one degrades a field and nothing more. Four are
+ * different:
+ *
+ *   - `name` and `argv` are spread into an array, so a non-array `argv` throws
+ *   - `startedAt` and `durationMs` are *added* — the consumer builds
+ *     `new Date(Date.parse(startedAt) + durationMs)`, and a missing `durationMs` makes that an
+ *     Invalid Date, which throws `RangeError: Invalid time value` inside `TraceWriter.append`
+ *
+ * The second pair is the one a narrower check missed. A frame torn between `startedAt` and
+ * `durationMs`, closed by a brace from the neighbouring write, is valid JSON with a string `name`,
+ * an array `argv` and a parseable `startedAt` — and it ended the run and left the trace unsealed.
+ *
+ * But that pair is a pair, and only together. `durationMs` is unsafe *where it is added to an
+ * instant*, and when there is no instant the consumer never adds it — it guards both uses of the
+ * timestamp with `Date.parse(startedAt)` being a number, and otherwise puts the duration in
+ * `attrs` and stamps the events from the drain's own clock. Checking it unconditionally therefore
+ * threw away the frame this reader exists to keep: the shim writes `startedAt` and `durationMs`
+ * next to each other, in that order, so the tear that loses the timestamp loses the duration with
+ * it, and the command lost both its events — the outcome the paragraph above says must not happen,
+ * from the check written to prevent it.
+ *
+ * For those two, being the right *type* is not enough: what the consumer needs is an instant that
+ * exists. A splice can leave the digits of one duration followed by the tail of the neighbour's
+ * number, and `Number.isFinite` is happy with a sixteen-digit result. Measured from a 2026 stamp:
+ *
+ *     durationMs 2.5e14  →  9948-11-18T…              accepted
+ *     durationMs 3e14    →  +011533-04-27T…           `ts must match format "date-time"`
+ *     durationMs 9e15    →  RangeError: Invalid time value
+ *
+ * Both throw inside `TraceWriter.append`, where the trace is being sealed — the schema types `ts`
+ * as `date-time`, which admits a four-digit year and nothing else. So the bound is the range the
+ * format can express, not the range a `number` can hold.
+ */
+
+/**
+ * Where every frame on a line begins.
+ *
+ * `record()` builds the object with `name` first and `JSON.stringify` keeps insertion order, so a
+ * frame always starts here — and nothing else does, which is the property {@link framesOnLine}
+ * needs. `shim.test.ts` pins the writer's half of it.
+ */
+const FRAME_START = '{"name":';
+
+/**
+ * Where the object starting at `from` ends, or -1 if it does not end on this line.
+ *
+ * Braces only: a `}` can appear in three places, and two of them are handled by counting. Inside a
+ * string it is text, which is what the quote and escape tracking is for; inside a nested object it
+ * is that object's, which is what the depth is for; the third is the one being looked for. Brackets
+ * need no counting of their own, because a `}` inside an array belongs to an object opened in it.
+ *
+ * Only sound when `from` is outside any string, which is what anchoring the search on an opening
+ * that cannot occur inside one buys. Started anywhere else, a fragment that stops mid-string leaves
+ * every quote after it on the wrong side, and the walk confidently returns a boundary that is not
+ * one — which is why what it returns is never taken on trust.
+ */
+function endOfObject(line: string, from: number): number {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let at = from; at < line.length; at += 1) {
+    const ch = line[at];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') depth += 1;
+    else if (ch === '}' && --depth === 0) return at + 1;
+  }
+  return -1;
+}
+
+/**
+ * The frames on one line, which is nearly always one.
+ *
+ * A frame is written with a single write, and that is not a single `write` syscall: a short
+ * write — a full disk, a quota, a process killed inside it — leaves part of one on disk with no
+ * newline behind it, and the next writer's bytes land straight on the end. Skipping such a line
+ * whole threw away whatever on it was *complete*, so work recorded in full went missing because a
+ * different writer was interrupted. Losing the torn one is unavoidable; losing its neighbour is not.
+ *
+ * **The whole line first, then anchored, then verified.**
+ *
+ * A line that parses is one frame and needs none of what follows: that is every line of every
+ * ordinary capture, and it is also the only thing that reads a frame whose fields are not in the
+ * order this file expects. The rest is recovery, and recovery is where the care goes.
+ *
+ * Verified, because that is where the correctness is. The walk balances braces; only
+ * `JSON.parse` knows a frame from a balanced run of bytes, and a piece that does not parse moves
+ * the search to the *next candidate*, never past the piece. Advancing past a boundary the walk was
+ * confident about and wrong about is how a complete frame was skipped without being read: a
+ * fragment that stops inside a string leaves every quote after it on the wrong side, and the walk
+ * then reports a boundary beyond the neighbour. Measured on one ordinary frame, that lost the
+ * neighbour for 122 of its 166 possible cut points.
+ *
+ * Anchored, because the candidates have to come from somewhere and the opening is the one place on
+ * a line that is certainly outside a string — JSON escapes the quotes in a value, so the sequence
+ * cannot occur within one. Searching every `{` would also work, since the parse is what decides,
+ * but it tries far more candidates and can hand back an object that was nested inside the fragment.
+ *
+ * A fragment on its own yields nothing, which is the partial final line this has always tolerated —
+ * recovery must not invent a frame out of a prefix.
+ */
+function framesOnLine(line: string): Record<string, unknown>[] {
+  // The ordinary line is one whole frame, whatever key it happens to begin with — one written
+  // by a version that ordered its fields differently, or one that simply has no such field, is
+  // still a frame and is still on a line of its own. Only a line that does not parse needs the
+  // rest of this, and that is a line a short write left holding more than it should.
+  try {
+    const whole: unknown = JSON.parse(line);
+    return whole !== null && typeof whole === 'object' && !Array.isArray(whole)
+      ? [whole as Record<string, unknown>]
+      : [];
+  } catch {
+    // Not one frame: a fragment, or a fragment with something whole stuck to it.
+  }
+  const found: Record<string, unknown>[] = [];
+  let at = line.indexOf(FRAME_START);
+  while (at !== -1) {
+    const end = endOfObject(line, at);
+    let next = at + 1;
+    if (end !== -1) {
+      try {
+        // A slice that starts at `{` and ends at the `}` that closed it parses to an object or
+        // not at all, which is what lets the callers below take the type on trust.
+        found.push(JSON.parse(line.slice(at, end)) as Record<string, unknown>);
+        next = end;
+      } catch {
+        // Balanced, and not a frame. The opening after it may still start one.
+      }
+    }
+    at = line.indexOf(FRAME_START, next);
+  }
+  return found;
+}
 export async function readShellFrames(framesPath: string): Promise<ShellFrame[]> {
   const raw = await readFile(framesPath, 'utf8').catch(() => '');
   const frames: ShellFrame[] = [];
-  for (const line of raw.split('\n')) {
-    if (line.trim() === '') continue;
-    try {
-      frames.push(JSON.parse(line) as ShellFrame);
-    } catch {
-      // A process killed mid-write leaves a partial line. That is the run we most want to read.
+  // One line is one frame, except where a short write glued a fragment and a frame onto the same
+  // one. What comes back has parsed; everything below is unchanged, because recovery decides what
+  // to *look* at and never what is acceptable.
+  for (const parsed of raw.split('\n').flatMap((line) => framesOnLine(line))) {
+    const frame = parsed as unknown as ShellFrame;
+    if (typeof frame.name !== 'string' || !Array.isArray(frame.argv)) continue;
+    // Only when there is an instant to bound. A `startedAt` that is absent, or present and
+    // unparseable, is already handled: the consumer drops `occurredAt` for it and stamps the event
+    // with the drain's own clock, which is a degraded field rather than a failure — so rejecting
+    // the frame here would lose a command that ran. `Date.parse` is NaN for both, which is why one
+    // check covers them; requiring a *string* rejected the absent case, out of step with the MCP
+    // reader written in the same change and with the sentence above it.
+    const startedMs = Date.parse(frame.startedAt);
+    if (!Number.isNaN(startedMs)) {
+      // And the duration belongs inside the same branch, for the same reason: it is unsafe where
+      // it is *added* to that instant, and nowhere else. Outside it, the consumer only copies the
+      // duration into `attrs`, where an absent one omits a key. Checked unconditionally, it threw
+      // away precisely the frame the sentence above is about — the shim writes `startedAt` and
+      // `durationMs` adjacent and in that order, so a tear before the timestamp takes the duration
+      // too, and the command lost both its events to the check meant to save them.
+      if (!Number.isFinite(frame.durationMs)) continue;
+      const endedMs = startedMs + frame.durationMs;
+      if (startedMs < EARLIEST_TS_MS || startedMs > LATEST_TS_MS) continue;
+      if (endedMs < EARLIEST_TS_MS || endedMs > LATEST_TS_MS) continue;
     }
+    frames.push(frame);
   }
   return frames;
 }

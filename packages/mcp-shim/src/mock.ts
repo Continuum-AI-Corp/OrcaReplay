@@ -1,4 +1,5 @@
 import { createInterface } from 'node:readline';
+import { isJsonRpcMessage } from './framing.js';
 
 /**
  * Answering an MCP client from a recording, without the server.
@@ -138,12 +139,17 @@ export async function runMock(options: MockOptions): Promise<number> {
     const lines = createInterface({ input: stdin });
     lines.on('line', (line) => {
       if (line.trim() === '') return;
-      let message: JsonRpcMessage;
+      let parsed: unknown;
       try {
-        message = JSON.parse(line) as JsonRpcMessage;
+        parsed = JSON.parse(line);
       } catch {
         return;
       }
+      // The same rule on the way in. A client line that is not an object cannot be a request, and
+      // reading `id` off it threw here — inside a `line` handler, where nothing catches, so the
+      // shim went down mid-session rather than losing one line.
+      if (!isJsonRpcMessage(parsed)) return;
+      const message = parsed as JsonRpcMessage;
       options.onFrame?.('in', message);
       // A notification expects no answer, and inventing one desynchronises the client.
       if (message.id === undefined) return;

@@ -332,3 +332,24 @@ def test_a_value_json_cannot_take_costs_that_field_and_nothing_else(tmp_path):
     assert len(records) == 1, "one unserialisable field took the whole span with it"
     assert records[0]["data"] == {"from_agent": "Triage", "to_agent": "Billing"}
     assert processor._dropped == 0
+
+
+def test_every_record_begins_with_kind(tmp_path):
+    """The CLI's reader anchors its recovery of a torn line on these bytes.
+
+    Every Python process the run starts appends to this file — the lock above is per-process — so a
+    short write can leave part of a record with the next process's bytes on the end of it. Getting
+    the whole record back out of such a line means finding where one begins, and the only thing on
+    the line that can say so is the first key. `json.dumps` keeps insertion order, and every record
+    here is built with `kind` first; this is the half of that agreement that lives on this side.
+    """
+    out = tmp_path / "spans.jsonl"
+    processor = OrcaTracingProcessor(str(out))
+    processor.on_trace_start(object())
+    processor.on_span_end(FakeSpan(HandoffSpanData({"from_agent": "A", "to_agent": "B"})))
+    processor.on_trace_end(object())
+
+    lines = out.read_text(encoding="utf-8").splitlines()
+    assert lines, "the processor wrote nothing, so this proves nothing"
+    for line in lines:
+        assert line.startswith('{"kind":'), line[:24]

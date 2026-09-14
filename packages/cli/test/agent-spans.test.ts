@@ -132,6 +132,48 @@ describe('reading what the processor wrote', () => {
     expect(await readAgentSpans(path)).toHaveLength(1);
   });
 
+  /**
+   * A line that parsed is not yet a span, and this reader hands what it read straight on.
+   *
+   * `eventForSpan` reads `.kind` off whatever it is given, and the drain runs after the agent has
+   * exited — where a throw is caught by `recordCommand`, which disposes of the transport and
+   * rethrows. The run then has no `run.end`, `verifyIntegrity` calls it tampered with, and the
+   * spans that were never read are gone with the transport. Every Python process the run starts
+   * appends here, so a line that is valid JSON and not a span is an interleaved write away.
+   */
+  it('skips a line that parsed to something that is not a span', async () => {
+    const path = join(dir, 'spans.jsonl');
+    await writeFile(
+      path,
+      [
+        'null',
+        '7',
+        '"a string"',
+        '[1,2]',
+        '{"kind":"span","type":"HandoffSpanData","data":{}}',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    const spans = await readAgentSpans(path);
+    expect(spans).toHaveLength(1);
+    for (const span of spans) expect(() => eventForSpan(span)).not.toThrow();
+  });
+
+  it('recovers a span from a line a short write left holding a fragment too', async () => {
+    // The same rule the other two transports got: the torn record is unrecoverable, the whole one
+    // stuck to it is not.
+    const whole =
+      '{"kind":"span","type":"HandoffSpanData","span_id":"s1","data":{"from_agent":"A","to_agent":"B"}}';
+    const path = join(dir, 'spans.jsonl');
+    await writeFile(path, `{"kind":"span","type${whole}\n`, 'utf8');
+
+    const spans = await readAgentSpans(path);
+    expect(spans, 'a span written in full went with the fragment glued to it').toHaveLength(1);
+    expect(spans[0]!.span_id).toBe('s1');
+  });
+
   it('is empty when there is no file, because that is the ordinary case', async () => {
     expect(await readAgentSpans(join(dir, 'nothing.jsonl'))).toEqual([]);
   });
