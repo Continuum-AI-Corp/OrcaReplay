@@ -29,7 +29,7 @@ const RETRIEVAL = ['retrieval-store'] as const;
 
 export const BY_COMMAND: Record<string, readonly string[]> = {
   quickstart: ['dir', 'full'],
-  record: ['fs', 'shell', 'mcp-config', ...RETRIEVAL, ...TLS, ...UPSTREAM],
+  record: ['fs', 'shell', 'agent-spans', 'mcp-config', ...RETRIEVAL, ...TLS, ...UPSTREAM],
   attach: [
     'for',
     'bind',

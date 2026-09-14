@@ -65,7 +65,40 @@ function stream(seen) {
  * quietly switched the SDK to chat completions would prove the wrong path works. orca has carried a
  * `responses` dialect since early on; until this, nothing end to end exercised it.
  */
+/** How many Responses calls this instance has answered, so a handoff can happen on the first. */
+let responseCalls = 0;
+
 function responses(seen) {
+  responseCalls += 1;
+  // Only when a handoff is actually on offer. The Agents SDK implements a handoff as a function
+  // tool named `transfer_to_<agent>`, so driving one means answering with that call — and a check
+  // whose agent has no handoffs sees none of this.
+  const transfer = (Array.isArray(seen.tools) ? seen.tools : []).find((t) =>
+    String(t?.name ?? '').startsWith('transfer_to_'),
+  );
+  if (responseCalls === 1 && transfer !== undefined) {
+    return {
+      id: 'resp_stub_handoff',
+      object: 'response',
+      created_at: 1756000000,
+      status: 'completed',
+      model: seen.model ?? 'stub-1',
+      output: [
+        {
+          id: 'fc_stub_1',
+          type: 'function_call',
+          status: 'completed',
+          call_id: 'call_stub_1',
+          name: transfer.name,
+          arguments: '{}',
+        },
+      ],
+      usage: { input_tokens: 9, output_tokens: 4, total_tokens: 13 },
+      parallel_tool_calls: false,
+      tool_choice: 'auto',
+      tools: [],
+    };
+  }
   return {
     id: 'resp_stub_1',
     object: 'response',

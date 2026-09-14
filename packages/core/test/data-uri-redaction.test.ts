@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,6 +46,23 @@ describe('a whole PNG is excluded from the entropy sweep', () => {
     const check = Buffer.alloc(4);
     check.writeUInt32BE(crc ?? crc32(body) >>> 0);
     return Buffer.concat([len, body, check]);
+  }
+
+  /**
+   * High-entropy bytes that are the same on every run.
+   *
+   * `randomBytes` is right where a test only needs an image to be incompressible, which is what
+   * most of this file needs, and it stays there. It is wrong wherever the assertion is that the
+   * sweep *fires*: that answer comes from a heuristic reading one particular string, so a fixture
+   * redrawn every run is a test that sometimes passes. This one went red on CI roughly one run in
+   * fourteen, on a branch that had not touched the redactor.
+   */
+  function fixedNoise(n: number): Buffer {
+    const parts: Buffer[] = [];
+    for (let i = 0; i * 32 < n; i += 1) {
+      parts.push(createHash('sha256').update(`orca palette fixture ${i}`).digest());
+    }
+    return Buffer.concat(parts).subarray(0, n);
   }
 
   function ihdrOf(w: number, h: number, depth = 8, colour = 2, interlace = 0): Buffer {
@@ -277,12 +294,20 @@ describe('a whole PNG is excluded from the entropy sweep', () => {
    * Since a valid indexed PNG cannot exist without a palette, colour type 3 is simply not accepted.
    */
   it('sweeps a valid indexed PNG carrying a credential in palette entries nothing references', () => {
-    // Positioned so the credential lands on a 3-byte group boundary and survives base64 intact.
-    const palette = Buffer.concat([
-      Buffer.alloc(4),
-      Buffer.from(NOISE.slice(0, 32), 'base64'),
-      Buffer.alloc(2),
-    ]);
+    // The whole palette: 256 entries of the caller's own bytes, which is the size of what the
+    // exemption would have been handing out, against a one-pixel image that references one of them.
+    //
+    // It used to be 24 bytes of credential in an otherwise empty palette. That is a real payload
+    // and the sweep caught it about thirteen times in fourteen — `TOKEN` is `[A-Za-z0-9_-]+`, so
+    // base64 cuts a credential apart at every `+` and `/`, and the zero entries around it dilute
+    // what survives below four bits a character. Measured at a 7% miss over 2000 draws, which is
+    // what the red CI run on a branch that never touched the redactor turned out to be.
+    //
+    // So the fixture is the threat the paragraph above describes, at its size, rather than a
+    // minimal one sitting on the heuristic's threshold. What is claimed here is that colour type 3
+    // buys no exemption and its palette is swept like any other payload — not that every credential
+    // small enough to hide in a mostly-empty palette is found, which no entropy heuristic promises.
+    const palette = fixedNoise(768);
     const image = Buffer.concat([
       SIG,
       chunk('IHDR', ihdrOf(1, 1, 8, 3)),

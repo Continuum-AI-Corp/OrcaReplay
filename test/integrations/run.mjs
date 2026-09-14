@@ -75,6 +75,17 @@ const CHECKS = [
     exchanges: 1,
   },
   {
+    id: 'openai-agents-handoff',
+    what: 'a two-agent handoff and a guardrail, reported by the SDK and captured without editing it',
+    run: ['python', 'agents/openai_agents_handoff.py'],
+    needs: ['agents', 'orcareplay_openai_agents'],
+    exchanges: 2,
+    // The point of the check. These three cannot come from the proxy: a handoff reaches the wire as
+    // an ordinary `transfer_to_*` tool call that never names the agent it came *from*, and a
+    // guardrail need make no request at all.
+    expectEvents: ['agent.start', 'agent.handoff', 'agent.guardrail'],
+  },
+  {
     id: 'crewai',
     what: 'CrewAI itself — which since 1.x no longer routes through LiteLLM at all',
     run: ['python', 'agents/crewai_agent.py'],
@@ -198,15 +209,24 @@ async function traceText(runDir) {
   return text;
 }
 
-/** Whether the framework this check speaks for is installed at all. */
-async function installed(module) {
-  if (module === undefined) return true;
-  try {
-    await exec('python', ['-c', `import ${module}`], { timeout: 30_000 });
-    return true;
-  } catch {
-    return false;
+/**
+ * Whether the framework this check speaks for is installed at all.
+ *
+ * An array where a check needs more than one thing. `openai-agents-handoff` is the case that made
+ * this necessary: it needs the SDK *and* orca's tracing package, and with only the first it ran and
+ * failed with "no agent.start in the trace" — which reads as a bug in the layer rather than as a
+ * missing install.
+ */
+async function installed(needs) {
+  if (needs === undefined) return undefined;
+  for (const module of Array.isArray(needs) ? needs : [needs]) {
+    try {
+      await exec('python', ['-c', `import ${module}`], { timeout: 30_000 });
+    } catch {
+      return module;
+    }
   }
+  return undefined;
 }
 
 /**
@@ -269,7 +289,8 @@ async function orca(argv, cwd, extraEnv = {}) {
 }
 
 async function runCheck(check) {
-  if (!(await installed(check.needs))) return { skipped: `${check.needs} is not installed` };
+  const absent = await installed(check.needs);
+  if (absent !== undefined) return { skipped: `${absent} is not installed` };
   if (!installedNode(check.needsNode)) return { skipped: `${check.needsNode} is not installed` };
 
   const dir = await mkdtemp(join(tmpdir(), `orca-int-${check.id}-`));
@@ -435,6 +456,17 @@ async function runCheck(check) {
     if (exact !== total) throw new Error(`${exact}/${total} matched byte for byte`);
     if (divergences !== 0) throw new Error(`${divergences} divergence(s)`);
 
+    // Event types a check insists on. Counting exchanges says the traffic was captured; it says
+    // nothing about a layer whose whole purpose is what the traffic does not contain.
+    if (check.expectEvents) {
+      const listed = await orca(['events', '--json', runId], dir);
+      const line = listed.out.split(/\r?\n/).find((l) => l.startsWith('['));
+      const events = JSON.parse(line ?? '[]');
+      const seen = new Set(events.map((e) => e.type));
+      const missing = check.expectEvents.filter((t) => !seen.has(t));
+      if (missing.length > 0) throw new Error(`no ${missing.join(', ')} in the trace`);
+    }
+
     // Retrieval is a separate axis and asserted separately, for the reason it is reported
     // separately: `exact` is about a matching ladder these calls never climb, and a check that
     // read only `exact` would call a replay faithful while every embedding in it went unserved.
@@ -452,7 +484,7 @@ async function runCheck(check) {
 
     const retrievalNote = check.retrieval === undefined ? '' : `, ${check.retrieval} retrieval`;
     return {
-      ok: `${total} exchanges${retrievalNote}, replayed exact with the origin down${check.forks ? ', forked live' : ''}`,
+      ok: `${total} exchanges${retrievalNote}, replayed exact with the origin down${check.forks ? ', forked live' : ''}${check.expectEvents ? `, ${check.expectEvents.length} agent events` : ''}`,
     };
   } finally {
     origin.stop();

@@ -5,3 +5,10 @@ dist/
 coverage/
 .DS_Store
 *.log
+
+# Python build artefacts. Absent until now only because nobody had run `pip install -e` in a
+# package directory; the first person who did committed an egg-info and two __pycache__ trees.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/

@@ -115,14 +115,16 @@ the way.
 
 Three more layers catch what the protocol cannot see: an exit code, a real duration, which stream a
 byte came out of, a file written without telling anyone. A fifth exists for the agents that read no
-base-URL variable at all — see [which agents](#which-agents).
+base-URL variable at all — see [which agents](#which-agents). A sixth reads the agent's own account
+of its structure, for a harness that has one: which sub-agent ran, which handed off to which,
+whether a guardrail tripped — none of which reaches the wire.
 
 ```mermaid
 %%{init: {'theme':'neutral'}}%%
 flowchart LR
     A["<b>your agent</b><br/><i>unmodified</i>"]
 
-    subgraph orca["orca · five capture layers"]
+    subgraph orca["orca · six capture layers"]
         direction TB
         P["<b>proxy</b><br/>base-URL env var"]
         SH["<b>PATH shim</b><br/>exit code · timing · streams"]
@@ -721,7 +723,8 @@ self-describing thing:
     events.jsonl      # the timeline, one JSON object per line, append-only
     blobs/            # content-addressed payloads over 4 KB, deduplicated
     fs/               # shadow git index: the workspace at every turn
-    shell-frames.jsonl
+    shims/            # the PATH shims this run used; written by orca, read by nothing
+    py/               # bootstrap for the agent-structure layer, when the agent is Python
     redactions.json   # what was removed, by rule and count — never by value
 ```
 

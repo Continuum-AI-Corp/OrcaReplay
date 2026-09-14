@@ -54,6 +54,7 @@ export const VALUELESS = new Set([
   'trace',
   'fs',
   'shell',
+  'agent-spans',
   'ci',
   'verbose',
   'color',
