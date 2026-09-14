@@ -102,6 +102,15 @@ export async function installShellShim(options: InstallOptions): Promise<Install
  * `durationMs`, closed by a brace from the neighbouring write, is valid JSON with a string `name`,
  * an array `argv` and a parseable `startedAt` — and it ended the run and left the trace unsealed.
  *
+ * But that pair is a pair, and only together. `durationMs` is unsafe *where it is added to an
+ * instant*, and when there is no instant the consumer never adds it — it guards both uses of the
+ * timestamp with `Date.parse(startedAt)` being a number, and otherwise puts the duration in
+ * `attrs` and stamps the events from the drain's own clock. Checking it unconditionally therefore
+ * threw away the frame this reader exists to keep: the shim writes `startedAt` and `durationMs`
+ * next to each other, in that order, so the tear that loses the timestamp loses the duration with
+ * it, and the command lost both its events — the outcome the paragraph above says must not happen,
+ * from the check written to prevent it.
+ *
  * For those two, being the right *type* is not enough: what the consumer needs is an instant that
  * exists. A splice can leave the digits of one duration followed by the tail of the neighbour's
  * number, and `Number.isFinite` is happy with a sixteen-digit result. Measured from a 2026 stamp:
@@ -132,7 +141,6 @@ export async function readShellFrames(framesPath: string): Promise<ShellFrame[]>
     if (parsed === null || typeof parsed !== 'object') continue;
     const frame = parsed as ShellFrame;
     if (typeof frame.name !== 'string' || !Array.isArray(frame.argv)) continue;
-    if (!Number.isFinite(frame.durationMs)) continue;
     // Only when there is an instant to bound. A `startedAt` that is absent, or present and
     // unparseable, is already handled: the consumer drops `occurredAt` for it and stamps the event
     // with the drain's own clock, which is a degraded field rather than a failure — so rejecting
@@ -141,6 +149,13 @@ export async function readShellFrames(framesPath: string): Promise<ShellFrame[]>
     // reader written in the same change and with the sentence above it.
     const startedMs = Date.parse(frame.startedAt);
     if (!Number.isNaN(startedMs)) {
+      // And the duration belongs inside the same branch, for the same reason: it is unsafe where
+      // it is *added* to that instant, and nowhere else. Outside it, the consumer only copies the
+      // duration into `attrs`, where an absent one omits a key. Checked unconditionally, it threw
+      // away precisely the frame the sentence above is about — the shim writes `startedAt` and
+      // `durationMs` adjacent and in that order, so a tear before the timestamp takes the duration
+      // too, and the command lost both its events to the check meant to save them.
+      if (!Number.isFinite(frame.durationMs)) continue;
       const endedMs = startedMs + frame.durationMs;
       if (startedMs < EARLIEST_MS || startedMs > LATEST_MS) continue;
       if (endedMs < EARLIEST_MS || endedMs > LATEST_MS) continue;

@@ -283,4 +283,60 @@ describe('shell shim', () => {
     await writeFile(shim.framesPath, `${JSON.stringify(frame)}\n`, 'utf8');
     expect(await readShellFrames(shim.framesPath)).toHaveLength(1);
   });
+
+  it('keeps the frame a real tear produces, where the duration went with the timestamp', async () => {
+    // The two cases above supply a `durationMs`, and a real tear does not. The shim writes
+    // `... signal, startedAt, durationMs, stdoutBytes, stderrBytes` in that order, so an
+    // interleaved append closed by a neighbour's brace loses the timestamp and everything after
+    // it — both of that pair, together. Asking about the duration before asking whether there was
+    // an instant to add it to therefore dropped exactly the frame this reader exists to keep, and
+    // both events for a command that really ran went missing from the trace.
+    const torn = '{"name":"sh","argv":["-c","npm test"],"cwd":"/tmp","exitCode":1,"signal":null}';
+    await writeFile(shim.framesPath, `${torn}\n`, 'utf8');
+
+    const frames = await readShellFrames(shim.framesPath);
+    expect(frames, 'a torn frame took the command it belonged to with it').toHaveLength(1);
+    expect(frames[0]!.argv).toEqual(['-c', 'npm test']);
+  });
+
+  it('drops one whose timestamp is out of range even when the duration brings it back', async () => {
+    // The two bounds are not one check written twice. `shell.exec` is stamped with the instant
+    // alone, so `startedAt` is bounded for its own sake — and a large enough negative duration puts
+    // `endedMs` back inside the window while the exec event stays unrepresentable. Without this
+    // case the list above still passes with the `startedAt` bound deleted, because every fixture in
+    // it fails the `endedMs` bound as well.
+    const frame = {
+      name: 'sh',
+      argv: ['-c', 'true'],
+      cwd: '/tmp',
+      exitCode: 0,
+      signal: null,
+      // The largest instant a `Date` can hold, brought back to the epoch by the duration.
+      startedAt: '+275760-09-13T00:00:00.000Z',
+      durationMs: -8_640_000_000_000_000,
+      stdoutBytes: 0,
+      stderrBytes: 0,
+    };
+    await writeFile(shim.framesPath, `${JSON.stringify(frame)}\n`, 'utf8');
+    expect(await readShellFrames(shim.framesPath)).toHaveLength(0);
+  });
+
+  it('still drops one whose timestamp parses and whose duration does not', async () => {
+    // The control for the case above, and the reason the check is conditional rather than gone.
+    // Here there *is* an instant, so the consumer builds `new Date(startedAt + durationMs)` — and
+    // an absent duration makes that an Invalid Date, which throws `RangeError: Invalid time value`
+    // inside `TraceWriter.append`, where the trace is being sealed.
+    const frame = {
+      name: 'sh',
+      argv: ['-c', 'true'],
+      cwd: '/tmp',
+      exitCode: 0,
+      signal: null,
+      startedAt: '2026-09-12T00:00:00.000Z',
+      stdoutBytes: 0,
+      stderrBytes: 0,
+    };
+    await writeFile(shim.framesPath, `${JSON.stringify(frame)}\n`, 'utf8');
+    expect(await readShellFrames(shim.framesPath)).toHaveLength(0);
+  });
 });
