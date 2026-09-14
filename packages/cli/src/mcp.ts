@@ -3,7 +3,9 @@ import { readFile, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { rewriteMcpConfig } from '@orcareplay/adapters';
+import { EARLIEST_TS_MS, LATEST_TS_MS } from '@orcareplay/schema';
 import type { TraceWriter } from '@orcareplay/core';
+import { isMcpFrameRecord, objectsOnLine, MCP_RECORD_START } from '@orcareplay/mcp-shim';
 import type { McpFrameRecord } from '@orcareplay/mcp-shim';
 import type { Output } from './out.js';
 
@@ -123,6 +125,33 @@ export function pointAtMcpConfig(env: Record<string, string>, configPath: string
  * duration (spec §2.1), and a frame stamped at the drain can never interleave with the model turns
  * it actually sat between.
  */
+
+/**
+ * Whether a parsed capture line is something the drain can safely turn into an event.
+ *
+ * Several shims share one capture file — `createWriteStream(out, { flags: 'a' })`, whose own
+ * comment says "several servers in one run may share a capture file" — so this file is exposed to
+ * the same interleaved write as the shell frames, and the same two failures follow from it:
+ *
+ *   - a line that parses to `null` reaches `frame.ts` and throws `TypeError`
+ *   - a `ts` that parses to an instant outside the range a `date-time` can express becomes a `Date`
+ *     that `TraceWriter.append` cannot format, and `toISOString()` or `assertEvent` throws
+ *
+ * Both happen after the agent has exited, where the trace is being sealed. Being the right *type*
+ * is not enough for `ts`; the instant has to exist.
+ */
+function usableFrame(value: unknown): value is McpFrameRecord {
+  // The shape check belongs to the package that owns the format, so the two readers of this file
+  // cannot drift apart — they already had, and the one without it died on a `null` line.
+  if (!isMcpFrameRecord(value)) return false;
+  const ts = (value as { ts?: unknown }).ts;
+  if (ts === undefined) return true;
+  if (typeof ts !== 'string') return false;
+  const at = Date.parse(ts);
+  // An unparseable `ts` is fine: the drain already falls back to the run's own turn for it.
+  return Number.isNaN(at) || (at >= EARLIEST_TS_MS && at <= LATEST_TS_MS);
+}
+
 export async function drainMcpFrames(
   mcp: McpCapture,
   writer: TraceWriter,
@@ -130,6 +159,9 @@ export async function drainMcpFrames(
   fallbackTurn: number,
 ): Promise<void> {
   for (const frame of await mcp.drain()) {
+    // Belt and braces with the filter in `drain`. This function is exported and reached from three
+    // call sites, and what it is handed comes off a file several processes append to.
+    if (!usableFrame(frame)) continue;
     const at = frame.ts === undefined ? Number.NaN : Date.parse(frame.ts);
     const when = Number.isNaN(at) ? undefined : new Date(at);
     await writer.append({
@@ -210,13 +242,12 @@ export async function setupMcpCapture(opts: {
     async drain() {
       const text = await readFile(framesPath, 'utf8').catch(() => '');
       const records: McpFrameRecord[] = [];
-      for (const line of text.split('\n')) {
-        if (line.trim() === '') continue;
-        try {
-          records.push(JSON.parse(line) as McpFrameRecord);
-        } catch {
-          // A malformed capture line must never break the recorder; the agent's run matters more.
-        }
+      // A malformed capture line must never break the recorder; the agent's run matters more, and
+      // a line that a short write left holding a fragment and a record must still yield the record.
+      for (const parsed of text
+        .split('\n')
+        .flatMap((line) => objectsOnLine(line, MCP_RECORD_START))) {
+        if (usableFrame(parsed)) records.push(parsed);
       }
       return records;
     },

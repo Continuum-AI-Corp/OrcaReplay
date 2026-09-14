@@ -35,6 +35,21 @@ export async function appendSnapshot(
   }
 
   const snap = outcome.snapshot;
+  // A declared artifact path that is a git checkout of its own — a cloned corpus under `dataset/`
+  // — cannot be stored here, and is dropped so the rest of the tree stays restorable. Said once
+  // per path: the whole reason `artifacts.capture` exists is that a recording missing its inputs
+  // looks exactly like a recording that has them until someone replays it somewhere else.
+  if (snap.skippedGitlinks !== undefined && snap.skippedGitlinks.length > 0) {
+    out.warn('fs.artifact_not_captured', {
+      paths: snap.skippedGitlinks.join(','),
+      why:
+        'these are git repositories of their own, and git stores them as a reference rather ' +
+        'than as their contents',
+      next:
+        'a replay elsewhere will not find them; remove the nested .git, or keep them outside ' +
+        'the declared artifact paths',
+    });
+  }
   await writer.append({
     type: 'fs.snapshot',
     actor: 'orca',

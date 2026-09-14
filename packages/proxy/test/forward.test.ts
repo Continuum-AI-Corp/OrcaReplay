@@ -180,6 +180,10 @@ describe('record mode — a forwarded origin', () => {
     expect(up.calls[0]!.headers['authorization']).toBe('Bearer sk-gateway-key');
   });
 
+  // `/v1/moderations`, not `/v1/embeddings`, and that is the whole point of these two: an
+  // embeddings path is claimed by a retrieval rule now, so a test written about an *unclaimed*
+  // tail that keeps using one stops asking its own question. The retrieval half is asserted where
+  // it belongs, in `retrieval.test.ts`.
   it('sends an unclaimed tail through passthrough to the forwarded base, past a configured gateway', async () => {
     const up = stubUpstream({ object: 'list', data: [] });
     const seen: NetExchange[] = [];
@@ -190,19 +194,21 @@ describe('record mode — a forwarded origin', () => {
     });
     closers.push(proxy.close);
 
-    const res = await post(`${proxy.url}${forwardBasePath(ZEN_GO)}/v1/embeddings`, {
+    const res = await post(`${proxy.url}${forwardBasePath(ZEN_GO)}/v1/moderations`, {
       input: 'hello',
     });
 
     expect(res.status).toBe(200);
-    expect(up.calls[0]!.url).toBe(`${ZEN_GO}/v1/embeddings`);
-    expect(seen[0]).toMatchObject({ host: 'opencode.ai', path: '/v1/embeddings', status: 200 });
+    expect(up.calls[0]!.url).toBe(`${ZEN_GO}/v1/moderations`);
+    expect(seen[0]).toMatchObject({ host: 'opencode.ai', path: '/v1/moderations', status: 200 });
     expect(proxy.stats().passedThrough).toBe(1);
   });
 
   it('lets a configured gateway have an unclaimed tail on a fork, where the fork decides', async () => {
     // Substituting the model is the operator choosing where answers come from, so the fork's
-    // configured origin decides for an unclaimed tail too.
+    // configured origin decides for an unclaimed tail too. A retrieval call is the exception, and
+    // it is one for a reason that does not apply here: orca knows what it is and forwards it
+    // unchanged, so the destination it announces is the only one anything can say about it.
     const up = stubUpstream({ object: 'list', data: [] });
     const proxy = await createProxy({
       mode: 'hybrid',
@@ -214,9 +220,9 @@ describe('record mode — a forwarded origin', () => {
     });
     closers.push(proxy.close);
 
-    await post(`${proxy.url}${forwardBasePath(ZEN_GO)}/v1/embeddings`, { input: 'hello' });
+    await post(`${proxy.url}${forwardBasePath(ZEN_GO)}/v1/moderations`, { input: 'hello' });
 
-    expect(up.calls[0]!.url).toBe('https://api.orcarouter.ai/v1/embeddings');
+    expect(up.calls[0]!.url).toBe('https://api.orcarouter.ai/v1/moderations');
   });
 
   it('treats an undecodable /forward/ path as an ordinary unclaimed path', async () => {

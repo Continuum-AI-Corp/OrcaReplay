@@ -29,6 +29,19 @@ What we do:
   that generalises: `id_ecdsa` is not on it. A shape we miss is a bug worth filing — there is an
   issue template for exactly that.
 - Trace files and blobs are written mode `0600`, run directories `0700`.
+- Redaction lives in the writer, so a file orca does not write itself has not been through it. A
+  capture layer that runs inside the agent's process, or in a child of it, produces exactly that:
+  the bytes are on disk before orca ever reads them. Where nothing reads such a file after the run,
+  it is kept out of the run directory — the OpenAI Agents tracing layer and the shell shim both
+  write to a private temporary directory, orca reads each once and appends what it keeps through
+  the redactor like anything else, and the directory is removed when the run ends. What the agents
+  layer writes is an allow-list of structural fields — agent and tool names, which agent handed off
+  to which, whether a guardrail tripped — never a tool's input or output.
+- Where something *does* read such a file later, it stays. `mcp-frames.jsonl` holds the recorded
+  JSON-RPC a replay answers from, so it cannot be deleted and must not be rewritten: the frames are
+  keyed on the request, and editing one makes the replay serve a different recorded response
+  instead of failing. It is not redacted. Treat a run directory as sensitive material, not just the
+  trace inside it.
 - The recorder opens no network connection of its own and sends no telemetry. It passes through
   only what your agent was already sending.
 - The recording proxy binds `127.0.0.1`, and the local viewer binds loopback only — it refuses any
@@ -47,6 +60,10 @@ rather than papering over:
   Scrub warns per event (`scrub_reverted`) that what it matched is still on disk, and does not
   count it as removed. A scrubber that under-reports is disappointing; one that hands you a false
   all-clear is worse than no scrubber.
+- A run directory holds more than the trace, and scrub rewrites only the trace. Everything else in
+  it — `mcp-frames.jsonl`, the rewritten MCP config, anything a later version adds — is **searched
+  and named** rather than rewritten, and finding something there suppresses the all-clear. So
+  "nothing matched" is an answer about the whole directory, not only about the part scrub edits.
 - The shadow filesystem store (`<run>/fs`) **cannot be rewritten**. Its objects are addressed by the
   hash of their own contents, so editing one changes its id, every tree naming it, and every
   `fs.snapshot` event naming those trees. Scrub searches the store instead and reports how many

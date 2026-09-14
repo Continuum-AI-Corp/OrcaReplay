@@ -87,6 +87,7 @@ Flags
   --no-trace     do not record the exact replay itself as a run of its own
   --no-fs        skip filesystem capture
   --no-shell     skip shell capture (PATH shim in front of sh/bash)
+  --no-agent-spans  skip the agent-structure layer (OpenAI Agents SDK)
   --mcp-config <path>  instrument MCP servers from this config
   --ci           machine-readable output, no progress
   --verbose      more detail

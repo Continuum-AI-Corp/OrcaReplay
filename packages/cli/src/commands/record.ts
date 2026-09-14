@@ -14,13 +14,30 @@ import {
 import { captureSession, defaultAdapters, resolveLaunch, snapshotDir } from '@orcareplay/adapters';
 import type { Adapter, RecordContext } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
-import { installShellShim, readShellFrames } from '@orcareplay/shell-shim';
+import { discardShellFrames, installShellShim, readShellFrames } from '@orcareplay/shell-shim';
+import {
+  eventForSpan,
+  discardAgentSpanTransport,
+  installAgentSpans,
+  sweepStaleTransports,
+  touchTransports,
+  pythonPathWith,
+  readAgentSpans,
+  SPANS_ENV,
+  type AgentSpanCapture,
+} from '../agent-spans.js';
 import { drainMcpFrames, pointAtMcpConfig, setupMcpCapture, type McpCapture } from '../mcp.js';
 import { SerialQueue } from '../serial.js';
 import { appendSnapshot } from '../fs-events.js';
 import type { Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
-import { persistNetExchange, planTlsCapture, setupTlsCapture, trustRunCa } from '../tls-capture.js';
+import {
+  persistNetExchange,
+  planTlsCapture,
+  setupTlsCapture,
+  trustRunCa,
+  UnclaimedPaths,
+} from '../tls-capture.js';
 import { upstreamPlan } from '../upstream.js';
 import { ORCA_VERSION } from '../version.js';
 
@@ -67,14 +84,33 @@ export async function recordCommand(
   out: Output,
   cwd = process.cwd(),
 ): Promise<RecordResult> {
+  // Before anything else, and never fatal: an orphan left by a killed run holds the same
+  // un-redacted material a live one does, and the next recording is the only thing that will ever
+  // come across it.
+  const sweptStale = await sweepStaleTransports().catch(() => 0);
+  if (sweptStale > 0) out.info('transports.swept', { stale: sweptStale });
+
   const minted: RunCa[] = [];
+  // Transport directories, disposed here if the run throws before their drain reaches them. Both
+  // hold material written by a process orca does not own — the agent's shells, the agent's own
+  // interpreter — and a run that dies partway must not leave either behind.
+  const transports: string[] = [];
+  // While this run holds them, they are not orphans, and a sweep that cannot resolve this pid —
+  // another container sharing `/tmp` — has no other way to know that. Started here so it covers
+  // both transports from the moment each is pushed, and stopped on every exit path below.
+  const stopHeartbeat = touchTransports(transports);
   try {
-    return await runRecording(args, out, cwd, minted);
+    return await runRecording(args, out, cwd, minted, transports);
   } catch (err) {
     for (const ca of minted) {
       await ca.dispose().catch(() => undefined);
     }
+    for (const dir of transports) {
+      await discardShellFrames(dir).catch(() => undefined);
+    }
     throw err;
+  } finally {
+    stopHeartbeat();
   }
 }
 
@@ -83,6 +119,7 @@ async function runRecording(
   out: Output,
   cwd: string,
   minted: RunCa[],
+  transports: string[],
 ): Promise<RecordResult> {
   const registry = defaultAdapters();
   const agentName = args.positionals[0];
@@ -141,7 +178,14 @@ async function runRecording(
   let fs: FsCapture | undefined;
   if (captureFs) {
     try {
-      fs = await FsCapture.start({ runDir: writer.runDir, cwd });
+      // The adapter's declared artifacts widen what a snapshot covers. A pipeline writes its
+      // product to a path its own `.gitignore` excludes, so without this the trace holds the
+      // calls that built an index and no trace of the index; see `HarnessArtifacts.capture`.
+      fs = await FsCapture.start({
+        runDir: writer.runDir,
+        cwd,
+        ...(adapter.artifacts?.capture === undefined ? {} : { forced: adapter.artifacts.capture }),
+      });
       // Read once, before the agent touches anything: `git` describes the state the run started
       // from, which is what makes it a reproduction instruction rather than a postscript.
       writer.setGit(await fs.gitInfo());
@@ -183,9 +227,28 @@ async function runRecording(
   if (args.bool('shell', true)) {
     try {
       shell = await installShellShim({ runDir: writer.runDir });
+      // Only when orca minted it. A caller-supplied `framesPath` leaves the directory theirs,
+      // and this list is deleted wholesale on a failure.
+      if (shell.transportDir !== undefined) transports.push(shell.transportDir);
     } catch (err) {
       // Same posture as filesystem capture: degrade the trace, never abort the run.
       out.warn('shell.unavailable', { reason: String(err) });
+    }
+  }
+
+  // Agent-level structure, for a harness that reports it. The proxy sees `POST /v1/responses` and
+  // cannot say which agent sent it, that a handoff happened, or that a guardrail ran — the last of
+  // which need make no request at all. A `sitecustomize.py` on PYTHONPATH attaches the OpenAI Agents
+  // SDK's tracing to a run without editing the agent, the same trick as the fetch hook's
+  // NODE_OPTIONS. Silent and free where the SDK is absent, which is most runs.
+  let agentSpans: AgentSpanCapture | undefined;
+  if (args.bool('agent-spans', true)) {
+    try {
+      agentSpans = await installAgentSpans(writer.runDir);
+      transports.push(agentSpans.transportDir);
+    } catch (err) {
+      // Same posture as the other optional layers: degrade the trace, never abort the run.
+      out.warn('agent_spans.unavailable', { reason: String(err) });
     }
   }
 
@@ -206,7 +269,16 @@ async function runRecording(
    * backend over TLS — invisible to the ordinary mechanism. This is the answer to that, and it is
    * deliberately a separate decision the operator has to make: it mints a certificate authority.
    */
-  const tls = await setupTlsCapture({ args, out, writer, writes, turn: () => turn });
+  /**
+   * Paths this run forwarded but could not read, however they arrived.
+   *
+   * Shared between the interception hook and the plaintext passthrough below, so a run that
+   * captured only unreadable traffic can say which paths those were instead of blaming a
+   * base-URL variable that was set correctly.
+   */
+  const unclaimed = new UnclaimedPaths();
+
+  const tls = await setupTlsCapture({ args, out, writer, writes, turn: () => turn, unclaimed });
   if (tls.ca) minted.push(tls.ca);
   const ca = tls.ca;
 
@@ -239,6 +311,7 @@ async function runRecording(
   let commandToolCalls = 0;
   /** Commands the shim actually saw. Zero against a non-zero `commandToolCalls` is the warning. */
   let shellFrames = 0;
+  // (the count this used to keep was read by nothing; the layer reports through its events)
   /**
    * Exchanges the upstream answered with an error status.
    *
@@ -251,11 +324,30 @@ async function runRecording(
   /** The status those errors carried, so the warning can name it rather than describe it. */
   const errorStatuses = new Map<number, number>();
 
+  /**
+   * How much of a retrieval answer to keep.
+   *
+   * `full` by default, because it is the only setting that can be replayed. `digest` exists
+   * because these bodies are large in a way a chat response is not — six paragraphs at 768
+   * dimensions is 98 KB of JSON floats, and an index build makes thousands of such calls — so a
+   * recording made to check that a later run agrees, rather than to reproduce one, can keep the
+   * hash and none of the vectors.
+   */
+  const retrievalStore = args.str('retrieval-store') ?? 'full';
+  if (retrievalStore !== 'full' && retrievalStore !== 'digest') {
+    throw new Error(
+      `--retrieval-store must be 'full' or 'digest', not '${retrievalStore}'\n` +
+        '  full   keep the response, so the run can be replayed offline\n' +
+        '  digest keep only its sha256, which proves a later run agreed but cannot serve it',
+    );
+  }
+
   const proxy = await createProxy({
     mode: 'record',
     upstream: plan.upstream,
     upstreamHeaders: plan.headers,
     upstreamHeadersOrigin: plan.headersOrigin,
+    retrievalStore,
     onExchange: (exchange: RecordedExchange) => {
       modelExchanges += 1;
       if (exchange.status >= 400) {
@@ -268,6 +360,11 @@ async function runRecording(
     // as the same `net.*` pair unrecognised TLS traffic does. Orca holds the bytes but not the
     // meaning, so it is evidence, not a replayable turn.
     onNetExchange: (exchange: NetExchange) => {
+      // The same warning interception has always printed, on the route most runs actually take.
+      // A harness redirected by a base-URL variable posts to the proxy in plaintext, so nothing
+      // it sent on an unclaimed path was ever reported — and a retrieval pipeline is made of
+      // those. See {@link UnclaimedPaths}.
+      unclaimed.note(out, exchange);
       writes.push(() => persistNetExchange(writer, turn, exchange));
     },
     ...tls.proxyOptions,
@@ -349,6 +446,16 @@ async function runRecording(
       if (shell) {
         prepared.env.PATH = `${shell.dir}${delimiter}${process.env.PATH ?? ''}`;
       }
+      if (agentSpans) {
+        // Both, or neither works: PYTHONPATH is how Python finds the bootstrap, and the variable is
+        // what tells the bootstrap this is a recording rather than an ordinary Python process.
+        prepared.env.PYTHONPATH = pythonPathWith(
+          agentSpans.pythonPath,
+          process.env.PYTHONPATH,
+          delimiter,
+        );
+        prepared.env[SPANS_ENV] = agentSpans.spansPath;
+      }
       if (mcp) {
         pointAtMcpConfig(prepared.env, mcp.configPath);
         // The variables above are belt and braces for a harness orca has not met. What actually
@@ -427,6 +534,13 @@ async function runRecording(
     // the final turn number — which makes `mono_us` describe the drain rather than the command,
     // and leaves the commands unable to interleave with the model turns they happened between.
     const frames = await readShellFrames(shell.framesPath);
+    // Read, then gone, for the same reason the spans transport is: every frame is about to be
+    // appended through `writer.append`, which redacts, and what is left on disk afterwards is a
+    // verbatim copy of every command line the agent ran that nothing reads and `orca scrub` never
+    // rewrites. Before the appends rather than after, so an append that throws still takes it.
+    const framesLeft =
+      shell.transportDir === undefined ? undefined : await discardShellFrames(shell.transportDir);
+    if (framesLeft !== undefined) out.warn('shell_frames.not_removed', { reason: framesLeft });
     shellFrames = frames.length;
     for (const frame of frames) {
       const startedAt = Date.parse(frame.startedAt);
@@ -453,6 +567,33 @@ async function runRecording(
           stdout_bytes: frame.stdoutBytes,
           stderr_bytes: frame.stderrBytes,
         },
+      });
+    }
+  }
+
+  if (agentSpans) {
+    // Timestamped from the span, like the shell frames above and for the same reason: these are
+    // read off disk after the agent exited, so stamping them now would file every handoff at the
+    // end of the run rather than between the turns it happened between.
+    const spans = await readAgentSpans(agentSpans.spansPath);
+    // Read, then gone. Everything the trace keeps from this file is about to be appended through
+    // `writer.append`, which redacts; what is left on disk afterwards is a copy nothing reads and
+    // nothing scrubs. Before the appends rather than after, so an append that throws still takes
+    // the transport with it.
+    const spansLeft = await discardAgentSpanTransport(agentSpans.transportDir);
+    if (spansLeft !== undefined) out.warn('agent_spans.not_removed', { reason: spansLeft });
+    for (const span of spans) {
+      const derived = eventForSpan(span);
+      if (derived === undefined) continue;
+      const startedAt = Date.parse(String(span.started_at ?? ''));
+      const at = Number.isNaN(startedAt) ? undefined : new Date(startedAt);
+      await writer.append({
+        type: derived.type as 'agent.start',
+        // `harness`, not `orca`: we did not observe this, we were told it.
+        actor: 'harness',
+        turn: at === undefined ? turn : turnAt(startedAt),
+        ...(at === undefined ? {} : { occurredAt: at }),
+        attrs: derived.attrs,
       });
     }
   }
@@ -550,18 +691,52 @@ async function runRecording(
     // Printing "it may not read a base-URL variable" next to `set=none` contradicts the run's own
     // output and sends the reader after a route that was never the route -- which is how the
     // capture bug fixed earlier in this branch stayed hidden through a dozen rounds of debugging.
+    //
+    // The proxy's own counters come first, because they settle the question the other branches
+    // are guessing at. A call orca forwarded is a call the agent made *to orca*: the variables
+    // were read and the redirection worked, so "the agent never called the proxy" is false on its
+    // face and costs the reader a search through a configuration that was right all along.
+    const captured = proxy.stats().retrievalTotal;
+    const opaque = proxy.stats().passedThrough - captured;
+    const paths = unclaimed.list();
+
+    // An index build is the case: every call it makes is an embedding, and every one of them is
+    // recorded *and* replayable. There is nothing wrong with that run, and warning about it would
+    // teach someone to ignore the line that matters. Said as a fact rather than as a problem.
+    const retrievalOnly = captured > 0 && opaque === 0;
     const cause =
-      baseUrls.length > 0
-        ? 'the agent never called the proxy — it may not read a base-URL variable'
-        : tls.ca
-          ? 'this adapter captures at the transport, and nothing orca decrypted looked like a model call'
-          : 'this adapter captures at the transport, and interception was not on';
-    out.warn('capture.empty', {
-      exchanges: 0,
-      cause,
-      set: baseUrls.join(',') || 'none',
-      next: 'orca doctor',
-    });
+      opaque > 0
+        ? `the agent called the proxy ${opaque} time(s), on ` +
+          `${paths.length > 0 ? paths.join(', ') : 'paths no wire dialect claims'} — recorded as ` +
+          'network traffic rather than as replayable model exchanges'
+        : baseUrls.length > 0
+          ? 'the agent never called the proxy — it may not read a base-URL variable'
+          : tls.ca
+            ? 'this adapter captures at the transport, and nothing orca decrypted looked like a model call'
+            : 'this adapter captures at the transport, and interception was not on';
+    if (retrievalOnly) {
+      out.info('capture.retrieval_only', {
+        exchanges: 0,
+        retrieval: captured,
+        // Under `digest` the trace holds a hash of each answer and not the answer, so promising
+        // an offline replay would be a claim this run cannot meet — which is the shape of
+        // dishonesty every other line here exists to avoid.
+        note:
+          retrievalStore === 'digest'
+            ? 'this run made no model calls, and --retrieval-store=digest kept only a hash of ' +
+              'each answer: enough to check a later run agreed, not enough to replay'
+            : 'this run made no model calls; its retrieval calls are recorded and replay offline',
+      });
+    } else {
+      out.warn('capture.empty', {
+        exchanges: 0,
+        cause,
+        ...(opaque > 0 ? { passed_through: opaque } : {}),
+        ...(captured > 0 ? { retrieval: captured } : {}),
+        set: baseUrls.join(',') || 'none',
+        next: opaque > 0 ? 'orca show to read what was forwarded' : 'orca doctor',
+      });
+    }
   }
 
   /**

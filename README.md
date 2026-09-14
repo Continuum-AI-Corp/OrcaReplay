@@ -115,14 +115,16 @@ the way.
 
 Three more layers catch what the protocol cannot see: an exit code, a real duration, which stream a
 byte came out of, a file written without telling anyone. A fifth exists for the agents that read no
-base-URL variable at all — see [which agents](#which-agents).
+base-URL variable at all — see [which agents](#which-agents). A sixth reads the agent's own account
+of its structure, for a harness that has one: which sub-agent ran, which handed off to which,
+whether a guardrail tripped — none of which reaches the wire.
 
 ```mermaid
 %%{init: {'theme':'neutral'}}%%
 flowchart LR
     A["<b>your agent</b><br/><i>unmodified</i>"]
 
-    subgraph orca["orca · five capture layers"]
+    subgraph orca["orca · six capture layers"]
         direction TB
         P["<b>proxy</b><br/>base-URL env var"]
         SH["<b>PATH shim</b><br/>exit code · timing · streams"]
@@ -478,6 +480,8 @@ whether orca understands the wire format it speaks once it arrives.
 | **Aider** | `orca record generic-openai -- python your_agent.py` — routes through LiteLLM, which reads `OPENAI_API_BASE` | works — the LiteLLM layer records and replays at `exact=1`, [in CI](test/integrations/) |
 | **browser-use** | `orca record generic-openai -- python your_task.py` — its `ChatOpenAI` passes an unset `base_url` straight through | works — records and replays at `exact=1`, [in CI](test/integrations/); LLM layer only, [the browser is not driven](docs/integrations.md#browser-use) |
 | **Hermes** (Nous Research) | `ORCA_BASE_URL_VARS=… orca record generic-openai -- hermes …` | should work — it overrides per provider; [name the variable](#a-base-url-variable-orca-has-never-heard-of) |
+| **IndexRAG** | `orca record indexrag -- --data-dir dataset/<name>/documents` — the whole pipeline as one run: `OPENAI_BASE_URL` for chat, `INDEXRAG_EMBEDDING_BASE_URL` for a second origin | works — driven end to end against the real pipeline: indexing, embeddings and answering replay offline at `exact=11/11 retrieval=3/3`, and a fork keeps the recorded index, [what is different about a pipeline](docs/integrations.md#rag-and-retrieval-frameworks) |
+| **a RAG pipeline** (LlamaIndex, GraphRAG, LightRAG) | `orca record generic-openai -- <cmd>` — embeddings and rerank replay without a dialect | works — a concurrent index build plus an embedding batch records and replays at `exact=5 retrieval=2`, [in CI](test/integrations/) |
 | **Codex-in-the-IDE** | `orca record exec --tls-intercept -- code .` | works — the extension spawns the agent, and it inherits the capture |
 | **a bot with a hardcoded origin** | `orca record exec --tls-intercept -- <cmd>` | works — a Grok bot posting to a URL in its own source, [in detail](#an-agent-that-reads-nothing-at-all) |
 | **an agent in a sandbox or on another machine** | `orca attach` | works — orca is reachable and prints what to export, [in detail](#an-agent-that-is-not-on-this-machine) |
@@ -809,7 +813,8 @@ self-describing thing:
     events.jsonl      # the timeline, one JSON object per line, append-only
     blobs/            # content-addressed payloads over 4 KB, deduplicated
     fs/               # shadow git index: the workspace at every turn
-    shell-frames.jsonl
+    shims/            # the PATH shims this run used; written by orca, read by nothing
+    py/               # bootstrap for the agent-structure layer, when the agent is Python
     redactions.json   # what was removed, by rule and count — never by value
 ```
 

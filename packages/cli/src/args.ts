@@ -54,6 +54,7 @@ export const VALUELESS = new Set([
   'trace',
   'fs',
   'shell',
+  'agent-spans',
   'ci',
   'verbose',
   'color',
@@ -69,6 +70,7 @@ export const VALUELESS = new Set([
   // without an entry here fails a test rather than a user.
   'quiet',
   'full',
+  'serialize',
   // `-h` parses to the body "h" (short flags take one dash), and main.ts reads it with
   // args.bool('h'). Found by the derived invariant test the day it was written, which is the
   // point of deriving it — the hand-written list had missed this one too.

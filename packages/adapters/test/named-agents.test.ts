@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { RecordContext } from '@orcareplay/plugin-api';
 import { HOOK_FILENAME } from '@orcareplay/node-instrument';
+import { decodeForwardPath } from '@orcareplay/proxy';
 import { checkAdapterContract, formatContractResult } from '../src/contract.js';
 import { defaultAdapters } from '../src/registry.js';
 import { grokAdapter } from '../src/grok.js';
@@ -187,5 +188,72 @@ describe('ORCA_BASE_URL_VARS — naming a base-URL variable orca does not know',
       .get('node')
       .prepare({ ...ctx, env: { ORCA_BASE_URL_VARS: 'LLM_BASE_URL' } });
     expect(launch.env.LLM_BASE_URL).toBe('http://127.0.0.1:44100/v1');
+  });
+
+  /**
+   * The variable that already pointed somewhere keeps pointing there, through `/forward/`.
+   *
+   * A retrieval run is the case: chat goes to a gateway and embeddings to a dedicated provider,
+   * and orca's upstream map is keyed by wire dialect — so two origins of the same dialect cannot
+   * be named by any `--upstream-*`. Rewritten to a bare `/v1`, the embedding calls arrived with
+   * nothing saying where they had been headed, and `passthroughOrigin` sent them to the chat
+   * origin, or to `api.openai.com` with the embedding provider's key on them.
+   */
+  it('keeps the origin a set variable already named, as a forward path', async () => {
+    const launch = await generic().prepare({
+      ...ctx,
+      env: {
+        ORCA_BASE_URL_VARS: 'MY_URL',
+        MY_URL: 'https://embeddings.example/v1',
+      },
+    });
+    expect(launch.env.MY_URL).toBe(
+      `http://127.0.0.1:44100/forward/${encodeURIComponent('https://embeddings.example/v1')}`,
+    );
+    // And it decodes back to what the client was originally given, path included.
+    const decoded = decodeForwardPath(new URL(launch.env.MY_URL!).pathname);
+    expect(decoded?.base).toBe('https://embeddings.example/v1');
+  });
+
+  /**
+   * A base URL the `/forward/` decoder will not accept must not become a `/forward/` path.
+   *
+   * `forwardBasePath` encodes anything; `decodeForwardPath` refuses credentials, a query, a
+   * fragment or a non-http(s) scheme. Encoding without asking produced a segment nothing could
+   * read, and the proxy then forwarded the call to the configured upstream — the very
+   * readdressing this rewrite exists to stop — with the harness's credential for another gateway
+   * on it. The segment is also the request *path*, so `https://tenant:pw@gw.example/v1` wrote the
+   * gateway password into the trace, where `orca show` and `orca export` carry it.
+   *
+   * The fallback is what this did before origins could be carried: a bare `/v1` on the proxy. The
+   * call is still recorded, and it fails against the wrong origin loudly rather than leaking
+   * quietly. Carrying the origin without its credential is not on offer — the client reads this
+   * value to build its request, so dropping the userinfo would stop it authenticating at all.
+   */
+  it.each([
+    ['credentials', 'https://tenant:s3cr3t@gw.example/v1'],
+    ['a query string', 'https://gw.example/v1?key=s3cr3t'],
+    ['a fragment', 'https://gw.example/v1#frag'],
+    ['a scheme the decoder refuses', 'ftp://gw.example/v1'],
+  ])('does not encode a base URL carrying %s', async (_what, value) => {
+    const launch = await generic().prepare({
+      ...ctx,
+      env: { ORCA_BASE_URL_VARS: 'MY_URL', MY_URL: value },
+    });
+    expect(launch.env.MY_URL).toBe('http://127.0.0.1:44100/v1');
+    expect(launch.env.MY_URL).not.toContain('forward');
+    expect(launch.env.MY_URL).not.toContain('s3cr3t');
+    expect(launch.env.MY_URL).not.toContain(encodeURIComponent('s3cr3t'));
+  });
+
+  it('still honours an explicit path, which is the user saying where to point it', async () => {
+    const launch = await generic().prepare({
+      ...ctx,
+      env: {
+        ORCA_BASE_URL_VARS: 'MY_URL=v2',
+        MY_URL: 'https://embeddings.example/v1',
+      },
+    });
+    expect(launch.env.MY_URL).toBe('http://127.0.0.1:44100/v2');
   });
 });

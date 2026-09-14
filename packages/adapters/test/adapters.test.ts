@@ -503,6 +503,10 @@ describe('AdapterRegistry', () => {
       'hermes',
       'grok',
       'openclaw',
+      // The only detector here that reads the workspace rather than the machine: it asks whether
+      // *this directory* is an IndexRAG checkout, which is a fact about the run rather than about
+      // what happens to be installed.
+      'indexrag',
       'node',
       'generic-openai',
       'exec',

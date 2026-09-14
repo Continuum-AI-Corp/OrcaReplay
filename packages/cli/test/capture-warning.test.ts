@@ -14,6 +14,7 @@ const run = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
 const DEAF_AGENT = join(here, 'fixtures', 'deaf-agent.mjs');
 const FAKE_AGENT = join(here, 'fixtures', 'fake-agent.mjs');
+const EMBEDDING_AGENT = join(here, 'fixtures', 'embedding-agent.mjs');
 
 /**
  * A recording that captured nothing must say so.
@@ -104,6 +105,35 @@ describe('orca record — a run that captured no model traffic', () => {
   it('says nothing when the run did capture model traffic', async () => {
     await record(FAKE_AGENT);
     expect(lines.find((l) => l.includes('capture.empty'))).toBeUndefined();
+  });
+
+  /**
+   * An index build makes no model calls at all, and there is nothing wrong with it.
+   *
+   * Every call it makes is an embedding: recorded, keyed, and replayable offline. Warning
+   * `capture.empty exchanges=0 cause="the agent never called the proxy — it may not read a
+   * base-URL variable"` over that is false twice over — the variable was read, and the run
+   * reproduces — and it sends the reader to check a configuration that was right all along.
+   */
+  it('does not cry empty over a run whose every call was a retrieval call', async () => {
+    const args = parseArgs([
+      'record',
+      'generic-openai',
+      '--upstream-openai',
+      model.url,
+      '--',
+      'node',
+      EMBEDDING_AGENT,
+    ]);
+    const result = await recordCommand(args, out, workspace);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.modelExchanges).toBe(0);
+    expect(lines.find((l) => l.includes('capture.empty'))).toBeUndefined();
+    // It still says what happened — `exchanges=0` is worth knowing — as a fact, not a fault.
+    const said = lines.find((l) => l.includes('capture.retrieval_only')) ?? '';
+    expect(said).toContain('retrieval=1');
+    expect(said).toContain('info');
   });
 });
 

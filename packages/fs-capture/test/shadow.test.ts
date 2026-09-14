@@ -318,6 +318,262 @@ describe('exclusions', () => {
   });
 });
 
+/**
+ * Paths an adapter declares as its harness's product, captured despite the workspace ignoring them.
+ *
+ * A coding agent's output is the working tree, which the ordinary snapshot already holds. A
+ * pipeline's output is an index, and every such project ignores it — IndexRAG's first three
+ * `.gitignore` lines are `vector_store/`, `cache/` and `dataset/` — so a recording of an indexing
+ * run held every call that built the index and nothing of the index itself.
+ */
+describe('forced capture', () => {
+  itGit('captures a path the workspace ignores, when the adapter declares it', async () => {
+    const root = await makeTempDir();
+    const workTree = join(root, 'ws');
+    await mkdir(workTree, { recursive: true });
+    const shadow = await ShadowIndex.create({
+      gitDir: join(root, 'run', 'fs'),
+      workTree,
+      forced: ['cache'],
+    });
+    await write(workTree, '.gitignore', 'cache/\nvector_store/\n');
+    await write(workTree, 'cache/mini_faqs.json', '{"faq_data":[]}\n');
+    await write(workTree, 'vector_store/index.faiss', 'binary\n');
+    await write(workTree, 'main.py', 'print(1)\n');
+
+    expect(await filesIn(shadow, await shadow.snapshot())).toEqual([
+      '.gitignore',
+      'cache/mini_faqs.json',
+      'main.py',
+    ]);
+  });
+
+  /**
+   * The security property that makes this safe to hand to third-party plugin code: the sensitive
+   * pathspecs are applied to the forced add too, and a pathspec exclusion is enforced by `git add`
+   * itself — no `-f` and no `.gitignore` negation overrides it. So an adapter that declares `.`
+   * to try to sweep the whole tree in still cannot capture a credential.
+   */
+  itGit('still refuses secrets when the adapter declares the whole tree', async () => {
+    const root = await makeTempDir();
+    const workTree = join(root, 'ws');
+    await mkdir(workTree, { recursive: true });
+    const shadow = await ShadowIndex.create({
+      gitDir: join(root, 'run', 'fs'),
+      workTree,
+      forced: ['.'],
+    });
+    await write(workTree, '.gitignore', '!.env\n');
+    await write(workTree, '.env', 'API_KEY=sk-live-secret\n');
+    await write(workTree, '.ssh/id_ed25519', 'PRIVATE KEY\n');
+    await write(workTree, 'node_modules/pkg/index.js', 'noise\n');
+    await write(workTree, 'ok.txt', 'fine\n');
+
+    const files = await filesIn(shadow, await shadow.snapshot());
+    expect(files).toEqual(['.gitignore', 'ok.txt']);
+  });
+
+  // Snapshot 0 is taken before the harness has written anything, and `git add` refuses a pathspec
+  // that matches nothing. One missing directory must not cost the whole snapshot.
+  itGit('snapshots normally when a declared path does not exist yet', async () => {
+    const root = await makeTempDir();
+    const workTree = join(root, 'ws');
+    await mkdir(workTree, { recursive: true });
+    const shadow = await ShadowIndex.create({
+      gitDir: join(root, 'run', 'fs'),
+      workTree,
+      forced: ['cache', 'vector_store'],
+    });
+    await write(workTree, '.gitignore', 'cache/\nvector_store/\n');
+    await write(workTree, 'main.py', 'print(1)\n');
+
+    expect(await filesIn(shadow, await shadow.snapshot())).toEqual(['.gitignore', 'main.py']);
+
+    // And it picks the path up as soon as the harness creates it.
+    await write(workTree, 'cache/mini_faqs.json', '{}\n');
+    expect(await filesIn(shadow, await shadow.snapshot())).toEqual([
+      '.gitignore',
+      'cache/mini_faqs.json',
+      'main.py',
+    ]);
+  });
+
+  itGit('tracks a forced path across edits and deletions', async () => {
+    const root = await makeTempDir();
+    const workTree = join(root, 'ws');
+    await mkdir(workTree, { recursive: true });
+    const shadow = await ShadowIndex.create({
+      gitDir: join(root, 'run', 'fs'),
+      workTree,
+      forced: ['cache'],
+    });
+    await write(workTree, '.gitignore', 'cache/\n');
+    await write(workTree, 'cache/a.json', '{"n":1}\n');
+    const first = await shadow.snapshot();
+
+    await write(workTree, 'cache/a.json', '{"n":2}\n');
+    const second = await shadow.snapshot();
+    expect(first).not.toBe(second);
+    expect(new TextDecoder().decode(await shadow.readFileAt(second, 'cache/a.json'))).toBe(
+      '{"n":2}\n',
+    );
+
+    await rm(join(workTree, 'cache'), { recursive: true, force: true });
+    expect(await filesIn(shadow, await shadow.snapshot())).toEqual(['.gitignore']);
+  });
+
+  /**
+   * "Did not match any files" is the *only* `git add` failure a snapshot may ignore.
+   *
+   * The per-path retry exists for the pathspec that matches nothing, and it used to swallow every
+   * other failure with it — a file git cannot open because the harness is still writing it, EACCES,
+   * a path too long — because `runGit` resolves rather than throws and no exit code was read. The
+   * snapshot then returned a tree id as if all was well while silently not holding the declared
+   * path, which is worse than failing: on replay the same hole lands in the safety snapshot that
+   * `resetArtifacts` deletes against, so what orca could not copy it deletes anyway.
+   *
+   * A path outside the workspace is the portable way to provoke a non-benign failure (the original
+   * report used a file held open by another process, which only Windows makes easy) — and it is
+   * worth refusing on its own account, since an adapter reaching outside the workspace is not
+   * something to do quietly.
+   */
+  itGit('refuses a declared path git fails on for any other reason', async () => {
+    const root = await makeTempDir();
+    const workTree = join(root, 'ws');
+    await mkdir(workTree, { recursive: true });
+    await write(root, 'outside.txt', 'not yours\n');
+    const shadow = await ShadowIndex.create({
+      gitDir: join(root, 'run', 'fs'),
+      workTree,
+      forced: ['cache', '../outside.txt'],
+    });
+    await write(workTree, '.gitignore', 'cache/\n');
+    await write(workTree, 'cache/mini_faqs.json', '{}\n');
+
+    await expect(shadow.snapshot()).rejects.toThrow(/declared artifact path '\.\.\/outside\.txt'/);
+  });
+
+  /**
+   * A cloned corpus inside a declared path, which `-f` reaches for the first time.
+   *
+   * `git add` records a nested repository as a gitlink whose contents live nowhere in this store,
+   * and `materialize` refuses such a tree rather than checking out an empty directory in its
+   * place. `dataset/` is both one of IndexRAG's declared paths and the ordinary place to clone a
+   * corpus into, so before this the first replay of such a workspace failed at the restore — after
+   * the reset had already deleted the artifacts the restore was supposed to put back.
+   */
+  itGit('drops a nested repository inside a declared path, and names it once', async () => {
+    const root = await makeTempDir();
+    const workTree = join(root, 'ws');
+    await mkdir(workTree, { recursive: true });
+    const shadow = await ShadowIndex.create({
+      gitDir: join(root, 'run', 'fs'),
+      workTree,
+      forced: ['cache', 'dataset'],
+    });
+    await write(workTree, '.gitignore', 'cache/\ndataset/\n');
+    await write(workTree, 'cache/mini_faqs.json', '{}\n');
+    await write(workTree, 'dataset/notes.txt', 'loose file, still captured\n');
+    const corpus = join(workTree, 'dataset', 'hotpotqa');
+    await mkdir(corpus, { recursive: true });
+    await runGit(['init', '-q'], { cwd: corpus });
+    await write(corpus, 'docs.jsonl', '{"id":1}\n');
+    await runGit(['add', '-A'], { cwd: corpus });
+    await runGit(['-c', 'user.email=a@b.c', '-c', 'user.name=a', 'commit', '-qm', 'x'], {
+      cwd: corpus,
+    });
+
+    const tree = await shadow.snapshot();
+    expect(shadow.skippedGitlinks).toEqual(['dataset/hotpotqa']);
+    expect(await shadow.gitlinks(tree)).toEqual([]);
+    // Everything else the adapter declared is still there, and the tree restores.
+    expect(await filesIn(shadow, tree)).toEqual([
+      '.gitignore',
+      'cache/mini_faqs.json',
+      'dataset/notes.txt',
+    ]);
+    await expect(shadow.materialize(tree, join(root, 'dest'))).resolves.toBeUndefined();
+
+    // Named once: a warning repeated on every turn of a long run is a warning nobody reads.
+    await shadow.snapshot();
+    expect(shadow.skippedGitlinks).toEqual([]);
+  });
+
+  /**
+   * What the snapshot did not take a copy of, for a caller about to delete these paths.
+   *
+   * Two rules keep things out of a forced add, and both are right: the sensitive pathspecs stop an
+   * adapter sweeping a credential into a trace however it declares its paths, and a nested
+   * repository cannot be held at all. Both mean the copy is missing something a reset would take —
+   * an `.env` the operator keeps beside a cache, a prebuilt store cloned into `vector_store/` —
+   * and neither need appear in the recording's own tree, since the operator may have put it there
+   * afterwards. `orca replay` deletes these paths on the strength of this copy, so it has to be
+   * able to ask what the copy is missing before it does.
+   */
+  itGit('reports what a forced snapshot could not hold under the declared paths', async () => {
+    const root = await makeTempDir();
+    const workTree = join(root, 'ws');
+    await mkdir(workTree, { recursive: true });
+    const shadow = await ShadowIndex.create({
+      gitDir: join(root, 'run', 'fs'),
+      workTree,
+      forced: ['cache', 'vector_store'],
+    });
+    await write(workTree, '.gitignore', 'cache/\nvector_store/\n');
+    await write(workTree, 'cache/mini_faqs.json', '{}\n');
+    await write(workTree, 'cache/.env', 'INDEXRAG_EMBEDDING_API_KEY=sk-live\n');
+    const prebuilt = join(workTree, 'vector_store', 'prebuilt');
+    await mkdir(prebuilt, { recursive: true });
+    await runGit(['init', '-q'], { cwd: prebuilt });
+    await write(prebuilt, 'faiss.bin', 'months of work\n');
+    await runGit(['add', '-A'], { cwd: prebuilt });
+    await runGit(['-c', 'user.email=a@b.c', '-c', 'user.name=a', 'commit', '-qm', 'p'], {
+      cwd: prebuilt,
+    });
+
+    await shadow.snapshot();
+    // The credential, kept out on purpose; and the clone, which no snapshot can hold. A trailing
+    // slash on the second because git will not look inside a repository of its own.
+    expect(await shadow.uncaptured(['cache', 'vector_store'])).toEqual([
+      'cache/.env',
+      'vector_store/prebuilt/',
+    ]);
+    // And the ordinary case says nothing, so a guard built on this is quiet in a normal run.
+    expect(await shadow.uncaptured(['cache/mini_faqs.json'])).toEqual([]);
+  });
+
+  /**
+   * The same question `materialize` answers by throwing, asked without writing anything.
+   *
+   * `orca replay` deletes the artifacts *before* the restore that puts them back, which is the
+   * only ordering that leaves them holding what they held when recording began. That makes the
+   * restore's refusal unrecoverable unless it can be seen coming — and recordings made before
+   * gitlinks were dropped are still on disk, which is who this is for.
+   */
+  itGit('reports the gitlinks a restore would refuse, without touching the workspace', async () => {
+    const { root, workTree, shadow } = await fixture();
+    await write(workTree, 'a.txt', 'x\n');
+    const clean = await shadow.snapshot();
+    expect(await shadow.gitlinks(clean)).toEqual([]);
+
+    // Not inside a declared path, so `add -A` stages it exactly as it always has.
+    const inner = join(workTree, 'vendor', 'inner');
+    await mkdir(inner, { recursive: true });
+    await runGit(['init', '-q'], { cwd: inner });
+    await write(inner, 'f.txt', 'inner\n');
+    await runGit(['add', '-A'], { cwd: inner });
+    await runGit(['-c', 'user.email=a@b.c', '-c', 'user.name=a', 'commit', '-qm', 'x'], {
+      cwd: inner,
+    });
+
+    const withLink = await shadow.snapshot();
+    expect(await shadow.gitlinks(withLink)).toEqual(['vendor/inner']);
+    await expect(shadow.materialize(withLink, join(root, 'dest'))).rejects.toThrow(
+      /embedded git repositor/i,
+    );
+  });
+});
+
 describe('readFileAt', () => {
   itGit('returns the exact bytes stored in a tree', async () => {
     const { workTree, shadow } = await fixture();

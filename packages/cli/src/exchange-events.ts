@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { CanonicalContent, CanonicalRequest, CanonicalResponse } from '@orcareplay/plugin-api';
 import type { RecordedExchange } from '@orcareplay/proxy';
 import type { TraceWriter } from '@orcareplay/core';
@@ -25,7 +26,7 @@ export interface PendingToolCall {
 }
 
 export interface DerivedEvent {
-  type: 'model.request' | 'model.response' | 'tool.call' | 'tool.result';
+  type: 'model.request' | 'model.response' | 'tool.call' | 'tool.result' | 'retrieval.context';
   actor: 'agent' | 'model' | 'harness';
   attrs: Record<string, unknown>;
   payload?: unknown;
@@ -51,6 +52,14 @@ export class ExchangeEventDeriver {
    * a long run would accumulate one duplicate per turn per tool call.
    */
   readonly #closed = new Set<string>();
+  /**
+   * Retrieval contexts already emitted, by fingerprint.
+   *
+   * A conversation is resent in full every turn, so without this a multi-turn RAG session would
+   * re-emit the first turn's passages on every request after it — the same duplication `#closed`
+   * prevents for tool results, one event type over.
+   */
+  readonly #seenContext = new Set<string>();
 
   /** Tool calls that were issued but whose result never came back. */
   unresolved(): PendingToolCall[] {
@@ -69,6 +78,30 @@ export class ExchangeEventDeriver {
     const events: DerivedEvent[] = [];
     /** Where the results this batch produced ended up, so the request can name them. */
     const resultsAt: number[] = [];
+
+    // What the retriever found, before the request that carried it — same order and the same
+    // reason as a tool result: it describes work that happened before this call was made, and the
+    // request names it as a cause. Derived rather than captured, because it is already on the
+    // wire: the passages are in the prompt. See `retrievalContext`.
+    const retrieved = retrievalContext(exchange.canonicalRequest);
+    if (retrieved && !this.#seenContext.has(retrieved.fingerprint)) {
+      this.#seenContext.add(retrieved.fingerprint);
+      events.push({
+        type: 'retrieval.context',
+        // The harness retrieved these; orca only read them out of what it sent.
+        actor: 'harness',
+        attrs: {
+          query: retrieved.query,
+          passages: retrieved.passages.length,
+          chars: retrieved.passages.reduce((n, p) => n + p.length, 0),
+          // Named so a reader knows the boundaries are the prompt's, not the retriever's: this
+          // is what was *used*, which `--context-docs` truncates out of what was *retrieved*.
+          derived_from: 'prompt',
+        },
+        payload: { query: retrieved.query, passages: retrieved.passages },
+      });
+      resultsAt.push(events.length - 1);
+    }
 
     for (const result of collectToolResults(exchange.canonicalRequest)) {
       // Already accounted for on an earlier turn — the resent conversation is not new information.
@@ -176,6 +209,83 @@ export class ExchangeEventDeriver {
     const seq = this.#pending.get(toolUseId)?.seq;
     return seq === undefined || seq < 0 ? undefined : seq;
   }
+}
+
+/**
+ * The question a retriever was asked and the passages it came back with, read out of the prompt.
+ *
+ * The whole point is that this needs no new capture mechanism. A RAG system's retrieval runs
+ * in-process — FAISS is a library call, not an HTTP request — so a proxy cannot see it happen.
+ * What a proxy *can* see is the prompt the retrieval produced, and the passages are in it
+ * verbatim, because putting them there is what retrieval is for. Same standing as `tool.call`,
+ * which is likewise reconstructed from traffic rather than captured at the source.
+ *
+ * Two things are deliberately not here, and their absence is not an oversight. **Scores** and
+ * **top-k** never reach the wire: a prompt carries the passages that survived truncation, in the
+ * order they were pasted, with no numbers attached. Reporting a count as though it were `top-k`
+ * would be a fabricated measurement — `--context-docs` cuts the list before it is joined, so even
+ * "how many were retrieved" cannot be recovered. Getting those needs an instrument inside the
+ * Python process, which is a separate piece of work and honestly out of reach from here.
+ *
+ * Recognition is deliberately narrow. It fires on an explicit `Context:` … `Question:` structure,
+ * which is what a RAG template writes and what an ordinary chat turn does not. A looser rule —
+ * "the message is long and has paragraphs" — would file half the coding-agent traffic in the
+ * world as retrieval evidence, and a timeline that cries retrieval on every long prompt is worth
+ * less than no timeline at all.
+ */
+const CONTEXT_LABEL =
+  /^[ \t]*(?:context|retrieved context|relevant context|retrieved documents|documents|passages|sources)[ \t]*:[ \t]*/im;
+const QUESTION_LABEL = /^[ \t]*(?:question|query|user question)[ \t]*:[ \t]*/im;
+/** How a template separates one passage from the next, most explicit first. */
+const PASSAGE_SEPARATORS = [/\n[ \t]*-{3,}[ \t]*\n/, /\n[ \t]*={3,}[ \t]*\n/, /\n\s*\n/];
+
+export interface RetrievalContext {
+  query: string;
+  passages: string[];
+  /** Identity for de-duplication across resent conversations. */
+  fingerprint: string;
+}
+
+export function retrievalContext(req: CanonicalRequest): RetrievalContext | undefined {
+  const last = req.messages[req.messages.length - 1];
+  if (!last || last.role !== 'user') return undefined;
+  const text = last.content
+    .filter((b): b is Extract<CanonicalContent, { type: 'text' }> => b.type === 'text')
+    .map((b) => b.text)
+    .join('\n');
+  if (text === '') return undefined;
+
+  const context = CONTEXT_LABEL.exec(text);
+  if (context === null) return undefined;
+  const afterContext = context.index + context[0].length;
+  const question = QUESTION_LABEL.exec(text.slice(afterContext));
+  if (question === null) return undefined;
+
+  const body = text.slice(afterContext, afterContext + question.index).trim();
+  if (body === '') return undefined;
+
+  // What follows the question label, up to a blank line — a template's closing instruction
+  // ("Answer concisely:") sits after one, and folding it into the query would make two runs that
+  // asked the same thing look like they asked different things.
+  const rest = text.slice(afterContext + question.index + question[0].length);
+  const query = (rest.split(/\n\s*\n/)[0] ?? '').trim();
+  if (query === '') return undefined;
+
+  const separator = PASSAGE_SEPARATORS.find((re) => re.test(body));
+  // `String.split` with a non-global pattern still splits on every occurrence, so the separator
+  // is used as found rather than recompiled.
+  const passages = (separator === undefined ? [body] : body.split(separator))
+    .map((p) => p.trim())
+    .filter((p) => p !== '');
+  if (passages.length === 0) return undefined;
+
+  return {
+    query,
+    passages,
+    fingerprint: createHash('sha256')
+      .update(`${query} ${passages.join(' ')}`)
+      .digest('hex'),
+  };
 }
 
 function collectToolResults(

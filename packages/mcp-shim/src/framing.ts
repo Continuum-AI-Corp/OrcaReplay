@@ -13,7 +13,22 @@ export interface JsonRpcFrame {
   method?: string;
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
+/**
+ * Whether a parsed line could be a JSON-RPC message at all.
+ *
+ * Exported because the readers of a capture have to apply the same rule as the writer of it, and
+ * the two already drifted apart once: the reader without a shape check died on a `null` line while
+ * the writer was happily recording them.
+ *
+ * A line that is not an object is *kept* by {@link toFrame}, as `{ raw, kind: 'unknown' }` — the
+ * recording holds what the server actually said, which is the point of a recording. What must not
+ * happen is treating it as a message afterwards: it has no `id` to read, and every consumer reads
+ * `id`.
+ *
+ * Arrays go with the rest. A JSON-RPC batch is an array, nothing here has ever produced or answered
+ * one, and calling it a message would only move the same crash further in.
+ */
+export function isJsonRpcMessage(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
@@ -29,7 +44,7 @@ function toFrame(line: string): JsonRpcFrame | undefined {
     // A server that emits a stray log line must not take the agent down with it.
     return { raw, kind: 'unknown' };
   }
-  if (!isPlainObject(message)) return { raw, message, kind: 'unknown' };
+  if (!isJsonRpcMessage(message)) return { raw, message, kind: 'unknown' };
 
   const method = typeof message['method'] === 'string' ? message['method'] : undefined;
   const rawId = message['id'];

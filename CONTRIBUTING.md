@@ -74,7 +74,18 @@ The highest-value contributions, in order:
 - **Replay never silently approximates.** If a match is inexact, emit a `divergence` event. A
   debugger that quietly guesses is worse than no debugger, because you will believe it.
 - **Secrets never reach disk or a TTY.** Redaction lives in the write path. If you add a new sink,
-  it goes through the redactor.
+  it goes through the redactor. If it *cannot* — anything written by the agent's own process, or by
+  a child of it, is on disk before orca sees it — then ask one question first: **does anything read
+  this file after the run?**
+  - No: it is a transport, not part of the trace. Keep it out of the run directory, write an
+    allow-list of the fields something actually reads rather than whatever the payload holds, and
+    delete it once it has been read. `shell-frames.jsonl` and the agent-spans file are both this.
+  - Yes: it stays, and it is unredacted material in a directory people share. Say so in
+    SECURITY.md, and make sure `orca scrub` at least *searches* it — a scrubber that reports
+    "nothing matched" over a file it never opened is the one failure mode SECURITY.md says it must
+    not have. `mcp-frames.jsonl` is this: a replay answers from it, and rewriting a frame changes
+    the key it is looked up by, so a scrub that edited it would make the replay serve a different
+    recorded response rather than fail.
 - **A new field is a new sink.** The redactor works on payloads derived from the incoming request,
   so a value sourced from anywhere else — configuration, a flag, an environment variable — arrives
   having bypassed it. Adding an attribute, ask where its value comes from and whether that source

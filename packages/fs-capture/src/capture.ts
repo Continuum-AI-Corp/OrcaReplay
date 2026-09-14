@@ -8,6 +8,11 @@ import { ShadowIndex } from './shadow.js';
 export interface FsCaptureOptions {
   runDir: string;
   cwd: string;
+  /**
+   * Paths to snapshot even where the workspace's `.gitignore` excludes them, from the adapter's
+   * `artifacts.capture`. See {@link ShadowIndex.snapshot}.
+   */
+  forced?: readonly string[];
 }
 
 export interface TurnSnapshot {
@@ -15,6 +20,12 @@ export interface TurnSnapshot {
   changes: FileChange[];
   /** True when there was no previous tree to diff against, so `changes` is empty by definition. */
   firstSnapshot: boolean;
+  /**
+   * Nested repositories inside a declared artifact path that this snapshot could not hold, named
+   * the first time each is seen. Absent from every ordinary snapshot; see
+   * {@link ShadowIndex.skippedGitlinks} for why they are dropped rather than captured or refused.
+   */
+  skippedGitlinks?: readonly string[];
 }
 
 /**
@@ -39,6 +50,7 @@ export class FsCapture {
     const shadow = await ShadowIndex.create({
       gitDir: join(opts.runDir, 'fs'),
       workTree: opts.cwd,
+      ...(opts.forced === undefined ? {} : { forced: opts.forced }),
     });
     return new FsCapture(opts.runDir, opts.cwd, shadow);
   }
@@ -59,7 +71,13 @@ export class FsCapture {
     const changes = previous === undefined ? [] : await this.shadow.diff(previous, tree);
     this.previousTree = tree;
     this.lastTurn = turn;
-    return { tree, changes, firstSnapshot: previous === undefined };
+    const skipped = this.shadow.skippedGitlinks;
+    return {
+      tree,
+      changes,
+      firstSnapshot: previous === undefined,
+      ...(skipped.length === 0 ? {} : { skippedGitlinks: skipped }),
+    };
   }
 
   currentTree(): string | undefined {
@@ -68,6 +86,16 @@ export class FsCapture {
 
   async restore(tree: string, destDir: string, opts?: MaterializeOptions): Promise<void> {
     await this.shadow.materialize(tree, destDir, opts);
+  }
+
+  /** See {@link ShadowIndex.gitlinks}: what a restore of this tree would refuse, asked up front. */
+  async gitlinks(tree: string): Promise<string[]> {
+    return this.shadow.gitlinks(tree);
+  }
+
+  /** See {@link ShadowIndex.uncaptured}: what the last snapshot left behind under these paths. */
+  async uncaptured(paths: readonly string[]): Promise<string[]> {
+    return this.shadow.uncaptured(paths);
   }
 
   /**

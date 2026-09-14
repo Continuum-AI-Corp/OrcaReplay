@@ -131,7 +131,8 @@ export async function scrubCommand(
    * These are too.
    */
   const blobsRoot = join(runDir, 'blobs');
-  const blobPaths = await walk(blobsRoot);
+  const blobs = await walk(blobsRoot);
+  const blobPaths = blobs.files;
   const moved = new Map<string, MovedBlob>();
   /** Old blob files, deleted only once every new one is in place. */
   const stale = new Set<string>();
@@ -214,9 +215,17 @@ export async function scrubCommand(
     filesChanged += 1;
   }
 
-  const fs = await handleShadowStore(runDir, args.bool('drop-fs'), dryRun, (text) => {
-    return scrubText(text).value !== text;
-  });
+  const matches = (text: string): boolean => scrubText(text).value !== text;
+  const fs = await handleShadowStore(runDir, args.bool('drop-fs'), dryRun, matches);
+  // The shadow store is reported as one number, so it keeps the single predicate. The run
+  // directory is reported file by file, and there the distinction is the whole point: "the
+  // hostname you named is still in this file" and "this file contains a base64 image" cannot
+  // share a sentence, because only one of them is an answer to what was asked.
+  const rest = await scanUnscrubbed(
+    runDir,
+    (text) => literals.some((literal) => text.includes(literal)),
+    (text) => redactor.redactString(text, 'scrub').hits.length > 0,
+  );
 
   const integrity = manifest.integrity;
   if (isRecord(integrity) && (eventsRewritten || moved.size > 0)) {
@@ -293,10 +302,26 @@ export async function scrubCommand(
     for (const path of stale) await rm(path, { force: true });
     out.phase('scrubbed', { run: runDir, removed: removals, files: filesChanged });
   }
-  if (removals === 0 && reverted === 0 && fs.matches === 0 && fs.unreadable === undefined) {
+  if (
+    removals === 0 &&
+    reverted === 0 &&
+    fs.matches === 0 &&
+    fs.unreadable === undefined &&
+    rest.named.length === 0 &&
+    rest.detected.length === 0 &&
+    rest.unreadable.length === 0 &&
+    blobs.unreadable.length === 0
+  ) {
     out.plain('  nothing matched — the trace is unchanged');
   }
   reportShadowStore(out, runDir, fs);
+  reportUnscrubbed(out, runDir, rest);
+  if (blobs.unreadable.length > 0) {
+    out.warn('blobs_not_searched', { path: blobsRoot, entries: blobs.unreadable.length });
+    out.plain('  these blobs could NOT be read, so they were not searched or rewritten:');
+    for (const entry of blobs.unreadable) out.plain(`    ${entry}`);
+    out.plain('  next: close whatever holds them open, or run again with access to them');
+  }
 
   return {
     runDir,
@@ -494,6 +519,126 @@ function manifestAdvice(runDir: string): string {
   );
 }
 
+/**
+ * What a run directory holds that scrub does not rewrite.
+ *
+ * The covered set is the trace as the spec defines it — `manifest.json`, `events.jsonl`,
+ * `redactions.json`, `blobs/` and `fs/` — and a run directory holds more than that: the MCP
+ * frames a replay answers from, the rewritten MCP config, the shim scripts, whatever a later
+ * version adds. Scrub cannot rewrite most of it and must not rewrite some of it, but reporting
+ * `nothing matched` over a file it never opened is the one thing SECURITY.md says a scrubber must
+ * never do. So it is searched and named, like the shadow store.
+ *
+ * Defined from the spec rather than as a list of the sidecars that exist today, so a file added
+ * later is reported by default instead of being silently uncovered until somebody remembers.
+ */
+const SCRUBBED_FILES = new Set(['manifest.json', 'events.jsonl', 'redactions.json']);
+const SCRUBBED_DIRS = new Set(['blobs', 'fs']);
+
+/** What a run directory holds that scrub did not rewrite, and what could not be looked at. */
+interface UnscrubbedStatus {
+  /** Paths, relative to the run directory, holding one of the literals the caller named. */
+  named: string[];
+  /** Paths holding something the standard detectors flag, but none of the caller's literals. */
+  detected: string[];
+  /** Paths that could not be read or listed at all, so nothing above says anything about them. */
+  unreadable: string[];
+}
+
+/**
+ * `mcp-frames.jsonl` is the reason this searches rather than rewrites.
+ *
+ * A replay answers the agent's MCP calls out of the recorded frames, keyed on the request. Rewrite
+ * an inbound frame and the key changes, the exact-match lookup misses, and the mock falls through
+ * to matching on method alone — so the replay is served *a different recorded response* with no
+ * miss reported and no divergence event. A scrubber that silently corrupts a replay is worse than
+ * one that admits it did not look.
+ *
+ * Three outcomes per file, not one. A file holding a literal the caller named is the thing they
+ * asked about; a file the detectors flag is worth saying but is not an answer to their question —
+ * a recorded screenshot trips the entropy sweep on every MCP run, and one sentence serving both
+ * meanings would make the alarming case indistinguishable from the routine one. A file that could
+ * not be opened is neither: it is the case where this function knows nothing, and saying nothing
+ * there is how a scrubber reports a clean run it never searched.
+ *
+ * It does its own walking rather than calling {@link walk}, which answers `[]` for a directory it
+ * cannot list. That is survivable where it is used for blobs — the blob pass fails loudly on the
+ * read that follows — but here it would be the silence this function exists to remove.
+ */
+async function scanUnscrubbed(
+  runDir: string,
+  named: (text: string) => boolean,
+  detected: (text: string) => boolean,
+): Promise<UnscrubbedStatus> {
+  const status: UnscrubbedStatus = { named: [], detected: [], unreadable: [] };
+  const rel = (path: string) => path.slice(runDir.length + 1);
+
+  const visit = async (dir: string): Promise<void> => {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch (err) {
+      status.unreadable.push(`${rel(dir)} (${String(err)})`);
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (
+        dir === runDir &&
+        (entry.isDirectory() ? SCRUBBED_DIRS : SCRUBBED_FILES).has(entry.name)
+      ) {
+        continue;
+      }
+      if (entry.isDirectory()) {
+        await visit(path);
+        continue;
+      }
+      let text;
+      try {
+        text = await readFile(path, 'utf8');
+      } catch (err) {
+        // Every reason this fails is a reason to say so: a file held open by another process, a
+        // path this user cannot read, a file past the runtime's string limit. None of them is
+        // evidence that the file is clean, and treating them as such is what made this report a
+        // clean bill over a file nobody opened.
+        status.unreadable.push(`${rel(path)} (${String(err)})`);
+        continue;
+      }
+      // A binary reaches here too — `readFile(…, 'utf8')` does not fail on one, it replaces what it
+      // cannot decode — and that is wanted: a credential written in ASCII inside a PNG is still a
+      // credential, and the search finds it.
+      if (named(text)) status.named.push(rel(path));
+      else if (detected(text)) status.detected.push(rel(path));
+    }
+  };
+
+  await visit(runDir);
+  return status;
+}
+
+function reportUnscrubbed(out: Output, runDir: string, status: UnscrubbedStatus): void {
+  if (status.named.length > 0) {
+    out.warn('not_scrubbed', { path: runDir, files: status.named.length });
+    out.plain('  these are in the run directory and still hold what you asked to remove; scrub');
+    out.plain('  rewrites the trace, and a replay reads some of these back:');
+    for (const file of status.named) out.plain(`    ${file}`);
+    out.plain('  next: delete the run, or remove the file if nothing replays it');
+  }
+  if (status.detected.length > 0) {
+    out.warn('not_scrubbed_detected', { path: runDir, files: status.detected.length });
+    out.plain('  these hold something the detectors flag — a key shape, or a run of high-entropy');
+    out.plain('  text, which a recorded image or token will trip on its own. Not what you asked');
+    out.plain('  about, and scrub does not rewrite them:');
+    for (const file of status.detected) out.plain(`    ${file}`);
+  }
+  if (status.unreadable.length > 0) {
+    out.warn('not_searched', { path: runDir, files: status.unreadable.length });
+    out.plain('  these could NOT be read, so nothing above says anything about them:');
+    for (const file of status.unreadable) out.plain(`    ${file}`);
+    out.plain('  next: close whatever holds them open, or run again with access to them');
+  }
+}
+
 /** What the shadow filesystem store still holds, and what was done about it. */
 interface ShadowStoreStatus {
   /** Objects still holding material the scrub would have removed. */
@@ -655,13 +800,55 @@ function placeholderFor(literal: string): string {
   return `<redacted:scrub:${hash}>`;
 }
 
-async function walk(dir: string): Promise<string[]> {
-  const out: string[] = [];
-  const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+/**
+ * Every file under `dir`, and every reason one could not be found.
+ *
+ * Both halves were wrong, in opposite directions.
+ *
+ * A directory it could not list answered `[]`. Scrub's only caller is the blob pass, so a blob
+ * directory this user cannot read made scrub scrub fewer blobs and *say a smaller number*, with no
+ * warning and no error: on a run with one unreadable prefix directory,
+ * `orca scrub --match … --dry-run` reported `would_remove=5 would_change=2` where it had reported
+ * `would_remove=6 would_change=3` a moment earlier. Under-reporting is the failure SECURITY.md
+ * names — "a scrubber that under-reports is disappointing; one that hands you a false all-clear is
+ * worse than no scrubber" — and this one did it silently, which is the half that makes it a lie
+ * rather than a limitation.
+ *
+ * An entry it could not `stat` threw instead. `readdir` reports a symlink with
+ * `isDirectory() === false`, so a link whose target is gone reaches an unguarded `stat`, and the
+ * rejection leaves `walk`, leaves the blob pass and ends the command — a scrub that was otherwise
+ * fine, abandoned because one entry went stale. A file removed between the listing and the `stat`
+ * does the same.
+ *
+ * So it reports both rather than swallowing one and throwing on the other, and the caller decides.
+ */
+async function walk(dir: string): Promise<{ files: string[]; unreadable: string[] }> {
+  const files: string[] = [];
+  const unreadable: string[] = [];
+  let entries;
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch (err) {
+    // A directory that is not there held nothing, and nothing was missed by not reading it. A run
+    // with no payload over the spill threshold has no `blobs/` at all, which is most small runs —
+    // reporting those as unsearched put a warning on the ordinary case and took the all-clear with
+    // it. Every other reason is a genuine "could not look".
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { files, unreadable };
+    return { files, unreadable: [`${dir} (${String(err)})`] };
+  }
   for (const entry of entries) {
     const path = join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...(await walk(path)));
-    else if ((await stat(path)).isFile()) out.push(path);
+    if (entry.isDirectory()) {
+      const under = await walk(path);
+      files.push(...under.files);
+      unreadable.push(...under.unreadable);
+      continue;
+    }
+    try {
+      if ((await stat(path)).isFile()) files.push(path);
+    } catch (err) {
+      unreadable.push(`${path} (${String(err)})`);
+    }
   }
-  return out;
+  return { files, unreadable };
 }

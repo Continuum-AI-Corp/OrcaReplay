@@ -26,6 +26,7 @@ export const CONTRACT_CHECKS = [
   'deterministic',
   'no-foreign-paths',
   'harness-versions',
+  'artifacts-resettable',
 ] as const;
 
 export type ContractCheck = (typeof CONTRACT_CHECKS)[number];
@@ -112,6 +113,7 @@ export async function checkAdapterContract(
       ['deterministic', () => deterministic(adapter, base)],
       ['no-foreign-paths', async () => noForeignPaths(primary, base)],
       ['harness-versions', async () => harnessVersions(adapter)],
+      ['artifacts-resettable', async () => artifactsResettable(adapter)],
     ];
 
     for (const [check, run] of runners) {
@@ -392,6 +394,39 @@ function harnessVersions(adapter: Adapter): CheckOutcome {
   return isSemverRange(range)
     ? undefined
     : `harnessVersions '${range}' is not a semver range; it is the field that says which harness versions this adapter was actually verified against, so 'latest' or a date says nothing`;
+}
+
+/**
+ * A path a replay resets has to be one the recording captured.
+ *
+ * `orca replay` clears `artifacts.resetBeforeReplay` and restores the recording's initial tree over
+ * the top, which is what puts those paths back to where the run began. But `orca record` forces
+ * only `artifacts.capture`, so a reset path outside it is a path the recording never held: the
+ * clear happens, the restore writes nothing there, and the harness starts from an empty directory
+ * rather than from the state the recording can answer for. The declaration reads as though it
+ * describes the recording; this is where it has to.
+ *
+ * Prefix-wise rather than exact, because `capture: ['cache']` covers `resetBeforeReplay:
+ * ['cache/**']` — the same directory said twice with different precision.
+ */
+function artifactsResettable(adapter: Adapter): CheckOutcome {
+  const artifacts = adapter.artifacts;
+  const reset = artifacts?.resetBeforeReplay ?? [];
+  if (reset.length === 0) return SKIP;
+  const capture = artifacts?.capture ?? [];
+  const covered = (path: string): boolean =>
+    capture.some((c) => {
+      const bare = c.replace(/[\\/]+$/, '');
+      return path === bare || path.startsWith(`${bare}/`) || path.startsWith(`${bare}\\`);
+    });
+  const orphans = reset.filter((path) => !covered(path));
+  if (orphans.length === 0) return undefined;
+  return (
+    `artifacts.resetBeforeReplay names ${orphans.join(', ')}, which artifacts.capture does not ` +
+    'cover. A replay deletes those paths and restores the recording over the top, and the ' +
+    'recording holds only what capture declared — so they would be reset to empty rather than to ' +
+    'the state the run started from'
+  );
 }
 
 function isStringRecord(value: unknown): value is Record<string, string> {

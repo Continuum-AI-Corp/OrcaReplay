@@ -21,13 +21,19 @@ const UPSTREAM = ['upstream-anthropic', 'upstream-openai'] as const;
 /** Read by `tls-capture.ts`, which record, replay and compare all set up. */
 const TLS = ['tls-intercept', 'tls-hosts'] as const;
 
+/**
+ * How much of a retrieval call's answer to keep. Only the commands that *make* one have it:
+ * replay serves what a recording already holds, and cannot change what was stored then.
+ */
+const RETRIEVAL = ['retrieval-store'] as const;
+
 export const BY_COMMAND: Record<string, readonly string[]> = {
   quickstart: ['dir', 'full'],
   // push/pull reach a gateway the user names. `--force` means two different deliberate overrides:
   // on push, store despite a secret-scan finding; on pull, replace a local run that already exists.
   push: ['gateway', 'force'],
   pull: ['gateway', 'force'],
-  record: ['fs', 'shell', 'mcp-config', ...TLS, ...UPSTREAM],
+  record: ['fs', 'shell', 'agent-spans', 'mcp-config', ...RETRIEVAL, ...TLS, ...UPSTREAM],
   attach: [
     'for',
     'bind',
@@ -36,6 +42,7 @@ export const BY_COMMAND: Record<string, readonly string[]> = {
     'remote-ca-path',
     'replay',
     'loose',
+    ...RETRIEVAL,
     ...TLS,
     ...UPSTREAM,
   ],
@@ -50,6 +57,7 @@ export const BY_COMMAND: Record<string, readonly string[]> = {
     'port',
     'ui',
     'mcp-config',
+    'serialize',
     ...TLS,
     ...UPSTREAM,
     'quiet',

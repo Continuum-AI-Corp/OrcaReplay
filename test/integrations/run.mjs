@@ -13,7 +13,7 @@
  */
 import { execFile, spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { cp, mkdtemp, rm } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -75,6 +75,17 @@ const CHECKS = [
     exchanges: 1,
   },
   {
+    id: 'openai-agents-handoff',
+    what: 'a two-agent handoff and a guardrail, reported by the SDK and captured without editing it',
+    run: ['python', 'agents/openai_agents_handoff.py'],
+    needs: ['agents', 'orcareplay_openai_agents'],
+    exchanges: 2,
+    // The point of the check. These three cannot come from the proxy: a handoff reaches the wire as
+    // an ordinary `transfer_to_*` tool call that never names the agent it came *from*, and a
+    // guardrail need make no request at all.
+    expectEvents: ['agent.start', 'agent.handoff', 'agent.guardrail'],
+  },
+  {
     id: 'crewai',
     what: 'CrewAI itself — which since 1.x no longer routes through LiteLLM at all',
     run: ['python', 'agents/crewai_agent.py'],
@@ -105,6 +116,25 @@ const CHECKS = [
     run: ['python', 'agents/browser_use_agent.py'],
     needs: 'browser_use',
     exchanges: 1,
+  },
+  {
+    id: 'vision-repaint',
+    what: 'an agent with eyes: a screenshot recorded intact, and replayed against a different one',
+    run: ['python', 'agents/vision_agent.py'],
+    needs: 'openai',
+    exchanges: 1,
+    /**
+     * Two assertions the other checks cannot make, because none of them sends an image.
+     *
+     * `imageIntact` reads the trace and looks for the exact base64 the agent printed. The entropy
+     * sweep used to shred it — 47,314 placeholders in one real browser-use run — and every one of
+     * those was recorded in `redactions.json` as though a secret had been removed.
+     *
+     * `repaint` re-runs the agent with a different image, which is the only thing a browser can
+     * do. The match must survive it, and must say that it did.
+     */
+    imageIntact: true,
+    repaint: true,
   },
   {
     id: 'mastra',
@@ -138,17 +168,65 @@ const CHECKS = [
     run: ['node', 'agents/hardcoded_origin.mjs'],
     exchanges: 1,
   },
+  {
+    id: 'rag-index',
+    what: 'a retrieval pipeline: concurrent indexing, an embedding batch, then one answer',
+    run: ['python', 'agents/rag_pipeline.py'],
+    needs: 'openai',
+    // Four indexing calls plus the answer. The four are the ones that used to be served each
+    // other's extraction under a `minor` label, because their only message is a fixed template
+    // and the document rides in the system prompt.
+    exchanges: 5,
+    // Two embedding calls: the batch, and the question. Neither is a model exchange, and before
+    // `RetrievalRule` a strict replay answered 502 at the first of them.
+    retrieval: 2,
+    // What the retriever put in the prompt, derived rather than captured.
+    retrievalContexts: 1,
+  },
+  {
+    id: 'rag-split-origin',
+    what: 'the same pipeline with embeddings at a second origin of the same wire dialect',
+    run: ['python', 'agents/rag_pipeline.py'],
+    needs: 'openai',
+    exchanges: 5,
+    retrieval: 2,
+    // The configuration `--upstream-openai` cannot express: chat at one origin and embeddings at
+    // another, both OpenAI-shaped. Redirected through `/forward/`, the request carries its own
+    // destination and the proxy has nothing to guess at.
+    secondOrigin: 'EMBEDDING_BASE_URL',
+  },
 ];
 
-/** Whether the framework this check speaks for is installed at all. */
-async function installed(module) {
-  if (module === undefined) return true;
-  try {
-    await exec('python', ['-c', `import ${module}`], { timeout: 30_000 });
-    return true;
-  } catch {
-    return false;
+/** Everything a run wrote, events and spilled bodies alike — a large body is not in events.jsonl. */
+async function traceText(runDir) {
+  let text = await readFile(join(runDir, 'events.jsonl'), 'utf8');
+  const blobs = join(runDir, 'blobs');
+  for (const shard of await readdir(blobs).catch(() => [])) {
+    for (const name of await readdir(join(blobs, shard))) {
+      text += await readFile(join(blobs, shard, name), 'utf8');
+    }
   }
+  return text;
+}
+
+/**
+ * Whether the framework this check speaks for is installed at all.
+ *
+ * An array where a check needs more than one thing. `openai-agents-handoff` is the case that made
+ * this necessary: it needs the SDK *and* orca's tracing package, and with only the first it ran and
+ * failed with "no agent.start in the trace" — which reads as a bug in the layer rather than as a
+ * missing install.
+ */
+async function installed(needs) {
+  if (needs === undefined) return undefined;
+  for (const module of Array.isArray(needs) ? needs : [needs]) {
+    try {
+      await exec('python', ['-c', `import ${module}`], { timeout: 30_000 });
+    } catch {
+      return module;
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -186,13 +264,16 @@ function startOrigin() {
 }
 
 /** Run the CLI, returning what it printed whether or not it succeeded. */
-async function orca(argv, cwd) {
+async function orca(argv, cwd, extraEnv = {}) {
   const env = {
     ...process.env,
     NO_COLOR: '1',
     // A key has to be present or the SDKs refuse to build a client; it never leaves the machine.
     OPENAI_API_KEY: 'stub-key',
     ANTHROPIC_API_KEY: 'stub-key',
+    // Reaches the replayed agent too, which is how a check makes the replay behave differently
+    // from the recording — the only way to test a match that is not byte equality.
+    ...extraEnv,
   };
   try {
     const { stdout, stderr } = await exec(process.execPath, [cli, ...argv], {
@@ -208,15 +289,28 @@ async function orca(argv, cwd) {
 }
 
 async function runCheck(check) {
-  if (!(await installed(check.needs))) return { skipped: `${check.needs} is not installed` };
+  const absent = await installed(check.needs);
+  if (absent !== undefined) return { skipped: `${absent} is not installed` };
   if (!installedNode(check.needsNode)) return { skipped: `${check.needsNode} is not installed` };
 
   const dir = await mkdtemp(join(tmpdir(), `orca-int-${check.id}-`));
   const origin = await startOrigin();
+  // A second stub, only for the checks that split their traffic across two origins of the same
+  // wire dialect — the shape `--upstream-openai` cannot express, and the ordinary shape of a
+  // retrieval stack.
+  const second = check.secondOrigin ? await startOrigin() : undefined;
   try {
     await cp(join(here, 'agents'), join(dir, 'agents'), { recursive: true });
 
     const adapter = check.adapter ?? 'generic-openai';
+    // The variable that names the second origin is redirected by name, which is what an adapter
+    // for a known harness does for itself.
+    const splitEnv = second
+      ? {
+          [check.secondOrigin]: `http://127.0.0.1:${second.port}/v1`,
+          ORCA_BASE_URL_VARS: check.secondOrigin,
+        }
+      : {};
     const recorded = await orca(
       [
         'record',
@@ -231,6 +325,7 @@ async function runCheck(check) {
           : check.run),
       ],
       dir,
+      splitEnv,
     );
     if (recorded.code !== 0) throw new Error(`record exited ${recorded.code}`);
     if (!recorded.out.includes('GOT:')) throw new Error('the agent did not produce its answer');
@@ -265,10 +360,71 @@ async function runCheck(check) {
       if (Number(f[2]) !== 0) throw new Error(`${f[2]} divergence(s) in the fork`);
     }
 
+    // What the trace says it captured, before the origins go down.
+    const events = (await readFile(join(dir, '.orca', 'runs', runId, 'events.jsonl'), 'utf8'))
+      .split('\n')
+      .filter((line) => line.trim() !== '')
+      .map((line) => JSON.parse(line));
+
+    // `retrieval.context` exists nowhere on the wire — it is derived from the prompt — so nothing
+    // but the trace can show whether it was derived at all.
+    if (check.retrievalContexts !== undefined) {
+      const found = events.filter((e) => e.type === 'retrieval.context');
+      if (found.length !== check.retrievalContexts) {
+        throw new Error(
+          `${found.length} retrieval.context event(s), wanted ${check.retrievalContexts}`,
+        );
+      }
+      // Derived means derived: the passages have to be the ones that were in the prompt.
+      if (!(found[0].attrs?.passages > 0)) throw new Error('retrieval.context named no passages');
+    }
+
+    // Where the second origin's traffic actually went. This is the assertion the check exists for
+    // — without it, "two origins" is indistinguishable from one, which is precisely the failure
+    // being guarded against: the embeddings were forwarded to the *chat* origin, or to
+    // `api.openai.com`, carrying the embedding provider's credential.
+    if (second) {
+      const retrievalCalls = events.filter(
+        (e) => e.type === 'net.request' && e.attrs?.replay_key !== undefined,
+      );
+      const stray = retrievalCalls.filter((e) => e.attrs?.port !== second.port);
+      if (retrievalCalls.length === 0) throw new Error('no retrieval call reached the trace');
+      if (stray.length > 0) {
+        const where = stray.map((e) => `${e.attrs?.host}:${e.attrs?.port}`).join(', ');
+        throw new Error(
+          `${stray.length} retrieval call(s) went to ${where}, not the second origin`,
+        );
+      }
+      // And the chat half stayed where it was. Both halves, or the check proves only one of them.
+      const chat = events.filter((e) => e.type === 'model.response');
+      if (chat.some((e) => !String(e.attrs?.upstream ?? '').includes(`:${origin.port}`))) {
+        throw new Error('a model exchange left the chat origin');
+      }
+    }
+
+    if (check.imageIntact) {
+      const sent = /^IMAGE: (\S+)$/m.exec(recorded.out)?.[1];
+      if (sent === undefined) throw new Error('the agent did not print the image it sent');
+      const trace = await traceText(join(dir, '.orca', 'runs', runId));
+      // Byte for byte. A near-miss is the failure this exists for: the sweep replaced runs *inside*
+      // the payload, so a substring check on the first hundred characters would have passed.
+      if (!trace.includes(sent))
+        throw new Error('the recorded image is not the image that was sent');
+      const holes = trace.match(/<secret:high_entropy:/g)?.length ?? 0;
+      if (holes > 0)
+        throw new Error(
+          `${holes} entropy placeholder(s) in a trace whose only high-entropy value is a PNG`,
+        );
+    }
+
     // From here the recording is on its own. Anything that reaches out now fails.
     origin.stop();
+    second?.stop();
 
-    const replayed = await orca(['replay', runId, '--in-place'], dir);
+    const replayed = await orca(['replay', runId, '--in-place'], dir, {
+      ...splitEnv,
+      ...(check.repaint ? { ORCA_CHECK_REPAINT: '1' } : {}),
+    });
     if (replayed.code !== 0) throw new Error(`replay exited ${replayed.code}`);
 
     const m = /reused=(\d+)\/(\d+) exact=(\d+) divergences=(\d+) unmatched=(\d+)/.exec(
@@ -281,15 +437,58 @@ async function runCheck(check) {
       throw new Error(`recorded ${total} exchanges, wanted ${check.exchanges}`);
     if (reused !== total)
       throw new Error(`${total - reused} turn(s) could not be served from the recording`);
-    if (exact !== total) throw new Error(`${exact}/${total} matched byte for byte`);
-    if (divergences !== 0) throw new Error(`${divergences} divergence(s)`);
     if (unmatched !== 0) throw new Error(`${unmatched} unmatched`);
 
+    if (check.repaint) {
+      // The opposite assertion to every other check, and deliberately so. A repaint that came back
+      // `exact` would mean the agent had not in fact changed its image, and the check would be
+      // passing without testing anything. A repaint that came back silent would mean the matcher
+      // folded the pixels away without saying so, which the spec forbids.
+      if (exact !== 0)
+        throw new Error(`${exact} turn(s) matched byte for byte despite the repaint`);
+      if (divergences !== total)
+        throw new Error(`${divergences} divergence(s) for ${total} repainted turn(s)`);
+      if (!/pixels are not compared/.test(replayed.out))
+        throw new Error('the replay did not say the pixels had been set aside');
+      return { ok: `${total} exchange, image intact on disk, replayed against a repaint` };
+    }
+
+    if (exact !== total) throw new Error(`${exact}/${total} matched byte for byte`);
+    if (divergences !== 0) throw new Error(`${divergences} divergence(s)`);
+
+    // Event types a check insists on. Counting exchanges says the traffic was captured; it says
+    // nothing about a layer whose whole purpose is what the traffic does not contain.
+    if (check.expectEvents) {
+      const listed = await orca(['events', '--json', runId], dir);
+      const line = listed.out.split(/\r?\n/).find((l) => l.startsWith('['));
+      const events = JSON.parse(line ?? '[]');
+      const seen = new Set(events.map((e) => e.type));
+      const missing = check.expectEvents.filter((t) => !seen.has(t));
+      if (missing.length > 0) throw new Error(`no ${missing.join(', ')} in the trace`);
+    }
+
+    // Retrieval is a separate axis and asserted separately, for the reason it is reported
+    // separately: `exact` is about a matching ladder these calls never climb, and a check that
+    // read only `exact` would call a replay faithful while every embedding in it went unserved.
+    if (check.retrieval !== undefined) {
+      const r = /retrieval=(\d+)\/(\d+)/.exec(replayed.out);
+      if (r === null) throw new Error('replay printed no retrieval count');
+      const [, served, recordedCalls] = r.map(Number);
+      if (recordedCalls !== check.retrieval)
+        throw new Error(`recorded ${recordedCalls} retrieval calls, wanted ${check.retrieval}`);
+      if (served !== recordedCalls)
+        throw new Error(
+          `${recordedCalls - served} retrieval call(s) not served from the recording`,
+        );
+    }
+
+    const retrievalNote = check.retrieval === undefined ? '' : `, ${check.retrieval} retrieval`;
     return {
-      ok: `${total} exchanges, replayed exact with the origin down${check.forks ? ', forked live' : ''}`,
+      ok: `${total} exchanges${retrievalNote}, replayed exact with the origin down${check.forks ? ', forked live' : ''}${check.expectEvents ? `, ${check.expectEvents.length} agent events` : ''}`,
     };
   } finally {
     origin.stop();
+    second?.stop();
     await rm(dir, { recursive: true, force: true });
   }
 }
