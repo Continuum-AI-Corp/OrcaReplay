@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from '
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MCP_RECORD_START, objectsOnLine } from '@orcareplay/mcp-shim';
+import { EARLIEST_TS_MS, LATEST_TS_MS } from '@orcareplay/schema';
 
 /**
  * Getting the OpenAI Agents SDK's own run structure into a trace, without editing the agent.
@@ -389,7 +390,22 @@ export async function readAgentSpans(path: string): Promise<AgentSpan[]> {
   // the transport, and rethrows: the run ends with no `run.end`, `verifyIntegrity` calls it
   // tampered with, and the spans that were never read are gone with the transport.
   for (const parsed of raw.split('\n').flatMap((line) => objectsOnLine(line, SPAN_START))) {
-    spans.push(parsed as unknown as AgentSpan);
+    const span = parsed as unknown as AgentSpan;
+    // And the third rule the other two transports apply, for the same reason and with the same
+    // consequence. The drain builds `new Date(Date.parse(String(span.started_at ?? '')))` and hands
+    // it to `TraceWriter.append` as `occurredAt`; `Date.parse` accepts instants a `date-time`
+    // cannot write down, and `assertEvent` then throws where the trace is being sealed — after
+    // `discardAgentSpanTransport` has already taken the file, so the run ends with no `run.end`
+    // and every span it recorded is gone. Exactly the drain's own expression, so the two cannot
+    // disagree about what parses.
+    //
+    // Absent or unparseable is kept, as in the siblings: the drain drops `occurredAt` for those
+    // and stamps from its own clock, which degrades a field rather than losing a handoff.
+    const startedMs = Date.parse(String(span.started_at ?? ''));
+    if (!Number.isNaN(startedMs) && (startedMs < EARLIEST_TS_MS || startedMs > LATEST_TS_MS)) {
+      continue;
+    }
+    spans.push(span);
   }
   return spans;
 }

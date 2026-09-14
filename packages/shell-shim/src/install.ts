@@ -2,6 +2,7 @@ import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { EARLIEST_TS_MS, LATEST_TS_MS } from '@orcareplay/schema';
 import type { ShellFrame } from './runner.js';
 
 /**
@@ -177,9 +178,6 @@ export async function discardShellFrames(dir: string): Promise<string | undefine
  * as `date-time`, which admits a four-digit year and nothing else. So the bound is the range the
  * format can express, not the range a `number` can hold.
  */
-/** `0000-01-01T00:00:00.000Z` and `9999-12-31T23:59:59.999Z`: what a `date-time` `ts` can express. */
-const EARLIEST_MS = -62_167_219_200_000;
-const LATEST_MS = 253_402_300_799_999;
 
 /**
  * Where every frame on a line begins.
@@ -310,8 +308,8 @@ export async function readShellFrames(framesPath: string): Promise<ShellFrame[]>
       // too, and the command lost both its events to the check meant to save them.
       if (!Number.isFinite(frame.durationMs)) continue;
       const endedMs = startedMs + frame.durationMs;
-      if (startedMs < EARLIEST_MS || startedMs > LATEST_MS) continue;
-      if (endedMs < EARLIEST_MS || endedMs > LATEST_MS) continue;
+      if (startedMs < EARLIEST_TS_MS || startedMs > LATEST_TS_MS) continue;
+      if (endedMs < EARLIEST_TS_MS || endedMs > LATEST_TS_MS) continue;
     }
     frames.push(frame);
   }

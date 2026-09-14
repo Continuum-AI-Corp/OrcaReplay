@@ -3,6 +3,7 @@ import { readFile, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { rewriteMcpConfig } from '@orcareplay/adapters';
+import { EARLIEST_TS_MS, LATEST_TS_MS } from '@orcareplay/schema';
 import type { TraceWriter } from '@orcareplay/core';
 import { isMcpFrameRecord, objectsOnLine, MCP_RECORD_START } from '@orcareplay/mcp-shim';
 import type { McpFrameRecord } from '@orcareplay/mcp-shim';
@@ -124,9 +125,6 @@ export function pointAtMcpConfig(env: Record<string, string>, configPath: string
  * duration (spec §2.1), and a frame stamped at the drain can never interleave with the model turns
  * it actually sat between.
  */
-/** `0000-01-01T00:00:00.000Z` and `9999-12-31T23:59:59.999Z`: what a `date-time` `ts` can express. */
-const EARLIEST_MS = -62_167_219_200_000;
-const LATEST_MS = 253_402_300_799_999;
 
 /**
  * Whether a parsed capture line is something the drain can safely turn into an event.
@@ -151,7 +149,7 @@ function usableFrame(value: unknown): value is McpFrameRecord {
   if (typeof ts !== 'string') return false;
   const at = Date.parse(ts);
   // An unparseable `ts` is fine: the drain already falls back to the run's own turn for it.
-  return Number.isNaN(at) || (at >= EARLIEST_MS && at <= LATEST_MS);
+  return Number.isNaN(at) || (at >= EARLIEST_TS_MS && at <= LATEST_TS_MS);
 }
 
 export async function drainMcpFrames(
