@@ -20,6 +20,12 @@ export interface TurnSnapshot {
   changes: FileChange[];
   /** True when there was no previous tree to diff against, so `changes` is empty by definition. */
   firstSnapshot: boolean;
+  /**
+   * Nested repositories inside a declared artifact path that this snapshot could not hold, named
+   * the first time each is seen. Absent from every ordinary snapshot; see
+   * {@link ShadowIndex.skippedGitlinks} for why they are dropped rather than captured or refused.
+   */
+  skippedGitlinks?: readonly string[];
 }
 
 /**
@@ -65,7 +71,13 @@ export class FsCapture {
     const changes = previous === undefined ? [] : await this.shadow.diff(previous, tree);
     this.previousTree = tree;
     this.lastTurn = turn;
-    return { tree, changes, firstSnapshot: previous === undefined };
+    const skipped = this.shadow.skippedGitlinks;
+    return {
+      tree,
+      changes,
+      firstSnapshot: previous === undefined,
+      ...(skipped.length === 0 ? {} : { skippedGitlinks: skipped }),
+    };
   }
 
   currentTree(): string | undefined {
@@ -74,6 +86,11 @@ export class FsCapture {
 
   async restore(tree: string, destDir: string, opts?: MaterializeOptions): Promise<void> {
     await this.shadow.materialize(tree, destDir, opts);
+  }
+
+  /** See {@link ShadowIndex.gitlinks}: what a restore of this tree would refuse, asked up front. */
+  async gitlinks(tree: string): Promise<string[]> {
+    return this.shadow.gitlinks(tree);
   }
 
   /**

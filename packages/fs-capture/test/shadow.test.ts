@@ -421,6 +421,114 @@ describe('forced capture', () => {
     await rm(join(workTree, 'cache'), { recursive: true, force: true });
     expect(await filesIn(shadow, await shadow.snapshot())).toEqual(['.gitignore']);
   });
+
+  /**
+   * "Did not match any files" is the *only* `git add` failure a snapshot may ignore.
+   *
+   * The per-path retry exists for the pathspec that matches nothing, and it used to swallow every
+   * other failure with it — a file git cannot open because the harness is still writing it, EACCES,
+   * a path too long — because `runGit` resolves rather than throws and no exit code was read. The
+   * snapshot then returned a tree id as if all was well while silently not holding the declared
+   * path, which is worse than failing: on replay the same hole lands in the safety snapshot that
+   * `resetArtifacts` deletes against, so what orca could not copy it deletes anyway.
+   *
+   * A path outside the workspace is the portable way to provoke a non-benign failure (the original
+   * report used a file held open by another process, which only Windows makes easy) — and it is
+   * worth refusing on its own account, since an adapter reaching outside the workspace is not
+   * something to do quietly.
+   */
+  itGit('refuses a declared path git fails on for any other reason', async () => {
+    const root = await makeTempDir();
+    const workTree = join(root, 'ws');
+    await mkdir(workTree, { recursive: true });
+    await write(root, 'outside.txt', 'not yours\n');
+    const shadow = await ShadowIndex.create({
+      gitDir: join(root, 'run', 'fs'),
+      workTree,
+      forced: ['cache', '../outside.txt'],
+    });
+    await write(workTree, '.gitignore', 'cache/\n');
+    await write(workTree, 'cache/mini_faqs.json', '{}\n');
+
+    await expect(shadow.snapshot()).rejects.toThrow(/declared artifact path '\.\.\/outside\.txt'/);
+  });
+
+  /**
+   * A cloned corpus inside a declared path, which `-f` reaches for the first time.
+   *
+   * `git add` records a nested repository as a gitlink whose contents live nowhere in this store,
+   * and `materialize` refuses such a tree rather than checking out an empty directory in its
+   * place. `dataset/` is both one of IndexRAG's declared paths and the ordinary place to clone a
+   * corpus into, so before this the first replay of such a workspace failed at the restore — after
+   * the reset had already deleted the artifacts the restore was supposed to put back.
+   */
+  itGit('drops a nested repository inside a declared path, and names it once', async () => {
+    const root = await makeTempDir();
+    const workTree = join(root, 'ws');
+    await mkdir(workTree, { recursive: true });
+    const shadow = await ShadowIndex.create({
+      gitDir: join(root, 'run', 'fs'),
+      workTree,
+      forced: ['cache', 'dataset'],
+    });
+    await write(workTree, '.gitignore', 'cache/\ndataset/\n');
+    await write(workTree, 'cache/mini_faqs.json', '{}\n');
+    await write(workTree, 'dataset/notes.txt', 'loose file, still captured\n');
+    const corpus = join(workTree, 'dataset', 'hotpotqa');
+    await mkdir(corpus, { recursive: true });
+    await runGit(['init', '-q'], { cwd: corpus });
+    await write(corpus, 'docs.jsonl', '{"id":1}\n');
+    await runGit(['add', '-A'], { cwd: corpus });
+    await runGit(['-c', 'user.email=a@b.c', '-c', 'user.name=a', 'commit', '-qm', 'x'], {
+      cwd: corpus,
+    });
+
+    const tree = await shadow.snapshot();
+    expect(shadow.skippedGitlinks).toEqual(['dataset/hotpotqa']);
+    expect(await shadow.gitlinks(tree)).toEqual([]);
+    // Everything else the adapter declared is still there, and the tree restores.
+    expect(await filesIn(shadow, tree)).toEqual([
+      '.gitignore',
+      'cache/mini_faqs.json',
+      'dataset/notes.txt',
+    ]);
+    await expect(shadow.materialize(tree, join(root, 'dest'))).resolves.toBeUndefined();
+
+    // Named once: a warning repeated on every turn of a long run is a warning nobody reads.
+    await shadow.snapshot();
+    expect(shadow.skippedGitlinks).toEqual([]);
+  });
+
+  /**
+   * The same question `materialize` answers by throwing, asked without writing anything.
+   *
+   * `orca replay` deletes the artifacts *before* the restore that puts them back, which is the
+   * only ordering that leaves them holding what they held when recording began. That makes the
+   * restore's refusal unrecoverable unless it can be seen coming — and recordings made before
+   * gitlinks were dropped are still on disk, which is who this is for.
+   */
+  itGit('reports the gitlinks a restore would refuse, without touching the workspace', async () => {
+    const { root, workTree, shadow } = await fixture();
+    await write(workTree, 'a.txt', 'x\n');
+    const clean = await shadow.snapshot();
+    expect(await shadow.gitlinks(clean)).toEqual([]);
+
+    // Not inside a declared path, so `add -A` stages it exactly as it always has.
+    const inner = join(workTree, 'vendor', 'inner');
+    await mkdir(inner, { recursive: true });
+    await runGit(['init', '-q'], { cwd: inner });
+    await write(inner, 'f.txt', 'inner\n');
+    await runGit(['add', '-A'], { cwd: inner });
+    await runGit(['-c', 'user.email=a@b.c', '-c', 'user.name=a', 'commit', '-qm', 'x'], {
+      cwd: inner,
+    });
+
+    const withLink = await shadow.snapshot();
+    expect(await shadow.gitlinks(withLink)).toEqual(['vendor/inner']);
+    await expect(shadow.materialize(withLink, join(root, 'dest'))).rejects.toThrow(
+      /embedded git repositor/i,
+    );
+  });
 });
 
 describe('readFileAt', () => {
