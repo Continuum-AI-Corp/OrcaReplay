@@ -5,6 +5,7 @@ import type { ParsedArgs } from '../args.js';
 import type { Output } from '../out.js';
 import {
   configPath,
+  fetchPinned,
   gatewayHeaders,
   ORCAROUTER_CONSOLE,
   ORCAROUTER_URL,
@@ -34,7 +35,13 @@ export interface SetupDeps {
 
 /** OpenAI-compatible model listing, which every gateway worth pointing orca at implements. */
 async function probeModels(gateway: string, headers: Record<string, string>): Promise<string[]> {
-  const res = await fetch(`${gateway.replace(/\/+$/, '')}/v1/models`, { headers });
+  // PINNED, like push and pull (orcacode-review). These are the same headers
+  // gatewayHeaders builds — authorization AND x-api-key, both the stored key —
+  // and undici forwards x-api-key across an origin it strips authorization on,
+  // so a gateway answering /v1/models with a 3xx handed the configured key to
+  // whatever the Location named. `orca setup --gateway http://gw --key sk-…`
+  // was enough to reach it.
+  const res = await fetchPinned(`${gateway.replace(/\/+$/, '')}/v1/models`, { headers });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   const body = (await res.json()) as { data?: { id?: unknown }[] };
   return (body.data ?? [])
@@ -72,7 +79,14 @@ export async function setupCommand(
   // OrcaRouter fills the blank, and Enter accepts it. Offered rather than imposed: the whole point
   // of a gateway is that one origin serves several models, and most people asking for that do not
   // have one already — but anyone who does types over it, and `--gateway` skips the question.
+  //
+  // WHICH OF THE TWO HAPPENED IS RECORDED, because push needs to know and the URL alone cannot say
+  // (GatewayConfig.url_source). A default that is right for model traffic — proxying a call the
+  // agent was already making — is not right for a RUN, which carries source, shell output and
+  // workspace snapshots. Without this, `orca setup` + `orca push last` sent all of it to a host
+  // the user never typed, against the README's "Never a default destination".
   if (!url && ask) url = await ask(`Gateway URL (serves the model APIs) [${ORCAROUTER_URL}]: `);
+  const urlSource: NonNullable<OrcaConfig['gateway']>['url_source'] = url ? 'named' : 'default';
   if (!url) url = ORCAROUTER_URL;
 
   // Refused here, before it is stored or echoed. Sanitising on the way out is not enough on its
@@ -95,7 +109,7 @@ export async function setupCommand(
     key = await ask('API key (stored 0600; leave blank for none): ');
   }
 
-  const gateway: OrcaConfig['gateway'] = { url };
+  const gateway: OrcaConfig['gateway'] = { url, url_source: urlSource };
   // Stored key wins if both are given, and only one is ever written: keeping both would leave a
   // credential on disk for someone who explicitly asked not to have one.
   if (key) gateway.api_key = key;

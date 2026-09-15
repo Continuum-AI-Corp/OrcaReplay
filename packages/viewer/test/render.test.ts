@@ -539,3 +539,98 @@ describe('buildTimeline depth', () => {
     expect(rows.map((r) => r.depth)).toEqual([0, 0, 0]);
   });
 });
+
+/**
+ * The three events a proxy cannot produce, and so the three the timeline had nothing to say about.
+ *
+ * Measured on a real recording before this: `agent.handoff` rendered `detail=""` — a blank cell,
+ * both ends gone — because `default:` picks only `message`, `name` or `summary` and a handoff
+ * carries `from` and `to`. `agent.guardrail` was worse than blank: `name` happened to match, so the
+ * row looked populated while dropping `triggered`, which is the only field anyone reads a guardrail
+ * event for.
+ */
+describe('the events a proxy cannot produce', () => {
+  it('puts both ends of a handoff on the row', () => {
+    // The destination is recoverable from the wire — it is the `transfer_to_<agent>` tool's name.
+    // The source never reaches it, so a row showing only the destination would waste the event.
+    const rows = buildTimeline([
+      ev({
+        type: 'agent.handoff',
+        actor: 'harness',
+        attrs: { from: 'Triage', to: 'Billing Specialist' },
+      }),
+    ]);
+    expect(rows[0]!.label).toBe('Triage → Billing Specialist');
+  });
+
+  it('names an end of a handoff even when the writer could not', () => {
+    const rows = buildTimeline([ev({ type: 'agent.handoff', actor: 'harness', attrs: {} })]);
+    // Not a blank arrow: a row that renders as ' → ' says nothing at all.
+    expect(rows[0]!.label).toBe('unknown → unknown');
+  });
+
+  it('says whether a guardrail tripped, not just that one exists', () => {
+    const rows = buildTimeline([
+      ev({
+        type: 'agent.guardrail',
+        actor: 'harness',
+        attrs: { name: 'not_empty', triggered: false },
+      }),
+      ev({ type: 'agent.guardrail', actor: 'harness', attrs: { name: 'no_pii', triggered: true } }),
+    ]);
+    expect(rows[0]!.label).toBe('not_empty');
+    expect(rows[0]!.detail).toBe('passed');
+    expect(rows[0]!.tone).toBe('normal');
+
+    expect(rows[1]!.detail).toBe('tripped');
+    // The timeline is where you go to find what stopped the run.
+    expect(rows[1]!.tone).toBe('attention');
+  });
+
+  it('names the agent and what it was offered', () => {
+    const rows = buildTimeline([
+      ev({
+        type: 'agent.start',
+        actor: 'harness',
+        attrs: { name: 'Triage', handoffs: 'Billing,Refunds', tools: 2, output_type: 'str' },
+      }),
+    ]);
+    expect(rows[0]!.label).toBe('Triage');
+    expect(rows[0]!.detail).toContain('can hand off to Billing,Refunds');
+    expect(rows[0]!.detail).toContain('2 tools');
+    // `str` is what almost every agent leaves it as; naming it on every row would be noise.
+    expect(rows[0]!.meta).toBe('');
+  });
+
+  it('keeps a structured output type, which is the one worth seeing', () => {
+    const rows = buildTimeline([
+      ev({
+        type: 'agent.start',
+        actor: 'harness',
+        attrs: { name: 'Extract', output_type: 'Invoice' },
+      }),
+    ]);
+    expect(rows[0]!.meta).toBe('→ Invoice');
+  });
+
+  it('leaves an agent with nothing offered to it uncluttered', () => {
+    const rows = buildTimeline([
+      ev({
+        type: 'agent.start',
+        actor: 'harness',
+        attrs: { name: 'Billing', handoffs: '', tools: 0 },
+      }),
+    ]);
+    expect(rows[0]!.label).toBe('Billing');
+    // Not "0 tools": a count of nothing is not worth a cell.
+    expect(rows[0]!.detail).toBe('');
+  });
+
+  it('never leaves one of them without a label', () => {
+    // `label` is the one thing worth reading at a glance, and the contract says it is never empty.
+    for (const type of ['agent.start', 'agent.handoff', 'agent.guardrail']) {
+      const rows = buildTimeline([ev({ type, actor: 'harness', attrs: {} })]);
+      expect(rows[0]!.label, type).not.toBe('');
+    }
+  });
+});

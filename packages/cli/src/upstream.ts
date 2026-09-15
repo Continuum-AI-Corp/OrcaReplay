@@ -1,6 +1,6 @@
 import type { ParsedArgs } from './args.js';
 import { unusableOrigin } from '@orcareplay/proxy';
-import { gatewayHeaders, readConfig, resolveUpstream } from './config.js';
+import { gatewayHeaders, readConfig, resolveUpstream, sameOrigin } from './config.js';
 
 /**
  * Where live model calls go, and what they carry.
@@ -72,12 +72,4 @@ export async function upstreamPlan(
     headers: goingToGateway && Object.keys(headers).length > 0 ? headers : undefined,
     headersOrigin: goingToGateway ? config.gateway!.url : undefined,
   };
-}
-
-function sameOrigin(a: string, b: string): boolean {
-  try {
-    return new URL(a).origin === new URL(b).origin;
-  } catch {
-    return a.replace(/\/+$/, '') === b.replace(/\/+$/, '');
-  }
 }

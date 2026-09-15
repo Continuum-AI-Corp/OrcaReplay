@@ -333,6 +333,46 @@ function parts(event: TraceEvent): RowParts {
         detail: from === undefined ? '' : `from seq ${from}`,
       };
     }
+    // The three a proxy cannot produce, and so the three the timeline had nothing to say about.
+    // Without these they fell to `default:`, which picks `message`, `name` or `summary` — so a
+    // handoff rendered as a blank cell, and a guardrail showed its name while dropping the only
+    // field anyone reads it for.
+    case 'agent.start': {
+      // `handoffs` arrives comma-joined and `tools` as a count: `attrs` values are scalars
+      // everywhere in this format, and the writer says so where it joins them.
+      const tools = num(a['tools']);
+      const handoffs = pick(a, 'handoffs');
+      const output = pick(a, 'output_type');
+      return {
+        label: pick(a, 'name'),
+        detail: [
+          handoffs ? `can hand off to ${handoffs}` : undefined,
+          tools === undefined || tools === 0 ? undefined : `${tools} tool${tools === 1 ? '' : 's'}`,
+        ]
+          .filter((part): part is string => part !== undefined)
+          .join(' · '),
+        // Only when it is not the default, which is what almost every agent leaves it as.
+        meta: output && output !== 'str' ? `→ ${output}` : '',
+      };
+    }
+    case 'agent.handoff':
+      // Both ends on the row, in the `fork` row's idiom. The destination is recoverable from the
+      // wire — it is the `transfer_to_<agent>` tool's name — but the source is not, and putting
+      // only the half a rule could have guessed would waste the row.
+      return {
+        label: `${pick(a, 'from') || 'unknown'} → ${pick(a, 'to') || 'unknown'}`,
+        detail: 'handoff',
+      };
+    case 'agent.guardrail': {
+      // Whether it tripped is the whole point of the event: a guardrail that passes can make no
+      // request at all, so this row is the only place in the trace that says it ran.
+      const tripped = a['triggered'] === true;
+      return {
+        label: pick(a, 'name'),
+        detail: tripped ? 'tripped' : 'passed',
+        tone: tripped ? 'attention' : 'normal',
+      };
+    }
     case 'route.decision':
       return { label: pick(a, 'model', 'target'), detail: pick(a, 'reason', 'rule') };
     case 'note':

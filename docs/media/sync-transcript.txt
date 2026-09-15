@@ -1,0 +1,18 @@
+$ orca push run_a2a97f8e0218
+info push.packed run=run_a2a97f8e0218 files=31 bytes=149761
+info push.done run=run_a2a97f8e0218 replaced=false gateway=http://127.0.0.1:45999
+
+$ orca pull run_a2a97f8e0218
+info pull.done run=run_a2a97f8e0218 files=31 dir=/tmp/orcapull4/.orca/runs/run_a2a97f8e0218
+
+$ orca show run_a2a97f8e0218
+run_a2a97f8e0218  claude-code@0.1.2  29 events  exit 0
+
+SEQ  KIND     WHAT                                                                    DETAIL
+0    RUN      run started                                                             claude-code
+1    SNAP     tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904                           0 changed
+2    MODEL    claude-sonnet-5                                                         2 messages
+3    MODEL    claude-sonnet-5                                                         stop: tool_use · 
+4    TOOL     Bash                                                                    {"command":"ls -la
+5    SNAP     tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904                           0 changed
+6    TOOL     Bash                                                                    ok

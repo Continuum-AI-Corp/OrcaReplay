@@ -64,3 +64,38 @@ ones `demo-cli.gif` needs, for the same reason.
 If output format changes, these go stale silently — a GIF has no test. When you change what a
 command prints, re-record the session and regenerate, or delete the asset. A README that shows
 output the tool no longer produces is worse than one with no picture at all.
+
+## sync-transcript.txt — the push/pull card
+
+`docs/sync-card.png` is rendered from `sync-transcript.txt` by
+`scripts/render-sync-card.mjs`. The transcript is a real round trip, captured with `NO_COLOR=1`:
+
+1. `orca record -- node packages/cli/test/fixtures/fake-agent.mjs` in a scratch workspace, which
+   produces a genuine run (`run_e727598b1469`, 10 events, 3 blobs).
+2. `orca push <run>` against a local stub that speaks the gateway's two endpoints —
+   `POST /api/replay/runs` (multipart, field `file`) and
+   `GET /api/replay/runs/:key/export`. The stub keeps the uploaded zip and returns it verbatim on
+   export, so the pull below reads exactly the bytes the push sent.
+3. `orca pull <run>` in a **second, empty** workspace.
+4. `orca show <run>` there, reading the pulled copy rather than the original.
+
+The gateway address in the transcript is therefore a loopback one, and is left as the command
+printed it.
+
+`orca show`'s output is trimmed to 104 columns at capture time — the same rule `render-demo.mjs`
+states for the hero animation, "trimmed for width and nothing else". The DETAIL column is as wide as
+the tool call it reports, and one `Bash` invocation here carries a full JSON argument, which alone
+would have made the card 3050px wide and unreadable in a README. Nothing is reworded, no line is
+dropped, and the trim happens in the capture rather than the renderer so the file on disk is exactly
+what the card shows.
+
+To regenerate after a change to either command's output:
+
+```console
+npm run build
+npm i --no-save playwright-core
+node scripts/render-sync-card.mjs
+```
+
+Re-capture the transcript itself only when the output genuinely changes — the card is evidence, and
+a transcript edited to match a nicer story is worth less than no card at all.

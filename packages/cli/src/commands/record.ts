@@ -203,22 +203,14 @@ async function runRecording(
   const mcpConfigPath = args.str('mcp-config');
   if (mcpConfigPath) {
     mcp = await setupMcpCapture({ sourceConfigPath: mcpConfigPath, runDir: writer.runDir, out });
-    if (mcp) {
-      // The source path, written down because a replay needs it and can get it nowhere else:
-      // `manifest.argv` holds the agent's own arguments, and `--mcp-config` is orca's. Without this
-      // a replay of an MCP-using run either loses the layer or cannot start the harness at all.
-      await writer.append({
-        type: 'note',
-        actor: 'orca',
-        turn: 0,
-        attrs: {
-          rule: 'mcp_instrumented',
-          source: resolve(cwd, mcpConfigPath),
-          servers: mcp.rewritten.join(',') || undefined,
-          skipped: mcp.skipped.join(',') || undefined,
-        },
-      });
-    }
+    // THE NOTE IS WRITTEN AFTER `run.start`, NOT HERE — see the append below it.
+    //
+    // Instrumenting MCP has to happen before the agent launches, because it rewrites the config the
+    // agent is about to read. Recording that it happened does not: orca-trace requires `run.start`
+    // at seq 0, and appending here put a `note` there instead, which the gateway's validator
+    // refuses on push ("run.start at seq 1, must be seq 0"). Nothing local checks the ordering, so
+    // every MCP-instrumented recording looked fine and was unpushable. `tls_intercept` already
+    // separates the two — it sets up here and queues its note for after the start event.
   }
 
   // Shell capture: a PATH shim in front of sh/bash. The protocol layer already reports the command
@@ -389,6 +381,24 @@ async function runRecording(
     turn: 0,
     attrs: { adapter: adapter.id, cwd, proxy: proxy.url },
   });
+
+  // The source path, written down because a replay needs it and can get it nowhere else:
+  // `manifest.argv` holds the agent's own arguments, and `--mcp-config` is orca's. Without this a
+  // replay of an MCP-using run either loses the layer or cannot start the harness at all. Deferred
+  // to here so `run.start` keeps seq 0 — see the note at the setup site.
+  if (mcp && mcpConfigPath) {
+    await writer.append({
+      type: 'note',
+      actor: 'orca',
+      turn: 0,
+      attrs: {
+        rule: 'mcp_instrumented',
+        source: resolve(cwd, mcpConfigPath),
+        servers: mcp.rewritten.join(',') || undefined,
+        skipped: mcp.skipped.join(',') || undefined,
+      },
+    });
+  }
 
   if (fs) await appendSnapshot(fs, writer, out, 0, { initial: true });
 
