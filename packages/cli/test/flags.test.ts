@@ -107,6 +107,52 @@ describe('the allowlist against the source it mirrors', () => {
   });
 
   /**
+   * The one above flattens every command's flags into one set and asks whether SOMEONE allows the
+   * name. That is too weak by exactly one level, and the gap shipped: `push` reads `args.bool('fs')`
+   * and the help text offers `--fs`, but `push`'s own entry listed only `gateway` and `force`.
+   * Because `record` and `replay` both allow `fs`, the union check was satisfied and said nothing.
+   *
+   * What the user got was not a flag quietly ignored — it was `orca push --fs` REFUSED, with an
+   * error naming only the two flags that were listed. The snapshots could therefore not be shipped
+   * by any invocation, so every run on a gateway carried `blob_count: 0`, and forking a pulled run
+   * died inside `git read-tree` on a tree object that had never left the machine.
+   *
+   * The help text is the contract the user reads, so hold the allowlist to it per command rather
+   * than in aggregate. `sync.test.ts` could not catch this: it calls `pushCommand` with args it
+   * built itself, which never passes through the gate this file guards.
+   */
+  it('accepts, for each command, every flag the help text offers it', () => {
+    const help = readFileSync(join(SRC, 'main.ts'), 'utf8').split(/\r?\n/);
+    const documented = new Map<string, Set<string>>();
+    let command: string | undefined;
+    for (const line of help) {
+      // `  orca push [run]   send a run to the gateway` — two spaces, then the command.
+      const heading = line.match(/^ {2}orca ([a-z-]+)\b(.*)$/);
+      if (heading) {
+        command = heading[1]!;
+        const flags = documented.get(command) ?? new Set<string>();
+        // A usage line can carry a flag itself: `orca replay [run] --from N`.
+        for (const m of heading[2]!.matchAll(/--([a-z][a-z0-9-]*)/g)) flags.add(m[1]!);
+        documented.set(command, flags);
+        continue;
+      }
+      // `        --fs   include the workspace snapshots` — eight spaces, under the last heading.
+      const flag = command === undefined ? null : line.match(/^ {8}--([a-z][a-z0-9-]*)/);
+      if (flag) documented.get(command!)!.add(flag[1]!);
+    }
+    // The parse itself has to keep working, or the check passes by finding nothing.
+    expect(documented.get('push'), 'the help block stopped parsing').toBeDefined();
+    expect([...documented.get('push')!].sort()).toContain('fs');
+
+    const refused: string[] = [];
+    for (const [cmd, flags] of documented) {
+      const allowed = new Set<string>([...(BY_COMMAND[cmd] ?? []), ...GLOBAL]);
+      for (const name of flags) if (!allowed.has(name)) refused.push(`orca ${cmd} --${name}`);
+    }
+    expect(refused.sort()).toEqual([]);
+  });
+
+  /**
    * A flag the code reads as a boolean has to be declared valueless, or the parser hands it the
    * next word and the positional it belonged to disappears.
    *

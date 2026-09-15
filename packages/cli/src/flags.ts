@@ -31,7 +31,15 @@ export const BY_COMMAND: Record<string, readonly string[]> = {
   quickstart: ['dir', 'full'],
   // push/pull reach a gateway the user names. `--force` means two different deliberate overrides:
   // on push, store despite a secret-scan finding; on pull, replace a local run that already exists.
-  push: ['gateway', 'force'],
+  //
+  // `--fs` belongs here because `pushCommand` reads it (`args.bool('fs')`) and the help text
+  // offers it. Leaving it out did not make push ignore the flag — it made push REFUSE it, before
+  // the implementation ever saw it, and the refusal named only the two flags that were listed. So
+  // the workspace snapshots could not be shipped by any invocation, every run on the gateway came
+  // back with `blob_count: 0`, and forking a pulled run died in `git read-tree` on a tree object
+  // that had never been sent. This list is meant to be counted from the `args.*` call sites; that
+  // one was missed.
+  push: ['gateway', 'force', 'fs'],
   pull: ['gateway', 'force'],
   record: ['fs', 'shell', 'agent-spans', 'mcp-config', ...RETRIEVAL, ...TLS, ...UPSTREAM],
   attach: [
