@@ -353,3 +353,105 @@ def test_every_record_begins_with_kind(tmp_path):
     assert lines, "the processor wrote nothing, so this proves nothing"
     for line in lines:
         assert line.startswith('{"kind":'), line[:24]
+
+
+# ── saying what was lost ──────────────────────────────────────────────────────────────────────────
+#
+# `_dropped` was counted from the first version and read by nothing, so the two failures `_write`
+# deliberately swallows reached the trace as an absence. Swallowing them is right — a debugger must
+# not be able to fail a run — but staying quiet about them is the shape this project keeps finding:
+# a capture layer reporting success while something it held is gone.
+
+
+def _wedge(processor):
+    """Cost the processor one record, through the guard that really drops them.
+
+    A non-string key is one of the few things that still defeats `json.dumps` here: `default=` is
+    consulted for values and never for keys. Going through `_write` rather than setting the counter
+    means the test fails if the guard stops counting.
+    """
+    processor._write({"kind": "span", (1, 2): "x"})
+
+
+def test_nothing_lost_says_nothing(tmp_path):
+    """The common case, and the one a spurious line would be most annoying in."""
+    out = tmp_path / "spans.jsonl"
+    processor = OrcaTracingProcessor(str(out))
+    processor.on_span_end(FakeSpan(HandoffSpanData({"from_agent": "Triage", "to_agent": "Billing"})))
+
+    processor.shutdown()
+
+    kinds = [r["kind"] for r in read(out)]
+    assert kinds == ["span"], "shutdown invented a loss on a run that had none"
+
+
+def test_a_record_that_could_not_be_written_is_reported_at_shutdown(tmp_path):
+    out = tmp_path / "spans.jsonl"
+    processor = OrcaTracingProcessor(str(out))
+
+    _wedge(processor)
+    assert processor._dropped == 1
+    # Not `read(out) == []`: the file is not there at all, because the only record so far is the
+    # one that could not be written.
+    assert not out.exists(), "the record that could not be serialised was written anyway"
+
+    processor.shutdown()
+
+    assert read(out) == [{"kind": "dropped", "count": 1}]
+
+
+def test_every_loss_is_counted_not_just_the_first(tmp_path):
+    out = tmp_path / "spans.jsonl"
+    processor = OrcaTracingProcessor(str(out))
+    for _ in range(3):
+        _wedge(processor)
+
+    processor.shutdown()
+
+    assert read(out) == [{"kind": "dropped", "count": 3}]
+
+
+def test_shutdown_twice_reports_once(tmp_path):
+    """The SDK may call `shutdown` more than once; a second line reads as a second, separate loss."""
+    out = tmp_path / "spans.jsonl"
+    processor = OrcaTracingProcessor(str(out))
+    _wedge(processor)
+
+    processor.shutdown()
+    processor.shutdown()
+
+    assert read(out) == [{"kind": "dropped", "count": 1}]
+
+
+def test_reporting_a_loss_cannot_itself_end_the_run(tmp_path):
+    """The likeliest reason a record was dropped is that this file cannot be written to."""
+    out = tmp_path / "spans.jsonl"
+    processor = OrcaTracingProcessor(str(out))
+    _wedge(processor)
+    # A directory where the file should be: every append fails, including shutdown's own.
+    (tmp_path / "wedged").mkdir()
+    processor._path = str(tmp_path / "wedged")
+
+    processor.shutdown()  # must return, not raise
+
+
+def test_an_inert_processor_writes_no_dropped_line(tmp_path, monkeypatch):
+    """Nothing is being recorded, so there is no file to report a loss into."""
+    monkeypatch.delenv(SPANS_ENV, raising=False)
+    processor = OrcaTracingProcessor()
+    assert not processor.active
+
+    processor.shutdown()  # must return, not raise
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_the_dropped_record_begins_with_kind_like_every_other(tmp_path):
+    """The CLI anchors its recovery of a torn line on these bytes. This record is not exempt."""
+    out = tmp_path / "spans.jsonl"
+    processor = OrcaTracingProcessor(str(out))
+    _wedge(processor)
+    processor.shutdown()
+
+    with open(out, encoding="utf-8") as f:
+        assert f.read().startswith('{"kind": "dropped"')
