@@ -102,6 +102,11 @@ export async function compareCommand(
         '--model',
         model,
         ...(args.bool('loose') ? ['--loose'] : []),
+        // The same silent-no-op this list already warns about twice. `--no-fs` is what a run
+        // fetched with `orca pull` needs — it has no snapshots to restore from — and dropping it
+        // here would accept the flag and then fork with the restore still on, which is the one
+        // thing it was passed to prevent.
+        ...(args.bool('fs', true) ? [] : ['--no-fs']),
         // Every fork this makes runs a live agent, so interception has to reach them: accepting
         // the flag here and dropping it before the fork is exactly the silent-no-op the flag was
         // fixed for one layer up.

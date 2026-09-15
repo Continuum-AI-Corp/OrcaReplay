@@ -907,11 +907,41 @@ async function replayFork(
   await planTlsCapture(args, forkInterceptedHosts);
 
   const worktree = await mkdtemp(join(tmpdir(), `orca-${checkpoint.seq}-`));
-  if (checkpoint.fsTree) {
+  if (checkpoint.fsTree && args.bool('fs', true)) {
     // Restore from the ORIGINAL run's shadow store: that is the only place the tree object
     // exists. Pointing a fresh store at the tree id fails to unpack it, which is exactly the
     // silent-wrong-state failure the checkpoint machinery is meant to prevent.
     const fs = await FsCapture.start({ runDir: ctx.runDir, cwd: ctx.cwd });
+    // A RUN CAN ARRIVE WITHOUT THE STORE ITS OWN EVENTS POINT AT.
+    //
+    // The line above guards against reading the WRONG store. It cannot guard against there being
+    // no store at all, which is what `orca pull` produces every time: a gateway archive carries
+    // manifest.json, events.jsonl, redactions.json and blobs/, and never `fs/`, so a pulled run's
+    // `fs.snapshot` events name trees whose objects were never sent. `materialize` then died
+    // inside git — "failed to unpack tree object <40 hex>" — which names neither the cause nor
+    // anything to do about it, on the exact path the gateway console tells people to take
+    // (`orca pull <run>` then `orca compare last --from N`).
+    //
+    // Refusing rather than forking anyway: an empty worktree is not the state the checkpoint
+    // describes, and a fork from the wrong state is the failure this machinery exists to prevent.
+    // `--no-fs` is the way to say "the conversation is what I am forking", and it now leaves the
+    // workspace alone on both ends — this restore and the fork's own capture below.
+    if (!(await fs.hasTree(checkpoint.fsTree))) {
+      // The detail goes in the warning, not the thrown message: `orca compare` renders each leg's
+      // error in one cell of a table, so anything past the first line is lost exactly where this
+      // is most likely to be read.
+      out.warn('fork.no_snapshot', {
+        seq: checkpoint.seq,
+        tree: checkpoint.fsTree,
+        store: join(ctx.runDir, 'fs'),
+        why: 'a gateway archive carries manifest, events, redactions and blobs — never the filesystem snapshots, so a pulled run names trees whose objects were never sent',
+        recorded_in: ctx.manifest.cwd,
+        next: `orca ${args.command} ${ctx.manifest.run_id} --from ${checkpoint.seq} --no-fs   # fork the conversation, without the workspace`,
+      });
+      throw new Error(
+        `no workspace snapshot for the checkpoint at seq ${checkpoint.seq} — see fork.no_snapshot; --no-fs forks without it`,
+      );
+    }
     await fs.restore(checkpoint.fsTree, worktree);
   }
 

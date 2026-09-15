@@ -70,7 +70,11 @@ export const BY_COMMAND: Record<string, readonly string[]> = {
     ...UPSTREAM,
     'quiet',
   ],
-  compare: ['from', 'models', 'verify', 'share', 'loose', ...TLS, ...UPSTREAM],
+  // `fs` because compare forks through the same code replay does, and that path reads
+  // `args.bool('fs', true)` twice: once for the checkpoint restore, once for the fork's own
+  // capture. Without the entry `orca compare --no-fs` was refused while `orca replay --no-fs`
+  // worked, for two spellings of the same fork.
+  compare: ['from', 'models', 'verify', 'share', 'loose', 'fs', ...TLS, ...UPSTREAM],
   show: [],
   checkpoints: [],
   events: [],

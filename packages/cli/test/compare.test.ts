@@ -135,6 +135,49 @@ describe('compare', () => {
     expect(new Set(rows.map((r) => r.forkRunId)).size).toBe(3);
   });
 
+  /**
+   * A RUN CAN ARRIVE WITHOUT THE STORE ITS OWN EVENTS POINT AT.
+   *
+   * `orca pull` produces one every time. A gateway archive carries manifest.json, events.jsonl,
+   * redactions.json and blobs/ — never `fs/` — so a pulled run's `fs.snapshot` events name trees
+   * whose objects were never sent. The restore then died inside git with "failed to unpack tree
+   * object <40 hex>", which names neither the cause nor anything to do about it, on the exact path
+   * the gateway console prints under "fork it locally": `orca pull <run>`, then `orca compare`.
+   *
+   * Deleting the store is what the wire leaves behind, so that is what this sets up.
+   */
+  it('says why a run without its snapshots cannot be forked, and forks it anyway with --no-fs', async () => {
+    const first = await record();
+    const events = await (await TraceReader.open(first.runDir)).events();
+    const from = deriveCheckpoints(events)[0]!.seq;
+    await rm(join(first.runDir, 'fs'), { recursive: true, force: true });
+
+    const argv = (extra: string[]) =>
+      parseArgs([
+        'compare', 'last', '--from', String(from),
+        '--models', 'claude-opus-5', '--upstream-anthropic', model.url,
+        ...extra,
+      ]);
+
+    const refused = await compareCommand(argv([]), out, workspace);
+    expect(refused[0]!.verdict).toBe('fail');
+    expect(refused[0]!.error, 'the error should name the missing snapshot').toMatch(
+      /no workspace snapshot/,
+    );
+    // The detail belongs where a reader will find it. `compare` renders each leg's error in one
+    // cell of a table, so the cause and the way out go in the warning rather than the message.
+    const warned = lines.find((l) => l.includes('fork.no_snapshot'));
+    expect(warned, 'fork.no_snapshot was not reported').toBeDefined();
+    expect(warned).toMatch(/--no-fs/);
+
+    // And the way out has to work, or the diagnosis is just a nicer dead end. This also covers the
+    // forwarding: `compare` builds a fresh argv per fork, and a flag accepted here and dropped
+    // there is the silent no-op that list already warns about twice.
+    const forked = await compareCommand(argv(['--no-fs']), out, workspace);
+    expect(forked[0]!.error, `--no-fs should have forked: ${forked[0]!.error}`).toBeUndefined();
+    expect(forked[0]!.verdict).toBe('pass');
+  });
+
   it('creates one child run per model, all descended from the original', async () => {
     const first = await record();
     const events = await (await TraceReader.open(first.runDir)).events();
