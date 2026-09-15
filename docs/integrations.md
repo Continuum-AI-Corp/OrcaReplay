@@ -213,21 +213,40 @@ the [Dockerfile](../Dockerfile) documents for orca's own image.
 ## OpenAI Agents SDK
 
 ```console
+pip install orcareplay-openai-agents
 orca record generic-openai -- python your_agent.py
 ```
 
-The default provider reads `OPENAI_BASE_URL`, and the SDK is built on `AsyncOpenAI` — both covered.
+**The integration is a `TracingProcessor`.** `orcareplay-openai-agents` implements the SDK's own
+[tracing processor interface](https://openai.github.io/openai-agents-python/ref/tracing/processor_interface/)
+— `on_trace_start`, `on_trace_end`, `on_span_start`, `on_span_end`, `shutdown`, `force_flush` — and
+registers through `set_trace_processors()`, or `add_trace_processor()` when you ask to keep the
+SDK's own exporter alongside it. Agent, handoff and guardrail spans become trace events; the model
+exchanges are left to the proxy, which already holds them byte for byte.
+
+It exports **bounded, metadata-only** spans: `name`/`handoffs`/`tools`/`output_type` from an agent,
+`from_agent`/`to_agent` from a handoff, `name`/`triggered` from a guardrail, and nothing else. Raw
+prompts, model output, tool arguments, tool results and span errors are excluded by an allow-list,
+so a field a future SDK version adds stays out without a code change.
+
+Nothing to add to your agent: `orca record` writes a `sitecustomize.py` into the run directory and
+puts it on `PYTHONPATH`, the same trick as the Node adapter's `NODE_OPTIONS` preload, and the
+package is inert unless orca is recording. `--no-agent-spans` turns it off. See
+[`python-openai-agents`](../python-openai-agents/README.md).
+
+The model traffic is recorded separately and needs none of the above — the default provider reads
+`OPENAI_BASE_URL`, and the SDK is built on `AsyncOpenAI`, so both are covered by `generic-openai`
+alone.
 
 **Measured:** the SDK itself — an `Agent` run through `Runner` — recorded and replayed at
-`exact=1 divergences=0`, against openai-agents 0.20.0.
+`exact=1 divergences=0`. Against openai-agents 0.20.0 in CI, and verified on 0.22.2 from a clean
+`pip install` of the published package.
 
 The check runs the SDK on the **Responses API**, which is what it reaches for unless told otherwise:
 the recorded exchange comes back as `dialect=openai-responses path=/v1/responses`. That is worth
 stating because the older check covered `AsyncOpenAI` on chat completions — the client underneath,
 on a wire format the SDK does not use by default. Both are covered now; only one of them is the
 path an Agents SDK user takes.
-
-Two things to decide before a long run:
 
 **Tracing is a second egress.** The SDK ships its own traces to OpenAI. They are not model traffic
 and orca does not capture them; `set_tracing_disabled(True)` turns them off if you would rather the
@@ -250,14 +269,20 @@ from the name, but a user tool may be called that too, and the agent it came **f
 the wire. A passing guardrail is plainer still: it need make no request at all.
 
 ```console
-pip install orcareplay-openai-agents
+$ orca events --json last \
+    | jq -r '.[] | select(.type|startswith("agent.")) | "\(.type) \(.attrs|del(.started_at))"'
+agent.guardrail {"name":"not_empty","triggered":false}
+agent.handoff {"from":"Triage","to":"Billing Specialist"}
+agent.start {"name":"Triage","handoffs":"Billing Specialist","tools":0,"output_type":"str"}
+agent.start {"name":"Billing Specialist","handoffs":"","tools":0,"output_type":"str"}
 ```
 
-Nothing to add to your agent. `orca record` writes a `sitecustomize.py` into the run directory and
-puts it on `PYTHONPATH`, the same trick as the Node adapter's `NODE_OPTIONS` preload, and the
-package is inert unless orca is recording. `--no-agent-spans` turns it off. The model exchanges are
-left to the proxy, which already has them byte for byte. See
-[`python-openai-agents`](../python-openai-agents/README.md).
+Searching the same trace's `model.request` and `model.response` for those strings is what makes the
+table above a measurement rather than a claim: `Triage` and `not_empty` appear nowhere in them,
+while `Billing Specialist` does — it is the destination the `transfer_to_*` tool name carries.
+
+Without the package the run still records, and records less: the same agent, the same stub origin,
+15 events with it and 11 without.
 
 **The websocket transport is not captured.** With the Responses websocket transport enabled the SDK
 reads `OPENAI_WEBSOCKET_BASE_URL`, and orca's proxy speaks HTTP. Under `--tls-intercept` an upgrade
