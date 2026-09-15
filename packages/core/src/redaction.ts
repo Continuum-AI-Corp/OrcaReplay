@@ -9,10 +9,8 @@ import type { RedactionRecord } from '@orcareplay/schema';
 // eating protocol identifiers (`id`, `tool_use_id`, `tool_call_id`); v4 stopped it eating whole
 // PNGs, which is a change in what reaches the trace for exactly the same reason — the same body
 // recorded under v3 and v4 differs, and a reader has to be able to tell that from the content
-// differing. v5 stopped it eating the paths orca records about the run, for the same reason again:
-// a `cwd` or a config `source` that survives under v5 and was a placeholder under v4 is a
-// difference in policy, not in what the run did.
-export const REDACTION_POLICY_VERSION = 5;
+// differing.
+export const REDACTION_POLICY_VERSION = 4;
 
 /** Environment capture is allowlist-only (spec §5). Everything else is denied. */
 export const DEFAULT_ENV_ALLOWLIST = [
@@ -513,30 +511,6 @@ const PROTOCOL_ID_VALUE = /(\\*")(?:id|tool_use_id|tool_call_id)\1\s*:\s*\1[A-Za
 const PROTOCOL_SIGNATURE_VALUE = /(\\*")signature\1\s*:\s*\1[A-Za-z0-9+/=_-]*\1/g;
 
 /**
- * A path orca wrote down about the run, which the run itself has to be able to read back.
- *
- * `mkdtemp` and every CI workspace produce a directory whose last segment is deliberately random,
- * and a random segment on the end of a prefix is exactly what the sweep is looking for. Measured:
- * `orca-int-mcp-stdio-feH8gJ` is 25 characters, over `MIN_ENTROPY_LENGTH`, mixed-case with digits —
- * so roughly one temp directory in seven cleared `entropy > 4.0` and was replaced with
- * `<secret:high_entropy:…>` inside `run.start`'s `cwd` **and** inside the `mcp_instrumented` note's
- * `source`.
- *
- * The second one is not cosmetic. `mcpForReplay` reads that `source` to find the config the
- * recording used; a mangled path fails `stat`, MCP is dropped for the replay, and the agent is
- * launched without `MCP_CONFIG_PATH` — which for a harness that requires it is
- * `KeyError: 'MCP_CONFIG_PATH'` from a recording that was perfectly good. Intermittently, on a
- * seventh of runs, because it depends on what `mkdtemp` picked.
- *
- * Shielded from the *entropy heuristic* only, exactly as the protocol ids above are: the pattern
- * rules run first, so a credential parked in a path is still redacted by shape. And the value has
- * to look like a path — it must contain a separator — so a bare token under a key called `source`
- * is left to the ordinary sweep.
- */
-const RECORDED_PATH_VALUE =
-  /(\\*")(?:cwd|source)\1\s*:\s*\1(?:[^"\\]|\\.)*?[/\\](?:[^"\\]|\\.)*?\1/g;
-
-/**
  * Regions the entropy sweep must not touch: what it already replaced, and what is not a secret.
  *
  * Returned sorted by start, which is what {@link Redactor.redactString}'s sweep relies on to test
@@ -554,9 +528,6 @@ function spansOf(value: string): [number, number][] {
   for (const m of value.matchAll(PLACEHOLDER)) spans.push([m.index, m.index + m[0].length]);
   for (const m of value.matchAll(PROTOCOL_ID_VALUE)) spans.push([m.index, m.index + m[0].length]);
   for (const m of value.matchAll(PROTOCOL_SIGNATURE_VALUE)) {
-    spans.push([m.index, m.index + m[0].length]);
-  }
-  for (const m of value.matchAll(RECORDED_PATH_VALUE)) {
     spans.push([m.index, m.index + m[0].length]);
   }
   for (const span of rasterSpans(value)) spans.push(span);

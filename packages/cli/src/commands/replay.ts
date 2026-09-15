@@ -682,7 +682,14 @@ async function replayRestored(
     const mcp =
       trace === undefined
         ? undefined
-        : await mcpForReplay(args, ctx.events, trace, out, join(ctx.runDir, 'mcp-frames.jsonl'));
+        : await mcpForReplay(
+            args,
+            ctx.events,
+            trace,
+            out,
+            join(ctx.runDir, 'mcp-frames.jsonl'),
+            ctx.runDir,
+          );
 
     const adapter = defaultAdapters().get(ctx.manifest.adapter.id);
     const launch = await adapter.prepare({
@@ -1009,7 +1016,9 @@ async function replayFork(
 
   // A fork continues the run live past the checkpoint, so its MCP traffic is new and belongs in the
   // fork's own trace. Without this the layer simply stopped at the fork point.
-  const mcp = await mcpForReplay(args, ctx.events, writer, out).catch(abandon);
+  const mcp = await mcpForReplay(args, ctx.events, writer, out, undefined, ctx.runDir).catch(
+    abandon,
+  );
 
   const proxy = await createProxy({
     mode: 'hybrid',

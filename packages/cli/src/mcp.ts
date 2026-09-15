@@ -30,6 +30,28 @@ export interface McpCapture {
 export type { McpFrameRecord };
 
 /**
+ * The recording's own copy of the config it was given, kept beside the frames it produced.
+ *
+ * A replay used to find the source by reading the path out of the `mcp_instrumented` note, and a
+ * path is a poor thing to depend on. It has to survive the trace's redactor — `mkdtemp` and every
+ * CI workspace end in a random segment, and `orca-int-mcp-stdio-feH8gJ` is 25 characters of
+ * mixed-case base62, so roughly one in seven cleared the entropy sweep's threshold and reached the
+ * trace as `<secret:high_entropy:…>`. `stat` then failed, MCP was dropped for the replay, and the
+ * agent was launched with no `MCP_CONFIG_PATH`: `KeyError` from a recording that was perfectly
+ * good, intermittently, according to what `mkdtemp` picked.
+ *
+ * It also has to still be there, and mean the same thing. Deleting the config, moving it, or
+ * editing a server's command between the recording and the replay all changed what the replay ran
+ * — for a file the operator has no reason to think of as part of the run.
+ *
+ * Keeping the bytes removes both. Nothing has to survive redaction, because this is not in the
+ * trace; nothing outside the run directory has to still exist. It carries the same material as the
+ * rewritten `mcp-config.json` written next to it — same directory, same `0600` — so it is not a
+ * new kind of thing to protect.
+ */
+export const MCP_SOURCE_FILENAME = 'mcp-source.json';
+
+/**
  * The MCP config a *replay* should instrument: the flag if one was given, else whatever the
  * recording itself used.
  *
@@ -43,6 +65,7 @@ export type { McpFrameRecord };
  * the *rewritten* config in the parent run directory: its servers already point at the parent's
  * frames file, so reusing it would append this replay's traffic to the recording it is replaying.
  */
+
 export function mcpSourceFrom(
   flagValue: string | undefined,
   events: { type: string; attrs?: Record<string, unknown> }[],
@@ -76,7 +99,21 @@ export async function mcpForReplay(
   out: Output,
   /** The recording's own frames, so the servers are answered from rather than started. */
   recordedFrames?: string,
+  /** The recording's directory, which holds its own copy of the config it was given. */
+  recordedRunDir?: string,
 ): Promise<McpCapture | undefined> {
+  // The recording's copy first, and only then the path it wrote down. The copy cannot have been
+  // redacted, moved or edited since; the path can have been all three.
+  const kept = recordedRunDir === undefined ? undefined : join(recordedRunDir, MCP_SOURCE_FILENAME);
+  if (kept !== undefined && (await stat(kept).catch(() => null))) {
+    return setupMcpCapture({
+      sourceConfigPath: kept,
+      runDir: writer.runDir,
+      out,
+      ...(recordedFrames === undefined ? {} : { replayFrames: recordedFrames }),
+    });
+  }
+
   const source = mcpSourceFrom(args.str('mcp-config'), events);
   if (source === undefined) {
     if (usedMcp(events)) {
@@ -205,6 +242,11 @@ export async function setupMcpCapture(opts: {
     opts.out.warn('mcp.config_unreadable', { path: opts.sourceConfigPath });
     return undefined;
   }
+  // Kept before it is parsed, so a later run reads back what this run was handed — byte for byte,
+  // key order and all. See {@link MCP_SOURCE_FILENAME} for why a path was not good enough.
+  await writeFile(join(opts.runDir, MCP_SOURCE_FILENAME), raw, { mode: 0o600 }).catch(
+    () => undefined,
+  );
 
   let parsed: unknown;
   try {
