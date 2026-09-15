@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,7 +9,13 @@ import { TraceReader, deriveCheckpoints, resolveRunSelector } from '@orcareplay/
 import { validateEvent } from '@orcareplay/schema';
 import { parseArgs } from '../src/args.js';
 import { Output } from '../src/out.js';
-import { mcpSourceFrom, setupMcpCapture, usedMcp } from '../src/mcp.js';
+import {
+  MCP_SOURCE_FILENAME,
+  mcpForReplay,
+  mcpSourceFrom,
+  setupMcpCapture,
+  usedMcp,
+} from '../src/mcp.js';
 import { recordCommand } from '../src/commands/record.js';
 import { replayCommand } from '../src/commands/replay.js';
 import { startFakeModel } from './fixtures/fake-model.mjs';
@@ -204,7 +210,13 @@ describe('mcp capture', () => {
       for (const event of mcp) expect(validateEvent(event).valid).toBe(true);
     });
 
-    it('says so rather than silently dropping the layer when the config has moved', async () => {
+    it('replays a moved config, because the recording kept the bytes', async () => {
+      // This used to warn `mcp.source_missing` and drop the layer, and that was the best it could
+      // do: the replay found the config by reading a path out of the trace, so a config the
+      // operator moved was a config the replay could not open. The recording now keeps its own
+      // copy, which also removes the reason the path had to survive redaction — see
+      // `MCP_SOURCE_FILENAME`.
+      //
       // The config lives *outside* the workspace here, because exact replay restores the recorded
       // tree over the working directory — deleting a file that was in the snapshot just brings it
       // back, which is the restore working correctly and would make this test pass for the wrong
@@ -216,6 +228,25 @@ describe('mcp capture', () => {
       await rm(elsewhere, { recursive: true, force: true });
       // Only what the replay said: the recording legitimately printed `mcp.instrumented`, and
       // asserting over both would check the wrong half of the session.
+      lines.length = 0;
+
+      await replayCommand(parseArgs(['replay', 'last']), out, workspace);
+
+      const printed = lines.join('');
+      expect(printed).toContain('mcp.instrumented');
+      expect(printed).not.toContain('mcp.source_missing');
+    });
+
+    it('still says so for a recording made before the copy was kept', async () => {
+      // The warning is not gone, and must not be: a trace recorded by an older orca has only the
+      // path, and a dropped capture layer must never read as a quiet success. Same run as above
+      // with the kept copy removed, which is exactly what those traces look like.
+      const elsewhere = await mkdtemp(join(tmpdir(), 'orca-mcp-cfg-'));
+      const configPath = join(elsewhere, 'mcp.json');
+      await writeFile(configPath, await readFile(join(workspace, 'mcp.json'), 'utf8'));
+      const { runDir } = await record(configPath);
+      await rm(elsewhere, { recursive: true, force: true });
+      await rm(join(runDir, MCP_SOURCE_FILENAME));
       lines.length = 0;
 
       await replayCommand(parseArgs(['replay', 'last']), out, workspace);
@@ -277,6 +308,98 @@ describe('mcpSourceFrom', () => {
     expect(usedMcp([{ type: 'mcp.request' }])).toBe(true);
     expect(usedMcp([{ type: 'mcp.response' }])).toBe(true);
     expect(usedMcp([{ type: 'model.request' }, { type: 'note' }])).toBe(false);
+  });
+});
+
+/**
+ * The recording keeps the config it was given, so a replay does not depend on a path.
+ *
+ * Found by an integration check that failed about one run in seven. The path was read back out of
+ * the `mcp_instrumented` note, and a path in the trace has to survive the redactor:
+ * `orca-int-mcp-stdio-feH8gJ` is 25 characters of mixed-case base62, over `MIN_ENTROPY_LENGTH`, so
+ * often enough the entropy sweep replaced the directory with `<secret:high_entropy:…>`. `stat`
+ * then failed, MCP was dropped for the replay, and the agent was launched with no
+ * `MCP_CONFIG_PATH` — `KeyError` from a recording that was perfectly good.
+ *
+ * Widening the redactor was the wrong fix and was tried first: an exemption keyed on `cwd`/`source`
+ * containing a separator also shelters a URL with a token in its query, a database DSN, and a
+ * `data:image/png;base64,…` forgery — which bypasses the raster validation that
+ * `data-uri-redaction.test.ts` exists to enforce. Measured before it was reverted: a forged image
+ * under `source` survived with **zero** redaction records, so the miss was invisible in
+ * `redactions.json` too. The file's own comment says an exemption granted on the label was a hole
+ * every time it was tried; this was that hole again.
+ */
+describe('the config the recording kept', () => {
+  /** An Output that says nothing, because these assert on files rather than on what was printed. */
+  const quiet = () => new Output({ write: () => {}, isTTY: false });
+
+  let runDir: string;
+  let source: string;
+
+  beforeEach(async () => {
+    runDir = await mkdtemp(join(tmpdir(), 'orca-mcp-src-'));
+    source = join(runDir, 'given.json');
+    await writeFile(source, CONFIG_TEXT);
+  });
+
+  afterEach(async () => {
+    await rm(runDir, { recursive: true, force: true });
+  });
+
+  const CONFIG_TEXT = `{\n  "mcpServers": {\n    "probe": { "command": "python", "args": ["s.py"] }\n  }\n}\n`;
+
+  it('keeps the bytes it was handed, not a re-serialisation of them', async () => {
+    // Byte for byte, so key order and whitespace a later reader might depend on survive.
+    await setupMcpCapture({ sourceConfigPath: source, runDir, out: quiet() });
+    expect(await readFile(join(runDir, MCP_SOURCE_FILENAME), 'utf8')).toBe(CONFIG_TEXT);
+  });
+
+  it('keeps it beside the rewritten one, at the same mode', async () => {
+    await setupMcpCapture({ sourceConfigPath: source, runDir, out: quiet() });
+    const mode = (await stat(join(runDir, MCP_SOURCE_FILENAME))).mode & 0o777;
+    const rewritten = (await stat(join(runDir, 'mcp-config.json'))).mode & 0o777;
+    expect(mode).toBe(rewritten);
+  });
+
+  it('is what a replay reads, even after the original is gone', async () => {
+    await setupMcpCapture({ sourceConfigPath: source, runDir, out: quiet() });
+    // The case the note could never survive: the operator moved or deleted their config, or the
+    // path in the trace was redacted into something `stat` cannot find.
+    await rm(source);
+
+    const replayDir = await mkdtemp(join(tmpdir(), 'orca-mcp-replay-'));
+    try {
+      const capture = await mcpForReplay(
+        { str: () => undefined },
+        [{ type: 'note', attrs: { rule: 'mcp_instrumented', source: '/gone/<secret:x>/c.json' } }],
+        { runDir: replayDir } as never,
+        quiet(),
+        undefined,
+        runDir,
+      );
+      expect(capture, 'the replay found nothing to instrument').toBeTruthy();
+      expect(capture?.rewritten).toEqual(['probe']);
+    } finally {
+      await rm(replayDir, { recursive: true, force: true });
+    }
+  });
+
+  it('still falls back to the note, for a run recorded before this', async () => {
+    const replayDir = await mkdtemp(join(tmpdir(), 'orca-mcp-replay-'));
+    try {
+      const capture = await mcpForReplay(
+        { str: () => undefined },
+        [{ type: 'note', attrs: { rule: 'mcp_instrumented', source } }],
+        { runDir: replayDir } as never,
+        quiet(),
+        undefined,
+        // A directory with no kept copy in it, which is every run recorded before this change.
+        replayDir,
+      );
+      expect(capture?.rewritten).toEqual(['probe']);
+    } finally {
+      await rm(replayDir, { recursive: true, force: true });
+    }
   });
 });
 
