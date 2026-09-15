@@ -154,8 +154,14 @@ describe('compare', () => {
 
     const argv = (extra: string[]) =>
       parseArgs([
-        'compare', 'last', '--from', String(from),
-        '--models', 'claude-opus-5', '--upstream-anthropic', model.url,
+        'compare',
+        'last',
+        '--from',
+        String(from),
+        '--models',
+        'claude-opus-5',
+        '--upstream-anthropic',
+        model.url,
         ...extra,
       ]);
 
