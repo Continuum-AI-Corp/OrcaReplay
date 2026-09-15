@@ -378,6 +378,65 @@ describe('protocol identifiers', () => {
   });
 });
 
+/**
+ * A path orca wrote down about the run, which the run has to be able to read back.
+ *
+ * Found by an integration check that failed roughly one run in seven. `mkdtemp` and every CI
+ * workspace end in a deliberately random segment, and a random segment on the end of a prefix is
+ * what the sweep is looking for: `orca-int-mcp-stdio-feH8gJ` is 25 characters, over
+ * `MIN_ENTROPY_LENGTH`, mixed-case with digits. When the suffix happened to clear the entropy
+ * threshold it was replaced inside `run.start`'s `cwd` and inside the `mcp_instrumented` note's
+ * `source` — and `mcpForReplay` reads that `source` to find the config the recording used, so a
+ * mangled path meant the replay dropped MCP and launched the agent without `MCP_CONFIG_PATH`.
+ */
+describe('paths orca recorded about the run', () => {
+  it('leaves a temp directory alone, however random its last segment looks', () => {
+    // The exact directory the failing check produced.
+    const body = JSON.stringify({
+      cwd: 'C:\\Users\\x\\AppData\\Local\\Temp\\orca-int-mcp-stdio-feH8gJ',
+    });
+    const { value } = fresh().redactString(body);
+    expect(value).toBe(body);
+  });
+
+  it('leaves the config path a replay has to read back', () => {
+    const body = JSON.stringify({
+      rule: 'mcp_instrumented',
+      source: '/tmp/orca-int-mcp-stdio-feH8gJ/mcp.json',
+      servers: 'probe',
+    });
+    const { value } = fresh().redactString(body);
+    expect(JSON.parse(value).source).toBe('/tmp/orca-int-mcp-stdio-feH8gJ/mcp.json');
+  });
+
+  it('still redacts a credential that happens to sit in a path, by shape', () => {
+    // The shield is against the entropy guess only. The pattern rules run first and are untouched.
+    const body = JSON.stringify({ cwd: '/home/ci/sk-live-9f2c14a03b71d4e8a7c5b6d2/work' });
+    const { value } = fresh().redactString(body);
+    expect(value).not.toContain('sk-live-9f2c14a03b71d4e8a7c5b6d2');
+    expect(value).toContain('<secret:sk_api_key:');
+  });
+
+  it('still sweeps a bare token under one of those keys', () => {
+    // No separator, so it is not a path and gets no shelter — which is what keeps the relaxation
+    // from becoming a place to hide a secret by naming its key `source`.
+    const body = JSON.stringify({ source: 'gT7hQ2vX9mK4pL8nR3wZ6yB1' });
+    const { value } = fresh().redactString(body);
+    expect(value).toContain('<secret:high_entropy:');
+  });
+
+  it('shelters the path and still sweeps a secret beside it', () => {
+    const body = JSON.stringify({
+      cwd: '/tmp/orca-int-mcp-stdio-feH8gJ',
+      note: 'gT7hQ2vX9mK4pL8nR3wZ6yB1',
+    });
+    const { value } = fresh().redactString(body);
+    const parsed = JSON.parse(value);
+    expect(parsed.cwd).toBe('/tmp/orca-int-mcp-stdio-feH8gJ');
+    expect(parsed.note).toContain('<secret:high_entropy:');
+  });
+});
+
 describe('protocol identifiers, as they are actually stored', () => {
   /**
    * The response body is a string inside the event's JSON, so the scanner sees escaped quotes. A

@@ -13,7 +13,8 @@
  */
 import { execFile, spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { cp, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -162,6 +163,23 @@ const CHECKS = [
     exchanges: 1,
   },
   {
+    id: 'mcp-stdio',
+    what: 'an MCP server launched from a config, recorded and then taken away',
+    run: ['python', 'agents/mcp_agent.py'],
+    needs: ['mcp', 'openai'],
+    exchanges: 1,
+    /**
+     * The layer with the most code behind it and, until this, no end-to-end check at all:
+     * `mcp-shim` and `cli/src/mcp.ts` are ~1900 lines including their unit tests, and nothing
+     * asserted that a recorded MCP session comes back.
+     *
+     * Named here rather than inferred, because the whole point is what the shim puts in the trace
+     * that the proxy never saw: MCP rides OS pipes, so no base-URL variable reaches it.
+     */
+    mcp: 'agents/mcp_server.py',
+    expectEvents: ['mcp.request', 'mcp.response'],
+  },
+  {
     id: 'fetch-hook',
     what: 'a JS agent with its origin compiled in',
     adapter: 'node',
@@ -284,8 +302,48 @@ async function orca(argv, cwd, extraEnv = {}) {
     });
     return { code: 0, out: `${stdout}${stderr}` };
   } catch (e) {
-    return { code: e.status ?? -1, out: `${e.stdout ?? ''}${e.stderr ?? ''}`, killed: e.killed };
+    // `e.status` is `spawnSync`'s field and is always undefined here, so every failure reported
+    // `-1` whatever the command actually did. `execFile` rejects with `code` — the exit status, or
+    // a string like `ENOENT` when the process never started — plus `signal` when it was killed.
+    //
+    // `e.message` matters as much: a spawn that fails, a timeout, or a `maxBuffer` overrun all
+    // reject with empty `stdout`/`stderr`, so without it the check reports a number and nothing
+    // else, which is the one case where there is no other evidence to go on.
+    const how = e.signal ? `${e.code ?? 'killed'} (${e.signal})` : (e.code ?? 'failed');
+    // Not just the first line. `execFile`'s message is `Command failed: <argv>` followed by the
+    // child's stderr — so taking one line keeps the part naming the command and drops the part
+    // saying what went wrong, which is the whole reason for reading it.
+    // And the *last* lines rather than the first. A Python traceback puts the exception at the
+    // bottom and the frames above it; keeping the top means keeping `asyncio.run(main())` and
+    // dropping the sentence that says what went wrong.
+    const why = String(e.message ?? '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== '' && !line.startsWith('Command failed:'))
+      .slice(-4)
+      .join(' | ');
+    return {
+      code: typeof e.code === 'number' ? e.code : -1,
+      out: `${e.stdout ?? ''}${e.stderr ?? ''}`,
+      killed: e.killed === true,
+      how: why === '' ? String(how) : `${how}: ${why}`,
+    };
   }
+}
+
+/**
+ * The last few lines of what a command said, for an error message that has to survive CI.
+ *
+ * `exited -1` on its own is unactionable: nobody can re-run the failing check by hand from a log,
+ * and -1 is what `orca()` reports when the process was killed rather than exiting — a timeout, or
+ * a signal — which is exactly the case where the output is the only evidence there is.
+ */
+function tail(out, lines = 6) {
+  const kept = String(out ?? '')
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== '')
+    .slice(-lines);
+  return kept.length === 0 ? '' : `\n      ${kept.join('\n      ')}`;
 }
 
 async function runCheck(check) {
@@ -303,6 +361,22 @@ async function runCheck(check) {
     await cp(join(here, 'agents'), join(dir, 'agents'), { recursive: true });
 
     const adapter = check.adapter ?? 'generic-openai';
+    /**
+     * The config an MCP-config-reading agent loads, and the file orca rewrites.
+     *
+     * `orca record --mcp-config` swaps each server's command for `<node> <shim> --out <frames> --
+     * <original>`, so the shim sits in the pipe and tees every JSON-RPC frame both ways. Written
+     * here pointing at the copy under `dir`, because the copy is what gets taken away before the
+     * replay.
+     */
+    const mcpServer = check.mcp ? join(dir, ...check.mcp.split('/')) : undefined;
+    const mcpConfig = join(dir, 'mcp.json');
+    if (mcpServer !== undefined) {
+      await writeFile(
+        mcpConfig,
+        `${JSON.stringify({ mcpServers: { probe: { command: check.run[0], args: [mcpServer] } } }, null, 2)}\n`,
+      );
+    }
     // The variable that names the second origin is redirected by name, which is what an adapter
     // for a known harness does for itself.
     const splitEnv = second
@@ -319,6 +393,7 @@ async function runCheck(check) {
         `http://127.0.0.1:${origin.port}`,
         '--upstream-anthropic',
         `http://127.0.0.1:${origin.port}`,
+        ...(mcpServer === undefined ? [] : ['--mcp-config', mcpConfig]),
         '--',
         ...(check.fromRepo
           ? [check.run[0], join(here, ...check.run.slice(1).join('/').split('/'))]
@@ -327,7 +402,10 @@ async function runCheck(check) {
       dir,
       splitEnv,
     );
-    if (recorded.code !== 0) throw new Error(`record exited ${recorded.code}`);
+    if (recorded.code !== 0)
+      throw new Error(
+        `record exited ${recorded.code} — ${recorded.how ?? 'no detail'}${tail(recorded.out)}`,
+      );
     if (!recorded.out.includes('GOT:')) throw new Error('the agent did not produce its answer');
     if (/capture\.empty/.test(recorded.out)) {
       throw new Error('recorded nothing — the traffic never reached the proxy');
@@ -353,7 +431,10 @@ async function runCheck(check) {
         ],
         dir,
       );
-      if (forked.code !== 0) throw new Error(`fork exited ${forked.code}`);
+      if (forked.code !== 0)
+        throw new Error(
+          `fork exited ${forked.code} — ${forked.how ?? 'no detail'}${tail(forked.out)}`,
+        );
       const f = /fork\.done .*live=(\d+) divergences=(\d+)/.exec(forked.out);
       if (f === null) throw new Error('fork printed no verdict');
       if (Number(f[1]) === 0) throw new Error('the fork answered nothing live');
@@ -420,12 +501,19 @@ async function runCheck(check) {
     // From here the recording is on its own. Anything that reaches out now fails.
     origin.stop();
     second?.stop();
+    // The MCP server is an origin too, and taking it away is the only way to tell a replay that
+    // served the recorded frames from one that quietly started the server again. Renamed rather
+    // than deleted so a failure says what is missing.
+    if (mcpServer !== undefined) await rename(mcpServer, `${mcpServer}.gone`);
 
     const replayed = await orca(['replay', runId, '--in-place'], dir, {
       ...splitEnv,
       ...(check.repaint ? { ORCA_CHECK_REPAINT: '1' } : {}),
     });
-    if (replayed.code !== 0) throw new Error(`replay exited ${replayed.code}`);
+    if (replayed.code !== 0)
+      throw new Error(
+        `replay exited ${replayed.code} — ${replayed.how ?? 'no detail'}${tail(replayed.out)}`,
+      );
 
     const m = /reused=(\d+)\/(\d+) exact=(\d+) divergences=(\d+) unmatched=(\d+)/.exec(
       replayed.out,
@@ -456,6 +544,26 @@ async function runCheck(check) {
     if (exact !== total) throw new Error(`${exact}/${total} matched byte for byte`);
     if (divergences !== 0) throw new Error(`${divergences} divergence(s)`);
 
+    /**
+     * The claim this check exists for: the session reproduces with the server gone.
+     *
+     * Asserted on the agent's own output rather than on a count, because a count cannot tell a
+     * served frame from a wrong one. The tool answers from its argument, so `VALUE-FOR-alpha` is
+     * the recorded reply to the recorded call and nothing else.
+     *
+     * `replay.done`'s numbers say nothing here — they count model exchanges — so a broken MCP
+     * replay would leave that line reading exactly as it does on success.
+     */
+    if (mcpServer !== undefined) {
+      if (existsSync(mcpServer)) throw new Error('the MCP server was still there for the replay');
+      if (!/MCP: VALUE-FOR-alpha/.test(replayed.out)) {
+        throw new Error('the MCP session did not reproduce from the recording');
+      }
+      if (!/mode=replay/.test(replayed.out)) {
+        throw new Error('the shim was not put in replay mode');
+      }
+    }
+
     // Event types a check insists on. Counting exchanges says the traffic was captured; it says
     // nothing about a layer whose whole purpose is what the traffic does not contain.
     if (check.expectEvents) {
@@ -484,7 +592,7 @@ async function runCheck(check) {
 
     const retrievalNote = check.retrieval === undefined ? '' : `, ${check.retrieval} retrieval`;
     return {
-      ok: `${total} exchanges${retrievalNote}, replayed exact with the origin down${check.forks ? ', forked live' : ''}${check.expectEvents ? `, ${check.expectEvents.length} agent events` : ''}`,
+      ok: `${total} exchanges${retrievalNote}, replayed exact with the origin down${check.forks ? ', forked live' : ''}${check.expectEvents ? `, ${check.expectEvents.length} of ${check.expectEvents[0].split('.')[0]}.* asserted` : ''}`,
     };
   } finally {
     origin.stop();
