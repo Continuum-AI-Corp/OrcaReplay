@@ -431,35 +431,42 @@ describe('push and pull', () => {
    * where pull is the command that CREATES the store. So the fixture below starts from an empty
    * workspace rather than seeding a run first.
    */
-  it('creates the store with the modes and the .gitignore the rest of the CLI uses', async () => {
-    reply = {
-      status: 200,
-      body: Buffer.from(
-        await writeArchive([
-          {
-            name: `${runId}/manifest.json`,
-            bytes: new TextEncoder().encode(`{"run_id":"${runId}"}\n`),
-          },
-          { name: `${runId}/events.jsonl`, bytes: new TextEncoder().encode('{"seq":1}\n') },
-          { name: `${runId}/blobs/ab/abcdef`, bytes: new Uint8Array([9, 8, 7]) },
-        ]),
-      ),
-    };
+  // POSIX MODES ONLY. Windows chmod moves the read-only bit and nothing else, so the 0700/0600
+  // this asserts cannot be made there at all. Skipped rather than loosened, for the reason
+  // config.test.ts gives at the identical assertion: a test that accepted 0o666 would stop
+  // noticing if the guarantee were lost on Linux too.
+  it.skipIf(process.platform === 'win32')(
+    'creates the store with the modes and the .gitignore the rest of the CLI uses',
+    async () => {
+      reply = {
+        status: 200,
+        body: Buffer.from(
+          await writeArchive([
+            {
+              name: `${runId}/manifest.json`,
+              bytes: new TextEncoder().encode(`{"run_id":"${runId}"}\n`),
+            },
+            { name: `${runId}/events.jsonl`, bytes: new TextEncoder().encode('{"seq":1}\n') },
+            { name: `${runId}/blobs/ab/abcdef`, bytes: new Uint8Array([9, 8, 7]) },
+          ]),
+        ),
+      };
 
-    await pullCommand(parseArgs(['pull', runId]), out, workspace, env());
+      await pullCommand(parseArgs(['pull', runId]), out, workspace, env());
 
-    // The store excludes itself from git — the accident ensureRunsDir exists to prevent.
-    expect(await readFile(join(workspace, '.orca', '.gitignore'), 'utf8')).toContain('*');
+      // The store excludes itself from git — the accident ensureRunsDir exists to prevent.
+      expect(await readFile(join(workspace, '.orca', '.gitignore'), 'utf8')).toContain('*');
 
-    // SECURITY.md: "Trace files and blobs are written mode 0600, run directories 0700."
-    const mode = async (...p: string[]): Promise<number> =>
-      (await stat(join(workspace, '.orca', 'runs', ...p))).mode & 0o777;
-    expect(await mode(runId)).toBe(0o700);
-    expect(await mode(runId, 'blobs')).toBe(0o700);
-    expect(await mode(runId, 'manifest.json')).toBe(0o600);
-    expect(await mode(runId, 'events.jsonl')).toBe(0o600);
-    expect(await mode(runId, 'blobs', 'ab', 'abcdef')).toBe(0o600);
-  });
+      // SECURITY.md: "Trace files and blobs are written mode 0600, run directories 0700."
+      const mode = async (...p: string[]): Promise<number> =>
+        (await stat(join(workspace, '.orca', 'runs', ...p))).mode & 0o777;
+      expect(await mode(runId)).toBe(0o700);
+      expect(await mode(runId, 'blobs')).toBe(0o700);
+      expect(await mode(runId, 'manifest.json')).toBe(0o600);
+      expect(await mode(runId, 'events.jsonl')).toBe(0o600);
+      expect(await mode(runId, 'blobs', 'ab', 'abcdef')).toBe(0o600);
+    },
+  );
   /**
    * `.replaced` IS THE EVIDENCE THAT `.incoming` IS COMPLETE — and the first version of the
    * recovery did not know that.

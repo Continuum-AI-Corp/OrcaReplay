@@ -110,6 +110,30 @@ describe('mcp capture', () => {
     for (const event of mcp) expect(event.attrs?.server, JSON.stringify(event.attrs)).toBe('echo');
   });
 
+  /**
+   * `run.start` AT SEQ 0, EVEN WITH MCP INSTRUMENTED.
+   *
+   * orca-trace v0 opens with `run.start`, and the gateway enforces it on arrival: a push whose
+   * first event is anything else is refused with `run.start at seq 1, must be seq 0`. Instrumenting
+   * MCP has to happen before the agent launches, because it rewrites the config the agent is about
+   * to read, and the `mcp_instrumented` note used to be appended right there — ahead of the start
+   * event. Nothing local reads the ordering, so every MCP-instrumented recording looked correct
+   * here and was rejected by the only component that checks.
+   */
+  it('opens with run.start, with the mcp_instrumented note after it', async () => {
+    const result = await record();
+    const events = await (await TraceReader.open(result.runDir)).events();
+
+    expect(events[0]?.type, `first event was ${events[0]?.type}`).toBe('run.start');
+    expect(events[0]?.seq).toBe(0);
+
+    // The note still has to be written: a replay reads the config path back out of it and can get
+    // it nowhere else. Moving it must not drop it.
+    const note = events.find((e) => e.type === 'note' && e.attrs?.['rule'] === 'mcp_instrumented');
+    expect(note, 'mcp_instrumented note is missing').toBeDefined();
+    expect(note?.seq ?? 0).toBeGreaterThan(0);
+  });
+
   it('timestamps a call when it happened, not when the frames file was drained', async () => {
     const result = await record();
     const events = await (await TraceReader.open(result.runDir)).events();
