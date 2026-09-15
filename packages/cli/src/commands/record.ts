@@ -596,10 +596,18 @@ async function runRecording(
     // Before the events, because both say the trace is about to be less complete than it looks,
     // and the operator reads the top of the drain rather than the bottom.
     const losses = agentSpanLosses(spans);
-    for (const pkg of losses.unavailable) {
+    // The second gate, and the one the bootstrap cannot apply: it decides before the agent's first
+    // statement, so all it can know is what is installed. A run that made no model call did not
+    // lose an agent structure — there was no agent turn to belong to one — and `capture.empty`
+    // below already says the larger thing that went wrong. Naming a missing package on top of it
+    // would send someone to `pip install` over a problem that is not about a package.
+    for (const pkg of modelExchanges > 0 ? losses.unavailable : []) {
       out.warn('agent_spans.unavailable', {
         package: pkg,
-        cause: 'the agent imported the OpenAI Agents SDK, but this package is not installed',
+        // What was actually checked, rather than what it suggests. The bootstrap asks
+        // `importlib.metadata` which distribution provides the SDK; it does not — and before the
+        // agent runs, cannot — know whether the agent went on to import it.
+        cause: 'openai-agents is installed and this package is not',
         effect: 'the run is recorded, without the agents, handoffs and guardrails only it can see',
         next: `pip install ${pkg}`,
       });

@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -203,12 +205,31 @@ describe('the bootstrap orca writes', () => {
     expect(SITECUSTOMIZE_SOURCE).toContain('if not path:');
   });
 
-  it('asks whether the SDK is there rather than importing it', () => {
-    // Measured on this machine: `find_spec("agents")` is 0.5ms and `import agents` is 1973ms, on an
-    // interpreter that starts in 50ms. This file is in front of every Python process the recording
-    // starts, so the import would put two seconds on each of them — including `python --version`.
-    expect(SITECUSTOMIZE_SOURCE).toContain('importlib.util.find_spec("agents")');
-    expect(SITECUSTOMIZE_SOURCE).not.toMatch(/^\s*import agents\b/m);
+  /**
+   * Asserted against the code rather than the file, because the file explains itself.
+   *
+   * `_unavailable`'s docstring names `find_spec("agents")` and `find_spec("agents.tracing")` —
+   * they are the two options it rejects, with the measurements that rejected them. A test that
+   * searched the whole source would trip on the prose describing what the code does not do.
+   */
+  const bootstrapCode = (): string =>
+    SITECUSTOMIZE_SOURCE.replace(/"""[\s\S]*?"""/g, '').replace(/^\s*#.*$/gm, '');
+
+  it('asks which distribution provides the SDK, not what a module is called', () => {
+    // `find_spec("agents")` is true of anything called that, and `agents.py` is an ordinary name
+    // for an ordinary module — measured, a project with its own two-line `agents.py` and
+    // `PYTHONPATH=.` on a machine with no SDK was told to install the adapter.
+    expect(bootstrapCode()).toContain('importlib.metadata.distribution("openai-agents")');
+    expect(bootstrapCode()).not.toContain('find_spec');
+  });
+
+  it('never imports what it is asking about', () => {
+    // Measured on this machine: `distribution("openai-agents")` 2.3ms, `import agents` 1973ms —
+    // and `find_spec("agents.tracing")`, the specific-looking middle option, **2066ms**, because
+    // resolving a submodule spec imports the parent. This file is in front of every Python process
+    // the recording starts, on an interpreter that starts in 50ms.
+    expect(bootstrapCode()).not.toMatch(/^\s*import agents\b/m);
+    expect(bootstrapCode()).not.toContain('agents.tracing');
   });
 
   it('lets no failure of its own reach the agent', () => {
@@ -407,55 +428,138 @@ describe('the spans transport is not in the trace', () => {
   }, 60_000);
 
   /**
-   * The failure this whole warning exists for, end to end.
+   * The failure this whole warning exists for, end to end — and the false positive it must not be.
    *
-   * Before it, uninstalling the package and recording the same agent moved the trace from 15 events
-   * to 11 and printed nothing at all — the same `recorded … exit=0`, byte for byte. Every other
-   * capture layer says when it did not fire: MCP warns `mcp.not_wired`, the proxy warns
-   * `capture.empty`. This one was the exception, and it is the *default* state until the package is
-   * on PyPI.
+   * Before the warning, uninstalling the package and recording the same agent moved the trace from
+   * 15 events to 11 and printed nothing at all: the same `recorded … exit=0`, byte for byte. Every
+   * other capture layer says when it did not fire — MCP warns `mcp.not_wired`, the proxy warns
+   * `capture.empty`. This one was the exception.
+   *
+   * The first version of the warning then fired on the wrong runs, which is the other half of what
+   * these pin. Both fixtures go on PYTHONPATH rather than beside the agent, and that is a property
+   * of the mechanism rather than a convenience: measured, `sitecustomize` runs while `sys.path[0]`
+   * is still the PYTHONPATH entry — the script's own directory is not added until afterwards.
    */
-  it('says so when the SDK is there and the adapter is not', async () => {
-    // Both shadows go on PYTHONPATH rather than next to the agent, and the difference is a real
-    // property of the mechanism rather than a detail of the test: measured, `sitecustomize` runs
-    // while `sys.path[0]` is still the PYTHONPATH entry — the script's own directory is not added
-    // until afterwards. So the bootstrap's `find_spec` sees PYTHONPATH and site-packages, and
-    // nothing the agent happens to sit beside.
-    //
-    // Going through PYTHONPATH also makes this say the same thing on a machine that has the real
-    // package installed — every machine running this suite does — and on one that does not, and it
-    // exercises orca keeping the caller's PYTHONPATH rather than replacing it.
-    const shadows = join(workspace, 'shadows');
-    await mkdir(shadows, { recursive: true });
-    await writeFile(
-      join(shadows, 'orcareplay_openai_agents.py'),
-      'raise ImportError("stands in for a machine without the package")\n',
-    );
-    await writeFile(join(shadows, 'agents.py'), '# stands in for the SDK\n');
-    const agent = join(workspace, 'agent.py');
-    await writeFile(agent, 'print("GOT: done")\n');
 
+  /** An origin that answers one chat completion, so a run has a model exchange to have lost. */
+  async function stubOrigin(): Promise<{ url: string; stop: () => void }> {
+    const body = JSON.stringify({
+      id: 'chatcmpl-stub',
+      object: 'chat.completion',
+      created: 1756000000,
+      model: 'stub-1',
+      choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    });
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(body);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    return { url: `http://127.0.0.1:${port}`, stop: () => server.close() };
+  }
+
+  /** Record `agentSource`, with `shadows` on PYTHONPATH and a stub origin behind the proxy. */
+  async function recordWith(
+    agentSource: string,
+    shadows: string,
+  ): Promise<{ said: string[]; exitCode: number; exchanges: number }> {
+    const agent = join(workspace, 'agent.py');
+    await writeFile(agent, agentSource);
+    const origin = await stubOrigin();
     const said: string[] = [];
     const out = new Output({ write: (line: string) => said.push(line), isTTY: false });
     const previousPath = process.env['PYTHONPATH'];
+    const previousKey = process.env['OPENAI_API_KEY'];
     process.env['PYTHONPATH'] = shadows;
-    let result;
+    process.env['OPENAI_API_KEY'] = 'stub-key';
     try {
-      result = await recordCommand(
-        parseArgs(['record', 'generic-openai', '--', 'python', agent]),
+      const result = await recordCommand(
+        parseArgs([
+          'record',
+          'generic-openai',
+          '--upstream-openai',
+          origin.url,
+          '--',
+          'python',
+          agent,
+        ]),
         out,
         workspace,
       );
+      return { said, exitCode: result.exitCode, exchanges: result.modelExchanges };
     } finally {
+      origin.stop();
       if (previousPath === undefined) delete process.env['PYTHONPATH'];
       else process.env['PYTHONPATH'] = previousPath;
+      if (previousKey === undefined) delete process.env['OPENAI_API_KEY'];
+      else process.env['OPENAI_API_KEY'] = previousKey;
     }
+  }
 
+  /** The adapter absent, deterministically, whatever this machine has installed. */
+  async function withoutAdapter(dir: string): Promise<string> {
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, 'orcareplay_openai_agents.py'),
+      'raise ImportError("stands in for a machine without the package")\n',
+    );
+    return dir;
+  }
+
+  /** Distribution metadata, because that is the question the bootstrap asks. */
+  async function withSdkInstalled(dir: string): Promise<void> {
+    const distInfo = join(dir, 'openai_agents-0.20.0.dist-info');
+    await mkdir(distInfo, { recursive: true });
+    await writeFile(
+      join(distInfo, 'METADATA'),
+      'Metadata-Version: 2.1\nName: openai-agents\nVersion: 0.20.0\n',
+    );
+  }
+
+  /** One model call through whatever base URL orca set, needing no SDK installed. */
+  const CALLS_A_MODEL = [
+    'import json, os, urllib.request',
+    'base = os.environ["OPENAI_BASE_URL"].rstrip("/")',
+    'req = urllib.request.Request(',
+    '    base + "/chat/completions",',
+    '    data=json.dumps({"model": "stub-1", "messages": [{"role": "user", "content": "hi"}]}).encode(),',
+    '    headers={"content-type": "application/json", "authorization": "Bearer stub-key"},',
+    ')',
+    'urllib.request.urlopen(req, timeout=30).read()',
+    'print("GOT: done")',
+  ].join('\n');
+
+  it('says so when the SDK is installed and the adapter is not', async () => {
+    const shadows = await withoutAdapter(join(workspace, 'shadows'));
+    await withSdkInstalled(shadows);
+
+    const { said, exitCode, exchanges } = await recordWith(CALLS_A_MODEL, shadows);
+
+    expect(exchanges, 'the run made no model call, so the gate below is untested').toBeGreaterThan(
+      0,
+    );
     const warning = said.find((line) => line.includes('agent_spans.unavailable'));
     expect(warning, `no warning in:\n${said.join('')}`).toBeTruthy();
     expect(warning).toContain('orcareplay-openai-agents');
     // A warning, not a failure: the run is still a run, and the model traffic in it is still real.
-    expect(result.exitCode).toBe(0);
+    expect(exitCode).toBe(0);
+  }, 60_000);
+
+  it('stays quiet for a run that made no model call', async () => {
+    // The bootstrap decides before the agent's first statement, so all it can know is what is
+    // installed. A run with no model exchange lost no agent structure, and `capture.empty` already
+    // says the larger thing that went wrong — naming a package on top of that sends someone to
+    // `pip install` over a problem that is not about a package.
+    const shadows = await withoutAdapter(join(workspace, 'shadows'));
+    await withSdkInstalled(shadows);
+
+    const { said, exchanges } = await recordWith('print("GOT: done")\n', shadows);
+
+    expect(exchanges).toBe(0);
+    expect(said.join('')).not.toContain('agent_spans.unavailable');
+    expect(said.join(''), 'the larger problem should still be reported').toContain('capture.empty');
   }, 60_000);
 });
 
@@ -563,41 +667,67 @@ describe('the bootstrap reports a missing adapter', () => {
   });
 
   /**
-   * Run the real bootstrap against a path that has the SDK on it, or does not.
+   * Run the real bootstrap against a path arranged three ways.
    *
    * `-S` and the explicit import, rather than letting `site` load it: this interpreter is whichever
    * one is on PATH, and the one the repository uses to run its checks has both the SDK **and** the
-   * adapter installed — so neither half of this could be arranged by adding files. `-S` drops
-   * site-packages and keeps `PYTHONPATH`, which makes both halves a property of what this test
-   * writes rather than of the machine it runs on. What `-S` gives up is `site` importing
-   * `sitecustomize` by itself, and that is asserted separately, by the end-to-end record above.
+   * adapter installed — so none of the three could be arranged by adding files. `-S` drops
+   * site-packages and keeps `PYTHONPATH`, which makes all three a property of what this test writes
+   * rather than of the machine it runs on. It is also the only level at which the lookalike case
+   * below can be asserted at all: on a machine with the SDK installed, a run that warns is warning
+   * correctly, whatever else is on the path. What `-S` gives up is `site` importing `sitecustomize`
+   * by itself, and that is covered by the end-to-end record above.
    */
-  async function runBootstrap(withSdk: boolean): Promise<string> {
-    const boot = join(bootRoot, withSdk ? 'with' : 'without');
-    const spans = join(bootRoot, `${withSdk ? 'with' : 'without'}.jsonl`);
+  type Fixture = 'sdk-installed' | 'lookalike-module' | 'nothing';
+
+  async function runBootstrap(fixture: Fixture): Promise<string> {
+    const boot = join(bootRoot, fixture);
+    const spans = join(bootRoot, `${fixture}.jsonl`);
     await mkdir(boot, { recursive: true });
     await writeFile(join(boot, 'sitecustomize.py'), SITECUSTOMIZE_SOURCE);
-    // A module, not an installed SDK: the bootstrap asks `find_spec`, which answers about the path.
-    if (withSdk) await writeFile(join(boot, 'agents.py'), '# stands in for the SDK\n');
+    if (fixture === 'sdk-installed') {
+      // Distribution metadata, because that is the question the bootstrap asks.
+      const distInfo = join(boot, 'openai_agents-0.20.0.dist-info');
+      await mkdir(distInfo, { recursive: true });
+      await writeFile(
+        join(distInfo, 'METADATA'),
+        'Metadata-Version: 2.1\nName: openai-agents\nVersion: 0.20.0\n',
+      );
+    }
+    if (fixture === 'lookalike-module') {
+      // Somebody's own module. Importable, called `agents`, and nothing to do with OpenAI.
+      await writeFile(join(boot, 'agents.py'), 'ROSTER = ["alice", "bob"]\n');
+    }
     await exec(python as string, ['-S', '-c', 'import sitecustomize'], {
       env: { ...process.env, PYTHONPATH: boot, ORCA_AGENT_SPANS: spans },
     });
     return await readFile(spans, 'utf8').catch(() => '');
   }
 
-  it('says so when the SDK is there and the adapter is not', async () => {
+  it('says so when the SDK is installed and the adapter is not', async () => {
     if (!python) return; // no interpreter here; CI has one and asserts this
-    const written = await runBootstrap(true);
+    const written = await runBootstrap('sdk-installed');
     expect(agentSpanLosses(readSpansText(written)).unavailable).toEqual([
       'orcareplay-openai-agents',
     ]);
+  });
+
+  it('stays quiet for a project whose own module happens to be called agents', async () => {
+    if (!python) return;
+    // The false positive the first version had, and the reason the question is about the
+    // distribution rather than the import name. `find_spec("agents")` is true of anything called
+    // that; `agents.py` is an ordinary name for an ordinary module. Reproduced before the fix: a
+    // project with a two-line `agents.py` and `PYTHONPATH=.`, on a machine with no SDK at all, was
+    // told "the agent imported the OpenAI Agents SDK" and sent to `pip install` a package it has
+    // no use for.
+    expect(await runBootstrap('lookalike-module')).toBe('');
   });
 
   it('stays quiet for a Python process that is not an agent', async () => {
     if (!python) return;
     // `orca record` exports ORCA_AGENT_SPANS to every child. Without this guard a run whose agent
     // shells out to `python` would warn about a package that process had no use for.
-    expect(await runBootstrap(false)).toBe('');
+    expect(await runBootstrap('nothing')).toBe('');
   });
 
   it('never fails the process it is loaded into', async () => {

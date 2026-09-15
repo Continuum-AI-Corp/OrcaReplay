@@ -77,27 +77,31 @@ def _chain():
 
 
 def _unavailable(path):
-    """Record that the SDK is here and the adapter is not — the one case worth reporting.
+    """Record that the SDK is installed and the adapter is not — the one case worth reporting.
 
     Without this, a run whose agent uses the Agents SDK on a machine without
     \`orcareplay-openai-agents\` is byte-identical to one that never used the SDK: the same
-    \`recorded ... exit=0\`, no agent events, no warning. That is the whole structural layer off,
-    silently, and today it is the *default* — the package is not on PyPI yet.
+    \`recorded ... exit=0\`, no agent events, no warning.
 
-    \`find_spec\` rather than \`import\`: measured at 0.5ms against 1973ms for \`import agents\`, on
-    an interpreter that starts in 50ms. This runs in every Python process the recording starts, so
-    importing here would put two seconds on each of them.
+    **The question is about the distribution, not the import name.** \`find_spec("agents")\` is
+    true of *anything* called that, and \`agents.py\` is an ordinary name for an ordinary module —
+    measured: a project with its own two-line \`agents.py\` and \`PYTHONPATH=.\`, on a machine with
+    no SDK at all, was told "the agent imported the OpenAI Agents SDK" and sent to install a
+    package it has no use for. \`importlib.metadata\` asks which *distribution* provides it, which
+    is what "the SDK is installed" actually means.
 
-    Gated on the SDK being present because the ungated version is noise: \`orca record\` puts this
-    bootstrap in front of every \`python\` in the run, and most of them are not agents.
+    Metadata rather than importing, and rather than probing a submodule. Measured on this machine:
+    \`distribution("openai-agents")\` 2.3ms, \`find_spec("agents")\` 0.5ms but wrong, and
+    \`find_spec("agents.tracing")\` **2066ms** — resolving a submodule spec imports the parent, so
+    the specific-looking option costs the same as the import it was avoiding. This bootstrap runs
+    in every Python process the recording starts, on an interpreter that starts in 50ms.
     """
-    import importlib.util
+    import importlib.metadata
 
     try:
-        if importlib.util.find_spec("agents") is None:
-            return
+        importlib.metadata.distribution("openai-agents")
     except Exception:
-        return
+        return  # not installed, or metadata unreadable: either way, nothing was lost here
     try:
         with open(path, "a", encoding="utf-8") as f:
             f.write('{"kind": "unavailable", "package": "orcareplay-openai-agents"}\\n')
