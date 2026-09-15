@@ -10,6 +10,44 @@ orca record generic-openai -- python your_agent.py
 
 That is the whole setup. There is nothing to add to your agent.
 
+## The SDK interface it implements
+
+`OrcaTracingProcessor` implements the Agents SDK's own
+[`TracingProcessor`](https://openai.github.io/openai-agents-python/ref/tracing/processor_interface/)
+surface — `on_trace_start`, `on_trace_end`, `on_span_start`, `on_span_end`, `shutdown`,
+`force_flush` — and is registered through the SDK's public entry points:
+
+```python
+from agents import add_trace_processor, set_trace_processors
+from orcareplay_openai_agents import OrcaTracingProcessor
+
+set_trace_processors([OrcaTracingProcessor()])   # what install() does
+add_trace_processor(OrcaTracingProcessor())      # to keep the SDK's exporter as well
+```
+
+`install()` does the first of those for you and returns whether it registered anything. It is a
+duck-typed implementation rather than a subclass on purpose: subclassing would mean importing
+`agents` to define the class, and the package has to stay importable — and inert — on a machine
+that has no SDK.
+
+**Bounded, metadata-only spans.** Three span types are exported, and from each only the fields the
+reader consumes:
+
+| span | fields kept |
+|---|---|
+| `AgentSpanData` | `name`, `handoffs`, `tools`, `output_type` |
+| `HandoffSpanData` | `from_agent`, `to_agent` |
+| `GuardrailSpanData` | `name`, `triggered` |
+
+Everything else is dropped, including every other span type. **Raw prompts, model output, tool
+arguments, tool results, `mcp_data`, `CustomSpanData` payloads, transcription and speech audio, and
+`SpanError.data` never reach the file** — an allow-list rather than a deny-list, so a field the SDK
+adds in a future version is excluded without a code change. `ResponseSpanData` and
+`GenerationSpanData` are dropped for a second reason as well: orca's proxy already holds those
+exchanges byte for byte.
+
+Verified against openai-agents **0.20.0** and **0.22.2**.
+
 ## What it adds, and what it does not
 
 orca records model traffic at a proxy, and every claim it makes about capture comes from there. This
@@ -81,12 +119,17 @@ orca record generic-openai --no-agent-spans -- python your_agent.py
 Three event types, added to the trace format in schema `0.2.0`:
 
 ```console
-$ orca events --json last | jq -r '.[] | select(.type|startswith("agent.")) | "\(.type) \(.attrs)"'
+$ orca events --json last \
+    | jq -r '.[] | select(.type|startswith("agent.")) | "\(.type) \(.attrs|del(.started_at))"'
 agent.guardrail {"name":"not_empty","triggered":false}
-agent.start     {"name":"Triage","handoffs":"Billing Specialist","tools":0}
-agent.handoff   {"from":"Triage","to":"Billing Specialist"}
-agent.start     {"name":"Billing Specialist","handoffs":"","tools":0}
+agent.handoff {"from":"Triage","to":"Billing Specialist"}
+agent.start {"name":"Triage","handoffs":"Billing Specialist","tools":0,"output_type":"str"}
+agent.start {"name":"Billing Specialist","handoffs":"","tools":0,"output_type":"str"}
 ```
+
+Each also carries `started_at`, dropped here to keep the line short — it is the SDK's own timestamp
+for the span, which is what files a handoff between the turns it happened between rather than at the
+end of the run.
 
 They are written with `actor: "harness"` rather than `actor: "orca"`, because orca did not observe
 them — it was told.
