@@ -44,10 +44,13 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
         --ui                     open the timeline when it finishes
   orca replay [run] --from N     fork from a checkpoint and continue live
         --model <id>             continue on a different model
+        --no-fs                  fork the conversation only — do not restore the workspace,
+                                 which a run fetched with orca pull does not carry
   orca compare [run] --models a,b,c
                                  fork the same checkpoint onto several models
         --from N                 checkpoint to fork every model from
         --verify <cmd>           run this in each fork; its exit code is the verdict
+        --no-fs                  as for replay: fork without the workspace
         --share [f.svg|png]      write the verdict table as a shareable card
   orca show [run]                the timeline, in the terminal
   orca checkpoints [run]         where you can fork from

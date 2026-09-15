@@ -138,7 +138,10 @@ describe('the allowlist against the source it mirrors', () => {
       }
       // `        --fs   include the workspace snapshots` — eight spaces, under the last heading.
       const flag = command === undefined ? null : line.match(/^ {8}--([a-z][a-z0-9-]*)/);
-      if (flag) documented.get(command!)!.add(flag[1]!);
+      // `--no-fs` is `fs` as far as the allowlist is concerned: the parser strips the prefix and
+      // records the base name (see `args.ts`), so checking the spelling the help shows would fail
+      // on every negated flag the help documents.
+      if (flag) documented.get(command!)!.add(flag[1]!.replace(/^no-/, ''));
     }
     // The parse itself has to keep working, or the check passes by finding nothing.
     expect(documented.get('push'), 'the help block stopped parsing').toBeDefined();

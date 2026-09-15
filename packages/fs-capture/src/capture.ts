@@ -93,6 +93,11 @@ export class FsCapture {
     return this.shadow.gitlinks(tree);
   }
 
+  /** See {@link ShadowIndex.has}: whether a restore of this tree has anything to restore from. */
+  async hasTree(tree: string): Promise<boolean> {
+    return this.shadow.has(tree);
+  }
+
   /** See {@link ShadowIndex.uncaptured}: what the last snapshot left behind under these paths. */
   async uncaptured(paths: readonly string[]): Promise<string[]> {
     return this.shadow.uncaptured(paths);
