@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -190,6 +191,102 @@ describe('push and pull', () => {
     expect(await readFile(join(dir, 'manifest.json'), 'utf8')).toBe(`{"run_id":"${runId}"}\n`);
     expect(await readFile(join(dir, 'events.jsonl'), 'utf8')).toBe('{"seq":1}\n');
     expect(Array.from(await readFile(join(dir, 'blobs', 'ab', 'abcdef')))).toEqual([9, 8, 7]);
+  });
+
+  /**
+   * SPEC §6: "Readers SHOULD verify it and MUST report, not repair, a mismatch."
+   *
+   * `verifyIntegrity` existed and `replay` called it. `pull` wrote a run to disk and said
+   * `pull.done` — so a download that arrived altered landed silently, and the first sign of it
+   * would be a replay that diverged for a reason nobody could name.
+   *
+   * The zip's own CRC catches a flipped bit. It cannot catch an archive that is internally
+   * consistent and whose events simply are not the ones the manifest attests to, which is the
+   * shape a storage bug on the far side takes.
+   */
+  it('refuses a pulled run whose events do not match its own integrity root', async () => {
+    const events = '{"seq":0,"type":"run.start"}\n';
+    const zip = await writeArchive([
+      {
+        name: `${runId}/manifest.json`,
+        bytes: new TextEncoder().encode(
+          `{"run_id":"${runId}","integrity":{"events_sha256":"${'0'.repeat(64)}"}}\n`,
+        ),
+      },
+      { name: `${runId}/events.jsonl`, bytes: new TextEncoder().encode(events) },
+    ]);
+    reply = { status: 200, body: Buffer.from(zip), headers: { 'content-type': 'application/zip' } };
+
+    await expect(pullCommand(parseArgs(['pull', runId]), out, workspace, env())).rejects.toThrow(
+      /does not match the integrity root/,
+    );
+    // Verified on the staged copy, before the swap: what fails must not be what replaced a run.
+    await expect(
+      readFile(join(workspace, '.orca', 'runs', runId, 'events.jsonl')),
+    ).rejects.toThrow();
+  });
+
+  /**
+   * The same run, pushed and pulled back, does not come back as the same bytes: a gateway is free
+   * to store the trace however it likes, and this one re-serialises it — Go's `encoding/json`
+   * sorts a map's keys and escapes `<`, `>` and `&` — then recomputes the root over its own bytes.
+   *
+   * Both copies are internally consistent and neither is wrong. What is lost is the one thing a
+   * digest is for: it no longer tells you the two are the same run. So say which it is, rather
+   * than leaving someone to discover two roots and not know whether to worry.
+   */
+  it('says when the copy that arrived is the same events under a different serialisation', async () => {
+    await seedRun();
+    const local = join(workspace, '.orca', 'runs', runId);
+    // `seedRun` writes no integrity root, and without one on both sides there is nothing to
+    // compare — which is the case this test exists to cover, so give the local copy a real one.
+    // Written in the order a writer writes them, which is NOT alphabetical — `seq,ts,type` already
+    // is, so sorting it would be a no-op and the test would pass by testing nothing.
+    const localEvents = '{"type":"run.start","seq":0,"actor":"orca"}\n';
+    await writeFile(join(local, 'events.jsonl'), localEvents);
+    await writeFile(
+      join(local, 'manifest.json'),
+      `${JSON.stringify({
+        run_id: runId,
+        schema_version: '0.1.0',
+        integrity: {
+          events_sha256: createHash('sha256').update(localEvents).digest('hex'),
+          blob_count: 0,
+        },
+      })}\n`,
+    );
+    // What the gateway stores: the same events, keys sorted, root recomputed over those bytes.
+    const resorted = localEvents
+      .split('\n')
+      .filter((l) => l.trim().length > 0)
+      .map((l) => {
+        const o = JSON.parse(l) as Record<string, unknown>;
+        const sorted: Record<string, unknown> = {};
+        for (const k of Object.keys(o).sort()) sorted[k] = o[k];
+        return JSON.stringify(sorted);
+      })
+      .join('\n');
+    const bytes = new TextEncoder().encode(`${resorted}\n`);
+    const root = createHash('sha256').update(bytes).digest('hex');
+    const zip = await writeArchive([
+      {
+        name: `${runId}/manifest.json`,
+        bytes: new TextEncoder().encode(
+          `{"run_id":"${runId}","integrity":{"events_sha256":"${root}"}}\n`,
+        ),
+      },
+      { name: `${runId}/events.jsonl`, bytes },
+    ]);
+    reply = { status: 200, body: Buffer.from(zip), headers: { 'content-type': 'application/zip' } };
+
+    await pullCommand(parseArgs(['pull', runId, '--force']), out, workspace, env());
+
+    const said = logs.find((e) => e.event === 'pull.reserialized');
+    expect(
+      said,
+      'a re-serialised copy should be reported, not passed off as identical',
+    ).toBeDefined();
+    expect(logs.some((e) => e.event === 'pull.differs')).toBe(false);
   });
 
   /**

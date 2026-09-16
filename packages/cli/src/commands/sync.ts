@@ -12,7 +12,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
-import { ensureRunsDir, resolveRunSelector, runDirFor } from '@orcareplay/core';
+import { ensureRunsDir, resolveRunSelector, runDirFor, sha256File } from '@orcareplay/core';
 import type { ParsedArgs } from '../args.js';
 import type { Output } from '../out.js';
 import {
@@ -953,6 +953,117 @@ export async function swapStagedRun(
  *
  * `orca pull <run> [--gateway URL] [--force]`
  */
+
+/**
+ * Spec §6: "Readers SHOULD verify it and MUST report, not repair, a mismatch."
+ *
+ * Nothing did. `verifyIntegrity` existed and `replay` called it; `pull` wrote a run to disk and
+ * said `pull.done`. A truncated download, a proxy that re-encoded the stream, an archive that lost
+ * a byte — every one of them landed silently, and the first sign would be a replay that diverged
+ * for no reason anyone could name.
+ *
+ * Checked on the STAGED copy, before the swap: a corrupt transfer must not be what replaces a local
+ * run that `--force` merely asked to update.
+ */
+async function verifyStaged(staging: string, runId: string): Promise<string | undefined> {
+  const manifestPath = join(staging, 'manifest.json');
+  const raw = await readFile(manifestPath, 'utf8').catch(() => undefined);
+  if (raw === undefined) return undefined;
+  let expected: unknown;
+  try {
+    expected = (JSON.parse(raw) as { integrity?: { events_sha256?: unknown } }).integrity
+      ?.events_sha256;
+  } catch {
+    throw new Error(`${runId}: the manifest that arrived is not JSON`);
+  }
+  // An unsealed run — one whose recorder crashed — has no root to check. Spec §6 describes the
+  // root as written "at the moment the run ended", so its absence is a state, not a failure.
+  if (typeof expected !== 'string') return undefined;
+  const actual = await sha256File(join(staging, 'events.jsonl'));
+  if (actual !== expected) {
+    throw new Error(
+      `${runId}: events.jsonl does not match the integrity root in its own manifest ` +
+        `(manifest ${expected.slice(0, 16)}…, file ${actual.slice(0, 16)}…). Nothing was ` +
+        'replaced. Pull it again; if it persists the copy on the gateway is damaged.',
+    );
+  }
+  return actual;
+}
+
+/** Every event, in order, with keys sorted deeply — so two serialisations of one run compare equal. */
+async function canonicalEvents(dir: string): Promise<string | undefined> {
+  const raw = await readFile(join(dir, 'events.jsonl'), 'utf8').catch(() => undefined);
+  if (raw === undefined) return undefined;
+  const sortDeep = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(sortDeep);
+    if (v === null || typeof v !== 'object') return v;
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(v as Record<string, unknown>).sort())
+      out[k] = sortDeep((v as Record<string, unknown>)[k]);
+    return out;
+  };
+  try {
+    return raw
+      .split('\n')
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.stringify(sortDeep(JSON.parse(l))))
+      .join('\n');
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether the copy that arrived is the copy that was pushed.
+ *
+ * A gateway is free to store the trace however it likes, and this one re-serialises it: Go's
+ * `encoding/json` sorts the keys of a map and escapes `<`, `>` and `&`, so the bytes come back
+ * different and the root in the manifest is the root of THOSE bytes. Both copies are internally
+ * consistent, and neither is wrong — but the digest no longer tells you the two are the same run,
+ * which is the one question a digest is for.
+ *
+ * So say which it is. Identical content under a different serialisation is worth a line; content
+ * that actually differs is worth a loud one.
+ */
+async function reportAgainstLocal(
+  out: Output,
+  runId: string,
+  localDir: string,
+  stagedDir: string,
+  stagedRoot: string | undefined,
+): Promise<void> {
+  const localRaw = await readFile(join(localDir, 'manifest.json'), 'utf8').catch(() => undefined);
+  if (localRaw === undefined || stagedRoot === undefined) return;
+  let localRoot: unknown;
+  try {
+    localRoot = (JSON.parse(localRaw) as { integrity?: { events_sha256?: unknown } }).integrity
+      ?.events_sha256;
+  } catch {
+    return;
+  }
+  if (typeof localRoot !== 'string' || localRoot === stagedRoot) return;
+
+  const [a, b] = await Promise.all([canonicalEvents(localDir), canonicalEvents(stagedDir)]);
+  const fields = {
+    run: runId,
+    local: `${localRoot.slice(0, 16)}…`,
+    pulled: `${stagedRoot.slice(0, 16)}…`,
+  };
+  if (a !== undefined && b !== undefined && a === b) {
+    out.warn('pull.reserialized', {
+      ...fields,
+      why: 'same events, different bytes — the gateway stores its own serialisation and recomputes the root over it',
+      effect: 'the two copies can no longer be compared by digest, though nothing was lost',
+    });
+    return;
+  }
+  out.warn('pull.differs', {
+    ...fields,
+    why: 'the events themselves differ, not just how they were written',
+    next: `orca show ${runId}   # the copy that just replaced the local one`,
+  });
+}
+
 export async function pullCommand(
   args: ParsedArgs,
   out: Output,
@@ -1079,6 +1190,10 @@ export async function pullCommand(
 
     try {
       await stageRunEntries(entries, runId, staging, stillHeld);
+
+      // Before the swap, never after: what fails verification must not be what replaced the run.
+      const stagedRoot = await verifyStaged(staging, runId);
+      if (existing) await reportAgainstLocal(out, runId, dest, staging, stagedRoot);
 
       movedAside = await swapStagedRun({ dest, staging, retired, existing: !!existing }, stillHeld);
     } catch (err) {
