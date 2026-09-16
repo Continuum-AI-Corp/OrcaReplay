@@ -46,6 +46,14 @@ describe('config', () => {
     },
   );
 
+  it('reads nothing at all when a test supplies no environment', async () => {
+    // The guard on vitest.setup.ts. `record`, `replay`, `attach` and `compare` all resolve their
+    // upstream through `readConfig()` with no argument. If that ever returns the config of whoever
+    // is running the suite, tests start sending live requests to their gateway — and never in CI,
+    // which has no config, so nothing would say so.
+    await expect(readConfig()).resolves.toEqual({});
+  });
+
   it('round-trips what was written', async () => {
     await writeConfig(
       { gateway: { url: 'https://gw.example', api_key: 'sk-secret' }, models: ['a', 'b'] },
