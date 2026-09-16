@@ -142,6 +142,17 @@ const CHECKS = [
     exchanges: 1,
   },
   {
+    id: 'haystack-rag',
+    what: 'a Haystack RAG pipeline: document embeddings, a query embedding, retrieval, then an answer',
+    run: ['python', 'agents/haystack_rag.py'],
+    needs: 'haystack',
+    exchanges: 1,
+    // The claim this check exists for. Embeddings are not model exchanges, so `exact` says nothing
+    // about them; a replay that served the chat turn and refused both embedding calls would look
+    // identical on that line.
+    retrieval: 2,
+  },
+  {
     id: 'browser-use',
     what: "browser-use's own ChatOpenAI, which passes an unset base_url straight through",
     run: ['python', 'agents/browser_use_agent.py'],

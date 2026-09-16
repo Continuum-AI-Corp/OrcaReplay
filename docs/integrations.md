@@ -203,6 +203,14 @@ orca replay last
 **3.1.1**. Recorded 1 exchange, replayed with the origin down at `exact=1 divergences=0
 unmatched=0`.
 
+**Embeddings replay too, and that is the answer to the obvious next question.** A second check runs
+the ordinary RAG shape — `OpenAIDocumentEmbedder` to build the store, `OpenAITextEmbedder` on the
+query, `InMemoryEmbeddingRetriever`, then the generator. Both embedder components reach the proxy
+the same way the generator does, and both are recorded as *retrieval* calls, whose answers are a
+function of their requests and so are replayed by key rather than by the matching ladder. Measured:
+`exact=1 divergences=0 unmatched=0 retrieval=2/2` with the origin down. A Haystack pipeline that
+embeds at query time replays completely offline.
+
 **Nothing is passed to the generator, and that is the case that matters.** `OpenAIChatGenerator`
 takes an optional `api_base_url`, and every Haystack example leaves it out — which is the shape
 worth checking, because the origin then comes from the environment rather than from the pipeline's
