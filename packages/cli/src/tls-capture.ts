@@ -150,7 +150,7 @@ export async function setupTlsCapture(req: TlsCaptureRequest): Promise<TlsCaptur
         onTunnel: (tunnel: TunnelRecord) => {
           if (writer) writes.push(() => persistTunnel(writer, req.turn(), tunnel));
         },
-        onFailure: (failure: InterceptFailure) => out.warn('tls.handshake_failed', { ...failure }),
+        onFailure: (failure: InterceptFailure) => reportInterceptFailure(out, failure),
       },
     },
   };
@@ -490,4 +490,59 @@ async function extraOriginRoots(env: NodeJS.ProcessEnv = process.env): Promise<s
     roots.push(await readFile(path, 'utf8'));
   }
   return roots;
+}
+
+/**
+ * ONE EVENT NAME PER THING THAT ACTUALLY HAPPENED.
+ *
+ * `tls.handshake_failed` was every failure interception could produce — a body that would not
+ * decompress, a WebSocket upgrade declined, an h2 stream faulting, and, buried among them, the one
+ * an operator most needs to recognise: the client refusing OUR certificate.
+ *
+ * That last one is why the name mattered. It is reported on the client side of the proxy, but
+ * "handshake failed" with an `h2 session:` prefix reads as a problem between orca and the origin —
+ * so the operator goes looking at the network, the upstream, the proxy variables. The fix is on the
+ * other side of the connection entirely: the run CA is not in the agent's trust store. Meanwhile
+ * nothing from that host is recorded, and the trace looks merely quiet rather than broken.
+ *
+ * The name is what people grep and alert on, so it is the name that has to be true.
+ */
+export function reportInterceptFailure(out: Output, failure: InterceptFailure): void {
+  const { kind, ...fields } = failure;
+  switch (kind) {
+    case 'client_handshake':
+      out.warn('tls.handshake_failed', {
+        ...fields,
+        cause:
+          'the agent refused the certificate orca presented — this run’s CA is not in its trust store',
+        effect: `nothing from ${failure.host} is being recorded; the trace will simply be missing it`,
+        next: 'trust the run CA in the agent: NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, SSL_CERT_FILE, or the language runtime’s own store — `orca record --tls-intercept` prints the path',
+      });
+      return;
+    case 'upstream_session':
+      out.warn('tls.upstream_failed', {
+        ...fields,
+        cause: 'orca could not establish or keep the TLS session to the origin',
+        next: 'check the host is reachable from this machine, and that any corporate root it needs is in ORCA_TLS_UPSTREAM_CA',
+      });
+      return;
+    case 'body_opaque':
+      // Not a failure of the connection at all: the exchange is recorded, the body just could not
+      // be decoded, so it is kept as it arrived. Saying "handshake" here sent people to the wrong
+      // layer for something that lost no data.
+      out.warn('net.body_opaque', {
+        ...fields,
+        effect: 'the exchange is recorded; this body is kept as it arrived rather than decoded',
+      });
+      return;
+    case 'upgrade_refused':
+      out.warn('net.upgrade_refused', {
+        ...fields,
+        next: 'take the host off --tls-hosts so the whole connection is tunnelled untouched',
+      });
+      return;
+    case 'session':
+      out.warn('tls.session_error', fields);
+      return;
+  }
 }
