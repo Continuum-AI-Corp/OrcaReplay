@@ -461,6 +461,22 @@ export class ShadowIndex {
     }
   }
 
+  /**
+   * Is this tree actually in the store?
+   *
+   * Same posture as {@link gitlinks}: ask before doing something that would otherwise fail from
+   * inside git, with a message about object names that says nothing about the cause.
+   *
+   * The cause worth naming is a run that arrived over the wire. A gateway archive carries
+   * manifest.json, events.jsonl, redactions.json and blobs/  never this store  so a pulled run's
+   * `fs.snapshot` events name trees whose objects were never sent. {@link materialize} on one of
+   * those dies in `read-tree`, and the caller has no way to tell that from a corrupt store.
+   */
+  async has(tree: string): Promise<boolean> {
+    const res = await runGitRaw(['cat-file', '-e', `${tree}^{tree}`], this.opts());
+    return res.code === 0;
+  }
+
   async materialize(tree: string, destDir: string, opts: MaterializeOptions = {}): Promise<void> {
     await mkdir(destDir, { recursive: true });
     const indexFile = join(this.gitDir, `materialize-${randomBytes(8).toString('hex')}.index`);
