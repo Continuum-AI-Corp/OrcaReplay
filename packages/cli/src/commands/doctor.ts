@@ -138,9 +138,24 @@ async function checkShellShim(): Promise<DoctorCheck> {
     });
     // Run something through it, rather than trusting that writing the scripts was enough: the
     // failure this catches is the compiled runner being absent from an installed package.
-    const { stdout } = await execFileAsync('sh', ['-c', 'printf ok'], {
-      env: { ...process.env, PATH: `${shim.dir}${delimiter}${process.env.PATH ?? ''}` },
-    });
+    //
+    // Through the command processor on Windows, because that is the only way to reach the shim
+    // there. PATH cannot hold an extensionless script, so the shim is `sh.cmd` — and
+    // `execFile('sh', …)` goes to CreateProcess, which looks for `sh` and `sh.exe` and never
+    // `sh.cmd`. This check therefore walked past the shim to whichever `sh.exe` was further down
+    // PATH, found no frames, and told every Windows user that a working capture layer records
+    // nothing — advising them to turn it off with `--no-shell`. Naming `sh.cmd` directly is not
+    // the fix: node has refused to spawn a `.cmd` without a shell since CVE-2024-27980. The
+    // command processor is what resolves PATHEXT, so it is what has to do the resolving.
+    const env = { ...process.env, PATH: `${shim.dir}${delimiter}${process.env.PATH ?? ''}` };
+    const { stdout } =
+      process.platform === 'win32'
+        ? await execFileAsync(
+            process.env.ComSpec ?? 'cmd.exe',
+            ['/d', '/s', '/c', 'sh', '-c', 'printf ok'],
+            { env },
+          )
+        : await execFileAsync('sh', ['-c', 'printf ok'], { env });
     if (stdout.trim() !== 'ok') {
       return {
         name,
