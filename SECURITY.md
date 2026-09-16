@@ -28,7 +28,12 @@ What we do:
   `id_ed25519*`, along with `.git/`, `node_modules/` and `.orca/`. That is a fixed list, not a rule
   that generalises: `id_ecdsa` is not on it. A shape we miss is a bug worth filing — there is an
   issue template for exactly that.
-- Trace files and blobs are written mode `0600`, run directories `0700`.
+- Trace files and blobs are written mode `0600`, run directories `0700` — and on Windows,
+  where those are not something the filesystem has, the equivalent ACL: `.orca/runs` is
+  created granting only its owner, SYSTEM and Administrators, and everything written beneath
+  it inherits that. Said plainly because it did not used to be true: `chmod` on Windows sets
+  the read-only attribute and discards the mode, so the store was left with whatever the
+  workspace handed down — typically readable by every account on the machine.
 - Redaction lives in the writer, so a file orca does not write itself has not been through it. A
   capture layer that runs inside the agent's process, or in a child of it, produces exactly that:
   the bytes are on disk before orca ever reads them. Where nothing reads such a file after the run,
@@ -88,7 +93,7 @@ intercept cannot be talked into it. The run says out loud that interception is o
 will decrypt, and where the CA lives, before the agent starts.
 
 **The CA is ephemeral and local.** Generated per run into `<run>/tls/` — key `0600`, directory
-`0700` — and deleted when the run ends, including when the run fails, is interrupted, or the agent
+`0700`, or the ACL that means the same on Windows — and deleted when the run ends, including when the run fails, is interrupted, or the agent
 binary does not exist. It expires 24 hours after minting regardless. It is **never** installed into
 a system or browser trust store, and orca will not offer to.
 

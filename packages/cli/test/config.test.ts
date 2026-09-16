@@ -1,6 +1,8 @@
+import { execFile } from 'node:child_process';
 import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parseArgs } from '../src/args.js';
 import {
@@ -10,6 +12,24 @@ import {
   resolveUpstream,
   writeConfig,
 } from '../src/config.js';
+
+/**
+ * 0600 and 0700 say nothing on Windows: `chmod` there sets the read-only attribute and `stat`
+ * answers 0o666 whatever was asked for. What actually decides who may read the file is its ACL, so
+ * that is what gets checked — `(I)` marks an inherited entry, and an inherited entry on this path
+ * is one the config directory handed down to it. `restrictToOwner`'s own tests in
+ * @orcareplay/core cover exactly which trustees are left; the property here is that none of them
+ * came from outside.
+ */
+async function expectOwnerOnly(path: string, mode: number): Promise<void> {
+  if (process.platform !== 'win32') {
+    expect((await stat(path)).mode & 0o777, path).toBe(mode);
+    return;
+  }
+  const icacls = join(process.env['SystemRoot'] ?? 'C:\Windows', 'System32', 'icacls.exe');
+  const { stdout } = await promisify(execFile)(icacls, [path]);
+  expect(stdout, path).not.toContain('(I)');
+}
 
 /**
  * Config exists for one job: let `orca compare --models a,b,c` reach several models without the
@@ -29,22 +49,18 @@ describe('config', () => {
     await rm(home, { recursive: true, force: true });
   });
 
-  // POSIX only. Windows has no mode bits: `chmod 0o600` is a no-op on NTFS and `stat` answers
-  // 0o666 whatever was asked for, so this asserts something the platform cannot provide. Skipped
-  // rather than loosened — the guarantee is real where it can be made, and a test that accepted
-  // 0o666 would stop noticing if it were lost on Linux too.
-  it.skipIf(process.platform === 'win32')(
-    'stores the file where only its owner can read it',
-    async () => {
-      // It holds an API key. 0600 is the same bar ~/.aws/credentials and ~/.npmrc set, and the
-      // directory has to match or the file's mode is decoration.
-      await writeConfig({ gateway: { url: 'https://gw.example', api_key: 'sk-secret' } }, env);
+  it('stores the file where only its owner can read it', async () => {
+    // It holds an API key. 0600 is the same bar ~/.aws/credentials and ~/.npmrc set, and the
+    // directory has to match or the file's mode is decoration.
+    //
+    // This ran on POSIX only, on the reading that Windows "cannot provide" the guarantee, because
+    // `chmod 0o600` is a no-op on NTFS. It cannot provide it *as mode bits*. It has permissions
+    // all the same, and without this the key sat in a file the whole machine could read.
+    await writeConfig({ gateway: { url: 'https://gw.example', api_key: 'sk-secret' } }, env);
 
-      const path = configPath(env);
-      expect((await stat(path)).mode & 0o777).toBe(0o600);
-      expect((await stat(join(home, 'orca'))).mode & 0o777).toBe(0o700);
-    },
-  );
+    await expectOwnerOnly(configPath(env), 0o600);
+    await expectOwnerOnly(join(home, 'orca'), 0o700);
+  });
 
   it('round-trips what was written', async () => {
     await writeConfig(

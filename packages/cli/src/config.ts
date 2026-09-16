@@ -1,6 +1,7 @@
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { restrictToOwner } from '@orcareplay/core';
 import type { ParsedArgs } from './args.js';
 // fetchPinned lives in @orcareplay/core so the CLI and the recording proxy cannot
 // each carry their own copy — see its doc comment.
@@ -104,10 +105,12 @@ export async function writeConfig(
   const path = configPath(env);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   // Set explicitly as well as passed to mkdir: an existing directory keeps whatever mode it had,
-  // and a 0755 directory makes the file's 0600 decoration.
-  await chmod(dirname(path), 0o700).catch(() => {});
+  // and a 0755 directory makes the file's 0600 decoration. On Windows neither mode argument does
+  // anything at all, and this call is the only thing standing between the API key below and every
+  // account on the machine.
+  await restrictToOwner(dirname(path), 0o700).catch(() => {});
   await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-  await chmod(path, 0o600);
+  await restrictToOwner(path, 0o600);
   return path;
 }
 
