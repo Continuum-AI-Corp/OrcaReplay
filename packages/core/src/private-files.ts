@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { chmod } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -23,8 +24,9 @@ const run = promisify(execFile);
  * writes it can substitute a CA of their own. For `config.json` it is a gateway API key sitting
  * in a file the machine can read.
  *
- * So on Windows the promise is kept with an ACL: the DACL is replaced — not added to — and the
- * only trustees left are the owner, SYSTEM and Administrators. That is the rule OpenSSH for Windows enforces on its
+ * So on Windows the promise is kept with an ACL: everything already on it is taken away — the
+ * inherited entries and the explicit ones alike — and the only trustees left are the owner,
+ * SYSTEM and Administrators. That is the rule OpenSSH for Windows enforces on its
  * own private keys, and it is the closest the platform comes to 0600 — under which root can still
  * read the file too.
  *
@@ -36,38 +38,71 @@ export async function restrictToOwner(path: string, mode: 0o600 | 0o700): Promis
     return;
   }
   const icacls = system32('icacls.exe');
-
-  // `chmod` replaces the whole permission state. Matching that takes two icacls operations,
-  // because neither replaces a DACL on its own: `/inheritance:r` removes only the ACEs carrying
-  // the inherited flag, and `/grant:r` replaces previously granted explicit permissions *for the
-  // trustees it names*. An explicit ACE for anybody else survives both — measured:
-  //
-  //   grant BUILTIN\Users explicitly, then restrict
-  //   -> D:PAI(A;;FA;;;BA)(A;;FA;;;SY)(A;;FA;;;<owner>)(A;;FA;;;BU)   <- BU is still there
-  //
-  // and that is not a hypothetical shape. "Replace all child object permissions" turns inherited
-  // ACEs into explicit ones, and so do `robocopy /SEC` and a tree carried between machines. On a
-  // directory the survivor keeps its `(OI)(CI)`, so every trace written afterwards inherits it.
-  //
-  // `/reset` first, then: it drops every explicit ACE and leaves what the parent hands down,
-  // `/inheritance:r` takes that away too, and `/grant:r` is left writing onto an empty DACL. The
-  // two cannot be combined — icacls rejects `/reset` alongside `/inheritance:r`.
-  //
-  // Nothing is widened on the way through. A directory is restricted before anything is written
-  // into it, so what a child inherits back from `/reset` is already owner-only.
-  await run(icacls, [path, '/reset', '/q']);
-
-  // Inheritable, for a directory, so that everything written inside it afterwards is covered
-  // without a further call — which is the only affordable way to secure a tree of many files.
   const inherit = mode === 0o700 ? '(OI)(CI)' : '';
-  const trustees = [await currentAccountSid(), SYSTEM, ADMINISTRATORS];
+
+  // Everything that can fail happens before the one call that changes anything — the SID lookup,
+  // the read, the temporary file. A failure therefore leaves the path exactly as it was found,
+  // which for a function like this is the only acceptable direction to fail in.
+  const keep = [await currentAccountSid(), SYSTEM, ADMINISTRATORS];
+  // Both spellings, because a descriptor writes the well-known ones abbreviated.
+  const ours = new Set([...keep, 'SY', 'BA']);
+  const foreign = (await explicitTrustees(icacls, path)).filter((trustee) => !ours.has(trustee));
+
+  // One invocation, and every part of it narrows.
+  //
+  // `/inheritance:r` removes only the ACEs carrying the inherited flag, and `/grant:r` replaces
+  // previously granted explicit permissions *for the trustees it names* — so an explicit ACE for
+  // anybody else survives both, keeping its `(OI)(CI)` on a directory and passing itself to
+  // everything written afterwards. Measured: grant BUILTIN\Users explicitly, then restrict, and
+  // `(A;;FA;;;BU)` is still on the DACL. "Replace all child object permissions" turns inherited
+  // ACEs into explicit ones, and so do `robocopy /SEC` and a tree carried between machines, so
+  // this is an ordinary shape rather than an exotic one. Hence naming them for removal.
+  //
+  // `/reset` would be the obvious way to clear them and is the wrong one: it replaces the DACL
+  // with whatever the *parent* hands down, so between it and the grant the path holds the
+  // workspace's ACL. `.orca` is not restricted — only `.orca/runs` is — so on every Windows
+  // command the store root would spend that window readable by every account on the machine, and
+  // anything created inside it would inherit that permanently, since icacls does not re-propagate
+  // to children later. Measured too, on a real store.
   await run(icacls, [
     path,
     '/inheritance:r',
+    ...foreign.flatMap((trustee) => ['/remove', `*${trustee}`]),
     '/grant:r',
-    ...trustees.map((sid) => `*${sid}:${inherit}(F)`),
+    ...keep.map((sid) => `*${sid}:${inherit}(F)`),
     '/q',
   ]);
+}
+
+/**
+ * Who a path grants or denies *explicitly*, in whatever spelling icacls itself uses.
+ *
+ * Explicit only, because the inherited ones are already `/inheritance:r`'s job — and naming one of
+ * those alongside it fails the whole invocation. A directory under `%TEMP%` here carries inherited
+ * ACEs for accounts that no longer exist, and `/remove` on such a SID after inheritance has been
+ * stripped cannot map it to a name: `icacls … /inheritance:r /remove *<orphan>` exits 1332 and
+ * applies nothing. Removing only what `/inheritance:r` will leave behind avoids that by being the
+ * more accurate thing to ask for.
+ *
+ * As SDDL, via `/save`, because the names `icacls <path>` prints are localized. Returned verbatim
+ * rather than expanded to SIDs: `/remove` accepts `*BU` as readily as `*S-1-5-32-545`, and a
+ * lookup table of well-known abbreviations would silently pass through any entry it had missed —
+ * which for this function means a trustee that keeps its access.
+ */
+async function explicitTrustees(icacls: string, path: string): Promise<string[]> {
+  const dir = await mkdtemp(join(tmpdir(), 'orca-acl-'));
+  try {
+    const saved = join(dir, 'acl');
+    await run(icacls, [path, '/save', saved]);
+    // UTF-16LE: the entry's name, then its descriptor.
+    const text = await readFile(saved, 'utf16le');
+    const descriptor = text.split(/\r?\n/).find((line) => /^[OGDS]:/.test(line.trim())) ?? '';
+    // (type;flags;rights;object;inherit_object;trustee) — `ID` in the flags marks it inherited.
+    const aces = [...descriptor.matchAll(/\(.;([^;]*);[^;]*;[^;]*;[^;]*;([^)]+)\)/g)];
+    return [...new Set(aces.filter((ace) => !ace[1]!.includes('ID')).map((ace) => ace[2]!))];
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 const SYSTEM = 'S-1-5-18';

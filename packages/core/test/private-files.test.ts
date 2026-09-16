@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -100,6 +100,38 @@ describe('restrictToOwner', () => {
       expect(trustees(after)).toEqual(ownerOnly);
     },
   );
+
+  it.runIf(onWindows)('never widens the path it is narrowing, even for an instant', async () => {
+    // `/reset` is the obvious way to clear explicit ACEs and the wrong one: it hands the path
+    // whatever its parent has, and only a second call narrows it again. `.orca` is never
+    // restricted — only `.orca/runs` is — so on every Windows command the store root would spend
+    // that window readable by every account on the machine, and a child created in it keeps what
+    // it inherited, since icacls does not re-propagate afterwards.
+    //
+    // A detector, not a proof: it can only fail while such a window exists, never spuriously.
+    const parent = await mkdtemp(join(tmpdir(), 'orca-perm-'));
+    await run(system32('icacls.exe'), [parent, '/grant', '*S-1-5-32-545:(OI)(CI)(F)', '/q']);
+    const store = join(parent, 'runs');
+    await mkdir(store);
+    await restrictToOwner(store, 0o700);
+
+    let stop = false;
+    const seen: string[] = [];
+    const born = (async () => {
+      for (let n = 0; !stop; n++) {
+        const child = join(store, `run_${n}`);
+        await mkdir(child);
+        seen.push(...trustees(await sddl(child)));
+        await rm(child, { recursive: true, force: true });
+      }
+    })();
+    for (let i = 0; i < 5; i++) await restrictToOwner(store, 0o700);
+    stop = true;
+    await born;
+
+    expect(seen.length, 'the probe never got to run').toBeGreaterThan(0);
+    expect([...new Set(seen)].sort()).toEqual(ownerOnly);
+  });
 
   it.runIf(onWindows)('replaces the DACL rather than adding to it', async () => {
     // `/inheritance:r` removes only inherited ACEs and `/grant:r` replaces explicit ones only for
