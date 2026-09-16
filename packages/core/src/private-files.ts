@@ -72,6 +72,23 @@ export async function restrictToOwner(path: string, mode: 0o600 | 0o700): Promis
     ...keep.map((sid) => `*${sid}:${inherit}(F)`),
     '/q',
   ]);
+
+  // And then read it back, because everything above rests on having understood a descriptor that
+  // this file's own parser has now been wrong about twice. The check is deliberately not that
+  // parser: it matches the whole descriptor, anchored, against the shape this function writes, so
+  // an ACE of a type nobody anticipated fails it rather than being skipped by it.
+  //
+  // Nothing is escaped into the pattern because nothing needs to be — a trustee here is a SID or
+  // one of SDDL's two-letter abbreviations, and both are `[A-Za-z0-9-]`.
+  const written = await descriptorOf(icacls, path);
+  const asWritten = new RegExp(
+    '^D:[A-Z]*P[A-Z]*(?:\\(A;[A-Z]*;[^;]*;;;(?:' + [...ours].join('|') + ')\\))+$',
+  );
+  if (!asWritten.test(written)) {
+    throw new Error(
+      `the ACL orca wrote to ${path} is not the one it asked for: ${JSON.stringify(written)}`,
+    );
+  }
 }
 
 /**
@@ -90,6 +107,18 @@ export async function restrictToOwner(path: string, mode: 0o600 | 0o700): Promis
  * which for this function means a trustee that keeps its access.
  */
 async function explicitTrustees(icacls: string, path: string): Promise<string[]> {
+  const descriptor = await descriptorOf(icacls, path);
+  // (type;flags;rights;object_guid;inherit_object_guid;trustee[;condition]) — `ID` in the flags
+  // marks it inherited. The type is read as a field rather than as one character: `XA`/`XD` are
+  // conditional ACEs, `OA`/`OD` object ones, `AU`/`AL` audits, and a single-character type class
+  // matched none of them. The trustee stops at `;` as well as `)`, because a conditional ACE
+  // carries its expression after the trustee.
+  const aces = [...descriptor.matchAll(/\(([^;]*);([^;]*);[^;]*;[^;]*;[^;]*;([^;)]+)/g)];
+  return [...new Set(aces.filter((ace) => !ace[2]!.includes('ID')).map((ace) => ace[3]!))];
+}
+
+/** The path's security descriptor, as SDDL. */
+async function descriptorOf(icacls: string, path: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'orca-acl-'));
   try {
     const saved = join(dir, 'acl');
@@ -112,9 +141,7 @@ async function explicitTrustees(icacls: string, path: string): Promise<string[]>
         `could not read the ACL of ${path}: ${JSON.stringify(descriptor.slice(0, 80))}`,
       );
     }
-    // (type;flags;rights;object;inherit_object;trustee) — `ID` in the flags marks it inherited.
-    const aces = [...descriptor.matchAll(/\(.;([^;]*);[^;]*;[^;]*;[^;]*;([^)]+)\)/g)];
-    return [...new Set(aces.filter((ace) => !ace[1]!.includes('ID')).map((ace) => ace[2]!))];
+    return descriptor;
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }

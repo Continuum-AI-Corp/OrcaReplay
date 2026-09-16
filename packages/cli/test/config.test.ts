@@ -52,7 +52,7 @@ describe('config', () => {
   });
 
   afterEach(async () => {
-    await rm(home, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   });
 
   it('stores the file where only its owner can read it', async () => {
@@ -96,6 +96,43 @@ describe('config', () => {
       expect(await readFile(configPath(env), 'utf8')).toContain('sk-earlier');
     },
   );
+
+  it('never installs a half-written config, however many writers race', async () => {
+    // The staging file used to be named after the destination alone, so every writer addressed one
+    // scratch path with nothing serialising them: B's truncate landed on the file A was about to
+    // rename into place, and A installed an *empty* config over the user's own while reporting
+    // success. `readConfig` swallows the parse failure, so the gateway and its key simply vanish.
+    //
+    // The property is that nobody installs a partial file — not that every racing writer wins. On
+    // Windows a rename onto a path another writer holds open fails with EPERM, and that is the
+    // better half of the trade: a loud failure leaving the previous config intact, where writing
+    // straight to the destination used to interleave two configs into one file in silence.
+    //
+    // Said plainly rather than implied: this does not reproduce the interleaving, and it was not
+    // written as though it did. Restoring the shared name and running thirty writers over eight
+    // rounds produced no empty and no corrupt config here, because Windows refuses the concurrent
+    // open instead of truncating. The interleaving is a POSIX shape, and the reason to fix it by
+    // convention — `BlobStore.put` and scrub's `commit` both randomise — rather than by a test
+    // that happens to catch it. What this does guard is the invariant either way: whatever ends up
+    // installed parses, and no scratch file is left to be mistaken for one.
+    const results = await Promise.allSettled(
+      Array.from({ length: 5 }, (_, n) =>
+        writeConfig({ gateway: { url: `https://gw-${n}.example`, api_key: `sk-${n}` } }, env),
+      ),
+    );
+    expect(
+      results.some((r) => r.status === 'fulfilled'),
+      'every writer failed',
+    ).toBe(true);
+
+    const config = await readConfig(env);
+    expect(config.gateway?.url, 'installed an empty or partial config').toMatch(
+      /^https:\/\/gw-\d+\.example$/,
+    );
+    expect(config.gateway?.api_key).toMatch(/^sk-\d+$/);
+    // And no scratch file survives to be mistaken for a config later.
+    expect((await readdir(join(home, 'orca'))).filter((f) => f.includes('incoming'))).toEqual([]);
+  });
 
   it('round-trips what was written', async () => {
     await writeConfig(

@@ -154,6 +154,28 @@ describe('ensureRunsDir and the directory the store stands in', () => {
       }
     },
   );
+
+  /**
+   * A link already in place, which narrowing the container does nothing about — and that is the
+   * population this exists for. `icacls` does not follow a reparse point, so the permissions
+   * would land on the link entry while the recording went through it into whatever it points at.
+   */
+  it.runIf(process.platform === 'win32')('refuses a store that is a link', async () => {
+    const elsewhere = join(cwd, 'elsewhere');
+    await mkdir(elsewhere);
+    await mkdir(join(cwd, '.orca'));
+    await promisify(execFile)('cmd.exe', [
+      '/d',
+      '/s',
+      '/c',
+      'mklink',
+      '/J',
+      join(cwd, '.orca', 'runs'),
+      elsewhere,
+    ]);
+
+    await expect(ensureRunsDir(cwd)).rejects.toThrow(/is a link to/);
+  });
 });
 
 describe('path helpers', () => {

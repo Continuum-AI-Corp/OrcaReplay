@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -121,7 +122,13 @@ export async function writeConfig(
   // config that was already there when the restriction fails. A rename carries the ACL of the
   // file being moved, so the key is never on disk under any ACL but the intended one, and a
   // failure leaves the previous config untouched.
-  const staging = `${path}.incoming`;
+  // Named per writer, not per destination. `${path}.incoming` is one scratch file every caller
+  // addresses, with nothing serialising them: B's `writeFile(staging, '')` truncates the file A is
+  // about to rename into place, and A installs an empty `config.json` over the user's own while
+  // reporting success — `readConfig` swallows the parse failure, so the gateway and its key are
+  // simply gone. `BlobStore.put` and scrub's `commit` both randomise for this reason; sync uses
+  // the deterministic name only while holding a lock.
+  const staging = `${path}.${randomBytes(6).toString('hex')}.incoming`;
   await writeFile(staging, '', { mode: 0o600 });
   try {
     await restrictToOwner(staging, 0o600);

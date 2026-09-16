@@ -1,5 +1,5 @@
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { RUN_ID_PATTERN } from '@orcareplay/schema';
 import { restrictToOwner } from './private-files.js';
 
@@ -58,6 +58,31 @@ export async function ensureRunsDir(cwd: string): Promise<string> {
   // existing children, and rewriting the ACL of every file in a store already on disk is not
   // something a `record` should do behind the user's back.
   const created = (await mkdir(dir, { recursive: true, mode: 0o700 })) !== undefined;
+  // Neither of them may be a link, on Windows, before anything else is decided.
+  //
+  // Narrowing `.orca` stops one being put there from now on and says nothing about one already in
+  // place — which is the population this whole change is for. `icacls` does not follow a reparse
+  // point, so the narrowing would land on the link entry while every trace went *through* it into
+  // whatever it points at, under that directory's ACL, with `restrictToOwner` reporting success.
+  // A junction needs no privilege to create, and `mkdir(…, { recursive: true })` accepts one as an
+  // existing directory.
+  //
+  // Refused rather than followed: orca creates both of these directories, so a link standing where
+  // one should be was not put there by orca, and a store it cannot vouch for is not one it should
+  // quietly write a recording into. POSIX keeps its existing behaviour, where `chmod` follows a
+  // symlink and pointing a store at another disk is an ordinary thing to do.
+  if (process.platform === 'win32') {
+    for (const path of [orcaDir(cwd), dir]) {
+      const real = await realpath(path).catch(() => undefined);
+      if (real !== undefined && resolve(real) !== resolve(path)) {
+        throw new Error(
+          `${path} is a link to ${real}, and orca will not write a trace store through one — ` +
+            'the permissions it sets would land on the link while the recording landed there. ' +
+            'Remove it, or record in a workspace where it is a real directory.',
+        );
+      }
+    }
+  }
   if (created || process.platform === 'win32') await restrictToOwner(dir, 0o700);
   // And the directory the store stands in, which orca creates too.
   //

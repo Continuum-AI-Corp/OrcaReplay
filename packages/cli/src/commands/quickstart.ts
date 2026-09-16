@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { cp, readdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, cp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -68,6 +68,21 @@ async function shippedRunId(): Promise<string> {
  * directory read as empty, so `orca quickstart --dir notes.txt` skipped the sentence that explains
  * the problem and surfaced `ENOTDIR: not a directory, mkdir` from three lines further on.
  */
+/**
+ * The store's modes, applied to a tree that was copied in rather than written.
+ *
+ * On Windows the modes are discarded and the tree already inherits the ACL `ensureRunsDir` put on
+ * `.orca/runs`, so this is the POSIX half of the same promise.
+ */
+async function applyStoreModes(dir: string): Promise<void> {
+  await chmod(dir, 0o700);
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) await applyStoreModes(path);
+    else await chmod(path, 0o600);
+  }
+}
+
 async function isEmptyish(dir: string): Promise<boolean> {
   try {
     return (await readdir(dir)).length === 0;
@@ -311,6 +326,11 @@ export async function quickstartCommand(
   await cp(join(ASSET, 'project'), target, { recursive: true });
   const runDir = join(target, '.orca', 'runs', runId);
   await cp(join(ASSET, 'trace'), runDir, { recursive: true });
+  // `cp` reproduces the source's permissions, and the source is a shipped npm package: every asset
+  // is 0644 in git, so the run landed 0644 under a 0755 directory — world-readable, in the store
+  // SECURITY.md says is 0600/0700. `pull` is the other command that *installs* a run rather than
+  // writing it, and it chmods every entry for exactly this reason.
+  await applyStoreModes(runDir);
   await adoptTrace(runDir, target);
 
   const all = await events();

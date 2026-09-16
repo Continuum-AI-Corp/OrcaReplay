@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -158,6 +158,18 @@ describe('orca quickstart', () => {
 
     await expect(readFile(join(result.dir, '.orca', '.gitignore'), 'utf8')).resolves.toContain('*');
     await expectOwnerOnly(join(result.dir, '.orca', 'runs'));
+
+    // And the run itself, which is *copied* in rather than written. `cp` reproduces the source's
+    // permissions, and every shipped asset is 0644 in git — so the recording landed 0644 under a
+    // 0755 directory, in the store SECURITY.md says is 0600/0700. Asserted on POSIX, where the
+    // modes exist; the Windows half is the inherited ACL above.
+    if (process.platform !== 'win32') {
+      const runDir = join(result.dir, '.orca', 'runs', result.runId);
+      expect((await stat(runDir)).mode & 0o777, runDir).toBe(0o700);
+      for (const name of ['events.jsonl', 'manifest.json']) {
+        expect((await stat(join(runDir, name))).mode & 0o777, name).toBe(0o600);
+      }
+    }
   });
 
   /**
