@@ -164,9 +164,16 @@ describe('restrictToOwner', () => {
     const file = join(await mkdtemp(join(tmpdir(), 'orca-perm-')), 'secret');
     await writeFile(file, 'sk-secret\n');
     const saved = process.env['SystemRoot'];
-    delete process.env['SystemRoot'];
     try {
+      delete process.env['SystemRoot'];
       await expect(restrictToOwner(file, 0o600)).rejects.toThrow(/SystemRoot is not set/);
+      // Absolute, not merely present: `C:Windows` rebuilds the same drive-relative lookup out of
+      // the environment instead of out of a literal, and a wrapper that sets the variable for
+      // orca's process is an ordinary thing to run into.
+      for (const relative of ['C:Windows', 'Windows']) {
+        process.env['SystemRoot'] = relative;
+        await expect(restrictToOwner(file, 0o600)).rejects.toThrow(/not an absolute path/);
+      }
     } finally {
       process.env['SystemRoot'] = saved;
     }

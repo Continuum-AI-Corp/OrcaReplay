@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { chmod, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
@@ -60,10 +60,10 @@ export async function restrictToOwner(path: string, mode: 0o600 | 0o700): Promis
   //
   // `/reset` would be the obvious way to clear them and is the wrong one: it replaces the DACL
   // with whatever the *parent* hands down, so between it and the grant the path holds the
-  // workspace's ACL. `.orca` is not restricted — only `.orca/runs` is — so on every Windows
-  // command the store root would spend that window readable by every account on the machine, and
-  // anything created inside it would inherit that permanently, since icacls does not re-propagate
-  // to children later. Measured too, on a real store.
+  // parent's ACL — and a parent is not something this function gets to assume anything about. On
+  // every Windows command the store root would spend that window readable by whoever the
+  // workspace allowed, and anything created inside it would keep that permanently, since icacls
+  // does not re-propagate to children later. Measured too, on a real store.
   await run(icacls, [
     path,
     '/inheritance:r',
@@ -164,10 +164,16 @@ async function readSid(): Promise<string> {
  */
 function system32(exe: string): string {
   const root = process.env['SystemRoot'];
-  if (root === undefined || root === '') {
+  // Absolute, not merely present. `SystemRoot=C:Windows` — the same drive-relative shape the
+  // comment above describes — would rebuild the workspace-relative lookup out of the environment
+  // instead of out of a literal, and a wrapper that sets the variable for orca's process is an
+  // ordinary thing to run into. `isAbsolute('C:Windows')` is false and `isAbsolute('C:\Windows')`
+  // is true, so this refuses exactly the values that would resolve against the current directory.
+  if (root === undefined || root === '' || !isAbsolute(root)) {
     throw new Error(
-      `cannot locate ${exe}: SystemRoot is not set, so there is no trustworthy path to it. ` +
-        'orca will not fall back to a guess here — this call is what keeps a private key private.',
+      `cannot locate ${exe}: SystemRoot is ${root === undefined || root === '' ? 'not set' : `not an absolute path (${JSON.stringify(root)})`}, ` +
+        'so there is no trustworthy path to it. orca will not fall back to a guess here — this ' +
+        'call is what keeps a private key private.',
     );
   }
   return join(root, 'System32', exe);

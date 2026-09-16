@@ -59,6 +59,16 @@ export async function ensureRunsDir(cwd: string): Promise<string> {
   // something a `record` should do behind the user's back.
   const created = (await mkdir(dir, { recursive: true, mode: 0o700 })) !== undefined;
   if (created || process.platform === 'win32') await restrictToOwner(dir, 0o700);
+  // And the directory the store stands in, which orca creates too.
+  //
+  // On POSIX `mkdir`'s mode covered it on the way past. On Windows it kept the workspace's ACL,
+  // and Modify there is enough to delete `runs` — a child's own DACL does not decide whether the
+  // parent may delete it — and leave a junction in its place, which needs no privilege. Measured
+  // from there: `mkdir(…, { recursive: true })` accepts the junction as an existing directory,
+  // and `icacls` does not follow a reparse point, so the narrowing lands on the junction while
+  // every trace is written *through* it into whatever it points at, under that directory's ACL.
+  // `restrictToOwner` reports success the whole way.
+  if (process.platform === 'win32') await restrictToOwner(orcaDir(cwd), 0o700);
   const ignore = join(orcaDir(cwd), '.gitignore');
   if (!(await stat(ignore).catch(() => null))) {
     await writeFile(

@@ -128,6 +128,34 @@ describe('ensureRunsDir on a store that already exists', () => {
   );
 });
 
+describe('ensureRunsDir and the directory the store stands in', () => {
+  /**
+   * The store's container, not only the store. Modify on `.orca` is enough to delete `runs` — a
+   * child's own DACL does not decide whether its parent may remove it — and leave a junction in
+   * its place, which needs no privilege on Windows. `mkdir(…, { recursive: true })` then accepts
+   * the junction as an existing directory, and `icacls` does not follow a reparse point: the
+   * narrowing lands on the junction while every trace is written through it into whatever it
+   * points at, under that directory's ACL, with `restrictToOwner` reporting success throughout.
+   */
+  it.runIf(process.platform === 'win32')(
+    'narrows the directory the store stands in, not only the store',
+    async () => {
+      await mkdir(join(cwd, '.orca', 'runs'), { recursive: true });
+      const icacls = join(process.env['SystemRoot']!, 'System32', 'icacls.exe');
+      const read = async (path: string): Promise<string> =>
+        (await promisify(execFile)(icacls, [path])).stdout;
+
+      expect(await read(join(cwd, '.orca')), 'precondition').toContain('(I)');
+
+      await ensureRunsDir(cwd);
+
+      for (const path of [join(cwd, '.orca'), join(cwd, '.orca', 'runs')]) {
+        expect(await read(path), path).not.toContain('(I)');
+      }
+    },
+  );
+});
+
 describe('path helpers', () => {
   it('puts everything under .orca', () => {
     expect(orcaDir('/w')).toBe(join('/w', '.orca'));
