@@ -23,8 +23,8 @@ const run = promisify(execFile);
  * writes it can substitute a CA of their own. For `config.json` it is a gateway API key sitting
  * in a file the machine can read.
  *
- * So on Windows the promise is kept with an ACL: inheritance dropped, and the only trustees left
- * are the owner, SYSTEM and Administrators. That is the rule OpenSSH for Windows enforces on its
+ * So on Windows the promise is kept with an ACL: the DACL is replaced — not added to — and the
+ * only trustees left are the owner, SYSTEM and Administrators. That is the rule OpenSSH for Windows enforces on its
  * own private keys, and it is the closest the platform comes to 0600 — under which root can still
  * read the file too.
  *
@@ -35,11 +35,33 @@ export async function restrictToOwner(path: string, mode: 0o600 | 0o700): Promis
     await chmod(path, mode);
     return;
   }
+  const icacls = system32('icacls.exe');
+
+  // `chmod` replaces the whole permission state. Matching that takes two icacls operations,
+  // because neither replaces a DACL on its own: `/inheritance:r` removes only the ACEs carrying
+  // the inherited flag, and `/grant:r` replaces previously granted explicit permissions *for the
+  // trustees it names*. An explicit ACE for anybody else survives both — measured:
+  //
+  //   grant BUILTIN\Users explicitly, then restrict
+  //   -> D:PAI(A;;FA;;;BA)(A;;FA;;;SY)(A;;FA;;;<owner>)(A;;FA;;;BU)   <- BU is still there
+  //
+  // and that is not a hypothetical shape. "Replace all child object permissions" turns inherited
+  // ACEs into explicit ones, and so do `robocopy /SEC` and a tree carried between machines. On a
+  // directory the survivor keeps its `(OI)(CI)`, so every trace written afterwards inherits it.
+  //
+  // `/reset` first, then: it drops every explicit ACE and leaves what the parent hands down,
+  // `/inheritance:r` takes that away too, and `/grant:r` is left writing onto an empty DACL. The
+  // two cannot be combined — icacls rejects `/reset` alongside `/inheritance:r`.
+  //
+  // Nothing is widened on the way through. A directory is restricted before anything is written
+  // into it, so what a child inherits back from `/reset` is already owner-only.
+  await run(icacls, [path, '/reset', '/q']);
+
   // Inheritable, for a directory, so that everything written inside it afterwards is covered
   // without a further call — which is the only affordable way to secure a tree of many files.
   const inherit = mode === 0o700 ? '(OI)(CI)' : '';
   const trustees = [await currentAccountSid(), SYSTEM, ADMINISTRATORS];
-  await run(system32('icacls.exe'), [
+  await run(icacls, [
     path,
     '/inheritance:r',
     '/grant:r',

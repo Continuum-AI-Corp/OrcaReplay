@@ -28,7 +28,13 @@ async function expectOwnerOnly(path: string, mode: number): Promise<void> {
   }
   const icacls = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'icacls.exe');
   const { stdout } = await promisify(execFile)(icacls, [path]);
+  // Nothing inherited...
   expect(stdout, path).not.toContain('(I)');
+  // ...and nothing else granted. `(I)` alone would pass a surviving *explicit* ACE for a third
+  // party, which is exactly what `/inheritance:r` plus `/grant:r` used to leave behind. Counted
+  // rather than named, because the names icacls prints are localized.
+  const granted = stdout.split(/\r?\n/).filter((line) => line.includes(':(')).length;
+  expect(granted, `${path}: expected owner, SYSTEM and Administrators only`).toBe(3);
 }
 
 /**

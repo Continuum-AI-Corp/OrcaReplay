@@ -13,8 +13,12 @@ const onWindows = process.platform === 'win32';
 const system32 = (exe: string): string =>
   join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', exe);
 
-/** SDDL's fixed abbreviations. The superusers, which reach a 0600 file on POSIX too, as root. */
-const BUILTIN = { BA: 'S-1-5-32-544', SY: 'S-1-5-18' } as const;
+/**
+ * SDDL's fixed abbreviations for the well-known SIDs that turn up here. `BA` and `SY` are the
+ * superusers, which reach a 0600 file on POSIX too, as root; `BU` is BUILTIN\\Users, which is what
+ * a store must never grant and what the tests plant in order to check that it does not.
+ */
+const BUILTIN = { BA: 'S-1-5-32-544', SY: 'S-1-5-18', BU: 'S-1-5-32-545' } as const;
 
 /**
  * The ACL of a path, as SDDL.
@@ -32,7 +36,7 @@ async function sddl(path: string): Promise<string> {
   return lines[1]!.trim();
 }
 
-/** Every trustee in a DACL, by SID, with `BA`/`SY` expanded. */
+/** Every trustee in a DACL, by SID, with the abbreviations above expanded. */
 function trustees(descriptor: string): string[] {
   const found = [...descriptor.matchAll(/\(A;[^;]*;[^;]*;[^;]*;[^;]*;([^)]+)\)/g)].map(
     (m) => BUILTIN[m[1] as keyof typeof BUILTIN] ?? m[1]!,
@@ -96,6 +100,26 @@ describe('restrictToOwner', () => {
       expect(trustees(after)).toEqual(ownerOnly);
     },
   );
+
+  it.runIf(onWindows)('replaces the DACL rather than adding to it', async () => {
+    // `/inheritance:r` removes only inherited ACEs and `/grant:r` replaces explicit ones only for
+    // the trustees it names, so an explicit grant to anybody else used to survive both. Not a
+    // hypothetical shape: "Replace all child object permissions" converts inherited ACEs into
+    // explicit ones, and so do `robocopy /SEC` and a tree carried between machines.
+    const dir = join(await mkdtemp(join(tmpdir(), 'orca-perm-')), 'runs');
+    await mkdir(dir);
+    const USERS = 'S-1-5-32-545'; // BUILTIN\\Users — by SID, so no name has to resolve
+    await run(system32('icacls.exe'), [dir, '/grant', `*${USERS}:(OI)(CI)(F)`, '/q']);
+    expect(trustees(await sddl(dir)), 'precondition').toContain(USERS);
+
+    await restrictToOwner(dir, 0o700);
+
+    expect(trustees(await sddl(dir))).toEqual(ownerOnly);
+    // And the inheritable half of it is gone, so nothing written afterwards picks it up either.
+    const later = join(dir, 'events.jsonl');
+    await writeFile(later, 'x');
+    expect(trustees(await sddl(later))).toEqual(ownerOnly);
+  });
 
   it.runIf(onWindows)('refuses rather than guessing where icacls lives', async () => {
     // `'C:\\Windows'` as a fallback is not one: `\\W` is not an escape, so the literal's value is
