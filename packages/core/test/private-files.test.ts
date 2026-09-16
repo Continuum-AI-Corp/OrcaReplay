@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -118,11 +118,13 @@ describe('restrictToOwner', () => {
     let stop = false;
     const seen: string[] = [];
     const born = (async () => {
-      for (let n = 0; !stop; n++) {
+      // Left on disk rather than cleaned up as they go: `icacls` still holds a handle on the one
+      // it has just read, and racing a `rm` against that is how this test failed under load
+      // rather than how the code under test failed. The whole tree is a mkdtemp.
+      for (let n = 0; !stop && n < 200; n++) {
         const child = join(store, `run_${n}`);
         await mkdir(child);
         seen.push(...trustees(await sddl(child)));
-        await rm(child, { recursive: true, force: true });
       }
     })();
     for (let i = 0; i < 5; i++) await restrictToOwner(store, 0o700);

@@ -94,9 +94,24 @@ async function explicitTrustees(icacls: string, path: string): Promise<string[]>
   try {
     const saved = join(dir, 'acl');
     await run(icacls, [path, '/save', saved]);
-    // UTF-16LE: the entry's name, then its descriptor.
-    const text = await readFile(saved, 'utf16le');
-    const descriptor = text.split(/\r?\n/).find((line) => /^[OGDS]:/.test(line.trim())) ?? '';
+    // UTF-16LE, and the descriptor is the last line: two lines for an ordinary path — the entry's
+    // name, then its descriptor — and one for a path with no name to give, such as a drive root.
+    //
+    // By position rather than by scanning for a `D:` prefix. A name line cannot carry one today,
+    // since `/save` writes the basename and a Windows filename cannot contain a colon, but that is
+    // a fact about a neighbouring tool rather than about this parse.
+    const lines = (await readFile(saved, 'utf16le'))
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const descriptor = lines.at(-1) ?? '';
+    // Refused rather than read as "nothing to remove", which is what an unrecognised line would
+    // silently mean: every foreign trustee left in place, and `icacls` still exiting 0.
+    if (!/^[OGDS]:/.test(descriptor) || !descriptor.includes('(')) {
+      throw new Error(
+        `could not read the ACL of ${path}: ${JSON.stringify(descriptor.slice(0, 80))}`,
+      );
+    }
     // (type;flags;rights;object;inherit_object;trustee) — `ID` in the flags marks it inherited.
     const aces = [...descriptor.matchAll(/\(.;([^;]*);[^;]*;[^;]*;[^;]*;([^)]+)\)/g)];
     return [...new Set(aces.filter((ace) => !ace[1]!.includes('ID')).map((ace) => ace[2]!))];

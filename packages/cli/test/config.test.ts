@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -67,6 +67,35 @@ describe('config', () => {
     await expectOwnerOnly(configPath(env), 0o600);
     await expectOwnerOnly(join(home, 'orca'), 0o700);
   });
+
+  it.runIf(process.platform === 'win32')(
+    'never leaves the key on disk when it cannot protect the file',
+    async () => {
+      // `mode: 0o600` is discarded on Windows, so until `restrictToOwner` has run the file carries
+      // whatever the directory handed down. Written straight to its final path, a failure there —
+      // icacls unavailable, `SystemRoot` unset — left the key readable by every account, while
+      // `orca setup` reported an error that mentioned none of it. Measured before this was fixed.
+      await writeConfig({ gateway: { url: 'https://gw.example', api_key: 'sk-earlier' } }, env);
+
+      const saved = process.env['SystemRoot'];
+      delete process.env['SystemRoot'];
+      try {
+        await expect(
+          writeConfig({ gateway: { url: 'https://gw.example', api_key: 'sk-must-not-land' } }, env),
+        ).rejects.toThrow(/SystemRoot/);
+      } finally {
+        process.env['SystemRoot'] = saved;
+      }
+
+      // Nowhere under the config directory — the staging file included — and the config that was
+      // already there is intact. Truncating in place, or deleting on failure, would have taken it.
+      const dir = join(home, 'orca');
+      for (const name of await readdir(dir)) {
+        expect(await readFile(join(dir, name), 'utf8'), name).not.toContain('sk-must-not-land');
+      }
+      expect(await readFile(configPath(env), 'utf8')).toContain('sk-earlier');
+    },
+  );
 
   it('round-trips what was written', async () => {
     await writeConfig(

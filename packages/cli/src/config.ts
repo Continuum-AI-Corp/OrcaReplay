@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { restrictToOwner } from '@orcareplay/core';
@@ -106,11 +106,31 @@ export async function writeConfig(
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   // Set explicitly as well as passed to mkdir: an existing directory keeps whatever mode it had,
   // and a 0755 directory makes the file's 0600 decoration. On Windows neither mode argument does
-  // anything at all, and this call is the only thing standing between the API key below and every
-  // account on the machine.
+  // anything at all, so this is what keeps the directory from being listable by every account.
   await restrictToOwner(dirname(path), 0o700).catch(() => {});
-  await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-  await restrictToOwner(path, 0o600);
+
+  // Through a staging file, narrowed before the key is put into it.
+  //
+  // `mode: 0o600` is discarded on Windows, so a file written straight to `path` carries whatever
+  // the directory handed down until `restrictToOwner` has run on it — and if that call throws
+  // (icacls unavailable, `SystemRoot` unset, an unwritable `%TEMP%` for its scratch file) the key
+  // is already on disk and readable, while `orca setup` reports an error that mentions none of
+  // that. Measured: the key was there in plain text, under the inherited ACL.
+  //
+  // Neither truncating in place nor deleting on failure would do, because both throw away the
+  // config that was already there when the restriction fails. A rename carries the ACL of the
+  // file being moved, so the key is never on disk under any ACL but the intended one, and a
+  // failure leaves the previous config untouched.
+  const staging = `${path}.incoming`;
+  await writeFile(staging, '', { mode: 0o600 });
+  try {
+    await restrictToOwner(staging, 0o600);
+    await writeFile(staging, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+    await rename(staging, path);
+  } catch (err) {
+    await rm(staging, { force: true }).catch(() => undefined);
+    throw err;
+  }
   return path;
 }
 
