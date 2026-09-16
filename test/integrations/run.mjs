@@ -135,6 +135,13 @@ const CHECKS = [
     },
   },
   {
+    id: 'haystack',
+    what: 'a Haystack pipeline whose generator takes no api_base_url, so the origin comes from the environment',
+    run: ['python', 'agents/haystack_pipeline.py'],
+    needs: 'haystack',
+    exchanges: 1,
+  },
+  {
     id: 'browser-use',
     what: "browser-use's own ChatOpenAI, which passes an unset base_url straight through",
     run: ['python', 'agents/browser_use_agent.py'],
