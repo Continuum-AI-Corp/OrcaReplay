@@ -9,7 +9,7 @@ sequence of `npm publish` calls run by hand at the end of a long day.
 - An **`NPM_TOKEN`** repository secret, from an npm account that owns the `orcareplay` name and the
   `@orcareplay` scope. An automation token, not a personal one.
 - **Actions enabled** for the repository, and Actions billing active on the org.
-- For the two Python packages, a **pending publisher** registered at pypi.org under
+- For the three Python packages, a **pending publisher** registered at pypi.org under
   *Publishing → Add a pending publisher*, and a repository **environment named `pypi`**. There is
   no PyPI secret: Trusted Publishing exchanges GitHub's OIDC identity for a short-lived upload
   token, so there is nothing here to leak or rotate. One registration per package, all four other
@@ -19,6 +19,7 @@ sequence of `npm publish` calls run by hand at the end of a long day.
   | --- | --- | --- | --- | --- |
   | `orca-trace` | `Continuum-AI-Corp` | `OrcaReplay` | `release-python.yml` | `pypi` |
   | `orcareplay-openai-agents` | `Continuum-AI-Corp` | `OrcaReplay` | `release-openai-agents.yml` | `pypi` |
+  | `orcareplay-langgraph` | `Continuum-AI-Corp` | `OrcaReplay` | `release-langgraph.yml` | `pypi` |
 
   A pending publisher does not reserve the name — it is only honoured on the first upload, and
   another account registering that name first invalidates it. So publish reasonably soon after
@@ -129,7 +130,7 @@ registry at a version the rest do not name — which is the one state npm will n
 To rehearse without sending anything: **Actions → Release → Run workflow**, leaving *dry run*
 checked. It packs and validates every tarball and publishes nothing.
 
-## The two Python packages
+## The three Python packages
 
 They are not part of the npm release and do not share its version. Each ships on its own tag:
 
@@ -137,6 +138,7 @@ They are not part of the npm release and do not share its version. Each ships on
 | --- | --- | --- | --- |
 | `orca-trace` — the read-only reader for the trace format | `python/` | `py-v<version>` | `release-python.yml` |
 | `orcareplay-openai-agents` — records the Agents SDK's own run structure | `python-openai-agents/` | `agents-v<version>` | `release-openai-agents.yml` |
+| `orcareplay-langgraph` — records which LangGraph node ran, and in which superstep | `python-langgraph/` | `langgraph-v<version>` | `release-langgraph.yml` |
 
 ```console
 # edit the version in the package's pyproject.toml, merge that, then:
@@ -148,11 +150,11 @@ builds, and `twine check`s before it uploads — the same gate the npm release a
 reason. **Actions → Release (…) → Run workflow** with *dry run* left checked does everything except
 the upload, which is how to find out whether a release would work without making one.
 
-> **Why three workflows rather than one.** A Python-only fix must not force a version bump across
-> twelve npm packages, and the npm publish must not fail because PyPI had a bad day. The two Python
+> **Why four workflows rather than one.** A Python-only fix must not force a version bump across
+> twelve npm packages, and the npm publish must not fail because PyPI had a bad day. The Python
 > packages are separated from each other for the same reason: they share a repository and nothing
-> else, so one tag publishing both would make every `orca-trace` fix reissue the adapter — and PyPI
-> does not allow reusing a version number.
+> else, so one tag publishing several would make every `orca-trace` fix reissue the adapters — and
+> PyPI does not allow reusing a version number.
 
 ## Why order matters
 

@@ -34,13 +34,84 @@ export const SPANS_ENV = 'ORCA_AGENT_SPANS';
 export const SPANS_FILENAME = 'agent-spans.jsonl';
 export const SITECUSTOMIZE = 'sitecustomize.py';
 
+/** A Python framework whose own run structure orca can read, and the package that reads it. */
+export interface PythonAdapter {
+  /** The framework, as `importlib.metadata` names the distribution that provides it. */
+  distribution: string;
+  /** The top-level module the agent imports to use it, which is how the bootstrap notices it. */
+  root: string;
+  /** The adapter's import name, for the bootstrap's `from … import install`. */
+  module: string;
+  /** The adapter's distribution name, as `pip install` takes it. */
+  package: string;
+  /** What the trace goes without when the framework is used and the adapter is not there. */
+  lost: string;
+}
+
+/**
+ * Every adapter the bootstrap installs — one declaration, three consumers.
+ *
+ * The bootstrap's Python is generated from this, {@link agentSpanLosses} reports against it, and
+ * the drain's warning reads its prose from it. Adding a row is the whole of adding an adapter to
+ * the record path, and nothing can be added to one of the three and forgotten in the others.
+ *
+ * They share a transport file on purpose. The reader recovers a record from a torn line by finding
+ * `{"kind":` in it, which is a property of the writers rather than of the file, so a second writer
+ * costs nothing; a second file would cost a second environment variable, a second drain and a
+ * second entry in the stale-transport sweep.
+ */
+export const PYTHON_ADAPTERS: readonly PythonAdapter[] = [
+  {
+    distribution: 'openai-agents',
+    root: 'agents',
+    module: 'orcareplay_openai_agents',
+    package: 'orcareplay-openai-agents',
+    lost: 'the agents, handoffs and guardrails only it can see',
+  },
+  {
+    distribution: 'langgraph',
+    root: 'langgraph',
+    module: 'orcareplay_langgraph',
+    package: 'orcareplay-langgraph',
+    lost: 'which node produced which call, and the nodes that call no model at all',
+  },
+];
+
+/**
+ * One adapter's stanza inside the bootstrap's `_install`.
+ *
+ * Written out per adapter rather than looped over a list, because the import has to be a literal
+ * `from … import install` statement: `__import__(name)` would work, and would leave the file with
+ * no readable statement of what it attaches to. This runs on someone else's machine, in front of
+ * their interpreter, and it should be possible to read it and see exactly that.
+ *
+ * `else` rather than a bare sequence, so an adapter whose `install` raises is not reported as one
+ * that is missing — a package that is present and broken sends the operator somewhere different
+ * from one that was never installed.
+ */
+function installBlock({ module, root, distribution, package: pkg }: PythonAdapter): string {
+  return `    try:
+        from ${module} import install as _${module}
+    except Exception:
+        missing["${root}"] = ("${distribution}", "${pkg}")
+    else:
+        try:
+            _${module}()
+        except Exception:
+            pass
+`;
+}
+
 /**
  * The bootstrap, as it is written into the run directory.
  *
  * Every path through it ends in a return rather than a traceback. It runs before the agent's first
  * statement, in *every* Python process the recording starts — including `python --version` — so a
- * failure here is a failure of the run rather than of the capture. Absence of the package, absence
- * of the SDK and an SDK whose interface moved are all the same non-event.
+ * failure here is a failure of the run rather than of the capture. Absence of an adapter, absence
+ * of the framework and a framework whose interface moved are all the same non-event.
+ *
+ * The adapters come from {@link PYTHON_ADAPTERS}, so adding one is a row in that list rather than
+ * an edit to this string.
  *
  * It also chains to whatever `sitecustomize` it displaced. Ours arrives via `PYTHONPATH` and so wins
  * over a site's or a virtualenv's own; silently disabling someone's startup hook to add a debugging
@@ -48,9 +119,10 @@ export const SITECUSTOMIZE = 'sitecustomize.py';
  */
 export const SITECUSTOMIZE_SOURCE = `# Written by \`orca record\`. Deleted with the run directory.
 #
-# Attaches OrcaReplay's tracing processor to the OpenAI Agents SDK without editing the agent.
-# Inert unless ORCA_AGENT_SPANS is set, which only \`orca record\` does.
+# Attaches OrcaReplay's adapters to the agent frameworks on this interpreter, without editing the
+# agent. Inert unless ORCA_AGENT_SPANS is set, which only \`orca record\` does.
 import os
+import sys
 
 
 def _chain():
@@ -76,52 +148,89 @@ def _chain():
         return
 
 
-def _unavailable(path):
-    """Record that the SDK is installed and the adapter is not — the one case worth reporting.
+def _unavailable(path, distribution, package):
+    """Record that a framework was used and its adapter was not there — the case worth reporting.
 
-    Without this, a run whose agent uses the Agents SDK on a machine without
-    \`orcareplay-openai-agents\` is byte-identical to one that never used the SDK: the same
-    \`recorded ... exit=0\`, no agent events, no warning.
+    Without this, a run whose agent uses the framework on a machine without the adapter is
+    byte-identical to one that never used it: the same \`recorded ... exit=0\`, no structural
+    events, no warning.
 
-    **The question is about the distribution, not the import name.** \`find_spec("agents")\` is
-    true of *anything* called that, and \`agents.py\` is an ordinary name for an ordinary module —
+    **The confirmation is about the distribution, not the import name.** The caller has only seen
+    a module *name* being imported, and \`agents.py\` is an ordinary name for an ordinary module —
     measured: a project with its own two-line \`agents.py\` and \`PYTHONPATH=.\`, on a machine with
     no SDK at all, was told "the agent imported the OpenAI Agents SDK" and sent to install a
-    package it has no use for. \`importlib.metadata\` asks which *distribution* provides it, which
-    is what "the SDK is installed" actually means.
+    package it has no use for. \`importlib.metadata\` asks which *distribution* provides that name,
+    which is what "the framework is here" actually means.
 
     Metadata rather than importing, and rather than probing a submodule. Measured on this machine:
-    \`distribution("openai-agents")\` 2.3ms, \`find_spec("agents")\` 0.5ms but wrong, and
-    \`find_spec("agents.tracing")\` **2066ms** — resolving a submodule spec imports the parent, so
-    the specific-looking option costs the same as the import it was avoiding. This bootstrap runs
-    in every Python process the recording starts, on an interpreter that starts in 50ms.
+    \`distribution("openai-agents")\` 2.3ms, and \`find_spec("agents.tracing")\` **2066ms** —
+    resolving a submodule spec imports the parent, so the specific-looking option costs the same as
+    the import it was avoiding.
     """
     import importlib.metadata
 
     try:
-        importlib.metadata.distribution("openai-agents")
+        importlib.metadata.distribution(distribution)
     except Exception:
-        return  # not installed, or metadata unreadable: either way, nothing was lost here
+        return  # a module that merely shares the name: nothing was lost here
     try:
         with open(path, "a", encoding="utf-8") as f:
-            f.write('{"kind": "unavailable", "package": "orcareplay-openai-agents"}\\n')
+            f.write('{"kind": "unavailable", "package": "' + package + '"}\\n')
     except Exception:
         return
+
+
+class _WhenImported:
+    """Report a missing adapter if, and only if, the agent imports the framework it is for.
+
+    Asking \`importlib.metadata\` at startup instead would answer a different question — is the
+    framework *installed* — and on an ordinary machine that is yes for frameworks the run never
+    touches. One venv here has both langgraph and openai-agents, so every recorded run in it would
+    be told to install two adapters it has no use for, and the count grows with every adapter orca
+    ships. A warning that fires when nothing is wrong is how warnings stop being read.
+
+    Installed only for the adapters that were *not* importable, so a fully equipped machine carries
+    nothing, and it takes itself off \`sys.meta_path\` once there is nothing left to watch for.
+    Every path returns None: it never claims a module, and the ordinary finders load the framework
+    exactly as they would have.
+    """
+
+    def __init__(self, path, missing):
+        self._path = path
+        self._missing = missing
+
+    def find_spec(self, fullname, path=None, target=None):
+        try:
+            found = self._missing.pop(fullname.partition(".")[0], None)
+            if not self._missing:
+                try:
+                    sys.meta_path.remove(self)
+                except ValueError:
+                    pass
+            if found is not None:
+                _unavailable(self._path, found[0], found[1])
+        except Exception:
+            pass
+        return None
 
 
 def _install():
+    """Attach every adapter that is here, and watch for the frameworks whose adapter is not.
+
+    One environment read for all of them, and each guarded on its own: an adapter that is absent,
+    or whose \`install\` raises, must not stop the next from attaching. \`else\` rather than a bare
+    sequence, so an adapter that is present and broken is not reported as one that is missing —
+    those send the operator somewhere different.
+    """
     path = os.environ.get("ORCA_AGENT_SPANS")
     if not path:
         return
-    try:
-        from orcareplay_openai_agents import install
-    except Exception:
-        _unavailable(path)
-        return
-    try:
-        install()
-    except Exception:
-        return
+    missing = {}
+${PYTHON_ADAPTERS.map(installBlock).join('\n')}    if missing:
+        try:
+            sys.meta_path.insert(0, _WhenImported(path, missing))
+        except Exception:
+            pass
 
 
 _chain()
@@ -427,16 +536,17 @@ export async function readAgentSpans(path: string): Promise<AgentSpan[]> {
   for (const parsed of raw.split('\n').flatMap((line) => objectsOnLine(line, SPAN_START))) {
     const span = parsed as unknown as AgentSpan;
     // And the third rule the other two transports apply, for the same reason and with the same
-    // consequence. The drain builds `new Date(Date.parse(String(span.started_at ?? '')))` and hands
-    // it to `TraceWriter.append` as `occurredAt`; `Date.parse` accepts instants a `date-time`
-    // cannot write down, and `assertEvent` then throws where the trace is being sealed — after
-    // `discardAgentSpanTransport` has already taken the file, so the run ends with no `run.end`
-    // and every span it recorded is gone. Exactly the drain's own expression, so the two cannot
-    // disagree about what parses.
+    // consequence. The drain builds `new Date(Date.parse(String(span.started_at ?? span.ended_at ??
+    // '')))` and hands it to `TraceWriter.append` as `occurredAt`; `Date.parse` accepts instants a
+    // `date-time` cannot write down, and `assertEvent` then throws where the trace is being sealed
+    // — after `discardAgentSpanTransport` has already taken the file, so the run ends with no
+    // `run.end` and every span it recorded is gone. Exactly the drain's own expression, so the two
+    // cannot disagree about what parses — including the fallback, which is what a record that
+    // closes something carries instead.
     //
     // Absent or unparseable is kept, as in the siblings: the drain drops `occurredAt` for those
     // and stamps from its own clock, which degrades a field rather than losing a handoff.
-    const startedMs = Date.parse(String(span.started_at ?? ''));
+    const startedMs = Date.parse(String(span.started_at ?? span.ended_at ?? ''));
     if (!Number.isNaN(startedMs) && (startedMs < EARLIEST_TS_MS || startedMs > LATEST_TS_MS)) {
       continue;
     }
@@ -465,14 +575,24 @@ const SPAN_START = '{"kind":';
  * as an event. They are for the operator, now, while the run is still on screen.
  */
 export interface AgentSpanLosses {
-  /** The SDK was importable and the adapter was not, so nothing structural was captured at all. */
+  /** The framework was used and its adapter was not there, so nothing structural was captured. */
   unavailable: string[];
-  /** Records the processor held and could not write: unserialisable, or the append failed. */
+  /** Records an adapter held and could not write: unserialisable, or the append failed. */
   dropped: number;
+  /**
+   * Which adapters reported those drops, for the records that said.
+   *
+   * The count alone stopped being actionable when there was more than one adapter: several write
+   * to one transport, so a total says how much was lost and nothing about where to look. Read
+   * rather than merely written — `_dropped` in the first adapter was counted from the start and
+   * read by nothing, which is how a field becomes payload.
+   */
+  droppedBy: string[];
 }
 
 export function agentSpanLosses(spans: AgentSpan[]): AgentSpanLosses {
   const unavailable = new Set<string>();
+  const droppedBy = new Set<string>();
   let dropped = 0;
   for (const span of spans) {
     if (span.kind === 'unavailable') {
@@ -480,15 +600,24 @@ export function agentSpanLosses(spans: AgentSpan[]): AgentSpanLosses {
       // starts, so an agent that shells out to `python` writes this once per child. Six lines
       // saying the same thing is one fact, and reporting it six times reads like six failures.
       const pkg = (span as { package?: unknown }).package;
-      unavailable.add(typeof pkg === 'string' && pkg !== '' ? pkg : 'orcareplay-openai-agents');
+      // The fallback is the first adapter rather than a name spelled out here, because a record
+      // with no `package` can only have come from a bootstrap older than the field — which is the
+      // version that had exactly one adapter.
+      unavailable.add(
+        typeof pkg === 'string' && pkg !== '' ? pkg : (PYTHON_ADAPTERS[0]?.package ?? 'unknown'),
+      );
     } else if (span.kind === 'dropped') {
       // Summed rather than taken: one `dropped` line per process, same as above, and here the
       // counts are of different records so they add rather than collapse.
       const count = (span as { count?: unknown }).count;
       if (typeof count === 'number' && Number.isFinite(count) && count > 0) dropped += count;
+      // Optional: the first adapter's records predate the field, and a loss reported without a
+      // name is still a loss worth counting.
+      const pkg = (span as { package?: unknown }).package;
+      if (typeof pkg === 'string' && pkg !== '') droppedBy.add(pkg);
     }
   }
-  return { unavailable: [...unavailable].sort(), dropped };
+  return { unavailable: [...unavailable].sort(), dropped, droppedBy: [...droppedBy].sort() };
 }
 
 /** A trace event, or undefined for a span that carries nothing the proxy lacks. */
@@ -529,6 +658,35 @@ export function eventForSpan(
           name: String(data['name'] ?? 'unknown'),
           triggered: data['triggered'] === true,
           ...at,
+        },
+      };
+    // A LangGraph superstep, which the wire has no representation of at all. A node's name is not
+    // in any request, a node that calls no model makes no request, and two nodes in one parallel
+    // superstep are indistinguishable from two consecutive turns.
+    case 'LangGraphNodeStart':
+      return {
+        type: 'graph.node.start',
+        attrs: {
+          node: String(data['node'] ?? 'unknown'),
+          // The superstep is per graph, so two records can share one without being concurrent.
+          // `parent` is what separates those, and it is the only reason the pair is useful.
+          step: typeof data['step'] === 'number' ? data['step'] : undefined,
+          run_id: span.span_id,
+          parent_run_id: span.parent_id,
+          ...at,
+        },
+      };
+    case 'LangGraphNodeEnd':
+      return {
+        type: 'graph.node.end',
+        attrs: {
+          node: String(data['node'] ?? 'unknown'),
+          step: typeof data['step'] === 'number' ? data['step'] : undefined,
+          run_id: span.span_id,
+          // The exception's class, never its message: the adapter has no redactor in front of it,
+          // and a node's exception text is whatever it was handed.
+          error: data['error'] === undefined ? undefined : String(data['error']),
+          ended_at: span.ended_at,
         },
       };
     default:

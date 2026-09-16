@@ -113,4 +113,45 @@ describe('a span line the drain cannot stamp', () => {
     expect(handoff, 'the span never reached the trace').toBeDefined();
     expect(handoff!.ts.startsWith('2026-09-12'), `stamped ${handoff!.ts}`).toBe(true);
   }, 60_000);
+
+  /**
+   * A record that closes something carries `ended_at` and no `started_at`.
+   *
+   * Reading only `started_at` left every one of them stamped from the drain's own clock, which
+   * runs after the agent has exited. Measured on a three-node graph: all three `graph.node.end`
+   * events landed within a millisecond of each other, 600ms after the last node actually finished,
+   * so the first node appeared to close after the second had opened — a timeline saying the
+   * opposite of what happened, in the one layer whose entire purpose is ordering.
+   */
+  it('stamps a closing record from the instant it does carry', async () => {
+    planted.line = JSON.stringify({
+      kind: 'span',
+      type: 'LangGraphNodeEnd',
+      span_id: 'r1',
+      ended_at: '2026-09-12T00:00:00.000Z',
+      data: { node: 'validate', step: 2 },
+    });
+
+    const rows = await record();
+    const end = rows.find((row) => row.type === 'graph.node.end');
+    expect(end, 'the span never reached the trace').toBeDefined();
+    expect(end!.ts.startsWith('2026-09-12'), `stamped ${end!.ts}`).toBe(true);
+  }, 60_000);
+
+  /** And the bound has to cover that field too, or it is a hole the size of the one it closed. */
+  it('does not take the run down with an end it cannot stamp either', async () => {
+    planted.line = JSON.stringify({
+      kind: 'span',
+      type: 'LangGraphNodeEnd',
+      span_id: 'r1',
+      ended_at: '+275760-09-13T00:00:00+00:00',
+      data: { node: 'validate' },
+    });
+
+    const rows = await record();
+    expect(
+      rows.some((row) => row.type === 'run.end'),
+      'the run was left unsealed by one closing span it could not stamp',
+    ).toBe(true);
+  }, 60_000);
 });

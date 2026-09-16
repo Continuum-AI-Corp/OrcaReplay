@@ -69,9 +69,11 @@ jobs:
       # else: no npm ci anywhere else gets slower, and a contributor who has not run this line gets
       # a skip rather than a failure, exactly as the pip line above behaves.
       - run: npm install --no-save @mastra/core @ai-sdk/openai
-      # From the tree, not PyPI: the `openai-agents-handoff` check exists to prove the tracing layer
-      # in *this* commit works, and installing a published copy would test the last release instead.
+      # From the tree, not PyPI: the `openai-agents-handoff` and `langgraph-nodes` checks exist to
+      # prove the adapters in *this* commit work, and installing a published copy would test the
+      # last release instead.
       - run: pip install -e python-openai-agents
+      - run: pip install -e python-langgraph
       # `--require-all`, because installing them above was never what enforced it. Two checks were
       # added without a line here and CI stayed green on the skips, while the README said "in CI"
       # about both. A skip is now a failure on this runner, so forgetting the line above fails
@@ -110,6 +112,11 @@ jobs:
       # of its tests are about how `install()` registers with it.
       - run: pip install ./python-openai-agents[dev]
       - run: python -m pytest python-openai-agents/ -q
+      # The third. Its `[dev]` extra brings langgraph and langchain-core, because the half of its
+      # suite that matters builds real graphs and invokes them — the unit tests assert what
+      # langchain-core is believed to pass, and only a real graph keeps that belief honest.
+      - run: pip install ./python-langgraph[dev]
+      - run: python -m pytest python-langgraph/ -q
 
   plugin-api-neutrality:
     name: plugin API neutrality

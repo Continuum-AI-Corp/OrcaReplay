@@ -88,6 +88,10 @@ const KIND_BY_TYPE: Record<string, string> = {
   divergence: 'DIVERGE',
   note: 'NOTE',
   'route.decision': 'ROUTE',
+  // Not the derived token, which would be `GRAPH` for both — the rows are about a node, and a
+  // reader scanning the chip column is looking for where in the graph they are.
+  'graph.node.start': 'NODE',
+  'graph.node.end': 'NODE',
   'run.start': 'RUN',
   'run.end': 'RUN',
   checkpoint: 'CKPT',
@@ -371,6 +375,29 @@ function parts(event: TraceEvent): RowParts {
         label: pick(a, 'name'),
         detail: tripped ? 'tripped' : 'passed',
         tone: tripped ? 'attention' : 'normal',
+      };
+    }
+    // The graph's own shape, which the proxy has no representation of. Both rows carry the step,
+    // because a reader following a run wants to know which superstep they are in and the answer is
+    // not derivable from the row's position — a parallel superstep emits several starts before any
+    // of their ends.
+    case 'graph.node.start': {
+      const step = num(a['step']);
+      return {
+        label: pick(a, 'node'),
+        detail: step === undefined ? 'enter' : `enter · step ${step}`,
+      };
+    }
+    case 'graph.node.end': {
+      const error = pick(a, 'error');
+      const step = num(a['step']);
+      return {
+        label: pick(a, 'node'),
+        // The class name the node raised. It is the first thing anyone asks of a failed graph and
+        // the one thing the wire cannot say — a node that dies before calling a model leaves no
+        // request behind at all.
+        detail: error ? `raised ${error}` : step === undefined ? 'exit' : `exit · step ${step}`,
+        tone: error ? 'attention' : 'normal',
       };
     }
     case 'route.decision':

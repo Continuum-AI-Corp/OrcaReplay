@@ -59,6 +59,48 @@ orca's, but a recorded run will differ from an unrecorded one in exactly that fi
 a replay rebuilds it by re-running the graph. A database-backed checkpointer is a different matter
 and is not covered by the checks here.
 
+### Recording the graph itself
+
+Everything above is about the traffic. The *graph* — which node ran, in which superstep, and how it
+ended — is not on the wire at all, and one package puts it in the trace:
+
+```console
+pip install orcareplay-langgraph
+```
+
+No code change: `orca record` attaches it to a graph you have not edited, the same way it attaches
+the fetch hook and the shell shim. Measured on `plan → validate → answer` against a stub origin:
+
+```
+graph.node.start   plan
+model.request
+model.response
+graph.node.end     plan
+graph.node.start   validate      ← makes no request of any kind
+graph.node.end     validate
+graph.node.start   answer
+graph.node.end     answer
+```
+
+`validate` is the point. Validators, state reducers, routers and writers call no model, so without
+this a proxy sees a graph with those nodes and a graph without them as the same run. The same goes
+for a parallel fan-out, which reaches the wire as two ordinary consecutive turns, and for a node
+that raised — `graph.node.end` carries the exception's class, which no request can.
+
+Two records per node and nothing else: `node`, `step`, the run ids that pair them, the instants,
+and `error`. No state, no inputs, no outputs, and no exception message. The model exchanges stay
+with the proxy, which already has them byte for byte.
+
+**One caveat, and it is orca's rather than the package's.** A node record carries the instant the
+callback fired, measured exact against the agent's own clock. A `model.request` is stamped when
+orca persists it — after the response and after a workspace snapshot, measured 95 ms late on one
+call and 31 ms on the next. So the node boundaries are trustworthy, and a model call within about a
+tenth of a second of one can sit on the wrong side of it.
+
+See [`python-langgraph/`](../python-langgraph/README.md) for how a node is told apart from an inner
+runnable, a conditional edge and the graph itself — which is the whole design, and also what keeps a
+`run_name` interpolated from user data out of the trace.
+
 ---
 
 ## CrewAI
