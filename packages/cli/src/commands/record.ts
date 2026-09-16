@@ -24,6 +24,7 @@ import {
   pythonPathWith,
   agentSpanLosses,
   readAgentSpans,
+  PYTHON_ADAPTERS,
   SPANS_ENV,
   type AgentSpanCapture,
 } from '../agent-spans.js';
@@ -596,32 +597,46 @@ async function runRecording(
     // Before the events, because both say the trace is about to be less complete than it looks,
     // and the operator reads the top of the drain rather than the bottom.
     const losses = agentSpanLosses(spans);
-    // The second gate, and the one the bootstrap cannot apply: it decides before the agent's first
-    // statement, so all it can know is what is installed. A run that made no model call did not
-    // lose an agent structure — there was no agent turn to belong to one — and `capture.empty`
-    // below already says the larger thing that went wrong. Naming a missing package on top of it
-    // would send someone to `pip install` over a problem that is not about a package.
+    // The second gate. The bootstrap now applies the first one itself — it reports a package only
+    // once the agent actually imports the framework — so what is left here is the case where a run
+    // captured no model traffic at all. `capture.empty` below already says that larger thing, and
+    // naming a missing package on top of it would send someone to `pip install` over a problem
+    // that is not about a package.
     for (const pkg of modelExchanges > 0 ? losses.unavailable : []) {
+      // The prose comes from the adapter table, so a package cannot be reported with another
+      // package's explanation — which is exactly what happened when this text was a constant and a
+      // second adapter arrived.
+      const adapter = PYTHON_ADAPTERS.find((entry) => entry.package === pkg);
       out.warn('agent_spans.unavailable', {
         package: pkg,
-        // What was actually checked, rather than what it suggests. The bootstrap asks
-        // `importlib.metadata` which distribution provides the SDK; it does not — and before the
-        // agent runs, cannot — know whether the agent went on to import it.
-        cause: 'openai-agents is installed and this package is not',
-        effect: 'the run is recorded, without the agents, handoffs and guardrails only it can see',
+        // What was actually observed, rather than what it suggests. The bootstrap saw the
+        // framework's own module being imported and confirmed with `importlib.metadata` that a
+        // distribution provides that name; it does not know what the agent then did with it.
+        cause: `${adapter?.distribution ?? 'the framework'} was imported and this package is not installed`,
+        effect: `the run is recorded, without ${adapter?.lost ?? 'the structure only it can see'}`,
         next: `pip install ${pkg}`,
       });
     }
     if (losses.dropped > 0) {
       out.warn('agent_spans.dropped', {
         count: losses.dropped,
-        cause: 'the processor could not serialise or could not write these records',
+        // Which adapter, where it said. Several write to one transport, so the total on its own
+        // says how much was lost and nothing about where to look.
+        ...(losses.droppedBy.length > 0 ? { package: losses.droppedBy.join(', ') } : {}),
+        cause: 'the adapter could not serialise or could not write these records',
       });
     }
     for (const span of spans) {
       const derived = eventForSpan(span);
       if (derived === undefined) continue;
-      const startedAt = Date.parse(String(span.started_at ?? ''));
+      // When the span happened, from whichever end it carries. A record that closes something has
+      // only `ended_at`, and reading `started_at` alone stamped every one of them from the drain's
+      // own clock — which runs after the agent has exited. Measured on a three-node graph: all
+      // three `graph.node.end` events landed at the same instant, 600ms after the run, so the
+      // first node appeared to finish after the second had started and the timeline said the
+      // opposite of what happened. `occurredAt` is also what `turnAt` reads, so the same mistake
+      // filed them under the wrong turn.
+      const startedAt = Date.parse(String(span.started_at ?? span.ended_at ?? ''));
       const at = Number.isNaN(startedAt) ? undefined : new Date(startedAt);
       await writer.append({
         type: derived.type as 'agent.start',

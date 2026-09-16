@@ -26,4 +26,6 @@
 {"seq":25,"ts":"2026-08-29T10:14:14.680Z","mono_us":36680000,"turn":5,"type":"agent.start","actor":"harness","attrs":{"name":"Triage","handoffs":"Billing Specialist","tools":0,"output_type":"str"}}
 {"seq":26,"ts":"2026-08-29T10:14:14.960Z","mono_us":36960000,"turn":5,"type":"agent.guardrail","actor":"harness","attrs":{"name":"not_empty","triggered":false}}
 {"seq":27,"ts":"2026-08-29T10:14:15.240Z","mono_us":37240000,"turn":5,"type":"agent.handoff","actor":"harness","attrs":{"from":"Triage","to":"Billing Specialist"}}
-{"seq":28,"ts":"2026-08-29T10:14:15.800Z","mono_us":37800000,"turn":5,"type":"run.end","actor":"orca","attrs":{"exit_code":1}}
+{"seq":28,"ts":"2026-08-29T10:14:15.430Z","mono_us":37430000,"turn":5,"type":"graph.node.start","actor":"harness","attrs":{"node":"summarise_invoice","step":1,"run_id":"3f6a1c8e-0b2d-4f51-9c77-1a5be2d40c93","parent_run_id":"9d4c7b12-5e83-4a06-b1f2-77c0ae35d918","started_at":"2026-08-29T10:14:15.430Z"}}
+{"seq":29,"ts":"2026-08-29T10:14:15.610Z","mono_us":37610000,"turn":5,"type":"graph.node.end","actor":"harness","attrs":{"node":"summarise_invoice","step":1,"run_id":"3f6a1c8e-0b2d-4f51-9c77-1a5be2d40c93","ended_at":"2026-08-29T10:14:15.610Z"}}
+{"seq":30,"ts":"2026-08-29T10:14:15.800Z","mono_us":37800000,"turn":5,"type":"run.end","actor":"orca","attrs":{"exit_code":1}}

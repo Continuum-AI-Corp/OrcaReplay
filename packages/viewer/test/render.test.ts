@@ -628,9 +628,65 @@ describe('the events a proxy cannot produce', () => {
 
   it('never leaves one of them without a label', () => {
     // `label` is the one thing worth reading at a glance, and the contract says it is never empty.
-    for (const type of ['agent.start', 'agent.handoff', 'agent.guardrail']) {
+    for (const type of [
+      'agent.start',
+      'agent.handoff',
+      'agent.guardrail',
+      'graph.node.start',
+      'graph.node.end',
+    ]) {
       const rows = buildTimeline([ev({ type, actor: 'harness', attrs: {} })]);
       expect(rows[0]!.label, type).not.toBe('');
     }
+  });
+});
+
+/**
+ * A graph's own shape, which the proxy has no representation of at all.
+ *
+ * A node's name is in no request; a node that calls no model makes no request; and two nodes of one
+ * parallel superstep are indistinguishable on the wire from two consecutive turns. Without these
+ * rows the timeline had nothing to say about any of it — they fell to `default:`, which looks for
+ * `message`, `name` or `summary` and would have rendered every one of them blank.
+ */
+describe('the graph rows', () => {
+  it('names the node and the superstep it belonged to', () => {
+    const rows = buildTimeline([
+      ev({ type: 'graph.node.start', actor: 'harness', attrs: { node: 'validate_only', step: 2 } }),
+    ]);
+    expect(rows[0]!.kind).toBe('NODE');
+    expect(rows[0]!.label).toBe('validate_only');
+    expect(rows[0]!.detail).toBe('enter · step 2');
+  });
+
+  it('says which node raised, and marks the row', () => {
+    const rows = buildTimeline([
+      ev({
+        type: 'graph.node.end',
+        actor: 'harness',
+        attrs: { node: 'lookup', step: 3, error: 'ValueError' },
+      }),
+    ]);
+    expect(rows[0]!.label).toBe('lookup');
+    expect(rows[0]!.detail).toBe('raised ValueError');
+    expect(rows[0]!.tone).toBe('attention');
+  });
+
+  it('closes a node that did not raise without shouting about it', () => {
+    const rows = buildTimeline([
+      ev({ type: 'graph.node.end', actor: 'harness', attrs: { node: 'first', step: 1 } }),
+    ]);
+    expect(rows[0]!.detail).toBe('exit · step 1');
+    expect(rows[0]!.tone).not.toBe('attention');
+  });
+
+  it('keeps the two nodes of a parallel superstep apart', () => {
+    // The row a proxy cannot produce. Both are step 1 under one parent; on the wire this is two
+    // turns.
+    const rows = buildTimeline([
+      ev({ type: 'graph.node.start', actor: 'harness', attrs: { node: 'worker', step: 1 } }),
+      ev({ type: 'graph.node.start', actor: 'harness', attrs: { node: 'worker', step: 1 } }),
+    ]);
+    expect(rows.map((row) => row.detail)).toEqual(['enter · step 1', 'enter · step 1']);
   });
 });

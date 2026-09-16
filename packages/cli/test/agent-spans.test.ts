@@ -15,9 +15,11 @@ import {
   eventForSpan,
   installAgentSpans,
   pythonPathWith,
+  PYTHON_ADAPTERS,
   readAgentSpans,
   SITECUSTOMIZE,
   SITECUSTOMIZE_SOURCE,
+  type PythonAdapter,
 } from '../src/agent-spans.js';
 import { parseArgs } from '../src/args.js';
 import { recordCommand } from '../src/commands/record.js';
@@ -86,6 +88,52 @@ describe('turning SDK spans into trace events', () => {
     });
   });
 
+  it('keeps a graph node, with the superstep and the ids that pair it', () => {
+    const event = eventForSpan({
+      kind: 'span',
+      type: 'LangGraphNodeStart',
+      span_id: 'run-1',
+      parent_id: 'graph-1',
+      started_at: '2026-09-16T03:46:03.483810+00:00',
+      data: { node: 'validate_only', step: 2 },
+    });
+    expect(event?.type).toBe('graph.node.start');
+    expect(event?.attrs).toMatchObject({
+      node: 'validate_only',
+      step: 2,
+      run_id: 'run-1',
+      parent_run_id: 'graph-1',
+    });
+  });
+
+  it('keeps which node raised, and only the class', () => {
+    // The node that failed is the first thing anyone asks of a broken graph, and the wire cannot
+    // say: a node that dies before calling a model leaves no request at all. The message is not
+    // carried, because the adapter has no redactor in front of it.
+    const event = eventForSpan({
+      kind: 'span',
+      type: 'LangGraphNodeEnd',
+      span_id: 'run-2',
+      ended_at: '2026-09-16T03:46:04.000000+00:00',
+      data: { node: 'lookup', step: 3, error: 'ValueError' },
+    });
+    expect(event?.type).toBe('graph.node.end');
+    expect(event?.attrs).toMatchObject({ node: 'lookup', step: 3, error: 'ValueError' });
+    expect(event?.attrs['ended_at']).toBe('2026-09-16T03:46:04.000000+00:00');
+  });
+
+  it('leaves the superstep out rather than guessing when it is not a number', () => {
+    // `attrs` values are scalars the reader prints. A step that arrived as a string would render
+    // as a superstep that never existed.
+    const event = eventForSpan({
+      kind: 'span',
+      type: 'LangGraphNodeStart',
+      data: { node: 'n', step: '2' },
+    });
+    expect(event?.attrs).not.toHaveProperty('step', '2');
+    expect(event?.attrs['step']).toBeUndefined();
+  });
+
   it('drops the model exchanges, which the proxy already has byte for byte', () => {
     // Not an optimisation. Writing them again would put a second, worse copy of the conversation in
     // the trace, and replay matches on the recorded bytes.
@@ -105,6 +153,14 @@ describe('turning SDK spans into trace events', () => {
       { kind: 'span', type: 'AgentSpanData', data: { name: 'A', handoffs: [], tools: [] } },
       { kind: 'span', type: 'HandoffSpanData', data: { from_agent: 'A', to_agent: 'B' } },
       { kind: 'span', type: 'GuardrailSpanData', data: { name: 'g', triggered: true } },
+      {
+        kind: 'span',
+        type: 'LangGraphNodeStart',
+        span_id: 'r',
+        parent_id: 'p',
+        data: { node: 'n', step: 1 },
+      },
+      { kind: 'span', type: 'LangGraphNodeEnd', span_id: 'r', data: { node: 'n', error: 'E' } },
     ];
     for (const span of spans) {
       const derived = eventForSpan(span)!;
@@ -195,8 +251,20 @@ describe('the bootstrap orca writes', () => {
   it('imports the published package, never this repository', () => {
     // It runs in the agent's interpreter, which resolves imports against its own environment. The
     // fetch hook and the shell shim are written out standalone for exactly this reason.
-    expect(SITECUSTOMIZE_SOURCE).toContain('from orcareplay_openai_agents import install');
+    for (const { module } of PYTHON_ADAPTERS) {
+      expect(SITECUSTOMIZE_SOURCE).toContain(`from ${module} import install`);
+    }
     expect(SITECUSTOMIZE_SOURCE).not.toMatch(/packages[/\\]/);
+  });
+
+  it('attaches every adapter in the table, and each independently', () => {
+    // One adapter that is absent, or whose `install` raises, must not stop the next from
+    // attaching. `else` is what separates those two outcomes: a package that is present and broken
+    // is not reported as one that was never installed.
+    for (const { module, root, distribution, package: pkg } of PYTHON_ADAPTERS) {
+      expect(SITECUSTOMIZE_SOURCE).toContain(`from ${module} import install as _${module}`);
+      expect(SITECUSTOMIZE_SOURCE).toContain(`missing["${root}"] = ("${distribution}", "${pkg}")`);
+    }
   });
 
   it('does nothing at all unless orca is recording', () => {
@@ -208,19 +276,24 @@ describe('the bootstrap orca writes', () => {
   /**
    * Asserted against the code rather than the file, because the file explains itself.
    *
-   * `_unavailable`'s docstring names `find_spec("agents")` and `find_spec("agents.tracing")` —
-   * they are the two options it rejects, with the measurements that rejected them. A test that
-   * searched the whole source would trip on the prose describing what the code does not do.
+   * `_unavailable`'s docstring names `find_spec("agents.tracing")` — the option it rejects, with
+   * the measurement that rejected it. A test that searched the whole source would trip on the
+   * prose describing what the code does not do.
    */
   const bootstrapCode = (): string =>
     SITECUSTOMIZE_SOURCE.replace(/"""[\s\S]*?"""/g, '').replace(/^\s*#.*$/gm, '');
 
-  it('asks which distribution provides the SDK, not what a module is called', () => {
-    // `find_spec("agents")` is true of anything called that, and `agents.py` is an ordinary name
-    // for an ordinary module — measured, a project with its own two-line `agents.py` and
-    // `PYTHONPATH=.` on a machine with no SDK was told to install the adapter.
-    expect(bootstrapCode()).toContain('importlib.metadata.distribution("openai-agents")');
-    expect(bootstrapCode()).not.toContain('find_spec');
+  it('confirms with distribution metadata before it reports anything', () => {
+    // Seeing a module name imported is where the question starts, not where it is answered:
+    // `agents.py` is an ordinary name for an ordinary module, and measured, a project with its own
+    // two-line `agents.py` and `PYTHONPATH=.` on a machine with no SDK was told to install the
+    // adapter. `importlib.metadata` asks which distribution provides that name.
+    expect(bootstrapCode()).toContain('importlib.metadata.distribution(distribution)');
+    // And it never *asks* whether a name resolves. It defines `find_spec` — that is how a finder
+    // is told an import is happening — but calling one on a name would be the rejected design, and
+    // the expensive one: `find_spec("agents.tracing")` costs 2066ms because resolving a submodule
+    // spec imports the parent.
+    expect(bootstrapCode()).not.toMatch(/find_spec\s*\(\s*["']/);
   });
 
   it('never imports what it is asking about', () => {
@@ -228,15 +301,38 @@ describe('the bootstrap orca writes', () => {
     // and `find_spec("agents.tracing")`, the specific-looking middle option, **2066ms**, because
     // resolving a submodule spec imports the parent. This file is in front of every Python process
     // the recording starts, on an interpreter that starts in 50ms.
-    expect(bootstrapCode()).not.toMatch(/^\s*import agents\b/m);
+    for (const { root } of PYTHON_ADAPTERS) {
+      expect(bootstrapCode()).not.toMatch(new RegExp(String.raw`^\s*import ${root}\b`, 'm'));
+    }
     expect(bootstrapCode()).not.toContain('agents.tracing');
+  });
+
+  it('reports a framework only once the agent imports it', () => {
+    // The whole reason the watcher exists. Installed is not used, and a machine with several
+    // frameworks lying around would otherwise be told to install an adapter for each of them on
+    // every recorded run.
+    expect(bootstrapCode()).toContain('class _WhenImported:');
+    expect(bootstrapCode()).toContain('sys.meta_path.insert(0, _WhenImported(path, missing))');
+    // Armed only for what is actually missing, so a fully equipped machine carries nothing.
+    expect(bootstrapCode()).toContain('if missing:');
+  });
+
+  it('never claims a module it is asked about', () => {
+    // The watcher observes imports; it must not participate in them. Every path through
+    // `find_spec` returns None, so the ordinary finders load the framework exactly as they would
+    // have — a debugging aid that changed how a package resolves would be a far worse trade than
+    // one that captured nothing.
+    const body = bootstrapCode().slice(bootstrapCode().indexOf('def find_spec'));
+    const returns = body.slice(0, body.indexOf('\ndef ') + 1).match(/^\s+return .*/gm) ?? [];
+    expect(returns.length).toBeGreaterThan(0);
+    for (const line of returns) expect(line.trim()).toBe('return None');
   });
 
   it('lets no failure of its own reach the agent', () => {
     // Every import and call is guarded. A capture layer that can break the run it is capturing is
     // worse than one that captures nothing.
     const guarded = SITECUSTOMIZE_SOURCE.split('except Exception:').length - 1;
-    expect(guarded).toBeGreaterThanOrEqual(3);
+    expect(guarded).toBeGreaterThanOrEqual(3 + PYTHON_ADAPTERS.length);
   });
 });
 
@@ -498,25 +594,51 @@ describe('the spans transport is not in the trace', () => {
     }
   }
 
-  /** The adapter absent, deterministically, whatever this machine has installed. */
-  async function withoutAdapter(dir: string): Promise<string> {
+  /**
+   * Every adapter absent, deterministically, whatever this machine has installed.
+   *
+   * All of them rather than the one under test: the bootstrap installs each adapter in
+   * `PYTHON_ADAPTERS`, and a machine that happens to have one of the others would otherwise make
+   * this suite's assertions depend on what is in its site-packages. The venv here has both
+   * langgraph and openai-agents, which is how that stopped being hypothetical.
+   */
+  async function withoutAdapters(dir: string): Promise<string> {
     await mkdir(dir, { recursive: true });
-    await writeFile(
-      join(dir, 'orcareplay_openai_agents.py'),
-      'raise ImportError("stands in for a machine without the package")\n',
-    );
+    for (const { module } of PYTHON_ADAPTERS) {
+      await writeFile(
+        join(dir, `${module}.py`),
+        'raise ImportError("stands in for a machine without the package")\n',
+      );
+    }
     return dir;
   }
 
-  /** Distribution metadata, because that is the question the bootstrap asks. */
-  async function withSdkInstalled(dir: string): Promise<void> {
-    const distInfo = join(dir, 'openai_agents-0.20.0.dist-info');
+  /**
+   * A framework the agent can import, and the distribution metadata that confirms it.
+   *
+   * Both halves matter, and they are the two questions the bootstrap asks in order: it notices the
+   * *module* being imported, then asks `importlib.metadata` which *distribution* provides that
+   * name. A stub module with no metadata is the `agents.py` false positive; metadata with no
+   * module is a framework nobody used.
+   *
+   * Shadowed rather than relying on the real package, so the test says the same thing on a machine
+   * that has the framework and one that does not — and so it does not pay a two-second SDK import.
+   */
+  async function frameworkPresent(dir: string, adapter: PythonAdapter): Promise<void> {
+    await writeFile(join(dir, `${adapter.root}.py`), 'VALUE = 1\n');
+    const distInfo = join(dir, `${adapter.distribution.replace(/-/g, '_')}-9.9.9.dist-info`);
     await mkdir(distInfo, { recursive: true });
     await writeFile(
       join(distInfo, 'METADATA'),
-      'Metadata-Version: 2.1\nName: openai-agents\nVersion: 0.20.0\n',
+      `Metadata-Version: 2.1\nName: ${adapter.distribution}\nVersion: 9.9.9\n`,
     );
   }
+
+  const ADAPTER_BY_PACKAGE = (pkg: string): PythonAdapter => {
+    const found = PYTHON_ADAPTERS.find((entry) => entry.package === pkg);
+    if (found === undefined) throw new Error(`no adapter named ${pkg}`);
+    return found;
+  };
 
   /** One model call through whatever base URL orca set, needing no SDK installed. */
   const CALLS_A_MODEL = [
@@ -531,31 +653,67 @@ describe('the spans transport is not in the trace', () => {
     'print("GOT: done")',
   ].join('\n');
 
-  it('says so when the SDK is installed and the adapter is not', async () => {
-    const shadows = await withoutAdapter(join(workspace, 'shadows'));
-    await withSdkInstalled(shadows);
+  it.each(PYTHON_ADAPTERS.map((adapter) => [adapter.package, adapter] as const))(
+    'says so when the agent uses the framework and %s is not there',
+    async (pkg, adapter) => {
+      const shadows = await withoutAdapters(join(workspace, 'shadows'));
+      await frameworkPresent(shadows, adapter);
 
-    const { said, exitCode, exchanges } = await recordWith(CALLS_A_MODEL, shadows);
+      const { said, exitCode, exchanges } = await recordWith(
+        `import ${adapter.root}\n${CALLS_A_MODEL}`,
+        shadows,
+      );
 
-    expect(exchanges, 'the run made no model call, so the gate below is untested').toBeGreaterThan(
-      0,
-    );
-    const warning = said.find((line) => line.includes('agent_spans.unavailable'));
-    expect(warning, `no warning in:\n${said.join('')}`).toBeTruthy();
-    expect(warning).toContain('orcareplay-openai-agents');
-    // A warning, not a failure: the run is still a run, and the model traffic in it is still real.
-    expect(exitCode).toBe(0);
+      expect(
+        exchanges,
+        'the run made no model call, so the gate below is untested',
+      ).toBeGreaterThan(0);
+      const warning = said.find(
+        (line) => line.includes('agent_spans.unavailable') && line.includes(pkg),
+      );
+      expect(warning, `no warning for ${pkg} in:\n${said.join('')}`).toBeTruthy();
+      // Its own explanation, not the first adapter's. When this text was one constant, adding a
+      // second adapter produced a warning that named langgraph and described the Agents SDK.
+      expect(warning).toContain(adapter.distribution);
+      expect(warning).toContain(adapter.lost);
+      expect(warning).toContain(`pip install ${pkg}`);
+      // A warning, not a failure: the run is still a run, and the model traffic in it is real.
+      expect(exitCode).toBe(0);
+    },
+    60_000,
+  );
+
+  it('says nothing about a framework the agent never imported', async () => {
+    // Installed is not used. An ordinary machine has frameworks lying around that a given run has
+    // no relationship to — this venv has two — and asking `importlib.metadata` at startup would
+    // tell every recorded run on it to install every adapter orca ships. A warning that fires when
+    // nothing is wrong is how warnings stop being read.
+    const shadows = await withoutAdapters(join(workspace, 'shadows'));
+    for (const adapter of PYTHON_ADAPTERS) await frameworkPresent(shadows, adapter);
+
+    const { said, exchanges } = await recordWith(CALLS_A_MODEL, shadows);
+
+    expect(exchanges).toBeGreaterThan(0);
+    expect(said.join('')).not.toContain('agent_spans.unavailable');
   }, 60_000);
 
-  it('stays quiet for a run that made no model call', async () => {
-    // The bootstrap decides before the agent's first statement, so all it can know is what is
-    // installed. A run with no model exchange lost no agent structure, and `capture.empty` already
-    // says the larger thing that went wrong — naming a package on top of that sends someone to
-    // `pip install` over a problem that is not about a package.
-    const shadows = await withoutAdapter(join(workspace, 'shadows'));
-    await withSdkInstalled(shadows);
+  // The lookalike case — a project's own `agents.py` — is asserted in the `-S` suite below and not
+  // here, for the reason that suite gives: this level keeps site-packages, so on a machine that
+  // really has the framework installed a warning is correct however the module resolved, and the
+  // test would be asserting a property of the machine.
 
-    const { said, exchanges } = await recordWith('print("GOT: done")\n', shadows);
+  it('stays quiet for a run that made no model call', async () => {
+    // A run with no model exchange lost no structure worth a `pip install`, and `capture.empty`
+    // already says the larger thing that went wrong — naming a package on top of that sends
+    // someone to a package manager over a problem that is not about a package.
+    const shadows = await withoutAdapters(join(workspace, 'shadows'));
+    const adapter = ADAPTER_BY_PACKAGE('orcareplay-openai-agents');
+    await frameworkPresent(shadows, adapter);
+
+    const { said, exchanges } = await recordWith(
+      `import ${adapter.root}\nprint("GOT: done")\n`,
+      shadows,
+    );
 
     expect(exchanges).toBe(0);
     expect(said.join('')).not.toContain('agent_spans.unavailable');
@@ -579,7 +737,21 @@ describe('agentSpanLosses', () => {
         { kind: 'span', type: 'HandoffSpanData' },
         { kind: 'trace.end' },
       ]),
-    ).toEqual({ unavailable: [], dropped: 0 });
+    ).toEqual({ unavailable: [], dropped: 0, droppedBy: [] });
+  });
+
+  it('says which adapter lost records, where the record says', () => {
+    // Several adapters write to one transport, so a total says how much was lost and nothing about
+    // where to look. The field is read here rather than merely written: `_dropped` in the first
+    // adapter was counted from the start and consumed by nothing, which is how a field becomes
+    // payload.
+    const losses = agentSpanLosses([
+      { kind: 'dropped', count: 2, package: 'orcareplay-langgraph' },
+      { kind: 'dropped', count: 1, package: 'orcareplay-openai-agents' },
+      { kind: 'dropped', count: 4 },
+    ] as never[]);
+    expect(losses.dropped).toBe(7);
+    expect(losses.droppedBy).toEqual(['orcareplay-langgraph', 'orcareplay-openai-agents']);
   });
 
   it('reports a missing adapter once however many processes said so', () => {
@@ -678,56 +850,106 @@ describe('the bootstrap reports a missing adapter', () => {
    * correctly, whatever else is on the path. What `-S` gives up is `site` importing `sitecustomize`
    * by itself, and that is covered by the end-to-end record above.
    */
-  type Fixture = 'sdk-installed' | 'lookalike-module' | 'nothing';
+  /**
+   * What the interpreter is given: a module it can import, metadata that names a distribution
+   * providing it, and what the process then imports. The three are independent because the three
+   * cases that matter differ in exactly one of them.
+   */
+  interface Fixture {
+    name: string;
+    /** Adapters whose framework module exists on the path. */
+    modules?: readonly PythonAdapter[];
+    /** Adapters whose framework distribution metadata exists on the path. */
+    metadata?: readonly PythonAdapter[];
+    /** What the process imports after the bootstrap has run. */
+    imports?: readonly string[];
+  }
 
   async function runBootstrap(fixture: Fixture): Promise<string> {
-    const boot = join(bootRoot, fixture);
-    const spans = join(bootRoot, `${fixture}.jsonl`);
+    const boot = join(bootRoot, fixture.name);
+    const spans = join(bootRoot, `${fixture.name}.jsonl`);
     await mkdir(boot, { recursive: true });
     await writeFile(join(boot, 'sitecustomize.py'), SITECUSTOMIZE_SOURCE);
-    if (fixture === 'sdk-installed') {
-      // Distribution metadata, because that is the question the bootstrap asks.
-      const distInfo = join(boot, 'openai_agents-0.20.0.dist-info');
+    for (const { root } of fixture.modules ?? []) {
+      await writeFile(join(boot, `${root}.py`), 'VALUE = 1\n');
+    }
+    for (const { distribution } of fixture.metadata ?? []) {
+      const distInfo = join(boot, `${distribution.replace(/-/g, '_')}-9.9.9.dist-info`);
       await mkdir(distInfo, { recursive: true });
       await writeFile(
         join(distInfo, 'METADATA'),
-        'Metadata-Version: 2.1\nName: openai-agents\nVersion: 0.20.0\n',
+        `Metadata-Version: 2.1\nName: ${distribution}\nVersion: 9.9.9\n`,
       );
     }
-    if (fixture === 'lookalike-module') {
-      // Somebody's own module. Importable, called `agents`, and nothing to do with OpenAI.
-      await writeFile(join(boot, 'agents.py'), 'ROSTER = ["alice", "bob"]\n');
-    }
-    await exec(python as string, ['-S', '-c', 'import sitecustomize'], {
+    const program = ['import sitecustomize', ...(fixture.imports ?? []).map((m) => `import ${m}`)];
+    await exec(python as string, ['-S', '-c', program.join('; ')], {
       env: { ...process.env, PYTHONPATH: boot, ORCA_AGENT_SPANS: spans },
     });
     return await readFile(spans, 'utf8').catch(() => '');
   }
 
-  it('says so when the SDK is installed and the adapter is not', async () => {
-    if (!python) return; // no interpreter here; CI has one and asserts this
-    const written = await runBootstrap('sdk-installed');
-    expect(agentSpanLosses(readSpansText(written)).unavailable).toEqual([
-      'orcareplay-openai-agents',
-    ]);
+  it.each(PYTHON_ADAPTERS.map((adapter) => [adapter.package, adapter] as const))(
+    'says so when the agent imports the framework and %s is not there',
+    async (pkg, adapter) => {
+      if (!python) return; // no interpreter here; CI has one and asserts this
+      const written = await runBootstrap({
+        name: `used-${adapter.root}`,
+        modules: [adapter],
+        metadata: [adapter],
+        imports: [adapter.root],
+      });
+      expect(agentSpanLosses(readSpansText(written)).unavailable).toEqual([pkg]);
+    },
+  );
+
+  it('stays quiet about a framework that is installed and never imported', async () => {
+    if (!python) return;
+    // Installed is not used, and this is the case that made the distinction worth drawing: this
+    // venv has both frameworks, so reporting on what is installed meant every recorded run on it
+    // was told to install two adapters it had no relationship to. The count grows with every
+    // adapter orca ships, and a warning that fires when nothing is wrong is how warnings stop
+    // being read.
+    expect(
+      await runBootstrap({
+        name: 'installed-unused',
+        modules: PYTHON_ADAPTERS,
+        metadata: PYTHON_ADAPTERS,
+      }),
+    ).toBe('');
   });
 
   it('stays quiet for a project whose own module happens to be called agents', async () => {
     if (!python) return;
-    // The false positive the first version had, and the reason the question is about the
-    // distribution rather than the import name. `find_spec("agents")` is true of anything called
-    // that; `agents.py` is an ordinary name for an ordinary module. Reproduced before the fix: a
-    // project with a two-line `agents.py` and `PYTHONPATH=.`, on a machine with no SDK at all, was
-    // told "the agent imported the OpenAI Agents SDK" and sent to `pip install` a package it has
-    // no use for.
-    expect(await runBootstrap('lookalike-module')).toBe('');
+    // The false positive #83 was about, still guarded. Noticing the import is where the question
+    // starts; `importlib.metadata` is what answers it. A project with a two-line `agents.py` and
+    // `PYTHONPATH=.`, on a machine with no SDK at all, was told "the agent imported the OpenAI
+    // Agents SDK" and sent to `pip install` a package it has no use for.
+    const agents = PYTHON_ADAPTERS.find((entry) => entry.root === 'agents')!;
+    expect(
+      await runBootstrap({ name: 'lookalike-module', modules: [agents], imports: ['agents'] }),
+    ).toBe('');
   });
 
   it('stays quiet for a Python process that is not an agent', async () => {
     if (!python) return;
     // `orca record` exports ORCA_AGENT_SPANS to every child. Without this guard a run whose agent
     // shells out to `python` would warn about a package that process had no use for.
-    expect(await runBootstrap('nothing')).toBe('');
+    expect(await runBootstrap({ name: 'nothing' })).toBe('');
+  });
+
+  it('reports a framework once, however many of its modules are imported', async () => {
+    if (!python) return;
+    // The watcher is asked for every submodule of an ordinary framework import — measured, 164
+    // times for one `from langgraph.graph import StateGraph`. Reporting per `find_spec` would turn
+    // one fact into a screenful.
+    const adapter = PYTHON_ADAPTERS.find((entry) => entry.root === 'langgraph')!;
+    const written = await runBootstrap({
+      name: 'many-submodules',
+      modules: [adapter],
+      metadata: [adapter],
+      imports: ['langgraph', 'langgraph', 'langgraph'],
+    });
+    expect(readSpansText(written)).toHaveLength(1);
   });
 
   it('never fails the process it is loaded into', async () => {

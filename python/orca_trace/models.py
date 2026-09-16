@@ -31,7 +31,7 @@ __all__ = [
     "TraceFormatError",
 ]
 
-SCHEMA_VERSION: Final = "0.2.0"
+SCHEMA_VERSION: Final = "0.3.0"
 
 #: Spec §2.3. Adding a type is a MINOR bump, so a reader that meets an unknown one skips the
 #: event rather than failing the trace — see `TraceReader.problems`.
@@ -60,6 +60,8 @@ EVENT_TYPES: Final[frozenset[str]] = frozenset(
         "agent.start",
         "agent.handoff",
         "agent.guardrail",
+        "graph.node.start",
+        "graph.node.end",
         "route.decision",
         "note",
     }

@@ -112,6 +112,29 @@ const CHECKS = [
     exchanges: 2,
   },
   {
+    id: 'langgraph-nodes',
+    what: "the graph's own shape: which node ran, including the one that calls no model",
+    run: ['python', 'agents/langgraph_nodes.py'],
+    // Both, for the reason the array exists: with only langgraph this runs, captures its two
+    // exchanges, and fails with "no graph.node.start in the trace" — which reads as a broken layer
+    // rather than as a missing install.
+    needs: ['langgraph', 'orcareplay_langgraph'],
+    exchanges: 2,
+    expectEvents: ['graph.node.start', 'graph.node.end'],
+    /**
+     * The claim the event types alone do not make.
+     *
+     * `validate` calls no model, so nothing about it reaches the wire — a trace that has it got it
+     * from the adapter and nowhere else. The other two are the discriminator: an inner runnable
+     * carries `langgraph_node` and a conditional edge carries the node it left, so both arrive at
+     * the callback looking like nodes, and the graph itself arrives with a name and no node at all.
+     */
+    expectNodes: {
+      present: ['plan', 'validate', 'answer'],
+      absent: ['INNER-RUNNABLE', 'route', 'the_graph'],
+    },
+  },
+  {
     id: 'browser-use',
     what: "browser-use's own ChatOpenAI, which passes an unset base_url straight through",
     run: ['python', 'agents/browser_use_agent.py'],
@@ -566,13 +589,29 @@ async function runCheck(check) {
 
     // Event types a check insists on. Counting exchanges says the traffic was captured; it says
     // nothing about a layer whose whole purpose is what the traffic does not contain.
-    if (check.expectEvents) {
+    if (check.expectEvents || check.expectNodes) {
       const listed = await orca(['events', '--json', runId], dir);
       const line = listed.out.split(/\r?\n/).find((l) => l.startsWith('['));
       const events = JSON.parse(line ?? '[]');
       const seen = new Set(events.map((e) => e.type));
-      const missing = check.expectEvents.filter((t) => !seen.has(t));
+      const missing = (check.expectEvents ?? []).filter((t) => !seen.has(t));
       if (missing.length > 0) throw new Error(`no ${missing.join(', ')} in the trace`);
+
+      // Which nodes, not just that there were nodes. A layer that reported every callback would
+      // satisfy the types above while saying something false about the graph.
+      if (check.expectNodes) {
+        const nodes = new Set(
+          events.filter((e) => e.type.startsWith('graph.node.')).map((e) => e.attrs?.node),
+        );
+        const absentNodes = check.expectNodes.present.filter((n) => !nodes.has(n));
+        if (absentNodes.length > 0) {
+          throw new Error(`no node named ${absentNodes.join(', ')} in [${[...nodes].join(', ')}]`);
+        }
+        const extra = check.expectNodes.absent.filter((n) => nodes.has(n));
+        if (extra.length > 0) {
+          throw new Error(`${extra.join(', ')} reported as a node, and none of them is one`);
+        }
+      }
     }
 
     // Retrieval is a separate axis and asserted separately, for the reason it is reported

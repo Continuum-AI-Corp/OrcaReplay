@@ -117,7 +117,8 @@ Three more layers catch what the protocol cannot see: an exit code, a real durat
 byte came out of, a file written without telling anyone. A fifth exists for the agents that read no
 base-URL variable at all — see [which agents](#which-agents). A sixth reads the agent's own account
 of its structure, for a harness that has one: which sub-agent ran, which handed off to which,
-whether a guardrail tripped — none of which reaches the wire.
+whether a guardrail tripped, which graph node produced what and which of them called no model at
+all — none of which reaches the wire.
 
 ```mermaid
 %%{init: {'theme':'neutral'}}%%
@@ -474,7 +475,7 @@ whether orca understands the wire format it speaks once it arrives.
 | **OpenClaw** | `orca record openclaw` — the hook for the gateway, inherited variables for the agents it spawns | works |
 | **opencode** | `orca record opencode` | adapter shipped, both origins redirected |
 | **goose** (Block) | `orca record goose` — `OPENAI_HOST` **and** `OPENAI_BASE_URL`, `ANTHROPIC_HOST` → Responses API | works — driven end to end against goose 1.49.0, [what is different about it](#the-harness-that-reads-different-variables) |
-| **LangGraph / LangChain** | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | works — a two-node graph, streaming and with a tool, records and replays at `exact=2` and forks live, [in CI](test/integrations/) |
+| **LangGraph / LangChain** | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | works — a two-node graph, streaming and with a tool, records and replays at `exact=2` and forks live, [in CI](test/integrations/); `pip install orcareplay-langgraph` [also records the graph](python-langgraph/README.md) — which node ran, in which superstep, including the ones that call no model |
 | **OpenHands** | `orca record generic-openai -- python your_agent.py` — its SDK wraps LiteLLM and reads `OPENAI_API_BASE` | works — the SDK's own LLM layer records and replays at `exact=1`, [in CI](test/integrations/) |
 | **CrewAI** | `orca record generic-openai -- python your_crew.py` — since 1.x its own provider, reading `OPENAI_API_BASE` and `OPENAI_BASE_URL` | works — a real `Agent`, `Task` and `Crew` records and replays at `exact=1`, [in CI](test/integrations/); [what 1.x changed](docs/integrations.md#crewai) |
 | **Aider** | `orca record generic-openai -- python your_agent.py` — routes through LiteLLM, which reads `OPENAI_API_BASE` | works — the LiteLLM layer records and replays at `exact=1`, [in CI](test/integrations/) |

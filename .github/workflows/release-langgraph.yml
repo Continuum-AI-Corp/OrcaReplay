@@ -1,0 +1,81 @@
+# `orcareplay-langgraph` records a LangGraph run's own structure — which node ran, in which
+# superstep, and how it ended — into an OrcaReplay trace. It ships on its own tag for the same
+# reason `orca-trace` and `orcareplay-openai-agents` do: a Python-only fix must not force a version
+# bump across twelve npm packages, and the npm release must not fail because PyPI had a bad day.
+#
+# A *fourth* release workflow rather than another job beside the others, because the three Python
+# packages are independent. They share a repository and nothing else: different sources, different
+# versions, different reasons to cut a release. One tag that published several would make every fix
+# to one reissue the rest, and PyPI does not allow reusing a version number.
+#
+# Publishing uses PyPI Trusted Publishing — GitHub's OIDC identity is exchanged for a short-lived
+# upload token, so there is no PyPI secret in this repository to leak or rotate. It needs a
+# one-time registration at pypi.org (Publishing -> Add a pending publisher) naming:
+#
+#   PyPI project   orcareplay-langgraph
+#   owner          Continuum-AI-Corp
+#   repository     OrcaReplay
+#   workflow       release-langgraph.yml
+#   environment    pypi
+#
+# Until that exists the upload step fails and nothing else is affected.
+name: Release (orcareplay-langgraph)
+
+on:
+  push:
+    tags: ['langgraph-v*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Build and check without uploading'
+        type: boolean
+        default: true
+
+jobs:
+  release-langgraph:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # Trusted Publishing: this is the whole credential
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # A tag that disagrees with pyproject would publish a version nobody can reproduce from the
+      # tree. Same check the other three releases make, for the same reason.
+      - name: Tag matches package version
+        if: startsWith(github.ref, 'refs/tags/langgraph-v')
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/langgraph-v}"
+          pkg=$(python -c "import tomllib;print(tomllib.load(open('python-langgraph/pyproject.toml','rb'))['project']['version'])")
+          [ "$tag" = "$pkg" ] || { echo "tag langgraph-v$tag does not match pyproject $pkg"; exit 1; }
+
+      # Neither langgraph nor langchain-core is a dependency — this package is inert without them,
+      # and `orca record` puts it in front of every Python process a recording starts, so importing
+      # it has to cost nothing. The `dev` extra brings them, because half the suite builds real
+      # graphs: the unit tests assert what langchain-core is believed to pass, and only a real graph
+      # keeps that belief honest.
+      - name: Test
+        working-directory: python-langgraph
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]'
+          python -m pytest -q
+
+      - name: Build
+        working-directory: python-langgraph
+        run: |
+          pip install --upgrade build twine
+          python -m build
+          twine check dist/*
+
+      - name: Publish to PyPI
+        if: ${{ github.event.inputs.dry-run != 'true' }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python-langgraph/dist

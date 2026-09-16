@@ -35,6 +35,8 @@
         "agent.start",
         "agent.handoff",
         "agent.guardrail",
+        "graph.node.start",
+        "graph.node.end",
         "route.decision",
         "session.snapshot",
         "note"

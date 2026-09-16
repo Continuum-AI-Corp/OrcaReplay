@@ -76,6 +76,7 @@ Because every model turn resends the whole conversation, content addressing is w
 | `agent.start` | An agent began a turn: its name, the tools and handoffs it was given. From a harness's own tracing, not from the wire. |
 | `agent.handoff` | One agent handed control to another, naming both. A proxy sees the transfer as an ordinary tool call and cannot say which agent it came *from*. |
 | `agent.guardrail` | A guardrail ran, and whether it tripped. Guardrails need not make any request, so this can have no trace on the wire at all. |
+| `graph.node.start` / `graph.node.end` | A node of an agent graph ran: its name, the superstep it belonged to, the run ids that pair the two and place it under its parent, and on the end the class of the exception it raised, if any. From the framework's own callbacks. A node's name appears in no request, a node that calls no model makes no request, and two nodes of one parallel superstep are indistinguishable on the wire from two consecutive turns. |
 | `session.snapshot` | The harness's own transcript, captured at the point the run ended. Carries what the run was *asked*, which a hand-driven run leaves nowhere on the wire. |
 | `error` | A failure derived from another event or reported by the harness. |
 | `divergence` | Replay matched inexactly. See §4. |
@@ -84,11 +85,19 @@ Because every model turn resends the whole conversation, content addressing is w
 | `route.decision` | A gateway chose a model. **Generic** — any gateway may emit it. |
 | `note` | Derived annotation from an analyzer (e.g. loop detection). |
 
-The three `agent.*` types are the first that cannot come from the proxy at all. Every other type
-above is something orca observed itself; these are reported by the harness through its own tracing
-interface, and a trace that has none of them is not missing anything — it is a run whose harness
-either has no such interface or was not asked to use it. Readers must treat them as optional, like
-any other type they do not find.
+The `agent.*` and `graph.*` types are the ones that cannot come from the proxy at all. Every other
+type above is something orca observed itself; these are reported by the harness through its own
+tracing or callback interface, and a trace that has none of them is not missing anything — it is a
+run whose harness either has no such interface or was not asked to use it. Readers must treat them
+as optional, like any other type they do not find.
+
+They also differ from the rest in who wrote them. A `model.request` was assembled by orca out of
+bytes it saw; a `graph.node.start` was handed to orca by code running inside the agent's own
+interpreter. An implementation that writes these MUST keep them to structure the harness names for
+itself — a node's declared name, an agent's name, whether a guardrail tripped — and MUST NOT carry
+prompts, model output, tool arguments, tool results or exception messages in them. Those either
+already exist elsewhere in the trace, byte for byte, or are values the harness never intended to
+export.
 
 Adding a type is a MINOR version bump. Removing or changing the meaning of one is MAJOR.
 
