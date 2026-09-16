@@ -180,6 +180,19 @@ async function runAttached(
     unmatched: 0,
   } as ReturnType<Awaited<ReturnType<typeof createProxy>>['stats']>;
   const deriver = new ExchangeEventDeriver();
+
+  // BEFORE THE PROXY, NOT AFTER: `createProxy` is listening by the time it returns, and the first
+  // thing a remote agent sends becomes an event. `attach` wrote no run.start at all, so every
+  // session it recorded opened on `model.request` and the gateway refused the push — "0 run.start
+  // and 1 run.end events". The proxy URL that `record`'s run.start carries is not known yet and is
+  // not read by anything; the adapter and the cwd are what a reader needs.
+  await writer.append({
+    type: 'run.start',
+    actor: 'orca',
+    turn: 0,
+    attrs: { adapter: adapter.id, cwd, attached: true },
+  });
+
   const proxy = await createProxy({
     // A replay session serves the recording and blocks egress, exactly as `orca replay` does. The
     // only difference is which side starts the agent, and that is not a difference the proxy has.
@@ -335,6 +348,13 @@ async function runAttached(
     });
   }
 
+  // The other half of the bracket. `close` seals the manifest; it does not write the event.
+  await writer.append({
+    type: 'run.end',
+    actor: 'orca',
+    turn,
+    attrs: { exchanges: modelExchanges },
+  });
   const manifest = await writer.close(0);
   // A replay session did not record a run, and saying it did would send someone looking for turns
   // in a trace that holds none. It reports what it actually did: how much of the recording the

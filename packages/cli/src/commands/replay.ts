@@ -1094,6 +1094,22 @@ async function replayFork(
   // Listening from here on — see the exact path.
   openProxy = proxy;
 
+  // A fork is a run, and a run opens with run.start (spec §2.3). It opened on `fork` instead, so
+  // the gateway refused every fork on push — "0 run.start and 1 run.end events" — which meant the
+  // output of `orca compare`, the thing the tool is pitched on, could not be shared with anyone.
+  // `fork` keeps everything that makes it a fork; it just is not the first line any more.
+  await writer.append({
+    type: 'run.start',
+    actor: 'orca',
+    turn: 0,
+    attrs: {
+      adapter: ctx.manifest.adapter.id,
+      cwd: worktree,
+      proxy: proxy.url,
+      forked_from: ctx.manifest.run_id,
+    },
+  });
+
   await writer.append({
     type: 'fork',
     actor: 'orca',
