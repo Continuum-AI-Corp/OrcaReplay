@@ -79,7 +79,24 @@ async function readSid(): Promise<string> {
  * Absolute rather than resolved through PATH. This runs in order to secure a private key, and a
  * lookup that landed on someone else's `icacls.exe` — in the workspace being recorded, say — would
  * hand that key to exactly the reader the call exists to shut out.
+ *
+ * Which is why there is no fallback. `'C:\Windows'` looks like one and is not: `\W` is not an
+ * escape, so that literal's value is `C:Windows`, and a path beginning with a drive letter and no
+ * separator is *drive-relative* — CreateProcess resolves it against the current directory on C:,
+ * which during a recording is the workspace. `Windows/System32/icacls.exe` is a storable git path,
+ * so the guess reintroduces exactly the hijack it was written against. Spelling it correctly would
+ * still be a guess, and wrong on a machine whose Windows is not on C:.
+ *
+ * `SystemRoot` is set by the OS in every normal process environment. Absent, something is wrong
+ * with how orca was launched, and refusing is the only answer that cannot be silently incorrect.
  */
 function system32(exe: string): string {
-  return join(process.env['SystemRoot'] ?? 'C:\Windows', 'System32', exe);
+  const root = process.env['SystemRoot'];
+  if (root === undefined || root === '') {
+    throw new Error(
+      `cannot locate ${exe}: SystemRoot is not set, so there is no trustworthy path to it. ` +
+        'orca will not fall back to a guess here — this call is what keeps a private key private.',
+    );
+  }
+  return join(root, 'System32', exe);
 }

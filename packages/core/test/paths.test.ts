@@ -1,6 +1,8 @@
+import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   ensureRunsDir,
@@ -98,6 +100,32 @@ describe('"last" after a replay', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+});
+
+describe('ensureRunsDir on a store that already exists', () => {
+  /**
+   * The Windows ACL was applied only when this call created `.orca/runs`, and `mkdir` returns
+   * undefined for a directory that already exists — so a store skipped once was skipped forever.
+   * That is every install predating the fix, and every store `orca quickstart` laid down.
+   *
+   * POSIX keeps create-only semantics: there the mode is not load-bearing (every file beneath gets
+   * its own 0600 from the writer) and a directory the user opened up deliberately is theirs.
+   */
+  it.runIf(process.platform === 'win32')(
+    'restricts a directory it did not create, because an inherited ACL is nobody’s choice',
+    async () => {
+      const dir = join(cwd, '.orca', 'runs');
+      await mkdir(dir, { recursive: true });
+      const icacls = join(process.env['SystemRoot']!, 'System32', 'icacls.exe');
+      const read = async (): Promise<string> => (await promisify(execFile)(icacls, [dir])).stdout;
+
+      expect(await read(), 'precondition: a hand-made store inherits').toContain('(I)');
+
+      await ensureRunsDir(cwd);
+
+      expect(await read()).not.toContain('(I)');
+    },
+  );
 });
 
 describe('path helpers', () => {

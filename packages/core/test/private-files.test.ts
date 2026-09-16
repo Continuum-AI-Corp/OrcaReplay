@@ -11,7 +11,7 @@ const onWindows = process.platform === 'win32';
 
 /** Absolute, as the implementation is: Git for Windows ships a POSIX `whoami` earlier on PATH. */
 const system32 = (exe: string): string =>
-  join(process.env['SystemRoot'] ?? 'C:\Windows', 'System32', exe);
+  join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', exe);
 
 /** SDDL's fixed abbreviations. The superusers, which reach a 0600 file on POSIX too, as root. */
 const BUILTIN = { BA: 'S-1-5-32-544', SY: 'S-1-5-18' } as const;
@@ -96,6 +96,23 @@ describe('restrictToOwner', () => {
       expect(trustees(after)).toEqual(ownerOnly);
     },
   );
+
+  it.runIf(onWindows)('refuses rather than guessing where icacls lives', async () => {
+    // `'C:\\Windows'` as a fallback is not one: `\\W` is not an escape, so the literal's value is
+    // `C:Windows` — and a drive letter with no separator is drive-relative. CreateProcess resolves
+    // it against the current directory on C:, which during a recording is the workspace being
+    // recorded, and `Windows/System32/icacls.exe` is a storable git path. The guess hands the key
+    // to exactly the reader this function exists to shut out.
+    const file = join(await mkdtemp(join(tmpdir(), 'orca-perm-')), 'secret');
+    await writeFile(file, 'sk-secret\n');
+    const saved = process.env['SystemRoot'];
+    delete process.env['SystemRoot'];
+    try {
+      await expect(restrictToOwner(file, 0o600)).rejects.toThrow(/SystemRoot is not set/);
+    } finally {
+      process.env['SystemRoot'] = saved;
+    }
+  });
 
   it.runIf(onWindows)(
     'restricts a directory so that later writes inside it are covered',

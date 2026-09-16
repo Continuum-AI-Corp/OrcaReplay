@@ -37,17 +37,28 @@ export function runsDir(cwd: string): string {
  */
 export async function ensureRunsDir(cwd: string): Promise<string> {
   const dir = runsDir(cwd);
-  // Only when this call is the one that created it, which is what passing `mode` to mkdir already
-  // meant: a directory the user has deliberately opened up is theirs to have opened up.
+  // On POSIX, only when this call created it — which is what passing `mode` to mkdir already
+  // meant. Every file beneath gets its own 0600 from the writer regardless, so the directory's
+  // mode is not load-bearing, and one the user has deliberately opened up is theirs to have
+  // opened up.
   //
-  // On Windows this is the call that carries the whole tree. `mode` is discarded there, and an ACL
-  // inherited from the workspace let every account on the machine read a store SECURITY.md asks
-  // you to treat as a shell history plus a heap dump. Restricting the root propagates to every
-  // run directory, blob, `.incoming` staging area and `tls/` written under it afterwards — one
-  // call, rather than one per file for a trace that may hold tens of thousands.
-  if ((await mkdir(dir, { recursive: true, mode: 0o700 })) !== undefined) {
-    await restrictToOwner(dir, 0o700);
-  }
+  // On Windows neither half of that holds. `mode` is discarded, the `mode:` arguments in the
+  // writer, the blob store and sync's staging are discarded too, and this one ACL is the only
+  // thing that makes the store owner-only: restricting the root is what every run directory,
+  // blob, `.incoming` staging area and `tls/` written afterwards inherits — one call, rather than
+  // one per file for a trace that may hold tens of thousands.
+  //
+  // So on Windows it is applied to a store that already exists as well, because "already exists"
+  // there is not a statement of intent. It is every install predating this, every store
+  // `orca quickstart` laid down, and any directory whose creation raced or half-failed — and
+  // `mkdir` returns undefined for all of them, so a store skipped once would be skipped forever.
+  // An inherited ACL is what the workspace happened to hand down, not something anyone chose.
+  //
+  // This covers what is written from now on. `icacls` on a parent does not re-propagate to
+  // existing children, and rewriting the ACL of every file in a store already on disk is not
+  // something a `record` should do behind the user's back.
+  const created = (await mkdir(dir, { recursive: true, mode: 0o700 })) !== undefined;
+  if (created || process.platform === 'win32') await restrictToOwner(dir, 0o700);
   const ignore = join(orcaDir(cwd), '.gitignore');
   if (!(await stat(ignore).catch(() => null))) {
     await writeFile(

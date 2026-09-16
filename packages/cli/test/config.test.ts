@@ -26,7 +26,7 @@ async function expectOwnerOnly(path: string, mode: number): Promise<void> {
     expect((await stat(path)).mode & 0o777, path).toBe(mode);
     return;
   }
-  const icacls = join(process.env['SystemRoot'] ?? 'C:\Windows', 'System32', 'icacls.exe');
+  const icacls = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'icacls.exe');
   const { stdout } = await promisify(execFile)(icacls, [path]);
   expect(stdout, path).not.toContain('(I)');
 }

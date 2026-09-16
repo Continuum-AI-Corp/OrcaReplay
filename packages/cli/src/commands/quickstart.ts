@@ -1,8 +1,9 @@
 import { execFile } from 'node:child_process';
-import { cp, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { cp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { ensureRunsDir } from '@orcareplay/core';
 import { parseArgs, type ParsedArgs } from '../args.js';
 import { Output } from '../out.js';
 import { replayCommand } from './replay.js';
@@ -301,7 +302,12 @@ export async function quickstartCommand(
     );
   }
 
-  await mkdir(join(target, '.orca', 'runs'), { recursive: true });
+  // Through core, not a bare mkdir. This is the last caller that made the store by hand, and it
+  // is the one the README's first line runs — so what it laid down was the store every later
+  // `record`, `attach` and `fork` in that directory writes into. Two things were skipped:
+  // `.orca/.gitignore`, and on Windows the owner-only ACL, which `ensureRunsDir` applies and which
+  // nothing else ever repairs. `orca pull` was moved off its own bare mkdir for the same reasons.
+  await ensureRunsDir(target);
   await cp(join(ASSET, 'project'), target, { recursive: true });
   const runDir = join(target, '.orca', 'runs', runId);
   await cp(join(ASSET, 'trace'), runDir, { recursive: true });

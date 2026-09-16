@@ -14,6 +14,18 @@ import {
   replayDemonstrated,
   type TraceEvent,
 } from '../src/commands/quickstart.js';
+
+/**
+ * On Windows the store's protection is an ACL, and `(I)` marks an entry inherited from the
+ * workspace — which is the one thing it must not have. Elsewhere there is nothing to check here:
+ * the mode is asserted by `restrictToOwner`'s own tests in @orcareplay/core.
+ */
+async function expectOwnerOnly(path: string): Promise<void> {
+  if (process.platform !== 'win32') return;
+  const icacls = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'icacls.exe');
+  const { stdout } = await promisify(execFile)(icacls, [path]);
+  expect(stdout, path).not.toContain('(I)');
+}
 import { parseArgs } from '../src/args.js';
 import { Output } from '../src/out.js';
 
@@ -123,6 +135,23 @@ describe('orca quickstart', () => {
     expect(printed).toMatch(/3\/3 turns from the trace/);
     expect(printed).toContain('0 live calls');
     expect(printed).toContain('Nothing above talked to a model');
+  });
+
+  /**
+   * The store this lays down is the store every later `record`, `attach` and `fork` in that
+   * directory writes into, because `ensureRunsDir` restricts and gitignores only a store it is the
+   * one to create. quickstart made it with a bare `mkdir` instead, so the directory the README's
+   * first line produces skipped both — and nothing afterwards ever repaired it.
+   *
+   * `.gitignore` is the half that can be checked on any platform. The ACL is the half that made it
+   * a security hole, and is checked where it exists.
+   */
+  it('creates the store the way every other command does', async () => {
+    const { out } = capture();
+    const result = await quickstartCommand(parseArgs(['quickstart']), out, dir);
+
+    await expect(readFile(join(result.dir, '.orca', '.gitignore'), 'utf8')).resolves.toContain('*');
+    await expectOwnerOnly(join(result.dir, '.orca', 'runs'));
   });
 
   /**

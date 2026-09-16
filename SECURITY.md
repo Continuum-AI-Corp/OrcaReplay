@@ -29,11 +29,14 @@ What we do:
   that generalises: `id_ecdsa` is not on it. A shape we miss is a bug worth filing — there is an
   issue template for exactly that.
 - Trace files and blobs are written mode `0600`, run directories `0700` — and on Windows,
-  where those are not something the filesystem has, the equivalent ACL: `.orca/runs` is
-  created granting only its owner, SYSTEM and Administrators, and everything written beneath
-  it inherits that. Said plainly because it did not used to be true: `chmod` on Windows sets
-  the read-only attribute and discards the mode, so the store was left with whatever the
-  workspace handed down — typically readable by every account on the machine.
+  where those are not something the filesystem has, the equivalent ACL: `.orca/runs` grants
+  only its owner, SYSTEM and Administrators, and everything written beneath it inherits that.
+  Said plainly because it did not used to be true: `chmod` on Windows sets the read-only
+  attribute and discards the mode, so the store was left with whatever the workspace handed
+  down — typically readable by every account on the machine. On Windows the ACL is applied
+  whether or not orca created the store that run, since an inherited one is not a choice
+  anybody made. What it cannot do is rewrite runs already on disk from before: those keep the
+  ACEs they were written with, and `icacls` on the parent does not re-propagate.
 - Redaction lives in the writer, so a file orca does not write itself has not been through it. A
   capture layer that runs inside the agent's process, or in a child of it, produces exactly that:
   the bytes are on disk before orca ever reads them. Where nothing reads such a file after the run,
