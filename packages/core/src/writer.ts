@@ -81,6 +81,9 @@ export class TraceWriter {
   readonly #started = process.hrtime.bigint();
   readonly #startedAtMs = Date.now();
   #seq = 0;
+  /** Whether run.start reached disk, so run.end can tell an open run from an unopened one. */
+  #opened = false;
+  #closedEvent = false;
   #turn = 0;
   #git: Manifest['git'];
   #tail: Promise<unknown> = Promise.resolve();
@@ -166,6 +169,41 @@ export class TraceWriter {
 
   async append(init: EventInit): Promise<TraceEvent> {
     if (this.#sealed) throw new Error(`run ${this.#runId} is closed`);
+    // SPEC §2.3: `run.start` AND `run.end` BRACKET THE RUN, EXACTLY ONE OF EACH.
+    //
+    // Nothing enforced that here, and three commands got it wrong in three different ways —
+    // `record --mcp-config` put a note at seq 0, `attach` wrote neither event, and a fork opened
+    // on `fork`. All three produced traces that look fine to `orca show`, `orca replay` and the
+    // viewer, and that no gateway will take:
+    //
+    //   invalid trace: run.start at seq 1, must be seq 0
+    //   invalid trace: 0 run.start and 1 run.end events (exactly one of each)
+    //
+    // The cost of finding out late is the whole recording: the user learns at `orca push`, after
+    // the agent session is over, that there is nothing to push. Refusing the write is the only
+    // point where the mistake is still cheap — it fails in the developer's own test run, at the
+    // line that wrote the wrong event, rather than in someone else's terminal a week later.
+    // Only the three a fragment cannot reach innocently. "seq 0 must BE run.start" would be the
+    // stronger rule and is wrong here: this writer is also how fixtures and conformance vectors
+    // are built, and a deliberate fragment is allowed to hold a few events and no bracket at all.
+    // These three are violations however the trace is meant to be used.
+    if (init.type === 'run.start' && this.#seq !== 0) {
+      throw new Error(
+        `run.start belongs at seq 0 (spec §2.3); run ${this.#runId} tried to write it at seq ` +
+          `${this.#seq}, behind ${this.#opened ? 'a run.start that is already there' : 'events that were written first'}. ` +
+          'Append it before any capture layer can write.',
+      );
+    }
+    if (init.type === 'run.end' && !this.#opened) {
+      throw new Error(
+        `run ${this.#runId} has no run.start to close: the spec brackets a run with exactly one ` +
+          'of each (spec §2.3), and a gateway refuses the push — "0 run.start and 1 run.end ' +
+          'events". Append run.start as the run opens.',
+      );
+    }
+    if (init.type === 'run.end' && this.#closedEvent) {
+      throw new Error(`run ${this.#runId} already has a run.end; the spec allows exactly one`);
+    }
     // Clocks are read at call time so they describe the event, not the queue drain; seq is
     // assigned inside the queue so a rejected event leaves no hole in the dense order.
     const when = init.occurredAt ?? new Date();
@@ -251,6 +289,9 @@ export class TraceWriter {
 
     assertEvent(out);
     await this.#handle.write(`${JSON.stringify(out)}\n`);
+    // Set after the write, not before it: a bracket that failed to reach disk is not one.
+    if (out.type === 'run.start') this.#opened = true;
+    if (out.type === 'run.end') this.#closedEvent = true;
     this.#seq = seq + 1;
     return out;
   }

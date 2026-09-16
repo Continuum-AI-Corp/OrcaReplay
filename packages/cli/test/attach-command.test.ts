@@ -173,6 +173,13 @@ describe('orca attach', () => {
     expect(result.modelExchanges).toBe(1);
     const events = await (await TraceReader.open(result.runDir)).events();
     expect(events.filter((e) => e.type === 'model.request')).toHaveLength(1);
+
+    // Spec §2.3: `run.start` and `run.end` bracket the run, exactly one of each. This assertion
+    // was the whole reason `attach` produced traces no gateway would take — it wrote neither, and
+    // the only thing anyone checked here was the model exchange.
+    expect(events[0]?.type, `first event was ${events[0]?.type}`).toBe('run.start');
+    expect(events[0]?.seq).toBe(0);
+    expect(events.at(-1)?.type, `last event was ${events.at(-1)?.type}`).toBe('run.end');
   });
 
   /**

@@ -172,6 +172,69 @@ describe('TraceWriter.create', () => {
   });
 });
 
+/**
+ * SPEC §2.3 BRACKETS, ENFORCED WHERE THE MISTAKE IS STILL CHEAP.
+ *
+ * Three commands broke this three different ways and every one of them shipped: `record
+ * --mcp-config` put a note at seq 0, `attach` wrote neither bracket, and a fork opened on `fork`.
+ * All three produce a trace that `orca show`, `orca replay` and the viewer render happily, and
+ * that a gateway refuses on push — after the agent session is over and the recording is the only
+ * copy of it.
+ *
+ * The rules are the three a deliberate fragment cannot reach by accident. "seq 0 must BE
+ * run.start" is deliberately NOT one of them: this writer also builds fixtures and conformance
+ * vectors, which are allowed to be a handful of events with no bracket at all.
+ */
+describe('TraceWriter — the brackets a run is required to have', () => {
+  it('refuses run.start anywhere but seq 0', async () => {
+    const w = await TraceWriter.create(runs, INIT);
+    await w.append({ type: 'note', actor: 'orca' });
+    await expect(w.append({ type: 'run.start', actor: 'orca' })).rejects.toThrow(/seq 0/);
+    await w.close();
+  });
+
+  it('refuses a second run.start', async () => {
+    const w = await TraceWriter.create(runs, INIT);
+    await w.append({ type: 'run.start', actor: 'orca' });
+    await expect(w.append({ type: 'run.start', actor: 'orca' })).rejects.toThrow(/seq 0/);
+    await w.close();
+  });
+
+  it('refuses run.end on a run that was never opened', async () => {
+    const w = await TraceWriter.create(runs, INIT);
+    await w.append({ type: 'model.request', actor: 'model' });
+    await expect(w.append({ type: 'run.end', actor: 'orca' })).rejects.toThrow(/no run.start/);
+    await w.close();
+  });
+
+  it('refuses a second run.end', async () => {
+    const w = await TraceWriter.create(runs, INIT);
+    await w.append({ type: 'run.start', actor: 'orca' });
+    await w.append({ type: 'run.end', actor: 'orca' });
+    await expect(w.append({ type: 'run.end', actor: 'orca' })).rejects.toThrow(/already has a run/);
+    await w.close();
+  });
+
+  it('leaves no hole in the dense order when it refuses one', async () => {
+    const w = await TraceWriter.create(runs, INIT);
+    await w.append({ type: 'run.start', actor: 'orca' });
+    await expect(w.append({ type: 'run.start', actor: 'orca' })).rejects.toThrow();
+    const after = await w.append({ type: 'note', actor: 'orca' });
+    // Spec §2.1: seq is a dense total order. A rejected write must not consume one.
+    expect(after.seq).toBe(1);
+    await w.close();
+  });
+
+  it('still lets a fragment be a fragment', async () => {
+    const w = await TraceWriter.create(runs, INIT);
+    await w.append({ type: 'model.request', actor: 'model' });
+    await w.append({ type: 'note', actor: 'orca' });
+    const events = await lines(w);
+    expect(events.map((e) => e.type)).toEqual(['model.request', 'note']);
+    await w.close();
+  });
+});
+
 describe('TraceWriter.append', () => {
   it('assigns a dense sequence from zero', async () => {
     const w = await TraceWriter.create(runs, INIT);
