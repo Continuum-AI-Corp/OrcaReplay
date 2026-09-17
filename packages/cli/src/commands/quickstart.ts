@@ -62,17 +62,19 @@ async function shippedRunId(): Promise<string> {
 }
 
 /**
- * Whether it is safe to write a project into this path.
- *
- * Only a missing path counts as free. Swallowing every error meant a path that exists and is not a
- * directory read as empty, so `orca quickstart --dir notes.txt` skipped the sentence that explains
- * the problem and surfaced `ENOTDIR: not a directory, mkdir` from three lines further on.
- */
-/**
  * The store's modes, applied to a tree that was copied in rather than written.
  *
- * On Windows the modes are discarded and the tree already inherits the ACL `ensureRunsDir` put on
- * `.orca/runs`, so this is the POSIX half of the same promise.
+ * `cp` reproduces the source's permissions, and every shipped asset is 0644 in git, so without
+ * this the recording landed 0644 under a 0755 directory — in the store SECURITY.md calls 0600 and
+ * 0700. `pull` is the other command that *installs* a run rather than writing it, and chmods every
+ * entry for the same reason.
+ *
+ * The POSIX half of the promise, and only that half. On Windows `chmod` touches the read-only
+ * attribute and nothing else, and what protects the copy there is the ACL it takes from the
+ * directory it is copied *into* — not, as a review read `CopyFileEx`'s "security resource
+ * attributes" to mean, the one it came from. Measured: a file copied out of a world-readable
+ * source into a narrowed directory comes out at the destination's three trustees. The quickstart
+ * test asserts that on a file inside the run rather than leaving it as a belief.
  */
 async function applyStoreModes(dir: string): Promise<void> {
   await chmod(dir, 0o700);
@@ -83,6 +85,13 @@ async function applyStoreModes(dir: string): Promise<void> {
   }
 }
 
+/**
+ * Whether it is safe to write a project into this path.
+ *
+ * Only a missing path counts as free. Swallowing every error meant a path that exists and is not a
+ * directory read as empty, so `orca quickstart --dir notes.txt` skipped the sentence that explains
+ * the problem and surfaced `ENOTDIR: not a directory, mkdir` from three lines further on.
+ */
 async function isEmptyish(dir: string): Promise<boolean> {
   try {
     return (await readdir(dir)).length === 0;
