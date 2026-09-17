@@ -174,7 +174,11 @@ describe('ensureRunsDir and the directory the store stands in', () => {
       elsewhere,
     ]);
 
-    await expect(ensureRunsDir(cwd)).rejects.toThrow(/is a link to/);
+    // `is a link`, not `is a link to <target>`: the check is `lstat` on the entry now, which
+    // answers whether this is a reparse point without resolving where it points. That is
+    // deliberate — `realpath` resolves, and a path that resolves elsewhere without being a link
+    // (a `subst` drive, a mapped drive, an 8.3 short name) was being refused as one.
+    await expect(ensureRunsDir(cwd)).rejects.toThrow(/is a link,/);
   });
 });
 

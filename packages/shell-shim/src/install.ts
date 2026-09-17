@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { EARLIEST_TS_MS, LATEST_TS_MS } from '@orcareplay/schema';
 import type { ShellFrame } from './runner.js';
+import { restrictToOwner } from '@orcareplay/core';
 
 /**
  * Shells an agent actually reaches for. Shimming more binaries buys detail and costs blast radius.
@@ -66,7 +67,7 @@ export async function installShellShim(options: InstallOptions): Promise<Install
   const dir = join(options.runDir, 'shims');
   const transportDir = options.framesPath
     ? undefined
-    : await mkdtemp(join(tmpdir(), 'orca-shell-'));
+    : await secureTransport(await mkdtemp(join(tmpdir(), 'orca-shell-')));
   const framesPath = options.framesPath ?? join(transportDir!, 'shell-frames.jsonl');
   const shims = options.shims ?? DEFAULT_SHIMS;
 
@@ -350,4 +351,32 @@ function quotePosix(value: string): string {
 
 function quoteCmd(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
+}
+
+/**
+ * The transport, narrowed before a single byte goes into it.
+ *
+ * `mkdtemp` is documented as giving a directory only this user can enter, and on POSIX it does —
+ * 0700. On Windows the mode is discarded and the directory takes whatever `%TEMP%` hands down,
+ * which is not always the profile: measured on one machine it carried a local group and a second
+ * account, both with Modify. What lands here is `shell-frames.jsonl`, and the doc comment on this
+ * package already says what that is — argv and cwd verbatim, so a `curl -H "Authorization: …"` or
+ * a `git clone https://user:token@host/…` is in it in full.
+ *
+ * Before anything is written, not after: `icacls` does not re-propagate to children that already
+ * exist, so a directory narrowed after `owner.pid` and the frames file were created would leave
+ * both of them holding the ACL they inherited.
+ *
+ * Failing here fails the install. The caller treats that as "this layer is unavailable" and the
+ * run continues without shell capture — which is the right way round: not capturing beats writing
+ * every command the agent runs into a file this cannot vouch for.
+ */
+async function secureTransport(dir: string): Promise<string> {
+  try {
+    await restrictToOwner(dir, 0o700);
+    return dir;
+  } catch (err) {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    throw err;
+  }
 }

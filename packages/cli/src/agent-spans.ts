@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { restrictToOwner } from '@orcareplay/core';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MCP_RECORD_START, objectsOnLine } from '@orcareplay/mcp-shim';
@@ -269,6 +270,17 @@ export async function installAgentSpans(runDir: string): Promise<AgentSpanCaptur
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, SITECUSTOMIZE), SITECUSTOMIZE_SOURCE, 'utf8');
   const transportDir = await mkdtemp(join(tmpdir(), 'orca-spans-'));
+  // Narrowed before the first write, for the reason the comment above no longer gets to assume:
+  // `mkdtemp` gives a directory only this user can enter on POSIX, and on Windows gives whatever
+  // `%TEMP%` hands down. `icacls` does not re-propagate, so this has to happen before `spansPath`
+  // and the owner file exist, not after. A failure here fails the install, and the caller degrades
+  // to no agent-span capture rather than writing into a directory it cannot vouch for.
+  try {
+    await restrictToOwner(transportDir, 0o700);
+  } catch (err) {
+    await rm(transportDir, { recursive: true, force: true }).catch(() => undefined);
+    throw err;
+  }
   const spansPath = join(transportDir, SPANS_FILENAME);
   // Best-effort: an unwritable transport must not stop the run, and the child creating it instead
   // still lands inside a directory only this user can enter.

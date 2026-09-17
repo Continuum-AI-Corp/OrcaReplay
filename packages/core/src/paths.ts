@@ -1,5 +1,5 @@
-import { mkdir, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { lstat, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { RUN_ID_PATTERN } from '@orcareplay/schema';
 import { restrictToOwner } from './private-files.js';
 
@@ -73,11 +73,30 @@ export async function ensureRunsDir(cwd: string): Promise<string> {
   // symlink and pointing a store at another disk is an ordinary thing to do.
   if (process.platform === 'win32') {
     for (const path of [orcaDir(cwd), dir]) {
-      const real = await realpath(path).catch(() => undefined);
-      if (real !== undefined && resolve(real) !== resolve(path)) {
+      // `lstat` on the entry, not `realpath` on the chain. Two reasons, both measured.
+      //
+      // `realpath` answers a different question — *where does this path end up* — and a drive
+      // that is not a link ends up somewhere else all the same. A `subst` drive is the ordinary
+      // case: it maps a letter onto a real directory, so every path under it resolves into that
+      // directory instead, the two differ, and the check refused to record at all on a perfectly
+      // normal workspace. A mapped network drive does the same. `lstat` on that directory reports
+      // no link, because there is none.
+      //
+      // And a resolution that *cannot* be made must not read as "no link here". `realpath` fails
+      // for more than absence — EACCES, ELOOP, and EINVAL/UNKNOWN on filesystems that cannot
+      // answer GetFinalPathNameByHandle — and swallowing those let the check skip itself silently
+      // in exactly the conditions it exists for. `lstat` asks about the entry that is right here,
+      // so a failure is a real failure, and it is refused like any other.
+      const entry = await lstat(path).catch((err: unknown) => {
         throw new Error(
-          `${path} is a link to ${real}, and orca will not write a trace store through one — ` +
-            'the permissions it sets would land on the link while the recording landed there. ' +
+          `${path} could not be examined (${(err as NodeJS.ErrnoException).code ?? String(err)}), ` +
+            'and orca will not write a trace store into a path it cannot vouch for.',
+        );
+      });
+      if (entry.isSymbolicLink()) {
+        throw new Error(
+          `${path} is a link, and orca will not write a trace store through one — the permissions ` +
+            'it sets would land on the link while the recording landed wherever it points. ' +
             'Remove it, or record in a workspace where it is a real directory.',
         );
       }

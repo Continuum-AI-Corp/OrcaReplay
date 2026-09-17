@@ -41,8 +41,12 @@ What we do:
   capture layer that runs inside the agent's process, or in a child of it, produces exactly that:
   the bytes are on disk before orca ever reads them. Where nothing reads such a file after the run,
   it is kept out of the run directory — the OpenAI Agents tracing layer and the shell shim both
-  write to a private temporary directory, orca reads each once and appends what it keeps through
-  the redactor like anything else, and the directory is removed when the run ends. What the agents
+  write to a temporary directory made private the moment it is created and before anything is
+  written into it, orca reads each once and appends what it keeps through the redactor like
+  anything else, and the directory is removed when the run ends. "Private" is `mkdtemp`'s 0700 on
+  POSIX and the same owner-only ACL as the store on Windows, where `mkdtemp` alone gives whatever
+  `%TEMP%` hands down — which is not always the profile, and `shell-frames.jsonl` holds argv and
+  cwd verbatim. What the agents
   layer writes is an allow-list of structural fields — agent and tool names, which agent handed off
   to which, whether a guardrail tripped — never a tool's input or output.
 - Where something *does* read such a file later, it stays. `mcp-frames.jsonl` holds the recorded
