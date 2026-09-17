@@ -164,6 +164,13 @@ describe('restrictToOwner', () => {
     const descriptor = await sddl(newest);
     expect(isProtected(descriptor), newest).toBe(true);
     expect(trustees(descriptor), newest).toEqual(ownerOnly);
+
+    // And it holds something, so it cannot be removed and replaced between two narrowings. In
+    // `%TEMP%` Modify carries Delete-Subfolders, and Delete-Subfolders on a parent removes a child
+    // whatever the child's own DACL says — an *empty* child. `rmdir` on a non-empty one is refused
+    // (verified: ENOTEMPTY), and the file itself inherits this directory's ACL, so deleting it
+    // would need the right the narrowing just took away.
+    expect(await readdir(newest), `${newest} is empty, so it can still be swapped`).not.toEqual([]);
   });
 
   it.runIf(onWindows)('replaces the DACL rather than adding to it', async () => {

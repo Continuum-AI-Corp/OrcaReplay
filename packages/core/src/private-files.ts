@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { rmSync } from 'node:fs';
-import { chmod, lstat, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { chmod, lstat, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -212,6 +212,21 @@ async function aclScratch(icacls: string): Promise<string> {
       if (now.isSymbolicLink() || now.dev !== was.dev || now.ino !== was.ino) {
         throw new Error(`${dir} was replaced while orca was securing it`);
       }
+
+      // A file, kept, so the directory cannot be removed and replaced later.
+      //
+      // The identity check above closes the window up to here. It does nothing about the rest of
+      // the run: this directory is reused for every narrowing the process makes, and between them
+      // it would sit empty in `%TEMP%` — where Modify, which two further local accounts hold here,
+      // carries Delete-Subfolders, and Delete-Subfolders on a parent removes a child whatever the
+      // child's own DACL says. An *empty* child. `rmdir` on a non-empty one is refused, and this
+      // file is out of reach in turn: it inherits this directory's ACL, so deleting it would need
+      // Delete-Subfolders *here*, which is exactly what the narrowing took away.
+      //
+      // `.orca` and `.orca/runs` are already safe this way — `.orca` holds `runs` and
+      // `.gitignore`, and `runs` sits under a narrowed parent — which is why only this one needed
+      // saying out loud.
+      await writeFile(join(dir, 'in-use'), String(process.pid), { mode: 0o600, flag: 'wx' });
 
       // And read back what was written, for the reason the sibling gives: `execFile` reports that
       // icacls exited 0 and nothing more. Read straight rather than through `descriptorOf`, which
