@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -133,6 +133,37 @@ describe('restrictToOwner', () => {
 
     expect(seen.length, 'the probe never got to run').toBeGreaterThan(0);
     expect([...new Set(seen)].sort()).toEqual(ownerOnly);
+  });
+
+  it.runIf(onWindows)('reads its descriptors out of a directory only it can write', async () => {
+    // The scratch file is the input to *both* halves of the only guard this function has: the
+    // descriptor `explicitTrustees` builds its `/remove` list from, and the descriptor the
+    // read-back compares against what was asked for. Substituting it hides a foreign trustee from
+    // the first read and satisfies the second, and `restrictToOwner` reports success either way.
+    //
+    // `mkdtemp` discards its mode on Windows, so under %TEMP% the directory took whatever that
+    // handed down — measured on this machine: two further local accounts, both with inheritable
+    // Modify. Every other temporary directory this feature mints is narrowed the moment it exists.
+    const dir = join(await mkdtemp(join(tmpdir(), 'orca-perm-')), 'runs');
+    await mkdir(dir);
+    await restrictToOwner(dir, 0o700);
+
+    // The newest one is this worker's: it was written into a moment ago. Picked that way rather
+    // than by difference, because an earlier test in the same file may already have made it.
+    const scratch = await Promise.all(
+      (await readdir(tmpdir()))
+        .filter((name) => name.startsWith('orca-acl-'))
+        .map(async (name) => {
+          const path = join(tmpdir(), name);
+          return { path, at: (await stat(path)).mtimeMs };
+        }),
+    );
+    expect(scratch.length, 'no scratch directory was made').toBeGreaterThan(0);
+    const newest = scratch.sort((a, b) => b.at - a.at)[0]!.path;
+
+    const descriptor = await sddl(newest);
+    expect(isProtected(descriptor), newest).toBe(true);
+    expect(trustees(descriptor), newest).toEqual(ownerOnly);
   });
 
   it.runIf(onWindows)('replaces the DACL rather than adding to it', async () => {

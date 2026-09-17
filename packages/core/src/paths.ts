@@ -54,18 +54,26 @@ export async function ensureRunsDir(cwd: string): Promise<string> {
     // Closing `.orca` first ends that: nothing else can delete or replace what is under it, so the
     // check on `runs` cannot be raced afterwards.
     await mkdir(orca, { recursive: true, mode: 0o700 });
-    await refuseLink(orca);
+    const orcaWas = await vouchFor(orca);
     await restrictToOwner(orca, 0o700);
+    await stillTheSame(orca, orcaWas);
 
     await mkdir(dir, { recursive: true, mode: 0o700 });
     // And `.orca` again, because it was itself open between its own check and its own narrowing.
-    // This catches a swap that landed in that window before a single byte is written into the
-    // store. It does not close the window — that needs the DACL applied to an open handle rather
-    // than to a path, which node cannot do — but it does mean such a swap ends in a refusal rather
-    // than in a recording written somewhere else.
-    await refuseLink(orca);
-    await refuseLink(dir);
+    //
+    // By identity, not just by "is it a link". A *real* directory another account put there is
+    // neither a link nor ours: it passes a link check and is then narrowed as though it were
+    // orca's, and its creator owns it, so it can re-grant itself afterwards. `dev`+`ino` is the
+    // volume serial and the NTFS file index, which a substitute cannot share — measured: it
+    // changes when a directory of the same name is deleted and remade.
+    //
+    // This does not close the window — that needs the DACL applied to an open handle rather than
+    // to a path, which node cannot do — but it does mean such a swap ends in a refusal rather than
+    // in a recording written somewhere else.
+    await stillTheSame(orca, orcaWas);
+    const dirWas = await vouchFor(dir);
     await restrictToOwner(dir, 0o700);
+    await stillTheSame(dir, dirWas);
   } else {
     // POSIX, unchanged: only when this call created it, which is what passing `mode` to mkdir
     // already meant. Every file beneath gets its own 0600 from the writer regardless, so the
@@ -113,7 +121,7 @@ export async function ensureRunsDir(cwd: string): Promise<string> {
  * the conditions it exists for. `lstat` asks about the entry that is right here, so a failure is a
  * real failure, and it is refused like any other.
  */
-async function refuseLink(path: string): Promise<void> {
+async function vouchFor(path: string): Promise<Identity> {
   const entry = await lstat(path).catch((err: unknown) => {
     throw new Error(
       `${path} could not be examined (${(err as NodeJS.ErrnoException).code ?? String(err)}), ` +
@@ -125,6 +133,36 @@ async function refuseLink(path: string): Promise<void> {
       `${path} is a link, and orca will not write a trace store through one — the permissions ` +
         'it sets would land on the link while the recording landed wherever it points. ' +
         'Remove it, or record in a workspace where it is a real directory.',
+    );
+  }
+  return { dev: entry.dev, ino: entry.ino };
+}
+
+/** What tells one directory from another that has taken its name. */
+interface Identity {
+  dev: number;
+  ino: number;
+}
+
+/**
+ * Refuse a path that is no longer the entry it was a moment ago.
+ *
+ * `vouchFor` answers "is this a reparse point", and a *real* directory another account put there
+ * is neither a link nor ours — it passes, is narrowed as though it were orca's, and its creator
+ * owns it, so it can re-grant itself whenever it likes.
+ *
+ * Only a genuine difference refuses. A filesystem that cannot give a file index answers zero for
+ * both, and zero equals zero, so the check lapses rather than refusing a network share out of
+ * hand. That is the opposite of what `vouchFor` does with a failure, and deliberately: there the
+ * failure means "we could not look", here it means "there is nothing to compare".
+ */
+async function stillTheSame(path: string, was: Identity): Promise<void> {
+  const now = await vouchFor(path);
+  if (now.dev !== was.dev || now.ino !== was.ino) {
+    throw new Error(
+      `${path} was replaced while orca was securing it — the permissions it set landed on a ` +
+        'directory that is no longer there. Nothing has been recorded; try again, and if it ' +
+        'keeps happening, something else on this machine is writing into your workspace.',
     );
   }
 }

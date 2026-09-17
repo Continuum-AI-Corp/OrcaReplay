@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { rmSync } from 'node:fs';
 import { chmod, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -119,9 +121,8 @@ async function explicitTrustees(icacls: string, path: string): Promise<string[]>
 
 /** The path's security descriptor, as SDDL. */
 async function descriptorOf(icacls: string, path: string): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), 'orca-acl-'));
+  const saved = join(await aclScratch(icacls), randomBytes(8).toString('hex'));
   try {
-    const saved = join(dir, 'acl');
     await run(icacls, [path, '/save', saved]);
     // UTF-16LE, and the descriptor is the last line: two lines for an ordinary path — the entry's
     // name, then its descriptor — and one for a path with no name to give, such as a drive root.
@@ -143,8 +144,60 @@ async function descriptorOf(icacls: string, path: string): Promise<string> {
     }
     return descriptor;
   } finally {
-    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    await rm(saved, { force: true }).catch(() => undefined);
   }
+}
+
+let scratch: Promise<string> | undefined;
+
+/**
+ * Somewhere private to write the descriptors this file reads back.
+ *
+ * `mkdtemp` discards its mode on Windows, so a scratch directory under `%TEMP%` takes whatever
+ * that hands down — measured here: two further local accounts, both with inheritable Modify. Every
+ * other temporary directory this feature mints is narrowed the moment it exists, and this one was
+ * not, which matters more rather than less: the file written into it is the *input to both halves
+ * of the only guard this function has* — the descriptor `explicitTrustees` decides the `/remove`
+ * list from, and the descriptor the read-back check compares against what was asked for.
+ * Substituting it hides a foreign trustee from the first and satisfies the second.
+ *
+ * Narrowed directly rather than through `restrictToOwner`, which reads a descriptor, which is read
+ * from here — that would recurse. `execFile` rejects on a non-zero exit, so a narrowing that did
+ * not apply is a throw rather than a descriptor read out of a directory anyone can write.
+ *
+ * One per process, with a random filename per call, so the cost is a single extra `icacls` for the
+ * life of the run rather than two on every path narrowed.
+ */
+async function aclScratch(icacls: string): Promise<string> {
+  scratch ??= (async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'orca-acl-'));
+    try {
+      await run(icacls, [
+        dir,
+        '/inheritance:r',
+        '/grant:r',
+        `*${await currentAccountSid()}:(OI)(CI)(F)`,
+        `*${SYSTEM}:(OI)(CI)(F)`,
+        `*${ADMINISTRATORS}:(OI)(CI)(F)`,
+        '/q',
+      ]);
+      // Nothing sweeps an `orca-acl-` directory the way `sweepStaleTransports` sweeps the two
+      // named transports, so it takes itself with it rather than accumulating one per run.
+      process.on('exit', () => {
+        try {
+          rmSync(dir, { recursive: true, force: true });
+        } catch {
+          // Exiting anyway; a directory left in %TEMP% is not worth failing the exit over.
+        }
+      });
+      return dir;
+    } catch (err) {
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+      scratch = undefined;
+      throw err;
+    }
+  })();
+  return scratch;
 }
 
 const SYSTEM = 'S-1-5-18';
