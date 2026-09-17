@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -180,6 +180,32 @@ describe('ensureRunsDir and the directory the store stands in', () => {
     // (a `subst` drive, a mapped drive, an 8.3 short name) was being refused as one.
     await expect(ensureRunsDir(cwd)).rejects.toThrow(/is a link,/);
   });
+
+  /**
+   * The container, which is the half the store's protection now rests on: it is created and
+   * narrowed *before* `runs` exists, so that nothing else can delete or replace what goes under
+   * it. A link standing there is refused before a single directory is made inside it.
+   */
+  it.runIf(process.platform === 'win32')(
+    'refuses a store whose container is a link, before making anything inside it',
+    async () => {
+      const elsewhere = join(cwd, 'elsewhere');
+      await mkdir(elsewhere);
+      await promisify(execFile)('cmd.exe', [
+        '/d',
+        '/s',
+        '/c',
+        'mklink',
+        '/J',
+        join(cwd, '.orca'),
+        elsewhere,
+      ]);
+
+      await expect(ensureRunsDir(cwd)).rejects.toThrow(/is a link,/);
+      // And nothing was written through it on the way to finding out.
+      expect(await readdir(elsewhere)).toEqual([]);
+    },
+  );
 });
 
 describe('path helpers', () => {

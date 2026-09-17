@@ -37,83 +37,46 @@ export function runsDir(cwd: string): string {
  */
 export async function ensureRunsDir(cwd: string): Promise<string> {
   const dir = runsDir(cwd);
-  // On POSIX, only when this call created it — which is what passing `mode` to mkdir already
-  // meant. Every file beneath gets its own 0600 from the writer regardless, so the directory's
-  // mode is not load-bearing, and one the user has deliberately opened up is theirs to have
-  // opened up.
-  //
-  // On Windows neither half of that holds. `mode` is discarded, the `mode:` arguments in the
-  // writer, the blob store and sync's staging are discarded too, and this one ACL is the only
-  // thing that makes the store owner-only: restricting the root is what every run directory,
-  // blob, `.incoming` staging area and `tls/` written afterwards inherits — one call, rather than
-  // one per file for a trace that may hold tens of thousands.
-  //
-  // So on Windows it is applied to a store that already exists as well, because "already exists"
-  // there is not a statement of intent. It is every install predating this, every store
-  // `orca quickstart` laid down, and any directory whose creation raced or half-failed — and
-  // `mkdir` returns undefined for all of them, so a store skipped once would be skipped forever.
-  // An inherited ACL is what the workspace happened to hand down, not something anyone chose.
-  //
-  // This covers what is written from now on. `icacls` on a parent does not re-propagate to
-  // existing children, and rewriting the ACL of every file in a store already on disk is not
-  // something a `record` should do behind the user's back.
-  const created = (await mkdir(dir, { recursive: true, mode: 0o700 })) !== undefined;
-  // Neither of them may be a link, on Windows, before anything else is decided.
-  //
-  // Narrowing `.orca` stops one being put there from now on and says nothing about one already in
-  // place — which is the population this whole change is for. `icacls` does not follow a reparse
-  // point, so the narrowing would land on the link entry while every trace went *through* it into
-  // whatever it points at, under that directory's ACL, with `restrictToOwner` reporting success.
-  // A junction needs no privilege to create, and `mkdir(…, { recursive: true })` accepts one as an
-  // existing directory.
-  //
-  // Refused rather than followed: orca creates both of these directories, so a link standing where
-  // one should be was not put there by orca, and a store it cannot vouch for is not one it should
-  // quietly write a recording into. POSIX keeps its existing behaviour, where `chmod` follows a
-  // symlink and pointing a store at another disk is an ordinary thing to do.
+  const orca = orcaDir(cwd);
+
   if (process.platform === 'win32') {
-    for (const path of [orcaDir(cwd), dir]) {
-      // `lstat` on the entry, not `realpath` on the chain. Two reasons, both measured.
-      //
-      // `realpath` answers a different question — *where does this path end up* — and a drive
-      // that is not a link ends up somewhere else all the same. A `subst` drive is the ordinary
-      // case: it maps a letter onto a real directory, so every path under it resolves into that
-      // directory instead, the two differ, and the check refused to record at all on a perfectly
-      // normal workspace. A mapped network drive does the same. `lstat` on that directory reports
-      // no link, because there is none.
-      //
-      // And a resolution that *cannot* be made must not read as "no link here". `realpath` fails
-      // for more than absence — EACCES, ELOOP, and EINVAL/UNKNOWN on filesystems that cannot
-      // answer GetFinalPathNameByHandle — and swallowing those let the check skip itself silently
-      // in exactly the conditions it exists for. `lstat` asks about the entry that is right here,
-      // so a failure is a real failure, and it is refused like any other.
-      const entry = await lstat(path).catch((err: unknown) => {
-        throw new Error(
-          `${path} could not be examined (${(err as NodeJS.ErrnoException).code ?? String(err)}), ` +
-            'and orca will not write a trace store into a path it cannot vouch for.',
-        );
-      });
-      if (entry.isSymbolicLink()) {
-        throw new Error(
-          `${path} is a link, and orca will not write a trace store through one — the permissions ` +
-            'it sets would land on the link while the recording landed wherever it points. ' +
-            'Remove it, or record in a workspace where it is a real directory.',
-        );
-      }
-    }
+    // The container first, narrowed before the store under it exists.
+    //
+    // The order used to be create-both, check-both, narrow `runs`, narrow `.orca` — which leaves
+    // the one thing that decides whether `runs` can be swapped open for the whole of it.
+    // `restrictToOwner` costs about 27ms a path here (a `whoami` spawn, an `icacls /save` read, the
+    // write, and a second `/save` to verify it), so the gap between checking `runs` and owning it
+    // ran past 50ms with `.orca` still granting the workspace's Modify — and Modify on the parent
+    // is enough to delete a child whatever the child's own DACL says. Another account can `rmdir`
+    // and `mklink /J` in a loop; whenever a swap lands inside that gap the check has already
+    // passed, the narrowing goes onto the link entry, and the entire run is written through it.
+    //
+    // Closing `.orca` first ends that: nothing else can delete or replace what is under it, so the
+    // check on `runs` cannot be raced afterwards.
+    await mkdir(orca, { recursive: true, mode: 0o700 });
+    await refuseLink(orca);
+    await restrictToOwner(orca, 0o700);
+
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    // And `.orca` again, because it was itself open between its own check and its own narrowing.
+    // This catches a swap that landed in that window before a single byte is written into the
+    // store. It does not close the window — that needs the DACL applied to an open handle rather
+    // than to a path, which node cannot do — but it does mean such a swap ends in a refusal rather
+    // than in a recording written somewhere else.
+    await refuseLink(orca);
+    await refuseLink(dir);
+    await restrictToOwner(dir, 0o700);
+  } else {
+    // POSIX, unchanged: only when this call created it, which is what passing `mode` to mkdir
+    // already meant. Every file beneath gets its own 0600 from the writer regardless, so the
+    // directory's mode is not load-bearing, and one the user has deliberately opened up is theirs
+    // to have opened up. `chmod` follows a symlink here, and pointing a store at another disk is
+    // an ordinary thing to do, so there is no link check either.
+    const created = (await mkdir(dir, { recursive: true, mode: 0o700 })) !== undefined;
+    if (created) await restrictToOwner(dir, 0o700);
   }
-  if (created || process.platform === 'win32') await restrictToOwner(dir, 0o700);
-  // And the directory the store stands in, which orca creates too.
-  //
-  // On POSIX `mkdir`'s mode covered it on the way past. On Windows it kept the workspace's ACL,
-  // and Modify there is enough to delete `runs` — a child's own DACL does not decide whether the
-  // parent may delete it — and leave a junction in its place, which needs no privilege. Measured
-  // from there: `mkdir(…, { recursive: true })` accepts the junction as an existing directory,
-  // and `icacls` does not follow a reparse point, so the narrowing lands on the junction while
-  // every trace is written *through* it into whatever it points at, under that directory's ACL.
-  // `restrictToOwner` reports success the whole way.
-  if (process.platform === 'win32') await restrictToOwner(orcaDir(cwd), 0o700);
-  const ignore = join(orcaDir(cwd), '.gitignore');
+
+  const ignore = join(orca, '.gitignore');
   if (!(await stat(ignore).catch(() => null))) {
     await writeFile(
       ignore,
@@ -122,6 +85,48 @@ export async function ensureRunsDir(cwd: string): Promise<string> {
     ).catch(() => undefined);
   }
   return dir;
+}
+
+/**
+ * Refuse a path that is a link, on the way to writing a trace store into it.
+ *
+ * `icacls` does not follow a reparse point, so the narrowing would land on the link entry while
+ * every trace went *through* it into whatever it points at, under that directory's ACL — and
+ * `restrictToOwner` would report success. A junction needs no privilege to create, and
+ * `mkdir(…, { recursive: true })` accepts one as an existing directory.
+ *
+ * Refused rather than followed: orca creates these directories, so a link standing where one
+ * should be was not put there by orca, and a store it cannot vouch for is not one it should
+ * quietly write a recording into.
+ *
+ * `lstat` on the entry, not `realpath` on the chain. Two reasons, both measured.
+ *
+ * `realpath` answers a different question — *where does this path end up* — and a drive that is
+ * not a link ends up somewhere else all the same. A `subst` drive is the ordinary case: it maps a
+ * letter onto a real directory, so every path under it resolves into that directory instead, the
+ * two differ, and the check refused to record at all on a perfectly normal workspace. A mapped
+ * network drive does the same. `lstat` on that directory reports no link, because there is none.
+ *
+ * And a resolution that *cannot* be made must not read as "no link here". `realpath` fails for
+ * more than absence — EACCES, ELOOP, and EINVAL/UNKNOWN on filesystems that cannot answer
+ * GetFinalPathNameByHandle — and swallowing those let the check skip itself silently in exactly
+ * the conditions it exists for. `lstat` asks about the entry that is right here, so a failure is a
+ * real failure, and it is refused like any other.
+ */
+async function refuseLink(path: string): Promise<void> {
+  const entry = await lstat(path).catch((err: unknown) => {
+    throw new Error(
+      `${path} could not be examined (${(err as NodeJS.ErrnoException).code ?? String(err)}), ` +
+        'and orca will not write a trace store into a path it cannot vouch for.',
+    );
+  });
+  if (entry.isSymbolicLink()) {
+    throw new Error(
+      `${path} is a link, and orca will not write a trace store through one — the permissions ` +
+        'it sets would land on the link while the recording landed wherever it points. ' +
+        'Remove it, or record in a workspace where it is a real directory.',
+    );
+  }
 }
 
 /** Run ids reach us from argv, so the pattern check is also the path-traversal guard. */
