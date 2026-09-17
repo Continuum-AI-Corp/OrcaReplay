@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { rmSync } from 'node:fs';
-import { chmod, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { chmod, lstat, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -71,7 +71,7 @@ export async function restrictToOwner(path: string, mode: 0o600 | 0o700): Promis
     '/inheritance:r',
     ...foreign.flatMap((trustee) => ['/remove', `*${trustee}`]),
     '/grant:r',
-    ...keep.map((sid) => `*${sid}:${inherit}(F)`),
+    ...grantsFor(keep, inherit),
     '/q',
   ]);
 
@@ -83,14 +83,31 @@ export async function restrictToOwner(path: string, mode: 0o600 | 0o700): Promis
   // Nothing is escaped into the pattern because nothing needs to be — a trustee here is a SID or
   // one of SDDL's two-letter abbreviations, and both are `[A-Za-z0-9-]`.
   const written = await descriptorOf(icacls, path);
-  const asWritten = new RegExp(
-    '^D:[A-Z]*P[A-Z]*(?:\\(A;[A-Z]*;[^;]*;;;(?:' + [...ours].join('|') + ')\\))+$',
-  );
-  if (!asWritten.test(written)) {
+  if (!asWritten(ours).test(written)) {
     throw new Error(
       `the ACL orca wrote to ${path} is not the one it asked for: ${JSON.stringify(written)}`,
     );
   }
+}
+
+/**
+ * The grants a narrowing asks for, and the shape its result has to come back in.
+ *
+ * Shared by `restrictToOwner` and `aclScratch` because they are the same job and drifted apart
+ * once already: the second was written with `/inheritance:r` and `/grant:r` and neither the
+ * read-back nor the reasoning eighty lines above about why exiting 0 is not an answer.
+ *
+ * Nothing is escaped into the pattern because nothing needs to be — a trustee here is a SID or one
+ * of SDDL's two-letter abbreviations, and both are `[A-Za-z0-9-]`.
+ */
+function grantsFor(trustees: readonly string[], inherit: string): string[] {
+  return trustees.map((sid) => `*${sid}:${inherit}(F)`);
+}
+
+function asWritten(trustees: Iterable<string>): RegExp {
+  return new RegExp(
+    '^D:[A-Z]*P[A-Z]*(?:\\(A;[A-Z]*;[^;]*;;;(?:' + [...trustees].join('|') + ')\\))+$',
+  );
 }
 
 /**
@@ -124,28 +141,36 @@ async function descriptorOf(icacls: string, path: string): Promise<string> {
   const saved = join(await aclScratch(icacls), randomBytes(8).toString('hex'));
   try {
     await run(icacls, [path, '/save', saved]);
-    // UTF-16LE, and the descriptor is the last line: two lines for an ordinary path — the entry's
-    // name, then its descriptor — and one for a path with no name to give, such as a drive root.
-    //
-    // By position rather than by scanning for a `D:` prefix. A name line cannot carry one today,
-    // since `/save` writes the basename and a Windows filename cannot contain a colon, but that is
-    // a fact about a neighbouring tool rather than about this parse.
-    const lines = (await readFile(saved, 'utf16le'))
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-    const descriptor = lines.at(-1) ?? '';
-    // Refused rather than read as "nothing to remove", which is what an unrecognised line would
-    // silently mean: every foreign trustee left in place, and `icacls` still exiting 0.
-    if (!/^[OGDS]:/.test(descriptor) || !descriptor.includes('(')) {
-      throw new Error(
-        `could not read the ACL of ${path}: ${JSON.stringify(descriptor.slice(0, 80))}`,
-      );
-    }
-    return descriptor;
+    return await readDescriptor(saved, path);
   } finally {
     await rm(saved, { force: true }).catch(() => undefined);
   }
+}
+
+/**
+ * The descriptor out of what `icacls /save` wrote.
+ *
+ * UTF-16LE, and the descriptor is the last line: two lines for an ordinary path — the entry's
+ * name, then its descriptor — and one for a path with no name to give, such as a drive root.
+ *
+ * By position rather than by scanning for a `D:` prefix. A name line cannot carry one today, since
+ * `/save` writes the basename and a Windows filename cannot contain a colon, but that is a fact
+ * about a neighbouring tool rather than about this parse.
+ */
+async function readDescriptor(saved: string, path: string): Promise<string> {
+  const lines = (await readFile(saved, 'utf16le'))
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const descriptor = lines.at(-1) ?? '';
+  // Refused rather than read as "nothing to remove", which is what an unrecognised line would
+  // silently mean: every foreign trustee left in place, and `icacls` still exiting 0.
+  if (!/^[OGDS]:/.test(descriptor) || !descriptor.includes('(')) {
+    throw new Error(
+      `could not read the ACL of ${path}: ${JSON.stringify(descriptor.slice(0, 80))}`,
+    );
+  }
+  return descriptor;
 }
 
 let scratch: Promise<string> | undefined;
@@ -172,15 +197,33 @@ async function aclScratch(icacls: string): Promise<string> {
   scratch ??= (async () => {
     const dir = await mkdtemp(join(tmpdir(), 'orca-acl-'));
     try {
-      await run(icacls, [
-        dir,
-        '/inheritance:r',
-        '/grant:r',
-        `*${await currentAccountSid()}:(OI)(CI)(F)`,
-        `*${SYSTEM}:(OI)(CI)(F)`,
-        `*${ADMINISTRATORS}:(OI)(CI)(F)`,
-        '/q',
-      ]);
+      const keep = [await currentAccountSid(), SYSTEM, ADMINISTRATORS];
+      const ours = new Set([...keep, 'SY', 'BA']);
+
+      // `mkdtemp` just made this, so it carries no explicit ACE to remove — measured: five, every
+      // one flagged inherited — and it cannot be a link. What it *can* be is swapped, in the gap
+      // between that call and this one, by an account with Modify on `%TEMP%`, which is the ACL
+      // measured here. `icacls` does not follow a reparse point, so the narrowing would land on
+      // the junction while every descriptor this module reads came out of the other directory.
+      // So it is vouched for and re-checked either side, exactly as `ensureRunsDir` does it.
+      const was = await lstat(dir);
+      await run(icacls, [dir, '/inheritance:r', '/grant:r', ...grantsFor(keep, '(OI)(CI)'), '/q']);
+      const now = await lstat(dir);
+      if (now.isSymbolicLink() || now.dev !== was.dev || now.ino !== was.ino) {
+        throw new Error(`${dir} was replaced while orca was securing it`);
+      }
+
+      // And read back what was written, for the reason the sibling gives: `execFile` reports that
+      // icacls exited 0 and nothing more. Read straight rather than through `descriptorOf`, which
+      // writes into this directory and would await the promise it is running inside.
+      const saved = join(dir, 'verify');
+      await run(icacls, [dir, '/save', saved]);
+      const written = await readDescriptor(saved, dir);
+      await rm(saved, { force: true }).catch(() => undefined);
+      if (!asWritten(ours).test(written)) {
+        throw new Error(`the ACL orca wrote to ${dir} is not the one it asked for: ${written}`);
+      }
+
       // Nothing sweeps an `orca-acl-` directory the way `sweepStaleTransports` sweeps the two
       // named transports, so it takes itself with it rather than accumulating one per run.
       process.on('exit', () => {
