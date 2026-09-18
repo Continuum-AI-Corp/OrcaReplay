@@ -52,8 +52,19 @@ function isProtected(descriptor: string): boolean {
 let ownerOnly: string[];
 beforeAll(async () => {
   if (!onWindows) return;
-  const { stdout } = await run(system32('whoami.exe'), ['/user', '/fo', 'csv', '/nh']);
-  ownerOnly = [/S-1-[\d-]+/.exec(stdout)![0], BUILTIN.BA, BUILTIN.SY].sort();
+  // Use the native SDDL spelling too: an account such as the built-in Administrator is LA,
+  // not a literal SID in icacls /save output. This remains independent of the ACL under test.
+  const script = `
+$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+([System.Security.AccessControl.RawSecurityDescriptor]::new('D:(A;;FA;;;' + $sid + ')')).GetSddlForm([System.Security.AccessControl.AccessControlSections]::Access)
+`;
+  const { stdout } = await run(system32('WindowsPowerShell/v1.0/powershell.exe'), [
+    '-NoProfile',
+    '-NonInteractive',
+    '-EncodedCommand',
+    Buffer.from(script, 'utf16le').toString('base64'),
+  ]);
+  ownerOnly = [...trustees(stdout.trim()), BUILTIN.BA, BUILTIN.SY].sort();
 });
 
 /**

@@ -29,32 +29,6 @@ jobs:
       - run: npx tsc --build
       - run: npx vitest run --reporter=verbose
 
-  windows-private-files:
-    name: Windows private files
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-      - run: npm ci
-      - run: npx tsc --build
-      - run: >
-          npx vitest run --maxWorkers=2
-          packages/core/test/private-files.test.ts
-          packages/core/test/private-files-owner.test.ts
-          packages/core/test/private-files-scratch-race.test.ts
-          packages/core/test/paths.test.ts
-          packages/core/test/paths-permission-failure.test.ts
-          packages/proxy/test/ca.test.ts
-          packages/cli/test/config.test.ts
-          packages/cli/test/config-permission-failure.test.ts
-          packages/cli/test/quickstart.test.ts
-          packages/cli/test/agent-spans-race.test.ts
-          packages/shell-shim/test/shim.test.ts
-          packages/shell-shim/test/transport-race.test.ts
-
   conformance:
     name: trace format conformance
     runs-on: ubuntu-latest

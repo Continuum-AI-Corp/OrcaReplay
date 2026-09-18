@@ -46,10 +46,8 @@ export async function restrictToOwner(path: string, mode: 0o600 | 0o700): Promis
   // Finish the ownership and descriptor lookups before changing permissions. A lookup failure
   // leaves the original ACL intact; a verification failure below refuses to use the narrowed path.
   const keep = [await currentAccountSid(), SYSTEM, ADMINISTRATORS];
-  await requireTrustedOwner(path, keep);
+  const ours = await requireTrustedOwner(path, keep);
   await assertPrivatePathIdentity(path, was);
-  // Both spellings, because a descriptor writes the well-known ones abbreviated.
-  const ours = new Set([...keep, 'SY', 'BA']);
   const foreign = (await explicitTrustees(icacls, path)).filter((trustee) => !ours.has(trustee));
 
   // One invocation, and every part of it narrows.
@@ -134,11 +132,13 @@ export async function removePrivateDirectory(
  * not the DACL's trustees. Windows PowerShell's .NET API works without Get-Acl/module autoload,
  * elevation, or localized account names. The path is data in the child environment, never code.
  */
-async function requireTrustedOwner(path: string, trusted: readonly string[]): Promise<void> {
+async function requireTrustedOwner(path: string, trusted: readonly string[]): Promise<Set<string>> {
   const script = `
 $ErrorActionPreference = 'Stop'
 $acl = [System.IO.File]::GetAccessControl($env:ORCA_PRIVATE_PATH, [System.Security.AccessControl.AccessControlSections]::Owner)
 $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+$descriptor = [System.Security.AccessControl.RawSecurityDescriptor]::new('D:(A;;FA;;;' + $env:ORCA_PRIVATE_SID + ')')
+$descriptor.GetSddlForm([System.Security.AccessControl.AccessControlSections]::Access)
 `;
   const { stdout } = await run(
     system32('WindowsPowerShell/v1.0/powershell.exe'),
@@ -149,12 +149,21 @@ $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
       '-EncodedCommand',
       Buffer.from(script, 'utf16le').toString('base64'),
     ],
-    { env: { ...process.env, ORCA_PRIVATE_PATH: path }, windowsHide: true },
+    {
+      env: { ...process.env, ORCA_PRIVATE_PATH: path, ORCA_PRIVATE_SID: trusted[0] },
+      windowsHide: true,
+    },
   );
-  const owner = stdout.trim();
+  const [owner = '', accountDescriptor = ''] = stdout.trim().split(/\r?\n/);
   if (!trusted.includes(owner)) {
     throw new Error(`${path} has an untrusted owner (${owner}); refusing to store private data`);
   }
+  // Windows may serialize the current account as an abbreviation, e.g. LA for the built-in
+  // Administrator. Ask Windows for this SID's spelling; accepting LA for every user would grant
+  // trust to a different account, and guessing from an RID alone would confuse local/domain SIDs.
+  const spelling = /^D:\(A;;FA;;;([A-Z]{2}|S-1-[\d-]+)\)$/.exec(accountDescriptor)?.[1];
+  if (!spelling) throw new Error(`could not read the SDDL spelling of ${trusted[0]}`);
+  return new Set([...trusted, 'SY', 'BA', spelling]);
 }
 
 /**
@@ -267,9 +276,8 @@ async function aclScratch(icacls: string): Promise<string> {
     let was: PrivatePathIdentity | undefined;
     try {
       was = await privatePathIdentity(dir);
-      await requireTrustedOwner(dir, keep);
+      const ours = await requireTrustedOwner(dir, keep);
       await assertPrivatePathIdentity(dir, was);
-      const ours = new Set([...keep, 'SY', 'BA']);
 
       // `mkdtemp` just made this, so it carries no explicit ACE to remove — measured: five, every
       // one flagged inherited — and it cannot be a link. What it *can* be is swapped, in the gap
