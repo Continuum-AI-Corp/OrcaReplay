@@ -373,7 +373,10 @@ function quoteCmd(value: string): string {
  */
 async function secureTransport(dir: string): Promise<string> {
   try {
-    await restrictToOwner(dir, 0o700);
+    // Windows only: `mkdtemp` already creates 0700 on POSIX, so there the call can only
+    // fail — on a filesystem without permissions it would abort a recording that main
+    // completed. On Windows the mode is discarded and this is the whole protection.
+    if (process.platform === 'win32') await restrictToOwner(dir, 0o700);
     return dir;
   } catch (err) {
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);

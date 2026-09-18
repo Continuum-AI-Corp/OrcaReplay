@@ -276,7 +276,10 @@ export async function installAgentSpans(runDir: string): Promise<AgentSpanCaptur
   // and the owner file exist, not after. A failure here fails the install, and the caller degrades
   // to no agent-span capture rather than writing into a directory it cannot vouch for.
   try {
-    await restrictToOwner(transportDir, 0o700);
+    // Windows only: `mkdtemp` already creates 0700 on POSIX, so there the call can only
+    // fail — on a filesystem without permissions it would abort a recording that main
+    // completed. On Windows the mode is discarded and this is the whole protection.
+    if (process.platform === 'win32') await restrictToOwner(transportDir, 0o700);
   } catch (err) {
     await rm(transportDir, { recursive: true, force: true }).catch(() => undefined);
     throw err;

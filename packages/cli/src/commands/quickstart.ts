@@ -77,11 +77,15 @@ async function shippedRunId(): Promise<string> {
  * test asserts that on a file inside the run rather than leaving it as a belief.
  */
 async function applyStoreModes(dir: string): Promise<void> {
-  await chmod(dir, 0o700);
+  // Each one swallowed: a filesystem without permissions ignores `cp`'s modes and rejects
+  // `chmod`, so a fatal call here would abort `orca quickstart` on an exFAT or vfat directory
+  // rather than leaving it where main already left it. `sync.ts` swallows the same call for the
+  // same reason.
+  await chmod(dir, 0o700).catch(() => undefined);
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);
     if (entry.isDirectory()) await applyStoreModes(path);
-    else await chmod(path, 0o600);
+    else await chmod(path, 0o600).catch(() => undefined);
   }
 }
 
