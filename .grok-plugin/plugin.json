@@ -1,0 +1,17 @@
+{
+  "name": "orcareplay",
+  "version": "0.2.2",
+  "description": "Record, inspect, replay and fork coding-agent runs: read what an agent actually did from the evidence of its run, offline.",
+  "author": {
+    "name": "Continuum AI Corp",
+    "url": "https://github.com/Continuum-AI-Corp"
+  },
+  "repository": "https://github.com/Continuum-AI-Corp/OrcaReplay",
+  "license": "Apache-2.0",
+  "keywords": [
+    "orcareplay",
+    "agent run replay",
+    "agent trace",
+    "record agent run"
+  ]
+}
