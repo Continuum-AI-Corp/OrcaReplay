@@ -83,7 +83,10 @@ describe('restrictToOwner', () => {
   it.runIf(onWindows)(
     'leaves a file to its owner and the superusers, and no one else',
     async () => {
-      const file = join(await mkdtemp(join(tmpdir(), 'orca-perm-')), 'secret');
+      const parent = await mkdtemp(join(tmpdir(), 'orca-perm-'));
+      // Deliberately broad, including on hosted Windows runners whose TEMP is already private.
+      await run(system32('icacls.exe'), [parent, '/grant', '*S-1-5-32-545:(OI)(CI)(RX)', '/q']);
+      const file = join(parent, 'secret');
       await writeFile(file, 'sk-secret\n');
 
       // The control, and the reason this exists: a file written the ordinary way carries whatever

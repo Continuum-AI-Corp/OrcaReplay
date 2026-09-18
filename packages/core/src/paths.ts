@@ -1,7 +1,11 @@
-import { lstat, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { RUN_ID_PATTERN } from '@orcareplay/schema';
-import { restrictToOwner } from './private-files.js';
+import {
+  assertPrivatePathIdentity,
+  privatePathIdentity,
+  restrictToOwner,
+} from './private-files.js';
 
 export interface RunRef {
   runId: string;
@@ -40,40 +44,20 @@ export async function ensureRunsDir(cwd: string): Promise<string> {
   const orca = orcaDir(cwd);
 
   if (process.platform === 'win32') {
-    // The container first, narrowed before the store under it exists.
-    //
-    // The order used to be create-both, check-both, narrow `runs`, narrow `.orca` — which leaves
-    // the one thing that decides whether `runs` can be swapped open for the whole of it.
-    // `restrictToOwner` costs about 27ms a path here (a `whoami` spawn, an `icacls /save` read, the
-    // write, and a second `/save` to verify it), so the gap between checking `runs` and owning it
-    // ran past 50ms with `.orca` still granting the workspace's Modify — and Modify on the parent
-    // is enough to delete a child whatever the child's own DACL says. Another account can `rmdir`
-    // and `mklink /J` in a loop; whenever a swap lands inside that gap the check has already
-    // passed, the narrowing goes onto the link entry, and the entire run is written through it.
-    //
-    // Closing `.orca` first ends that: nothing else can delete or replace what is under it, so the
-    // check on `runs` cannot be raced afterwards.
+    // Secure the container before creating the store inside it. Ownership is checked as well:
+    // removing a foreign owner's ACE alone would leave it able to restore its own access.
     await mkdir(orca, { recursive: true, mode: 0o700 });
-    const orcaWas = await vouchFor(orca);
+    const orcaWas = await privatePathIdentity(orca);
     await restrictToOwner(orca, 0o700);
-    await stillTheSame(orca, orcaWas);
+    await assertPrivatePathIdentity(orca, orcaWas);
 
     await mkdir(dir, { recursive: true, mode: 0o700 });
-    // And `.orca` again, because it was itself open between its own check and its own narrowing.
-    //
-    // By identity, not just by "is it a link". A *real* directory another account put there is
-    // neither a link nor ours: it passes a link check and is then narrowed as though it were
-    // orca's, and its creator owns it, so it can re-grant itself afterwards. `dev`+`ino` is the
-    // volume serial and the NTFS file index, which a substitute cannot share — measured: it
-    // changes when a directory of the same name is deleted and remade.
-    //
-    // This does not close the window — that needs the DACL applied to an open handle rather than
-    // to a path, which node cannot do — but it does mean such a swap ends in a refusal rather than
-    // in a recording written somewhere else.
-    await stillTheSame(orca, orcaWas);
-    const dirWas = await vouchFor(dir);
+    // Check again after making the container non-empty. These checks detect replacement during
+    // setup; they do not lock ancestors against an account that can keep replacing them later.
+    await assertPrivatePathIdentity(orca, orcaWas);
+    const dirWas = await privatePathIdentity(dir);
     await restrictToOwner(dir, 0o700);
-    await stillTheSame(dir, dirWas);
+    await assertPrivatePathIdentity(dir, dirWas);
   } else {
     // POSIX, unchanged: only when this call created it, which is what passing `mode` to mkdir
     // already meant. Every file beneath gets its own 0600 from the writer regardless, so the
@@ -101,78 +85,6 @@ export async function ensureRunsDir(cwd: string): Promise<string> {
     ).catch(() => undefined);
   }
   return dir;
-}
-
-/**
- * Refuse a path that is a link, on the way to writing a trace store into it.
- *
- * `icacls` does not follow a reparse point, so the narrowing would land on the link entry while
- * every trace went *through* it into whatever it points at, under that directory's ACL — and
- * `restrictToOwner` would report success. A junction needs no privilege to create, and
- * `mkdir(…, { recursive: true })` accepts one as an existing directory.
- *
- * Refused rather than followed: orca creates these directories, so a link standing where one
- * should be was not put there by orca, and a store it cannot vouch for is not one it should
- * quietly write a recording into.
- *
- * `lstat` on the entry, not `realpath` on the chain. Two reasons, both measured.
- *
- * `realpath` answers a different question — *where does this path end up* — and a drive that is
- * not a link ends up somewhere else all the same. A `subst` drive is the ordinary case: it maps a
- * letter onto a real directory, so every path under it resolves into that directory instead, the
- * two differ, and the check refused to record at all on a perfectly normal workspace. A mapped
- * network drive does the same. `lstat` on that directory reports no link, because there is none.
- *
- * And a resolution that *cannot* be made must not read as "no link here". `realpath` fails for
- * more than absence — EACCES, ELOOP, and EINVAL/UNKNOWN on filesystems that cannot answer
- * GetFinalPathNameByHandle — and swallowing those let the check skip itself silently in exactly
- * the conditions it exists for. `lstat` asks about the entry that is right here, so a failure is a
- * real failure, and it is refused like any other.
- */
-async function vouchFor(path: string): Promise<Identity> {
-  const entry = await lstat(path).catch((err: unknown) => {
-    throw new Error(
-      `${path} could not be examined (${(err as NodeJS.ErrnoException).code ?? String(err)}), ` +
-        'and orca will not write a trace store into a path it cannot vouch for.',
-    );
-  });
-  if (entry.isSymbolicLink()) {
-    throw new Error(
-      `${path} is a link, and orca will not write a trace store through one — the permissions ` +
-        'it sets would land on the link while the recording landed wherever it points. ' +
-        'Remove it, or record in a workspace where it is a real directory.',
-    );
-  }
-  return { dev: entry.dev, ino: entry.ino };
-}
-
-/** What tells one directory from another that has taken its name. */
-interface Identity {
-  dev: number;
-  ino: number;
-}
-
-/**
- * Refuse a path that is no longer the entry it was a moment ago.
- *
- * `vouchFor` answers "is this a reparse point", and a *real* directory another account put there
- * is neither a link nor ours — it passes, is narrowed as though it were orca's, and its creator
- * owns it, so it can re-grant itself whenever it likes.
- *
- * Only a genuine difference refuses. A filesystem that cannot give a file index answers zero for
- * both, and zero equals zero, so the check lapses rather than refusing a network share out of
- * hand. That is the opposite of what `vouchFor` does with a failure, and deliberately: there the
- * failure means "we could not look", here it means "there is nothing to compare".
- */
-async function stillTheSame(path: string, was: Identity): Promise<void> {
-  const now = await vouchFor(path);
-  if (now.dev !== was.dev || now.ino !== was.ino) {
-    throw new Error(
-      `${path} was replaced while orca was securing it — the permissions it set landed on a ` +
-        'directory that is no longer there. Nothing has been recorded; try again, and if it ' +
-        'keeps happening, something else on this machine is writing into your workspace.',
-    );
-  }
 }
 
 /** Run ids reach us from argv, so the pattern check is also the path-traversal guard. */

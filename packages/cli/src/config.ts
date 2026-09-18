@@ -108,7 +108,8 @@ export async function writeConfig(
   // Set explicitly as well as passed to mkdir: an existing directory keeps whatever mode it had,
   // and a 0755 directory makes the file's 0600 decoration. On Windows neither mode argument does
   // anything at all, so this is what keeps the directory from being listable by every account.
-  await restrictToOwner(dirname(path), 0o700).catch(() => {});
+  if (process.platform === 'win32') await restrictToOwner(dirname(path), 0o700);
+  else await restrictToOwner(dirname(path), 0o700).catch(() => {});
 
   // Through a staging file, narrowed before the key is put into it.
   //
@@ -129,7 +130,7 @@ export async function writeConfig(
   // simply gone. `BlobStore.put` and scrub's `commit` both randomise for this reason; sync uses
   // the deterministic name only while holding a lock.
   const staging = `${path}.${randomBytes(6).toString('hex')}.incoming`;
-  await writeFile(staging, '', { mode: 0o600 });
+  await writeFile(staging, '', { mode: 0o600, flag: 'wx' });
   try {
     await restrictToOwner(staging, 0o600);
     await writeFile(staging, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });

@@ -37,6 +37,12 @@ What we do:
   whether or not orca created the store that run, since an inherited one is not a choice
   anybody made. What it cannot do is rewrite runs already on disk from before: those keep the
   ACEs they were written with, and `icacls` on the parent does not re-propagate.
+  The account running orca, SYSTEM and Administrators are the trusted principals. Before
+  changing a Windows ACL, orca also checks the actual owner: another account's ownership can
+  otherwise retain the right to restore access even after its ACE is removed. An unreadable or
+  foreign owner, a junction, or an entry replaced during setup causes a refusal. Owner lookup
+  uses the built-in Windows PowerShell .NET API; it needs neither elevation nor `Get-Acl` module
+  loading. If that API is unavailable, private-data setup fails closed.
 - Redaction lives in the writer, so a file orca does not write itself has not been through it. A
   capture layer that runs inside the agent's process, or in a child of it, produces exactly that:
   the bytes are on disk before orca ever reads them. Where nothing reads such a file after the run,
@@ -62,6 +68,10 @@ What we do:
 
 **What we do not promise:** redaction is best-effort mitigation, not a guarantee. Treat a trace as
 sensitive material.
+
+Keep the workspace and temporary-directory ancestors under trusted control. The Windows checks
+detect replacements during setup; they are path-based checks, not a filesystem sandbox or an
+atomic handle-based defense against an account that can replace ancestors throughout a run.
 
 `orca scrub` is the second pass, for what the write path missed and for the internal hostname that
 is only sensitive in your organisation. It rewrites `events.jsonl`, `manifest.json` and every text

@@ -4,7 +4,12 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { EARLIEST_TS_MS, LATEST_TS_MS } from '@orcareplay/schema';
 import type { ShellFrame } from './runner.js';
-import { restrictToOwner } from '@orcareplay/core';
+import {
+  assertPrivatePathIdentity,
+  privatePathIdentity,
+  removePrivateDirectory,
+  restrictToOwner,
+} from '@orcareplay/core';
 
 /**
  * Shells an agent actually reaches for. Shimming more binaries buys detail and costs blast radius.
@@ -372,14 +377,19 @@ function quoteCmd(value: string): string {
  * every command the agent runs into a file this cannot vouch for.
  */
 async function secureTransport(dir: string): Promise<string> {
+  // POSIX mkdtemp already creates 0700, including on filesystems that reject chmod.
+  if (process.platform !== 'win32') return dir;
+  const was = await privatePathIdentity(dir);
   try {
-    // Windows only: `mkdtemp` already creates 0700 on POSIX, so there the call can only
-    // fail — on a filesystem without permissions it would abort a recording that main
-    // completed. On Windows the mode is discarded and this is the whole protection.
-    if (process.platform === 'win32') await restrictToOwner(dir, 0o700);
+    await restrictToOwner(dir, 0o700);
+    await assertPrivatePathIdentity(dir, was);
+    // Keep it non-empty before returning to the installer, which may await other work before
+    // writing frames. Failure to establish this guard must fail the capture layer.
+    await writeFile(join(dir, 'owner.pid'), String(process.pid), { mode: 0o600, flag: 'wx' });
+    await assertPrivatePathIdentity(dir, was);
     return dir;
   } catch (err) {
-    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    await removePrivateDirectory(dir, was);
     throw err;
   }
 }

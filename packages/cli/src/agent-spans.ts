@@ -1,5 +1,10 @@
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
-import { restrictToOwner } from '@orcareplay/core';
+import {
+  assertPrivatePathIdentity,
+  privatePathIdentity,
+  removePrivateDirectory,
+  restrictToOwner,
+} from '@orcareplay/core';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MCP_RECORD_START, objectsOnLine } from '@orcareplay/mcp-shim';
@@ -270,6 +275,7 @@ export async function installAgentSpans(runDir: string): Promise<AgentSpanCaptur
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, SITECUSTOMIZE), SITECUSTOMIZE_SOURCE, 'utf8');
   const transportDir = await mkdtemp(join(tmpdir(), 'orca-spans-'));
+  const was = process.platform === 'win32' ? await privatePathIdentity(transportDir) : undefined;
   // Narrowed before the first write, for the reason the comment above no longer gets to assume:
   // `mkdtemp` gives a directory only this user can enter on POSIX, and on Windows gives whatever
   // `%TEMP%` hands down. `icacls` does not re-propagate, so this has to happen before `spansPath`
@@ -279,9 +285,17 @@ export async function installAgentSpans(runDir: string): Promise<AgentSpanCaptur
     // Windows only: `mkdtemp` already creates 0700 on POSIX, so there the call can only
     // fail — on a filesystem without permissions it would abort a recording that main
     // completed. On Windows the mode is discarded and this is the whole protection.
-    if (process.platform === 'win32') await restrictToOwner(transportDir, 0o700);
+    if (was) {
+      await restrictToOwner(transportDir, 0o700);
+      await assertPrivatePathIdentity(transportDir, was);
+      await writeFile(join(transportDir, TRANSPORT_OWNER), String(process.pid), {
+        mode: 0o600,
+        flag: 'wx',
+      });
+      await assertPrivatePathIdentity(transportDir, was);
+    }
   } catch (err) {
-    await rm(transportDir, { recursive: true, force: true }).catch(() => undefined);
+    if (was) await removePrivateDirectory(transportDir, was);
     throw err;
   }
   const spansPath = join(transportDir, SPANS_FILENAME);

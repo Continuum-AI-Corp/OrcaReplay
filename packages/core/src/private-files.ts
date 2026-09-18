@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { rmSync } from 'node:fs';
+import { lstatSync, rmSync } from 'node:fs';
 import { chmod, lstat, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -41,11 +41,13 @@ export async function restrictToOwner(path: string, mode: 0o600 | 0o700): Promis
   }
   const icacls = system32('icacls.exe');
   const inherit = mode === 0o700 ? '(OI)(CI)' : '';
+  const was = await privatePathIdentity(path);
 
-  // Everything that can fail happens before the one call that changes anything — the SID lookup,
-  // the read, the temporary file. A failure therefore leaves the path exactly as it was found,
-  // which for a function like this is the only acceptable direction to fail in.
+  // Finish the ownership and descriptor lookups before changing permissions. A lookup failure
+  // leaves the original ACL intact; a verification failure below refuses to use the narrowed path.
   const keep = [await currentAccountSid(), SYSTEM, ADMINISTRATORS];
+  await requireTrustedOwner(path, keep);
+  await assertPrivatePathIdentity(path, was);
   // Both spellings, because a descriptor writes the well-known ones abbreviated.
   const ours = new Set([...keep, 'SY', 'BA']);
   const foreign = (await explicitTrustees(icacls, path)).filter((trustee) => !ours.has(trustee));
@@ -87,6 +89,71 @@ export async function restrictToOwner(path: string, mode: 0o600 | 0o700): Promis
     throw new Error(
       `the ACL orca wrote to ${path} is not the one it asked for: ${JSON.stringify(written)}`,
     );
+  }
+  await assertPrivatePathIdentity(path, was);
+}
+
+/** The entry itself, without following a junction; bigint preserves the complete NTFS file ID. */
+export interface PrivatePathIdentity {
+  dev: bigint;
+  ino: bigint;
+}
+
+export async function privatePathIdentity(path: string): Promise<PrivatePathIdentity> {
+  const entry = await lstat(path, { bigint: true });
+  if (entry.isSymbolicLink()) throw new Error(`${path} is a link, refusing to secure its target`);
+  if (entry.ino === 0n) throw new Error(`${path} has no usable file identity`);
+  return { dev: entry.dev, ino: entry.ino };
+}
+
+export async function assertPrivatePathIdentity(
+  path: string,
+  was: PrivatePathIdentity,
+): Promise<void> {
+  const now = await privatePathIdentity(path);
+  if (now.dev !== was.dev || now.ino !== was.ino) {
+    throw new Error(`${path} was replaced while orca was securing it`);
+  }
+}
+
+/** Never recursively clean up a replacement belonging to somebody else. */
+export async function removePrivateDirectory(
+  path: string,
+  was: PrivatePathIdentity,
+): Promise<void> {
+  try {
+    await assertPrivatePathIdentity(path, was);
+    await rm(path, { recursive: true, force: true });
+  } catch {
+    // A missing or substituted entry is no longer ours to remove.
+  }
+}
+
+/**
+ * A foreign owner retains WRITE_DAC even after its last ACE is removed. Read the actual owner,
+ * not the DACL's trustees. Windows PowerShell's .NET API works without Get-Acl/module autoload,
+ * elevation, or localized account names. The path is data in the child environment, never code.
+ */
+async function requireTrustedOwner(path: string, trusted: readonly string[]): Promise<void> {
+  const script = `
+$ErrorActionPreference = 'Stop'
+$acl = [System.IO.File]::GetAccessControl($env:ORCA_PRIVATE_PATH, [System.Security.AccessControl.AccessControlSections]::Owner)
+$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+`;
+  const { stdout } = await run(
+    system32('WindowsPowerShell/v1.0/powershell.exe'),
+    [
+      '-NoLogo',
+      '-NoProfile',
+      '-NonInteractive',
+      '-EncodedCommand',
+      Buffer.from(script, 'utf16le').toString('base64'),
+    ],
+    { env: { ...process.env, ORCA_PRIVATE_PATH: path }, windowsHide: true },
+  );
+  const owner = stdout.trim();
+  if (!trusted.includes(owner)) {
+    throw new Error(`${path} has an untrusted owner (${owner}); refusing to store private data`);
   }
 }
 
@@ -195,9 +262,13 @@ let scratch: Promise<string> | undefined;
  */
 async function aclScratch(icacls: string): Promise<string> {
   scratch ??= (async () => {
+    const keep = [await currentAccountSid(), SYSTEM, ADMINISTRATORS];
     const dir = await mkdtemp(join(tmpdir(), 'orca-acl-'));
+    let was: PrivatePathIdentity | undefined;
     try {
-      const keep = [await currentAccountSid(), SYSTEM, ADMINISTRATORS];
+      was = await privatePathIdentity(dir);
+      await requireTrustedOwner(dir, keep);
+      await assertPrivatePathIdentity(dir, was);
       const ours = new Set([...keep, 'SY', 'BA']);
 
       // `mkdtemp` just made this, so it carries no explicit ACE to remove — measured: five, every
@@ -206,27 +277,14 @@ async function aclScratch(icacls: string): Promise<string> {
       // measured here. `icacls` does not follow a reparse point, so the narrowing would land on
       // the junction while every descriptor this module reads came out of the other directory.
       // So it is vouched for and re-checked either side, exactly as `ensureRunsDir` does it.
-      const was = await lstat(dir);
       await run(icacls, [dir, '/inheritance:r', '/grant:r', ...grantsFor(keep, '(OI)(CI)'), '/q']);
-      const now = await lstat(dir);
-      if (now.isSymbolicLink() || now.dev !== was.dev || now.ino !== was.ino) {
-        throw new Error(`${dir} was replaced while orca was securing it`);
-      }
+      await assertPrivatePathIdentity(dir, was);
 
-      // A file, kept, so the directory cannot be removed and replaced later.
-      //
-      // The identity check above closes the window up to here. It does nothing about the rest of
-      // the run: this directory is reused for every narrowing the process makes, and between them
-      // it would sit empty in `%TEMP%` — where Modify, which two further local accounts hold here,
-      // carries Delete-Subfolders, and Delete-Subfolders on a parent removes a child whatever the
-      // child's own DACL says. An *empty* child. `rmdir` on a non-empty one is refused, and this
-      // file is out of reach in turn: it inherits this directory's ACL, so deleting it would need
-      // Delete-Subfolders *here*, which is exactly what the narrowing took away.
-      //
-      // `.orca` and `.orca/runs` are already safe this way — `.orca` holds `runs` and
-      // `.gitignore`, and `runs` sits under a narrowed parent — which is why only this one needed
-      // saying out loud.
+      // Keep the directory non-empty between descriptor reads, so an empty-directory removal
+      // cannot replace it after setup. Recheck after this write too. As SECURITY.md explains,
+      // this is not a defense against arbitrary replacement of writable ancestors.
       await writeFile(join(dir, 'in-use'), String(process.pid), { mode: 0o600, flag: 'wx' });
+      await assertPrivatePathIdentity(dir, was);
 
       // And read back what was written, for the reason the sibling gives: `execFile` reports that
       // icacls exited 0 and nothing more. Read straight rather than through `descriptorOf`, which
@@ -238,19 +296,23 @@ async function aclScratch(icacls: string): Promise<string> {
       if (!asWritten(ours).test(written)) {
         throw new Error(`the ACL orca wrote to ${dir} is not the one it asked for: ${written}`);
       }
+      await assertPrivatePathIdentity(dir, was);
 
       // Nothing sweeps an `orca-acl-` directory the way `sweepStaleTransports` sweeps the two
       // named transports, so it takes itself with it rather than accumulating one per run.
       process.on('exit', () => {
         try {
-          rmSync(dir, { recursive: true, force: true });
+          const now = lstatSync(dir, { bigint: true });
+          if (!now.isSymbolicLink() && now.dev === was!.dev && now.ino === was!.ino) {
+            rmSync(dir, { recursive: true, force: true });
+          }
         } catch {
           // Exiting anyway; a directory left in %TEMP% is not worth failing the exit over.
         }
       });
       return dir;
     } catch (err) {
-      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+      if (was) await removePrivateDirectory(dir, was);
       scratch = undefined;
       throw err;
     }
