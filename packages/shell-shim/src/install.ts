@@ -9,6 +9,7 @@ import {
   privatePathIdentity,
   removePrivateDirectory,
   restrictToOwner,
+  type PrivatePathIdentity,
 } from '@orcareplay/core';
 
 /**
@@ -70,9 +71,10 @@ export interface InstalledShim {
  */
 export async function installShellShim(options: InstallOptions): Promise<InstalledShim> {
   const dir = join(options.runDir, 'shims');
-  const transportDir = options.framesPath
+  const transport = options.framesPath
     ? undefined
     : await secureTransport(await mkdtemp(join(tmpdir(), 'orca-shell-')));
+  const transportDir = transport?.dir;
   const framesPath = options.framesPath ?? join(transportDir!, 'shell-frames.jsonl');
   const shims = options.shims ?? DEFAULT_SHIMS;
 
@@ -102,7 +104,7 @@ export async function installShellShim(options: InstallOptions): Promise<Install
     await chmod(path, 0o755);
   }
 
-  if (transportDir !== undefined) {
+  if (transportDir !== undefined && !windows) {
     // Who to ask about later: orca's sweep decides an abandoned transport by whether the process
     // that minted it is still running, because the directory's own mtime stops moving the moment
     // it is created — every frame after that is an append to the file inside it.
@@ -111,9 +113,14 @@ export async function installShellShim(options: InstallOptions): Promise<Install
     );
   }
 
-  await writeFile(framesPath, '', { flag: 'a', mode: 0o600 }).catch(() => {
-    // An unwritable frames file must not stop the run; the shim swallows write errors too.
-  });
+  if (transport === undefined || !windows) {
+    await writeFile(framesPath, '', { flag: 'a', mode: 0o600 }).catch(() => {
+      // Caller-owned files and POSIX retain their best-effort capture policy.
+    });
+  }
+  // Shim generation awaited other work after transport setup. Refuse a replacement before
+  // returning paths a child can append to; never rewrite owner.pid outside the guarded setup.
+  if (transport?.identity) await assertPrivatePathIdentity(transport.dir, transport.identity);
 
   return {
     dir,
@@ -376,18 +383,22 @@ function quoteCmd(value: string): string {
  * run continues without shell capture — which is the right way round: not capturing beats writing
  * every command the agent runs into a file this cannot vouch for.
  */
-async function secureTransport(dir: string): Promise<string> {
+async function secureTransport(
+  dir: string,
+): Promise<{ dir: string; identity?: PrivatePathIdentity }> {
   // POSIX mkdtemp already creates 0700, including on filesystems that reject chmod.
-  if (process.platform !== 'win32') return dir;
+  if (process.platform !== 'win32') return { dir };
   const was = await privatePathIdentity(dir);
   try {
     await restrictToOwner(dir, 0o700);
     await assertPrivatePathIdentity(dir, was);
-    // Keep it non-empty before returning to the installer, which may await other work before
-    // writing frames. Failure to establish this guard must fail the capture layer.
+    // Both files belong inside the verified setup. A non-empty directory can still be renamed,
+    // so owner.pid alone cannot protect a deferred frames-file creation.
     await writeFile(join(dir, 'owner.pid'), String(process.pid), { mode: 0o600, flag: 'wx' });
     await assertPrivatePathIdentity(dir, was);
-    return dir;
+    await writeFile(join(dir, 'shell-frames.jsonl'), '', { mode: 0o600, flag: 'wx' });
+    await assertPrivatePathIdentity(dir, was);
+    return { dir, identity: was };
   } catch (err) {
     await removePrivateDirectory(dir, was);
     throw err;

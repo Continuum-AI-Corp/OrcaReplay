@@ -275,6 +275,7 @@ export async function installAgentSpans(runDir: string): Promise<AgentSpanCaptur
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, SITECUSTOMIZE), SITECUSTOMIZE_SOURCE, 'utf8');
   const transportDir = await mkdtemp(join(tmpdir(), 'orca-spans-'));
+  const spansPath = join(transportDir, SPANS_FILENAME);
   const was = process.platform === 'win32' ? await privatePathIdentity(transportDir) : undefined;
   // Narrowed before the first write, for the reason the comment above no longer gets to assume:
   // `mkdtemp` gives a directory only this user can enter on POSIX, and on Windows gives whatever
@@ -293,20 +294,21 @@ export async function installAgentSpans(runDir: string): Promise<AgentSpanCaptur
         flag: 'wx',
       });
       await assertPrivatePathIdentity(transportDir, was);
+      await writeFile(spansPath, '', { mode: 0o600, flag: 'wx' });
+      await assertPrivatePathIdentity(transportDir, was);
     }
   } catch (err) {
     if (was) await removePrivateDirectory(transportDir, was);
     throw err;
   }
-  const spansPath = join(transportDir, SPANS_FILENAME);
-  // Best-effort: an unwritable transport must not stop the run, and the child creating it instead
-  // still lands inside a directory only this user can enter.
-  await writeFile(spansPath, '', { flag: 'a', mode: 0o600 }).catch(() => undefined);
-  // Who to ask about later. A sweep that finds this directory after orca is gone has no other way
-  // to tell an abandoned transport from one a longer run is still appending to.
-  await writeFile(join(transportDir, TRANSPORT_OWNER), String(process.pid), {
-    mode: 0o600,
-  }).catch(() => undefined);
+  if (!was) {
+    // POSIX mkdtemp supplies the protection at creation. Keep its existing best-effort writes;
+    // on Windows both files already exist and must never be recreated outside the identity guard.
+    await writeFile(spansPath, '', { flag: 'a', mode: 0o600 }).catch(() => undefined);
+    await writeFile(join(transportDir, TRANSPORT_OWNER), String(process.pid), {
+      mode: 0o600,
+    }).catch(() => undefined);
+  }
   return { spansPath, pythonPath: dir, transportDir };
 }
 
