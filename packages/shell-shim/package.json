@@ -17,6 +17,7 @@
     "dist"
   ],
   "dependencies": {
-    "@orcareplay/schema": "0.3.0"
+    "@orcareplay/schema": "0.3.0",
+    "@orcareplay/core": "0.3.0"
   }
 }

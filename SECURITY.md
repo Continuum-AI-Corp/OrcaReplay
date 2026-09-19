@@ -28,13 +28,31 @@ What we do:
   `id_ed25519*`, along with `.git/`, `node_modules/` and `.orca/`. That is a fixed list, not a rule
   that generalises: `id_ecdsa` is not on it. A shape we miss is a bug worth filing — there is an
   issue template for exactly that.
-- Trace files and blobs are written mode `0600`, run directories `0700`.
+- Trace files and blobs are written mode `0600`, run directories `0700` — and on Windows,
+  where those are not something the filesystem has, the equivalent ACL: `.orca/runs` grants
+  only its owner, SYSTEM and Administrators, and everything written beneath it inherits that.
+  Said plainly because it did not used to be true: `chmod` on Windows sets the read-only
+  attribute and discards the mode, so the store was left with whatever the workspace handed
+  down — typically readable by every account on the machine. On Windows the ACL is applied
+  whether or not orca created the store that run, since an inherited one is not a choice
+  anybody made. What it cannot do is rewrite runs already on disk from before: those keep the
+  ACEs they were written with, and `icacls` on the parent does not re-propagate.
+  The account running orca, SYSTEM and Administrators are the trusted principals. Before
+  changing a Windows ACL, orca also checks the actual owner: another account's ownership can
+  otherwise retain the right to restore access even after its ACE is removed. An unreadable or
+  foreign owner, a junction, or an entry replaced during setup causes a refusal. Owner lookup
+  uses the built-in Windows PowerShell .NET API; it needs neither elevation nor `Get-Acl` module
+  loading. If that API is unavailable, private-data setup fails closed.
 - Redaction lives in the writer, so a file orca does not write itself has not been through it. A
   capture layer that runs inside the agent's process, or in a child of it, produces exactly that:
   the bytes are on disk before orca ever reads them. Where nothing reads such a file after the run,
   it is kept out of the run directory — the OpenAI Agents tracing layer and the shell shim both
-  write to a private temporary directory, orca reads each once and appends what it keeps through
-  the redactor like anything else, and the directory is removed when the run ends. What the agents
+  write to a temporary directory made private the moment it is created and before anything is
+  written into it, orca reads each once and appends what it keeps through the redactor like
+  anything else, and the directory is removed when the run ends. "Private" is `mkdtemp`'s 0700 on
+  POSIX and the same owner-only ACL as the store on Windows, where `mkdtemp` alone gives whatever
+  `%TEMP%` hands down — which is not always the profile, and `shell-frames.jsonl` holds argv and
+  cwd verbatim. What the agents
   layer writes is an allow-list of structural fields — agent and tool names, which agent handed off
   to which, whether a guardrail tripped — never a tool's input or output.
 - Where something *does* read such a file later, it stays. `mcp-frames.jsonl` holds the recorded
@@ -50,6 +68,10 @@ What we do:
 
 **What we do not promise:** redaction is best-effort mitigation, not a guarantee. Treat a trace as
 sensitive material.
+
+Keep the workspace and temporary-directory ancestors under trusted control. The Windows checks
+detect replacements during setup; they are path-based checks, not a filesystem sandbox or an
+atomic handle-based defense against an account that can replace ancestors throughout a run.
 
 `orca scrub` is the second pass, for what the write path missed and for the internal hostname that
 is only sensitive in your organisation. It rewrites `events.jsonl`, `manifest.json` and every text
@@ -88,7 +110,7 @@ intercept cannot be talked into it. The run says out loud that interception is o
 will decrypt, and where the CA lives, before the agent starts.
 
 **The CA is ephemeral and local.** Generated per run into `<run>/tls/` — key `0600`, directory
-`0700` — and deleted when the run ends, including when the run fails, is interrupted, or the agent
+`0700`, or the ACL that means the same on Windows — and deleted when the run ends, including when the run fails, is interrupted, or the agent
 binary does not exist. It expires 24 hours after minting regardless. It is **never** installed into
 a system or browser trust store, and orca will not offer to.
 

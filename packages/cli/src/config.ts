@@ -1,6 +1,8 @@
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { restrictToOwner } from '@orcareplay/core';
 import type { ParsedArgs } from './args.js';
 // fetchPinned lives in @orcareplay/core so the CLI and the recording proxy cannot
 // each carry their own copy — see its doc comment.
@@ -104,10 +106,39 @@ export async function writeConfig(
   const path = configPath(env);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   // Set explicitly as well as passed to mkdir: an existing directory keeps whatever mode it had,
-  // and a 0755 directory makes the file's 0600 decoration.
-  await chmod(dirname(path), 0o700).catch(() => {});
-  await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-  await chmod(path, 0o600);
+  // and a 0755 directory makes the file's 0600 decoration. On Windows neither mode argument does
+  // anything at all, so this is what keeps the directory from being listable by every account.
+  if (process.platform === 'win32') await restrictToOwner(dirname(path), 0o700);
+  else await restrictToOwner(dirname(path), 0o700).catch(() => {});
+
+  // Through a staging file, narrowed before the key is put into it.
+  //
+  // `mode: 0o600` is discarded on Windows, so a file written straight to `path` carries whatever
+  // the directory handed down until `restrictToOwner` has run on it — and if that call throws
+  // (icacls unavailable, `SystemRoot` unset, an unwritable `%TEMP%` for its scratch file) the key
+  // is already on disk and readable, while `orca setup` reports an error that mentions none of
+  // that. Measured: the key was there in plain text, under the inherited ACL.
+  //
+  // Neither truncating in place nor deleting on failure would do, because both throw away the
+  // config that was already there when the restriction fails. A rename carries the ACL of the
+  // file being moved, so the key is never on disk under any ACL but the intended one, and a
+  // failure leaves the previous config untouched.
+  // Named per writer, not per destination. `${path}.incoming` is one scratch file every caller
+  // addresses, with nothing serialising them: B's `writeFile(staging, '')` truncates the file A is
+  // about to rename into place, and A installs an empty `config.json` over the user's own while
+  // reporting success — `readConfig` swallows the parse failure, so the gateway and its key are
+  // simply gone. `BlobStore.put` and scrub's `commit` both randomise for this reason; sync uses
+  // the deterministic name only while holding a lock.
+  const staging = `${path}.${randomBytes(6).toString('hex')}.incoming`;
+  await writeFile(staging, '', { mode: 0o600, flag: 'wx' });
+  try {
+    await restrictToOwner(staging, 0o600);
+    await writeFile(staging, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+    await rename(staging, path);
+  } catch (err) {
+    await rm(staging, { force: true }).catch(() => undefined);
+    throw err;
+  }
   return path;
 }
 
