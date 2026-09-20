@@ -140,6 +140,7 @@ function parseArgs(argv) {
     'from-run',
     'dir',
     'retries',
+    'prompt-mode',
   ]);
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -155,9 +156,10 @@ function parseArgs(argv) {
 
 const { harness, flags } = parseArgs(process.argv.slice(2));
 
-const USAGE = `usage: node capture/capture.mjs <claude|codex|opencode|qwen|mimo|kilo|cursor> [options]
+const USAGE = `usage: node capture/capture.mjs <claude|codex|opencode|qwen|mimo|mcode|kilo|cursor> [options]
 
   --model <id>       model to capture. default: the harness's own default
+  --prompt-mode <m>  mcode only: tui, coding or work. default: coding
   --print            claude only: capture the -p prompt instead of the interactive one
   --interactive      codex only: capture the TUI prompt instead of the exec one
   --upstream <url>   override where the proxy forwards. default: api.anthropic.com for
@@ -316,6 +318,22 @@ function orcaGatewayKey() {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Which of MCode's three prompts to capture.
+ *
+ * `tui`, `coding` and `work` are three different system prompts from one binary, so the mode is
+ * part of what a capture identifies and `prompt/MCODE/` holds all three. `coding` is the default
+ * here because it is the one a non-interactive `exec` run would otherwise pick anyway.
+ */
+const MCODE_PROMPT_MODES = ['tui', 'coding', 'work'];
+function promptMode() {
+  const mode = typeof flags['prompt-mode'] === 'string' ? flags['prompt-mode'] : 'coding';
+  if (!MCODE_PROMPT_MODES.includes(mode)) {
+    throw new Error(`--prompt-mode must be one of ${MCODE_PROMPT_MODES.join(', ')}, got '${mode}'`);
+  }
+  return mode;
 }
 
 const PROFILES = {
@@ -488,6 +506,67 @@ const PROFILES = {
     recordArgs: (model, prompt) => ['--', 'run', ...(model ? ['--model', model] : []), prompt],
     consoleArgs: (model, prompt) => ['run', ...(model ? ['--model', model] : []), `"${prompt}"`],
     forceAnthropicUpstream: false,
+
+    extract: extractOpenAiShaped,
+  },
+
+  /**
+   * MiniMax Code, the one harness here captured by moving its data directory.
+   *
+   * No `--tls-intercept`, and that is the finding rather than an omission: MCode's HTTP client is
+   * Node's `fetch`, which consults neither `HTTP_PROXY` nor `HTTPS_PROXY`, so interception sees no
+   * traffic and the run ends `capture.empty`. There is no base-URL variable either -- the origin
+   * lives in `~/.minimax/config.yaml`. The `mcode` adapter points `MINIMAX_DATA_DIR` at a
+   * directory inside the run and writes a redirected copy of that config there, so the operator's
+   * own file is never touched, which matters because MCode writes to its config on startup.
+   *
+   * It follows that a provider has to be configured for there to be anything to capture: the
+   * built-in managed login cannot be redirected by a file, and MCode restores its origin over
+   * whatever the config says. Run `mcode provider add` once first.
+   *
+   * No model is defaulted. MCode resolves `provider/model` against the operator's own config, so
+   * naming one here would be naming a provider that may not exist on their machine; without
+   * `--model` it uses the `defaultModel` they already chose. `--permission off` and `--max-steps
+   * 1` keep the run to the single call the prompt travels in.
+   *
+   * The prompt does not vary by model. Measured across seven models on six families and two
+   * gateways: 119 identical lines, with only the `- Model:` line differing. It does vary by
+   * `--prompt-mode`, which is why all three are in `prompt/MCODE/`.
+   */
+  mcode: {
+    id: 'mcode',
+    adapter: 'mcode',
+    promptDir: 'MCODE',
+    defaultInteractive: false,
+    recordFlags: [],
+    defaultModel: '',
+    recordArgs: (model, prompt) => [
+      '--',
+      'exec',
+      '--prompt-mode',
+      promptMode(),
+      '--permission',
+      'off',
+      '--max-steps',
+      '1',
+      ...(model ? ['--model', model] : []),
+      prompt,
+    ],
+    consoleArgs: (model, prompt) => [
+      'exec',
+      '--prompt-mode',
+      promptMode(),
+      '--permission',
+      'off',
+      '--max-steps',
+      '1',
+      ...(model ? ['--model', model] : []),
+      `"${prompt}"`,
+    ],
+    forceAnthropicUpstream: false,
+
+    // Three prompts from one binary, so the mode is part of what the file is named for.
+    promptVariant: () => `-${promptMode()}`,
 
     extract: extractOpenAiShaped,
   },
@@ -786,6 +865,15 @@ function buildScrubber(cwd) {
   if (gateway) rules.push([new RegExp(reEscape(gateway), 'g'), '{{GATEWAY}}']);
   rules.push(
     [/(OS Version: [^\n]*?)\d+\.\d+\.\d{4,}/g, '$1{{OS_BUILD}}'],
+    // A run id makes the artifact different on every capture, which would make `regenerate`
+    // produce a diff every time and mean nothing when it did not. MCode prints one: orca moves
+    // its data directory into the run, and the prompt reports that directory back as
+    // `activeDataDir`. Twelve hex characters is below the `{{HEX}}` rule's floor of 32.
+    [/\brun_[0-9a-f]{8,}\b/g, '{{RUN_ID}}'],
+    // The interpreter's own path, which carries a version that changes under the user on every
+    // PowerShell update. Windows installs it under `WindowsApps` with the version in the folder
+    // name, so the path is machine state rather than anything about the harness.
+    [/[A-Za-z]:\\[^\n"'()]*?\\pwsh\.exe/g, '{{PWSH}}'],
     [/[\w.+-]+@[\w-]+\.[\w.]{2,}/g, '{{EMAIL}}'],
     // Lookarounds rather than \b: an id is often prefixed, as in `msg_01a06161-...`, and `_` is a
     // word character, so \b never matches between the two and the whole rule silently misses.
@@ -1255,9 +1343,11 @@ function writeCapture(profile, cwd, runId, interactive, dirOverride) {
   const dirName = flattenModelId(
     typeof flags.dir === 'string'
       ? flags.dir
-      : interactive === profile.defaultInteractive
-        ? model
-        : `${model}.${interactive ? 'interactive' : 'print'}`,
+      : profile.promptVariant
+        ? `${model}${profile.promptVariant()}`
+        : interactive === profile.defaultInteractive
+          ? model
+          : `${model}.${interactive ? 'interactive' : 'print'}`,
   );
   const dest = join(CAPTURE_DIR, dirName);
 
@@ -1327,16 +1417,34 @@ function writeCapture(profile, cwd, runId, interactive, dirOverride) {
 
   meta.dir_slug = slug;
   // The capture folder may be disambiguated by hand (--dir) when two harnesses serve one model.
-  // Under prompt/ the harness folder already does that, so the file is named for the model alone.
-  meta.prompt_slug =
-    `${model}${interactive === profile.defaultInteractive ? '' : interactive ? '-interactive' : '-print'}`
-      .replace(/[^A-Za-z0-9._-]+/g, '-')
-      .replace(/\./g, '-');
+  // Under prompt/ the harness folder already does that, so the file is named for the model alone
+  // — plus whatever makes one capture of that model a different prompt from another.
+  //
+  // Two things do. Claude Code's `-p` prompt is not its interactive one. And MCode has three,
+  // chosen by `--prompt-mode`, which is why `promptVariant` exists: without it all three modes
+  // mirrored to one filename and each run quietly overwrote the last, leaving `prompt/MCODE/`
+  // holding whichever was captured most recently under the name of all three.
+  const variant =
+    profile.promptVariant?.() ??
+    (interactive === profile.defaultInteractive ? '' : interactive ? '-interactive' : '-print');
+  meta.prompt_slug = `${model}${variant}`.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/\./g, '-');
   meta.prompt_dir = profile.promptDir ?? profile.id.toUpperCase();
   meta.prompt_file = `prompt/${meta.prompt_dir}/${meta.prompt_slug}-system-prompt.md`;
+  // Runnable as printed, or it is not a regenerate command. The variant has to be on it for the
+  // same reason it is in the filename — `--prompt-mode work` and `--prompt-mode tui` are
+  // different prompts — and so does `--allow-failed` when this capture only exists because the
+  // turn was kept after an error, which is the ordinary case for a harness captured without a
+  // credential.
   meta.regenerate =
     `node capture/capture.mjs ${profile.id} --model ${model}` +
-    (interactive === profile.defaultInteractive ? '' : interactive ? ' --interactive' : ' --print');
+    (profile.promptVariant
+      ? ` --prompt-mode ${variant.slice(1)}`
+      : interactive === profile.defaultInteractive
+        ? ''
+        : interactive
+          ? ' --interactive'
+          : ' --print') +
+    (facts.response_error ? ' --allow-failed' : '');
 
   // Two copies on purpose: the capture folder stays self-contained, and `prompt/` stays a flat
   // collection you can read without walking into subdirectories. The capture-side file is the
