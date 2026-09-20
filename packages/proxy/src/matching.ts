@@ -454,9 +454,21 @@ function withoutReminders<T>(value: T): T {
   return mapStrings(value, (s) => s.replace(SYSTEM_REMINDER, ''));
 }
 
+/**
+ * The budget is measured on the same text the drift is, or the two are in different spaces.
+ *
+ * `askDistance` compares the ask with its reminders removed, so a tolerance taken from the raw ask
+ * is inflated by exactly the part that no longer counts — and the bigger the harness's injected
+ * block, the wider the gap a changed question can hide in. With a 2,000-character reminder the
+ * budget reached 40 while the stripped drift between "fix the auth test" and "delete the auth
+ * test" is 6, so the recorded answer to one was served for the other at rung 2, labelled `minor`.
+ * That is the failure the ask guard exists to prevent, reintroduced by widening only one side of
+ * its own comparison.
+ */
 function askTolerance(recorded: Record<string, unknown>): number {
   const ask = trailingMessage(recorded);
-  return ask === undefined ? 0 : Math.min(weight(ask) * ASK_DRIFT_RATIO, ASK_DRIFT_MAX);
+  if (ask === undefined) return 0;
+  return Math.min(weight(withoutReminders(ask)) * ASK_DRIFT_RATIO, ASK_DRIFT_MAX);
 }
 
 export interface MatcherOptions {

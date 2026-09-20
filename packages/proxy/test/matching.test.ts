@@ -236,6 +236,65 @@ describe('RequestMatcher — the ladder from spec §4', () => {
     expect(r.rung).toBe(4);
   });
 
+  it('does not let a large reminder buy tolerance for a changed question', () => {
+    // Caught in review, reproduced before it was fixed. `askDistance` compares the stripped ask, so
+    // a tolerance taken from the *raw* ask is inflated by the part that no longer counts. At 2,000
+    // characters of reminder the budget reached 40 while the stripped drift between these two
+    // questions is 6 — so the recorded answer to "fix the auth test" was served for "delete the
+    // auth test" at rung 2, labelled `minor`. The ask guard exists to stop exactly that.
+    //
+    // The reminder is large on purpose: the existing changed-question test uses a short one, where
+    // the budget is small either way, which is why it passed while this was broken.
+    const reminder = 'x'.repeat(2000);
+    const ask = (id: string, question: string) =>
+      `<system-reminder>${reminder} SESSION ${id}</system-reminder>${LF}${LF}${question}`;
+
+    const recorded = req({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: ask('643d348214ea4573bf852652677b7dcf', 'fix the auth test') },
+          ],
+        },
+      ],
+    });
+
+    const changed = new RequestMatcher([recorded]).match(
+      req({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: ask('9f21ac0bb7de41528ee3d90147cc6a82', 'delete the auth test'),
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(changed.matched).toBe(false);
+    expect(changed.rung).toBe(4);
+
+    // And the case the change exists for still works: same question, drifting id.
+    const same = new RequestMatcher([recorded]).match(
+      req({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: ask('9f21ac0bb7de41528ee3d90147cc6a82', 'fix the auth test') },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(same.matched).toBe(true);
+    expect(same.rung).toBe(2);
+  });
+
   it('does not let an unterminated reminder swallow the question', () => {
     // Non-greedy is not enough on its own: a lone opening tag must match nothing, or a truncated
     // reminder would take the rest of the message — and the ask — out of the comparison with it.
