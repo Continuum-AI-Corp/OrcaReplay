@@ -573,7 +573,18 @@ describe('the mcode adapter', () => {
     // the rule a few lines up that keys come out of all of them, and review found the gap:
     // `provider:` carrying `authSecret: <32 hex>` passed everything, because the redactor
     // cannot see 32 hex characters either.
+    // The detector is a detector, not a rewriter, so it does not use the rewrite's allowlist:
+    // every shape that one refuses would be a value this one never looked at. Review found a
+    // quoted value slipping past the shape test; going through the rest turned up a flow map,
+    // a value on the following line and a list item with the same hole. It reads the text
+    // after the colon now and does not care about structure.
+    const hex = 'b8e793df1a6e4b1088eeaa608388afc9';
     for (const built of [
+      ['provider:', '  m:', '    options:', `      authSecret: "${hex}"`],
+      [`      authSecret: '${hex}'`],
+      [`    opts: {authSecret: ${hex}}`],
+      ['      authSecret:', `        ${hex}`],
+      ['      secrets:', `        - ${hex}`],
       [
         'provider:',
         '  minimax_api:',
@@ -601,6 +612,28 @@ describe('the mcode adapter', () => {
     ]) {
       expect(rewriteIsTrustworthy(withField(line), PROXY), line).toBe(false);
     }
+
+    // Three shapes a real config carries that a careless net refuses. `defaultModel`'s value is
+    // forty characters of the token alphabet once `/` is in it, which is why `/` is not; the
+    // two long names are why the scan starts after the colon.
+    expect(
+      rewriteIsTrustworthy(
+        [
+          'defaultModel: custom_provider:orca-cap/deepseek/deepseek-v4-flash-free',
+          'custom_provider:',
+          '  gw:',
+          '    options:',
+          '      apiKey: sk-live-x',
+          '      baseURL: https://gateway.example/v1',
+          '      contextWindowOptionHints: 3',
+          '      files_api_upload_endpoint: /v1/files',
+          '    models:',
+          '      deepseek/deepseek-v4-flash-free: {}',
+          '',
+        ].join(LF),
+        PROXY,
+      ),
+    ).toBe(true);
 
     // And an ordinary provider block is not refused over the fields it really carries.
     for (const line of [

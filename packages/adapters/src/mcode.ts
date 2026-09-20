@@ -120,31 +120,55 @@ function isolatedEnv(
   return overlay;
 }
 
-/** One opaque run of token characters, long enough that nothing in a real config is one. */
-const OPAQUE_TOKEN = /^[A-Za-z0-9+/_=-]{24,}$/;
-
-/** Any `name: value` line at all, so a field this file does not rewrite can still be looked at. */
-const ANY_FIELD = /^[ \t]*(['"]?)([^:'"]+)\1[ \t]*:[ \t]*(.*?)[ \t\r]*$/;
+/**
+ * One opaque run of token characters, long enough that nothing in a real config is one.
+ *
+ * `/` is deliberately not in the alphabet. A base64 secret can contain one, but so does every
+ * provider-qualified model id — `deepseek/deepseek-v4-flash-free` is thirty-one characters of it —
+ * and refusing every config that names a model would leave nothing working at all.
+ */
+const OPAQUE_TOKEN = /[A-Za-z0-9+_=-]{24,}/;
 
 /**
- * Every section, not just the custom one.
+ * What a line says after its field name.
  *
- * Scoping this to `custom_provider:` contradicted the invariant a few lines up — keys are taken
- * out of *every* section, because the file lands in the run directory whatever section they are
- * in. Review found the gap: `provider:` carrying `authSecret: <32 hex>` passed everything, since
- * the redactor's entropy sweep cannot see 32 hex characters either. A real config has no opaque
- * token under any name in any section, so there is nothing to pay for reading all of them.
+ * Nothing is stripped from it. The shape below is searched for inside the text rather than
+ * matched against the whole of it, so a quote, a brace or a comma around the value makes no
+ * difference — which is the property that makes a detector cheaper to get right than a rewriter.
  *
- * It also covers the configs whose section this file cannot track at all — a quoted top-level key,
- * a leading byte-order mark — where every line reads as section `''`.
+ * The name is dropped because names are long: `contextWindowOptionHints` and
+ * `files_api_upload_endpoint` both clear twenty-four characters in a real config, and scanning
+ * whole lines refused it. A line with no colon is a continuation — the indented scalar under
+ * `apiKey:` — and is scanned whole, which is the only way to see a value written there.
+ */
+function valueText(line: string): string {
+  const body = lineBody(line);
+  const colon = body.indexOf(':');
+  return colon === -1 ? body : body.slice(colon + 1);
+}
+
+/**
+ * A value this file cannot account for, anywhere in the file.
+ *
+ * The second of two nets under `rewriteIsTrustworthy`, and a detector rather than a rewriter — so
+ * it is deliberately not written the way the rewrite is. The rewrite understands one shape and
+ * refuses the rest, which is right for something that has to produce correct output. A detector
+ * built that way has the failure the other way round: every shape it does not parse is a value it
+ * does not look at. Review found three of those in turn — a quoted value, a flow map, a value on
+ * the following line — so this reads the text after the colon and does not care about structure.
+ *
+ * Every section, not just the custom one: the file lands in the run directory whatever section a
+ * value is in. That also covers the configs whose section cannot be tracked at all, a quoted
+ * top-level key or a leading byte-order mark.
+ *
+ * Measured against a real config and against a rewritten one, forward URLs included: nothing in
+ * either matches.
  */
 function hasUnaccountedToken(config: string): boolean {
   return config.split('\n').some((line) => {
-    const parts = ANY_FIELD.exec(lineBody(line));
-    if (parts === null) return false;
     // The two this file rewrites are accounted for by the checks above.
-    if (/base[_-]?url|api[_-]?key/i.test(parts[2]!)) return false;
-    return OPAQUE_TOKEN.test(parts[3]!);
+    if (/base[_-]?url|api[_-]?key/i.test(lineBody(line).split(':')[0] ?? '')) return false;
+    return OPAQUE_TOKEN.test(valueText(line));
   });
 }
 
@@ -331,9 +355,16 @@ export function rewriteIsTrustworthy(config: string, proxyUrl: string): boolean 
  * Every custom provider, not the first. With several configured, rewriting one leaves the rest
  * aimed at their real origins, and a run on one of those is simply missing from the trace.
  *
- * Keys come out of every section, built-in included. The file is written inside the run directory,
- * and §7 says a credential is never written there; `capture.mjs` then copies that directory into
- * `capture/<model>/trace/` unscrubbed, so a key left here would leave with the capture. Orca
+ * Keys come out of every section, built-in included, and `rewriteIsTrustworthy` refuses a config
+ * whose credentials it cannot account for. What that is worth saying precisely: the two nets
+ * catch what they recognise and a short low-entropy value under an unknown name gets past both,
+ * so this is a best effort rather than the guarantee an earlier version of this comment claimed.
+ *
+ * Two things carry the rest of the weight, and neither is detection. `orca push` ships an
+ * allowlist of four top-level entries, which this directory is not one of, so a pushed run never
+ * carries it. And `capture/<model>/trace/` — where `capture.mjs` moves the run — is documented as
+ * the unscrubbed raw run and is the one thing the prompt vault's CONTRIBUTING forbids committing.
+ * A key that survives the nets stays on the machine it was already on. Orca
  * supplies the real one for the origin it forwards to — that is what `orca setup` configures and
  * what `upstreamHeaders` injects. Without it the gateway answers 401, and the prompt is captured
  * anyway: it travels in the request, which orca records before the origin ever replies.
