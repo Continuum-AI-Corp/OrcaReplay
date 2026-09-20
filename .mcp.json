@@ -2,11 +2,7 @@
   "mcpServers": {
     "orcareplay": {
       "command": "npx",
-      "args": [
-        "-y",
-        "orcareplay",
-        "mcp"
-      ]
+      "args": ["-y", "orcareplay", "mcp"]
     }
   }
 }

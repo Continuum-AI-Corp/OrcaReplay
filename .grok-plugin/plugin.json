@@ -8,10 +8,5 @@
   },
   "repository": "https://github.com/Continuum-AI-Corp/OrcaReplay",
   "license": "Apache-2.0",
-  "keywords": [
-    "orcareplay",
-    "agent run replay",
-    "agent trace",
-    "record agent run"
-  ]
+  "keywords": ["orcareplay", "agent run replay", "agent trace", "record agent run"]
 }
