@@ -596,9 +596,13 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
   // secrets themselves. Without a redactor on this side the two are never in the same
   // representation, and a recording of any real harness — whose own system prompt carries a
   // session id — cannot match itself.
+  // Shared with the passthrough failure path, which writes an upstream's own error message into
+  // the trace: a gateway that quotes the call it refused can quote the credential with it, and §7
+  // says never write it — not "write it and let a later layer catch it".
+  const redactor = new Redactor();
   const matcher = new RequestMatcher(
     replayable.map((e) => e.canonicalRequest),
-    { redactor: new Redactor(), concurrency: () => peakInFlight },
+    { redactor, concurrency: () => peakInFlight },
   );
 
   /**
@@ -1352,6 +1356,23 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
    * Filing it with the model exchanges would inflate `reused=n/m` with turns replay will never
    * serve, and an operator would be reading a fidelity number that is not one.
    */
+  /**
+   * An origin string as a host and a port, for the two places that record one.
+   *
+   * An origin that does not parse is still worth recording under the string we were given.
+   */
+  function netExchangeTarget(origin: string): { host: string; port: number } {
+    try {
+      const url = new URL(origin);
+      return {
+        host: url.hostname,
+        port: url.port !== '' ? Number(url.port) : url.protocol === 'http:' ? 80 : 443,
+      };
+    } catch {
+      return { host: origin, port: 443 };
+    }
+  }
+
   async function passThrough(
     path: string,
     rawBody: string,
@@ -1379,18 +1400,52 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
 
     stats.passedThrough += 1;
     const origin = passthroughOrigin(headers, forwardBase);
-    const upstreamRes = await doFetch(`${origin}${path}`, {
-      method: 'POST',
-      // `upstreamHeaders` too, as `goLive` does. Omitting them sent a gateway the agent's own
-      // credential — often the `orca-recorded` placeholder — and the call came back 401 for a
-      // reason nothing in the trace explained.
-      headers: {
-        'content-type': 'application/json',
-        ...headers,
-        ...headersForOrigin(origin),
-      },
-      body: rawBody,
-    });
+    let upstreamRes: Awaited<ReturnType<typeof doFetch>>;
+    try {
+      upstreamRes = await doFetch(`${origin}${path}`, {
+        method: 'POST',
+        // `upstreamHeaders` too, as `goLive` does. Omitting them sent a gateway the agent's own
+        // credential — often the `orca-recorded` placeholder — and the call came back 401 for a
+        // reason nothing in the trace explained.
+        headers: {
+          'content-type': 'application/json',
+          ...headers,
+          ...headersForOrigin(origin),
+        },
+        body: rawBody,
+      });
+    } catch (err) {
+      // An upstream that never answered is still something the agent asked for, and a trace
+      // that leaves it out says the run made fewer calls than it did. Before this the throw
+      // reached the server's catch-all: the agent got its 500 — which was right — and nothing
+      // else happened. No event, no warning, and the replay later blamed "opaque network
+      // traffic" that had never been captured.
+      //
+      // Not an exotic path. `fetchPinned` refuses every redirect on purpose, and a gateway
+      // behind a CDN answers an unknown path with one: `api.orcarouter.ai` sends `301` to its
+      // own marketing site, and MiniMax Code posts to `/v1/responses/input_tokens` before every
+      // call, so two requests per run went missing and said nothing.
+      //
+      // `status: 0` is the same thing it means for an intercepted exchange: no response header
+      // was ever seen. The reason travels in the body, scrubbed, because the message names the
+      // origin it was given.
+      options.onNetExchange?.({
+        ...netExchangeTarget(origin),
+        method: 'POST',
+        intercepted: false,
+        path,
+        requestHeaders: recordableHeaders,
+        requestBody: rawBody,
+        requestTruncated: false,
+        status: 0,
+        responseHeaders: {},
+        responseBody: `orca did not forward this call: ${redactor.redactString(withoutCredentials(String(err))).value}`,
+        responseTruncated: false,
+        responseBytes: 0,
+        durationMs: Date.now() - startedAt,
+      });
+      throw err;
+    }
 
     const responseHeaders: Record<string, string> = {};
     upstreamRes.headers.forEach((value, key) => {

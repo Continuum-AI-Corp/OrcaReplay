@@ -45,6 +45,74 @@ async function post(url: string, body: unknown, headers: Record<string, string> 
 
 const EMBEDDING = { object: 'list', data: [{ embedding: [0.1, 0.2] }] };
 
+describe('an upstream that never answers', () => {
+  /**
+   * The failure this locks out.
+   *
+   * `fetchPinned` refuses every redirect on purpose — undici strips `authorization` across origins
+   * but not `x-api-key`, so following one could hand a gateway's key to whoever the `Location`
+   * names. The refusal is a throw, and the throw used to leave `passThrough` before it recorded
+   * anything: the agent got its 500, the operator saw nothing, and the trace said the run made
+   * fewer calls than it did.
+   *
+   * Found on a real gateway. `api.orcarouter.ai` sits behind a CDN that answers an unknown API path
+   * with `301` to its own marketing site, and MiniMax Code posts to `/v1/responses/input_tokens`
+   * before every call — so every recording of that harness through that gateway lost two requests
+   * and said nothing. The same run against a gateway answering `404` recorded them: eighteen events
+   * against four, which is how it was isolated.
+   */
+  it('records the call it could not forward, rather than dropping it', async () => {
+    const seen: NetExchange[] = [];
+    const proxy = await createProxy({
+      mode: 'record',
+      upstream: { openai: 'https://gateway.example' },
+      fetchImpl: (async () => {
+        throw new Error(
+          'https://gateway.example/v1/responses/input_tokens answered 301 redirecting to ' +
+            'https://www.example. orca does not follow it: your key is in this request.',
+        );
+      }) as unknown as typeof fetch,
+      onNetExchange: (e) => void seen.push(e),
+    });
+    closers.push(proxy.close);
+
+    const res = await post(`${proxy.url}/v1/responses/input_tokens`, { input: 'count me' });
+
+    // The agent still learns it failed — that part was already right.
+    expect(res.status).toBe(500);
+
+    expect(seen).toHaveLength(1);
+    // `status: 0` means the same thing it means for an intercepted exchange: no response header was
+    // ever seen. A `404` here would claim the origin answered.
+    expect(seen[0]!.status).toBe(0);
+    expect(seen[0]!.path).toBe('/v1/responses/input_tokens');
+    expect(seen[0]!.requestBody).toContain('count me');
+    // The reason, so the trace answers "why is there no response" without a rerun.
+    expect(seen[0]!.responseBody).toContain('orca did not forward this call');
+    expect(seen[0]!.responseBody).toContain('301');
+  });
+
+  it('keeps the credential out of the recorded reason', async () => {
+    // The message names the request that failed, and that message reaches both the agent and the
+    // trace. A gateway error quoting the call can quote the key with it.
+    const seen: NetExchange[] = [];
+    const proxy = await createProxy({
+      mode: 'record',
+      upstream: { openai: 'https://gateway.example' },
+      fetchImpl: (async () => {
+        throw new Error('refused: authorization: Bearer sk-live-must-not-be-written-down');
+      }) as unknown as typeof fetch,
+      onNetExchange: (e) => void seen.push(e),
+    });
+    closers.push(proxy.close);
+
+    await post(`${proxy.url}/v1/responses/input_tokens`, { input: 'x' });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.responseBody).not.toContain('sk-live-must-not-be-written-down');
+  });
+});
+
 describe('Anthropic path boundary', () => {
   it.each(['/v1/messages', '/anthropic/v1/messages', '/coding/v1/messages'])(
     'recognizes the versioned Anthropic endpoint %s',
