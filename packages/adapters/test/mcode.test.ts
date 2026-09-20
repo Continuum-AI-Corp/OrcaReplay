@@ -413,7 +413,7 @@ describe('the mcode adapter', () => {
       '',
     ].join(LF);
 
-    expect(rewriteIsTrustworthy(config)).toBe(true);
+    expect(rewriteIsTrustworthy(config, PROXY)).toBe(true);
     const out = redirected(config, PROXY);
     expect(out).not.toContain('sk-live-x');
     expect(out).toContain('authMode: api-key');
@@ -495,7 +495,7 @@ describe('the mcode adapter', () => {
         `      baseURL: ${origin}`,
         '',
       ].join(LF);
-      expect(rewriteIsTrustworthy(config), origin).toBe(false);
+      expect(rewriteIsTrustworthy(config, PROXY), origin).toBe(false);
     }
   });
 
@@ -512,12 +512,80 @@ describe('the mcode adapter', () => {
       '',
     ].join('\r\n');
 
-    expect(rewriteIsTrustworthy(config)).toBe(true);
+    expect(rewriteIsTrustworthy(config, PROXY)).toBe(true);
     const out = redirected(config, PROXY);
     expect(out).not.toContain('sk-live-x');
     expect(out).toContain('\r\n');
     const moved = /baseURL: (\S+?)\r/.exec(out)?.[1];
     expect(decodeForwardPath(new URL(moved!).pathname)?.base).toBe('https://gateway.example/v1');
+  });
+
+  it('empties the vendor environment so no other spelling can point elsewhere', async () => {
+    // Caught in review. `configPath` reads either spelling of the data directory, but the launch
+    // overrode only one — so an operator who had set `MAVIS_DATA_DIR` kept their real data
+    // directory, with the real config, origin and credential, and the isolation bought nothing.
+    //
+    // Naming the spellings one at a time is how that happened, so this does not: MCode reads about
+    // ninety `MAVIS_*` and `MINIMAX_*` variables, including three more data directories and four
+    // credentials, and every one of them arrives empty.
+    ctx.env = {
+      PATH: 'kept',
+      MAVIS_DATA_DIR: '/real/data',
+      MAVIS_RUNTIME_DATA_DIR: '/real/runtime',
+      MAVIS_ACCESS_TOKEN: 'tok',
+      MINIMAX_API_KEY: 'sk-real',
+      UNRELATED: 'kept',
+    };
+
+    const launch = await mcodeAdapter.prepare(ctx);
+    const isolated = join(ctx.runDir, 'mcode-data');
+    expect(launch.env['MINIMAX_DATA_DIR']).toBe(isolated);
+    expect(launch.env['MAVIS_DATA_DIR']).toBe(isolated);
+    expect(launch.env['MAVIS_RUNTIME_DATA_DIR']).toBe('');
+    expect(launch.env['MAVIS_ACCESS_TOKEN']).toBe('');
+    expect(launch.env['MINIMAX_API_KEY']).toBe('');
+    // Only the vendor's namespace. The rest of the operator's environment is theirs.
+    expect(launch.env['UNRELATED']).toBeUndefined();
+    expect(launch.env['PATH']).toBeUndefined();
+  });
+
+  it('refuses a credential stored under a name it does not rewrite', () => {
+    // The allowlist proves the two fields it understands. A provider that keeps its credential
+    // under any other name would pass every check and be copied out verbatim, into the run
+    // directory `capture.mjs` ships unscrubbed.
+    //
+    // Two nets, because one has a measured hole: orca's redactor catches an `sk-` token, a real
+    // JWT, a long random string and an AWS key id, but not 32 hex characters — that string's
+    // maximum Shannon entropy is exactly its threshold. So an opaque token of 24 characters or
+    // more under a name this file does not rewrite is refused on shape instead.
+    const withField = (line: string) =>
+      [
+        'custom_provider:',
+        '  gw:',
+        '    options:',
+        '      apiKey: sk-live-x',
+        '      baseURL: https://gateway.example/v1',
+        line,
+        '',
+      ].join(LF);
+
+    for (const line of [
+      '      token: sk-live-AbCdEf0123456789XyZ',
+      '      secret: b8e793df1a6e4b1088eeaa608388afc9',
+      '      apiToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c',
+    ]) {
+      expect(rewriteIsTrustworthy(withField(line), PROXY), line).toBe(false);
+    }
+
+    // And an ordinary provider block is not refused over the fields it really carries.
+    for (const line of [
+      '      authMode: api-key',
+      '      enabled: true',
+      '      name: gw',
+      '      api: openai-completions',
+    ]) {
+      expect(rewriteIsTrustworthy(withField(line), PROXY), line).toBe(true);
+    }
   });
 
   it('writes no config when there is none to read', async () => {

@@ -17,6 +17,7 @@
     "dist"
   ],
   "dependencies": {
+    "@orcareplay/core": "0.3.0",
     "@orcareplay/node-instrument": "0.3.0",
     "@orcareplay/plugin-api": "0.3.0",
     "@orcareplay/proxy": "0.3.0",

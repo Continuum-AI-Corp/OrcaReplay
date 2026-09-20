@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, Launch, RecordContext } from '@orcareplay/plugin-api';
 import { detectAgent } from './detect.js';
+import { Redactor } from '@orcareplay/core';
 import { decodeForwardPath, forwardBasePath } from '@orcareplay/proxy';
 import { forwardOrProxyBase, PLACEHOLDER_KEY, readEnv } from './env.js';
 
@@ -73,12 +74,16 @@ export const mcodeAdapter: Adapter = {
     const launch: Launch = {
       command: 'mcode',
       args: [...ctx.userArgs],
-      env: { MINIMAX_DATA_DIR: dataDir },
+      env: isolatedEnv(ctx.env, dataDir),
     };
 
     // Nothing to redirect, or nothing this rewrite can prove it redirected. Either way the config
     // is not written, and the isolated directory above is what the agent gets.
-    if (original === undefined || !hasOrigin(original) || !rewriteIsTrustworthy(original)) {
+    if (
+      original === undefined ||
+      !hasOrigin(original) ||
+      !rewriteIsTrustworthy(original, ctx.proxyUrl)
+    ) {
       return launch;
     }
 
@@ -87,6 +92,54 @@ export const mcodeAdapter: Adapter = {
     return { ...launch, tempFiles: [config] };
   },
 };
+
+/**
+ * The vendor's whole environment namespace, blanked, then the data directory put back.
+ *
+ * Review found `MAVIS_DATA_DIR` surviving into the child: `configPath` reads either spelling, but
+ * the launch overrode only one, so an operator who had set the other kept their real data
+ * directory — real config, real origin, real credential — and the isolation above bought nothing.
+ *
+ * Naming the spellings one at a time is how that happened, so this does not. MCode reads about
+ * ninety `MAVIS_*` and `MINIMAX_*` variables, among them three more data directories
+ * (`MAVIS_RUNTIME_DATA_DIR`, `MAVIS_PARENT_DATA_DIR`), four credentials (`MAVIS_ACCESS_TOKEN`,
+ * `MAVIS_PARENT_AUTH_SECRET`, `MINIMAX_API_KEY`, `MINIMAX_CN_API_KEY`) and several origins. Every
+ * one of them is emptied, and the two documented data-dir spellings are then pointed here. A
+ * variable a later version adds is covered by the sweep rather than by remembering to add it.
+ *
+ * The overlay can only set, not unset, so they arrive empty rather than absent. That is the
+ * difference between a run that cannot reach a real origin and one that quietly can.
+ */
+function isolatedEnv(
+  env: Record<string, string | undefined>,
+  dataDir: string,
+): Record<string, string> {
+  const overlay: Record<string, string> = {};
+  for (const name of Object.keys(env)) if (VENDOR_ENV.test(name)) overlay[name] = '';
+  for (const name of DATA_DIR_VARS) overlay[name] = dataDir;
+  return overlay;
+}
+
+/** One opaque run of token characters, long enough that nothing in a real config is one. */
+const OPAQUE_TOKEN = /^[A-Za-z0-9+/_=-]{24,}$/;
+
+/** Any `name: value` line at all, so a field this file does not rewrite can still be looked at. */
+const ANY_FIELD = /^[ \t]*(['"]?)([^:'"]+)\1[ \t]*:[ \t]*(.*?)[ \t\r]*$/;
+
+function hasUnaccountedToken(config: string): boolean {
+  const sections = sectionsOf(config);
+  return config.split('\n').some((line, i) => {
+    if (sections[i] !== CUSTOM_SECTION) return false;
+    const parts = ANY_FIELD.exec(lineBody(line));
+    if (parts === null) return false;
+    // The two this file rewrites are accounted for by the checks above.
+    if (/base[_-]?url|api[_-]?key/i.test(parts[2]!)) return false;
+    return OPAQUE_TOKEN.test(parts[3]!);
+  });
+}
+
+const VENDOR_ENV = /^(MAVIS|MINIMAX)_/;
+const DATA_DIR_VARS = ['MAVIS_DATA_DIR', 'MINIMAX_DATA_DIR'];
 
 /** Both spellings, because the bundle reads either and the operator may have set the other. */
 function configPath(env: Record<string, string | undefined>): string {
@@ -216,7 +269,30 @@ export function hasOrigin(config: string): boolean {
  * The cost of refusing is an uncaptured run — the same untouched launch a config with no custom
  * provider gets — which is the side to fail on when the alternative is writing a credential down.
  */
-export function rewriteIsTrustworthy(config: string): boolean {
+export function rewriteIsTrustworthy(config: string, proxyUrl: string): boolean {
+  // Last, and about what this file does not know rather than what it does. The allowlist proves
+  // the two fields it understands; a custom provider storing its credential under any other
+  // name — `token:`, `secret:`, `apiToken:` — would pass every check above and be copied out
+  // verbatim.
+  //
+  // Two nets, because one of them has a measured hole. Orca's own redactor is asked whether
+  // anything in the result still looks like a secret: it changes nothing in a rewritten real
+  // config, forward URLs included, and it catches an `sk-` token, a real JWT, a 40-character
+  // random string and an AWS key id. It does not catch 32 hex characters — that string's maximum
+  // Shannon entropy is exactly the threshold, so a hex key never trips it — which is the commonest
+  // shape a session key or an API key takes.
+  //
+  // So the second net is shape rather than entropy: inside `custom_provider:`, a field this file
+  // does not rewrite whose value is one opaque token of twenty-four characters or more is
+  // something it cannot account for, and is refused. No value in a real config matches that —
+  // names, kinds, model ids and `api-key` all carry punctuation or are shorter.
+  //
+  // What survives both is a short low-entropy value under an unknown name, `token: hunter2`.
+  // These narrow the hole; they do not close it.
+  const rewritten = redirected(config, proxyUrl);
+  if (new Redactor().redactString(rewritten).value !== rewritten) return false;
+  if (hasUnaccountedToken(config)) return false;
+
   const sections = sectionsOf(config);
   return config.split('\n').every((line, i) => {
     const body = lineBody(line);
