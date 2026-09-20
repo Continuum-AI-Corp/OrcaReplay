@@ -68,7 +68,7 @@ jobs:
       # dependency tree. `--no-save` keeps it out of package.json so it costs this job and nothing
       # else: no npm ci anywhere else gets slower, and a contributor who has not run this line gets
       # a skip rather than a failure, exactly as the pip line above behaves.
-      - run: npm install --no-save @mastra/core @ai-sdk/openai
+      - run: npm install --no-save @mastra/core @ai-sdk/openai ai
       # From the tree, not PyPI: the `openai-agents-handoff` and `langgraph-nodes` checks exist to
       # prove the adapters in *this* commit work, and installing a published copy would test the
       # last release instead.

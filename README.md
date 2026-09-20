@@ -471,7 +471,7 @@ whether orca understands the wire format it speaks once it arrives.
 | **Codex CLI** (API key) | `OPENAI_BASE_URL` → Responses API | works |
 | **Codex CLI** (ChatGPT login) | `--tls-intercept` → Responses API | works, [with a decision to make](#when-the-harness-will-not-be-redirected) |
 | **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | works — the SDK itself, on the Responses API it defaults to, records and replays at `exact=1`, [in CI](test/integrations/); [its own tracing is a second egress](docs/integrations.md#openai-agents-sdk) |
-| **Vercel AI SDK** | `OPENAI_BASE_URL` via `@ai-sdk/openai` (since 3.0.72) — `orca record generic-openai --`; fetch hook (`orca record node --`) when the origin is compiled in | works — env-aware SDK clients via `generic-openai`; an agent posting to an origin compiled into its source records and replays at `exact=1`, [in CI](test/integrations/) |
+| **Vercel AI SDK** | `OPENAI_BASE_URL` via `@ai-sdk/openai` (since 2.0.41) — `orca record generic-openai --`; fetch hook (`orca record node --`) when the origin is compiled in | works — env-aware SDK clients via `generic-openai` at `exact=1`, [in CI](test/integrations/); an agent posting to an origin compiled into its source records and replays at `exact=1` |
 | **grok-cli** (and its Telegram bot) | `orca record grok` — `GROK_BASE_URL`, plus the hook for its sub-agents | works |
 | **OpenClaw** | `orca record openclaw` — the hook for the gateway, inherited variables for the agents it spawns | works |
 | **opencode** | `orca record opencode` | adapter shipped, both origins redirected |

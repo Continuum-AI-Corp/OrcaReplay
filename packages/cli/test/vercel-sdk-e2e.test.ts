@@ -21,9 +21,9 @@ const AGENT = join(here, 'fixtures', 'vercel-agent.mjs');
  * An agent that reads no base-URL variable, recorded anyway.
  *
  * This is the last of the five named integrations, and the only one that could not be reached by
- * setting an environment variable — `@ai-sdk/openai` takes its origin as a constructor argument.
- * The pair of tests below is the whole point: the same agent, the same fixture, one adapter that
- * captures it and one that cannot.
+ * setting an environment variable — its origin is compiled into source. The pair of tests below
+ * is the whole point: the same agent, the same fixture, one adapter that captures it and one
+ * that cannot.
  */
 describe('end to end: an agent with a hardcoded provider origin', () => {
   let workspace: string;

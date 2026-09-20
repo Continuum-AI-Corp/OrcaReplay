@@ -61,7 +61,7 @@ describe('the support table is backed by checks that exist', () => {
 
   const CITED = [
     { framework: 'OpenAI Agents SDK', checks: ['openai-agents'], exact: 1 },
-    { framework: 'Vercel AI SDK', checks: ['fetch-hook'], exact: 1 },
+    { framework: 'Vercel AI SDK', checks: ['ai-sdk-openai', 'fetch-hook'], exact: 1 },
     {
       framework: 'LangGraph / LangChain',
       checks: ['langgraph-stream', 'langgraph-tools'],

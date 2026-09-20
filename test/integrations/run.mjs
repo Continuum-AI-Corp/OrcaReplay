@@ -179,6 +179,16 @@ const CHECKS = [
     repaint: true,
   },
   {
+    id: 'ai-sdk-openai',
+    what: 'a real @ai-sdk/openai client reading OPENAI_BASE_URL, with no fetch preload',
+    // generic-openai on purpose: this is the check that discriminates "the SDK honours
+    // OPENAI_BASE_URL" from "the preload caught the request either way".
+    run: ['node', 'agents/ai_sdk_openai.mjs'],
+    needsNode: ['@ai-sdk/openai', 'ai'],
+    fromRepo: true,
+    exchanges: 1,
+  },
+  {
     id: 'mastra',
     what: 'Mastra, whose model provider takes its origin in code rather than from the environment',
     adapter: 'node',
@@ -294,14 +304,16 @@ async function installed(needs) {
  * Resolved rather than imported: importing runs the package's top-level code, and a check that is
  * only asking whether something is present should not be able to fail because of what it does.
  */
-function installedNode(specifier) {
-  if (specifier === undefined) return true;
-  try {
-    createRequire(join(here, 'agents', 'x.mjs')).resolve(specifier);
-    return true;
-  } catch {
-    return false;
+function installedNode(needs) {
+  if (needs === undefined) return undefined;
+  for (const specifier of Array.isArray(needs) ? needs : [needs]) {
+    try {
+      createRequire(join(here, 'agents', 'x.mjs')).resolve(specifier);
+    } catch {
+      return specifier;
+    }
   }
+  return undefined;
 }
 
 /** Start the stub and resolve once it has printed the port it took. */
@@ -390,7 +402,8 @@ function tail(out, lines = 6) {
 async function runCheck(check) {
   const absent = await installed(check.needs);
   if (absent !== undefined) return { skipped: `${absent} is not installed` };
-  if (!installedNode(check.needsNode)) return { skipped: `${check.needsNode} is not installed` };
+  const absentNode = installedNode(check.needsNode);
+  if (absentNode !== undefined) return { skipped: `${absentNode} is not installed` };
 
   const dir = await mkdtemp(join(tmpdir(), `orca-int-${check.id}-`));
   const origin = await startOrigin();

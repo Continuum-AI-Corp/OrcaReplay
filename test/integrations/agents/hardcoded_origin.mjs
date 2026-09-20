@@ -1,9 +1,8 @@
 /**
  * A JS agent with its origin compiled in, which no environment variable can reach.
  *
- * This is the case the fetch hook exists for — the Vercel AI SDK takes its origin as a constructor
- * argument and reads nothing from the environment, and so does anything that types a URL into its
- * own source.
+ * This is the case the fetch hook exists for — anything that types a URL into its own source
+ * reads nothing from the environment.
  */
 const res = await fetch('https://api.openai.com/v1/chat/completions', {
   method: 'POST',

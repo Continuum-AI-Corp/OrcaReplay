@@ -730,8 +730,8 @@ async function runRecording(
    *
    * Capture works by pointing a base-URL variable at the proxy, so a harness that reads none of
    * them is never redirected — and there is nothing to notice. The agent answers, the exit code is
-   * zero, and the trace is empty. `@ai-sdk/openai` is the live example: it takes its base URL only
-   * as a constructor argument, so an agent built on the Vercel AI SDK produces exactly this.
+   * zero, and the trace is empty. An agent with its origin compiled into source is the live
+   * example: it never consults a base-URL variable, so `orca record` produces exactly this.
    *
    * `contract.ts` already names this shape as what the adapter checks exist to prevent. They guard
    * the adapters; this guards the run, which is where a user actually meets it.
