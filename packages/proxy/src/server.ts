@@ -229,34 +229,42 @@ export function withoutCredentials(text: string): string {
 }
 
 /**
- * An origin orca could not parse, reduced to what is safe to write down.
+ * An origin orca could not parse, reduced to the host it names and nothing else.
  *
- * `withoutCredentials` is written for prose — an error message, a warning line — and pays for that
- * with rules that only fire on text that looks like a URL in a sentence. Its scheme-less query rule
- * needs a dotted host, `[a-z0-9][a-z0-9.-]*\.[a-z][a-z0-9-]*`, and its userinfo rule cannot cross a
- * space. Review found four shapes it leaves whole, each verified by running it:
+ * Three rounds of review here, each finding a shape the last one let through, and the lesson is
+ * the same each time: a string no parser accepted has no structure to rely on, so nothing may be
+ * kept because of where it sits — only because of what it is made of.
  *
- *   gw?key=SECRET123          localhost?key=SECRET123
- *   192.168.0.1?key=SECRET123 (digits after the dot)    https://user:pa ss@gw (space in userinfo)
+ * `withoutCredentials` went first. It is written for prose and its rules need prose shapes: a
+ * dotted host for the scheme-less query rule, no whitespace inside userinfo. `gw?key=SECRET123`,
+ * `localhost?key=…`, `192.168.0.1?key=…` and `https://user:pa ss@gw` all went through it whole.
  *
- * The first test written here happened to use the one dotted shape that works, which is how the
- * gap survived a commit whose whole subject was closing it.
+ * Cutting by position went second, and left `https://gw key=SECRET123`: a secret in a
+ * whitespace-separated token after the host is still "after the last `@`", so it was kept as part
+ * of the host.
  *
- * An origin is not prose, so it does not need those rules. It is one token, and everything in it
- * that could hold a secret is positional: a query or fragment is whatever follows the first `?` or
- * `#`, and userinfo is whatever precedes the last `@` in the authority. Cutting on position works
- * on a string no parser accepted — which is the only kind that reaches here.
+ * So the last step is a whitelist — the characters a host and a port are made of, and the first
+ * one that is not ends it. A path is not returned at all: the success branch of `originParts`
+ * gives `url.hostname`, the exchange records its request path in its own field, and a path that
+ * reached here unparsed could carry a secret as easily as a query could.
+ *
+ * An origin with no host left — `https://user:pass@` — yields the empty string, which is the
+ * honest answer: there was no host in it to name.
+ *
+ * `redactString` still runs over the result at the call site, as a backstop for a long key rather
+ * than the thing doing the work: its shape rules and 20-character entropy floor catch neither
+ * `hunter2` nor `SECRET123`.
  */
 export function scrubOrigin(origin: string): string {
   const withoutQuery = origin.replace(/[?#][\s\S]*$/, '');
   const schemeEnd = withoutQuery.indexOf('://');
-  const scheme = schemeEnd === -1 ? '' : withoutQuery.slice(0, schemeEnd + 3);
-  const rest = withoutQuery.slice(scheme.length);
+  const rest = schemeEnd === -1 ? withoutQuery : withoutQuery.slice(schemeEnd + 3);
   const pathStart = rest.indexOf('/');
   const authority = pathStart === -1 ? rest : rest.slice(0, pathStart);
-  const path = pathStart === -1 ? '' : rest.slice(pathStart);
   const at = authority.lastIndexOf('@');
-  return `${scheme}${at === -1 ? authority : authority.slice(at + 1)}${path}`;
+  const host = at === -1 ? authority : authority.slice(at + 1);
+  // What a host and a port are made of, IPv6 brackets included. Anything else ends it.
+  return /^[A-Za-z0-9._:\[\]-]*/.exec(host)?.[0] ?? '';
 }
 
 export interface RecordedExchange {

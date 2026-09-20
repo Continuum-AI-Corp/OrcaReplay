@@ -93,27 +93,43 @@ describe('an upstream that never answers', () => {
   });
 
   it('keeps the credential out of the recorded host, whatever shape the origin is', async () => {
-    // Caught in review twice. The reason was scrubbed and the `host` beside it was not, so an
-    // origin `new URL` rejects went into the trace whole — `persistNetExchange` files `host` as a
-    // `net.request` attr. The first fix reached for `withoutCredentials`, which is written for
-    // prose: its scheme-less rule needs a dotted host and its userinfo rule cannot cross a space,
-    // so four of these six still leaked. The first version of this test used only the dotted
-    // shape, which is exactly why that survived a commit meant to close it.
+    // Caught in review three times, each round finding a shape the last one let through. An origin
+    // `new URL` rejects went into the trace whole — `persistNetExchange` files `host` as a
+    // `net.request` attr — and the trace's own redactor is no backstop, because `hunter2` and
+    // `SECRET123` are under its 20-character entropy floor and match no shape rule.
     //
-    // The trace's own redactor is no backstop: `hunter2` and `SECRET123` are under its
-    // 20-character entropy floor and match no shape rule.
+    // `withoutCredentials` was the first attempt: written for prose, so its rules want prose
+    // shapes, and a dotted host was the only one of these it handled. Cutting by position was the
+    // second, and kept `gw key=SECRET123` because a secret after a space is still "after the last
+    // `@`". A string no parser accepted has no structure to rely on, so the host is now read as a
+    // whitelist: the characters a host and a port are made of, and the first one that is not ends
+    // it.
     //
     // This is the one path where the fallback runs at all — everywhere else it is reached only
     // after a response came back, which means undici parsed the URL. `createProxy` does not
     // validate origins; only the CLI does, through `unusableOrigin`.
-    for (const [origin, secret] of [
-      ['https://myuser:hunter2@gw bad', 'hunter2'],
-      ['https://myuser:hunter2@', 'hunter2'],
-      ['https://myuser:hun ter2@gw', 'hun ter2'],
-      ['gateway.example?key=SECRET123', 'SECRET123'],
-      ['gw?key=SECRET123', 'SECRET123'],
-      ['localhost?key=SECRET123', 'SECRET123'],
-      ['192.168.0.1?key=SECRET123', 'SECRET123'],
+    for (const [origin, secret, host] of [
+      ['https://myuser:hunter2@gw bad', 'hunter2', 'gw'],
+      ['https://myuser:hun ter2@gw', 'hun ter2', 'gw'],
+      ['https://myuser:hunter2@', 'hunter2', ''],
+      ['gateway.example?key=SECRET123', 'SECRET123', 'gateway.example'],
+      ['gw?key=SECRET123', 'SECRET123', 'gw'],
+      ['localhost?key=SECRET123', 'SECRET123', 'localhost'],
+      ['192.168.0.1?key=SECRET123', 'SECRET123', '192.168.0.1'],
+      ['https://gw key=SECRET123', 'SECRET123', 'gw'],
+      ['https://myuser:pw@host:8080 key=SECRET123', 'SECRET123', 'host:8080'],
+      ['https://host/v1 key=SECRET123', 'SECRET123', 'host'],
+      // An `@` outside the authority is not userinfo. `withoutCredentials` names the first
+      // of these — a scoped package in a path — and the second is its mirror in a query.
+      // Both survived a mutation run until they were written down: drop either cut and the
+      // host is read from the wrong side of an `@` that was never a credential, and the
+      // trace names `scope` or `evil.example` as the upstream that failed.
+      //
+      // The space is in the authority on purpose. A space in a path is percent-encoded
+      // rather than rejected, so `new URL` accepts it and the fallback never runs — the
+      // first version of this case tested nothing at all, which the mutation run showed.
+      ['https://host bad/v1/@scope/pkg', 'scope', 'host'],
+      ['gw?user@evil.example', 'evil.example', 'gw'],
     ] as const) {
       const seen: NetExchange[] = [];
       const proxy = await createProxy({
@@ -129,8 +145,9 @@ describe('an upstream that never answers', () => {
       expect(seen[0]!.host, `host for ${origin}`).not.toContain(secret);
       // The reason travels in the same event and quotes the request, so it carries the origin too.
       expect(seen[0]!.responseBody, `reason for ${origin}`).not.toContain(secret);
-      // Still says which upstream failed, or the event is no use to whoever reads the trace.
-      expect(seen[0]!.host.length).toBeGreaterThan(0);
+      // Still names the upstream that failed, where there was one to name. `https://user:pass@`
+      // has no host in it, and saying so is better than inventing one.
+      expect(seen[0]!.host, `host for ${origin}`).toBe(host);
     }
   });
 
