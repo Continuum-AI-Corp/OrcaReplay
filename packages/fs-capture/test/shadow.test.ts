@@ -643,20 +643,37 @@ describe('materialize', () => {
       const restored = await readFile(join(dest, rel));
       expect(restored.equals(original), `bytes differ for ${rel}`).toBe(true);
     }
-    expect((await stat(join(dest, 'run.sh'))).mode & 0o111).toBeGreaterThan(0);
+    // Windows has no execute bit — git itself gives up on it there (`core.fileMode=false`), so a
+    // restore cannot put back what the filesystem cannot hold. Only this line is skipped: the
+    // byte-for-byte round trip above is exactly as meaningful on Windows and still runs.
+    //
+    // The consequence is real and belongs in the open, not in a green test: a run recorded on
+    // POSIX and forked on Windows gets its scripts back without `+x`.
+    if (process.platform !== 'win32') {
+      expect((await stat(join(dest, 'run.sh'))).mode & 0o111).toBeGreaterThan(0);
+    }
   });
 
-  itGit('round-trips a symlink as a symlink, without following it', async () => {
-    const { root, workTree, shadow } = await fixture();
-    await write(workTree, 'target.txt', 'pointed at\n');
-    await symlink('target.txt', join(workTree, 'link.txt'));
-    await symlink('/etc/passwd', join(workTree, 'escape.txt'));
-    const dest = join(root, 'materialized-links');
-    await shadow.materialize(await shadow.snapshot(), dest);
-    expect(await readlink(join(dest, 'link.txt'))).toBe('target.txt');
-    expect(await readlink(join(dest, 'escape.txt'))).toBe('/etc/passwd');
-    expect((await lstat(join(dest, 'escape.txt'))).isSymbolicLink()).toBe(true);
-  });
+  /**
+   * Creating the symlink is what fails on Windows, in this test's own setup: `symlink()` needs
+   * Developer Mode or elevation, so the scenario cannot be built and `materialize` is never
+   * reached. The gap on Windows is therefore unmeasured here, not proven — worth saying plainly
+   * rather than leaving a red test that looks like a restore bug.
+   */
+  itGit.skipIf(process.platform === 'win32')(
+    'round-trips a symlink as a symlink, without following it',
+    async () => {
+      const { root, workTree, shadow } = await fixture();
+      await write(workTree, 'target.txt', 'pointed at\n');
+      await symlink('target.txt', join(workTree, 'link.txt'));
+      await symlink('/etc/passwd', join(workTree, 'escape.txt'));
+      const dest = join(root, 'materialized-links');
+      await shadow.materialize(await shadow.snapshot(), dest);
+      expect(await readlink(join(dest, 'link.txt'))).toBe('target.txt');
+      expect(await readlink(join(dest, 'escape.txt'))).toBe('/etc/passwd');
+      expect((await lstat(join(dest, 'escape.txt'))).isSymbolicLink()).toBe(true);
+    },
+  );
 
   itGit('creates the destination directory if it does not exist', async () => {
     const { root, workTree, shadow } = await fixture();
