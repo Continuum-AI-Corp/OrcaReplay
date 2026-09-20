@@ -130,6 +130,13 @@ describe('an upstream that never answers', () => {
       // first version of this case tested nothing at all, which the mutation run showed.
       ['https://host bad/v1/@scope/pkg', 'scope', 'host'],
       ['gw?user@evil.example', 'evil.example', 'gw'],
+      // Userinfo and host:port are the same shape until something says which it is, and an
+      // origin with no `@` has nothing to cut at. Digits after the colon are what say it:
+      // without that rule `https://myuser:hunter2` was recorded whole, password included.
+      ['https://myuser:hunter2', 'hunter2', 'myuser'],
+      ['https://user:PASSWORD', 'PASSWORD', 'user'],
+      // And a real port survives, or the trace stops naming which upstream failed.
+      ['http://[::1]:8080 key=SECRET123', 'SECRET123', '[::1]:8080'],
     ] as const) {
       const seen: NetExchange[] = [];
       const proxy = await createProxy({

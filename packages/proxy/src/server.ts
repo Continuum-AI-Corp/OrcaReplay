@@ -263,8 +263,12 @@ export function scrubOrigin(origin: string): string {
   const authority = pathStart === -1 ? rest : rest.slice(0, pathStart);
   const at = authority.lastIndexOf('@');
   const host = at === -1 ? authority : authority.slice(at + 1);
-  // What a host and a port are made of, IPv6 brackets included. Anything else ends it.
-  return /^[A-Za-z0-9._:\[\]-]*/.exec(host)?.[0] ?? '';
+  // A host, then a port only if it is one. Allowing a bare `:` for the port let a whole
+  // `user:password` through when the origin had no `@` to cut at — `https://myuser:hunter2`
+  // came back whole — because userinfo and host:port are the same shape until something
+  // says which it is. Digits after the colon say it. An IPv6 literal keeps its brackets,
+  // which is what separates its colons from that one.
+  return /^(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+)(?::[0-9]+)?/.exec(host)?.[0] ?? '';
 }
 
 export interface RecordedExchange {
