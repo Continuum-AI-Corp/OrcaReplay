@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, Launch, RecordContext } from '@orcareplay/plugin-api';
 import { detectAgent } from './detect.js';
+import { decodeForwardPath, forwardBasePath } from '@orcareplay/proxy';
 import { forwardOrProxyBase, PLACEHOLDER_KEY, readEnv } from './env.js';
 
 /**
@@ -50,25 +51,40 @@ export const mcodeAdapter: Adapter = {
     const source = configPath(ctx.env);
     const original = await readFile(source, 'utf8').catch(() => undefined);
 
-    // No config means no custom provider, and a custom provider is the only thing this route can
-    // move. Launching untouched leaves the operator with MCode's own behaviour and orca's empty
-    // capture warning, which is a truer answer than a redirect aimed at a provider that is not
-    // there.
-    if (original === undefined || !hasOrigin(original) || !rewriteIsTrustworthy(original)) {
-      return { command: 'mcode', args: [...ctx.userArgs], env: {} };
-    }
-
+    // The data directory moves whether or not there is anything to put in it.
+    //
+    // Review caught what the earlier fallback cost. `orca replay` calls this same `prepare`, with
+    // the operator's *current* environment rather than the recorded one — so a config that has
+    // lost its custom provider since the recording made the fallback launch MCode untouched, on
+    // the real `~/.minimax`, against the real gateway with the real credential. Nothing reached
+    // the proxy, `unmatched` stayed at zero, and the replay reported success. An offline replay
+    // had spent money and recorded nothing, quietly.
+    //
+    // An empty directory of orca's own is what stops that: MCode finds no provider and no
+    // credential there and refuses to start, measured — `Sign in to MiniMax to use Agent
+    // features` — without making a call. The adapter cannot tell a record from a replay, so the
+    // safe launch has to be the one it always produces.
+    //
+    // The operator of a stock install pays for it: `orca record mcode` now ends in that sign-in
+    // message rather than running uncaptured, and MCode fills the directory with its bundled
+    // skills either way, about 14 MB. Both are worth it against a replay that silently goes live.
     const dataDir = join(ctx.runDir, 'mcode-data');
     await mkdir(dataDir, { recursive: true });
-    const config = join(dataDir, 'config.yaml');
-    await writeFile(config, redirected(original, ctx.proxyUrl), 'utf8');
-
-    return {
+    const launch: Launch = {
       command: 'mcode',
       args: [...ctx.userArgs],
       env: { MINIMAX_DATA_DIR: dataDir },
-      tempFiles: [config],
     };
+
+    // Nothing to redirect, or nothing this rewrite can prove it redirected. Either way the config
+    // is not written, and the isolated directory above is what the agent gets.
+    if (original === undefined || !hasOrigin(original) || !rewriteIsTrustworthy(original)) {
+      return launch;
+    }
+
+    const config = join(dataDir, 'config.yaml');
+    await writeFile(config, redirected(original, ctx.proxyUrl), 'utf8');
+    return { ...launch, tempFiles: [config] };
   },
 };
 
@@ -101,7 +117,7 @@ function lineBody(line: string): string {
  * one of these fields and is not written this way is not rewritten, it is refused.
  */
 const CANONICAL =
-  /^([ \t]*)(['"]?)(base[_-]?url|api[_-]?key)\2([ \t]*:[ \t]*)(?:(['"])([^'"]*)\5|([^\s'"]+))([ \t]*)$/i;
+  /^([ \t]*)(['"]?)(base[_-]?url|api[_-]?key)\2([ \t]*:[ \t]*)(?:(['"])([^'"]*)\5|([^\s'"]+))([ \t\r]*)$/i;
 
 /**
  * Either field, however it is written. A line naming one has to be understood or refused.
@@ -131,7 +147,10 @@ function fieldOf(line: string): Field | undefined {
   const name = parts[3]!;
   const quote = parts[5] ?? '';
   const value = parts[6] ?? parts[7] ?? '';
-  if (BLOCK_SCALAR.test(value)) return undefined;
+  // A value is only a value if it is one. `|` and `>` put it on the lines below; so does a
+  // `#` with no space before it, which the comment strip leaves in place — `apiKey:#rotated`
+  // parsed as a field whose value was `#rotated` while the real key sat on the next line.
+  if (BLOCK_SCALAR.test(value) || value.startsWith('#')) return undefined;
   const head = `${parts[1]!}${parts[2]!}${name}${parts[2]!}${parts[4]!}`;
   // The trailing whitespace and the comment come back from the line as it was written.
   const tail = `${parts[8]!}${line.slice(body.length)}`;
@@ -163,6 +182,19 @@ function sectionsOf(config: string): string[] {
 
 const CUSTOM_SECTION = 'custom_provider';
 
+/**
+ * Whether `/forward/` can carry this origin, asked of the decoder rather than restated here.
+ *
+ * `forwardOrProxyBase` answers an origin the decoder will not take with orca's own default
+ * upstream, which for the env route is a reasonable last resort and here is not: the request
+ * would leave for a host the operator never named, and this file's own comment calls that worse
+ * than not capturing. Userinfo, a query, a fragment and a non-HTTP scheme are all refused by the
+ * decoder, and a config carrying one of those is a config this adapter leaves alone.
+ */
+function carries(origin: string): boolean {
+  return decodeForwardPath(forwardBasePath(origin)) !== undefined;
+}
+
 /** True when there is an origin in here this adapter can actually move. */
 export function hasOrigin(config: string): boolean {
   const sections = sectionsOf(config);
@@ -191,7 +223,7 @@ export function rewriteIsTrustworthy(config: string): boolean {
     const mentionsKey = KEY_MENTION.test(body);
     if (!mentionsKey && !ORIGIN_MENTION.test(body)) return true;
     const field = fieldOf(line);
-    if (field !== undefined) return true;
+    if (field !== undefined && (mentionsKey || carries(field.value))) return true;
     // Not understood. A key hidden in it would be written down, and a custom origin would be
     // left pointing at its real host. A built-in origin is MCode's to decide and is not
     // rewritten either way, so its shape is none of this adapter's business.

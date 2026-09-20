@@ -191,18 +191,20 @@ describe('the mcode adapter', () => {
     expect(out).toContain('      minimax-m3: {}');
   });
 
-  it('launches untouched when there is no provider to redirect', async () => {
+  it('writes no config when there is no provider to redirect', async () => {
     // The built-in `minimax_oauth` login is not redirectable — MCode restores its own origin over
     // whatever the config says. A redirect aimed at a provider that is not there would be a
     // captured run talking to the wrong host; an untouched launch plus orca's empty-capture
     // warning is the truer answer.
     await writeFile(join(root, 'home', 'config.yaml'), 'logLevel: info\n', 'utf8');
     const launch = await mcodeAdapter.prepare(ctx);
-    expect(launch.env).toEqual({});
+    // Isolated all the same: the data directory always moves, so a replay cannot fall back
+    // onto the operator's own config and go live. See the test below.
+    expect(launch.env['MINIMAX_DATA_DIR']).toBe(join(ctx.runDir, 'mcode-data'));
     expect(launch.tempFiles).toBeUndefined();
   });
 
-  it('launches untouched when every origin belongs to a built-in provider', async () => {
+  it('writes no config when every origin belongs to a built-in provider', async () => {
     // Caught in review. Asking only "is there a `baseURL` line" said yes to a stock install, where
     // the only ones are the built-in providers'. The adapter then wrote a redirected config for a
     // run that records nothing — MCode restores those origins over whatever the file says — and
@@ -222,7 +224,9 @@ describe('the mcode adapter', () => {
     );
 
     const launch = await mcodeAdapter.prepare(ctx);
-    expect(launch.env).toEqual({});
+    // Isolated all the same: the data directory always moves, so a replay cannot fall back
+    // onto the operator's own config and go live. See the test below.
+    expect(launch.env['MINIMAX_DATA_DIR']).toBe(join(ctx.runDir, 'mcode-data'));
     expect(launch.tempFiles).toBeUndefined();
   });
 
@@ -298,6 +302,16 @@ describe('the mcode adapter', () => {
         '        sk-live-x',
         '      baseURL: https://e.example/v1',
       ],
+      // Review, a later round: with no space before it the comment strip leaves the `#` in
+      // place, so the line parsed as a field whose value was `#rotated`.
+      'value is a comment with no space': [
+        'custom_provider:',
+        '  g:',
+        '    options:',
+        '      apiKey:#rotated',
+        '        sk-live-x',
+        '      baseURL: https://g.example/v1',
+      ],
       // Review, this round: the `#` was captured as the value, so the same-line check
       // passed while the real key sat on the line below.
       'value is only a comment': [
@@ -331,7 +345,7 @@ describe('the mcode adapter', () => {
     for (const [shape, lines] of Object.entries(configs)) {
       await writeFile(join(root, 'home', 'config.yaml'), lines.join(LF) + LF, 'utf8');
       const launch = await mcodeAdapter.prepare(ctx);
-      expect(launch.env, shape).toEqual({});
+      expect(launch.env['MINIMAX_DATA_DIR'], shape).toBe(join(ctx.runDir, 'mcode-data'));
       expect(launch.tempFiles, shape).toBeUndefined();
       await expect(
         readFile(join(ctx.runDir, 'mcode-data', 'config.yaml'), 'utf8'),
@@ -432,10 +446,84 @@ describe('the mcode adapter', () => {
     expect(written).toContain('{baseURL: https://agent.minimaxi.com/v1}');
   });
 
-  it('launches untouched when there is no config at all', async () => {
+  it('isolates the data directory even when it has nothing to write there', async () => {
+    // Caught in review. `orca replay` calls this same `prepare`, with the operator's *current*
+    // environment rather than the recorded one, so a config that has lost its custom provider
+    // since the recording used to launch MCode untouched — on the real `~/.minimax`, against the
+    // real gateway, with the real credential. Nothing reached the proxy, `unmatched` stayed at
+    // zero, and the replay reported success: money spent, nothing recorded, quietly.
+    //
+    // An empty directory of orca's own is what stops it. Measured: MCode finds no provider and no
+    // credential there and refuses to start — "Sign in to MiniMax to use Agent features" — without
+    // making a call.
+    for (const body of [
+      // Nothing to redirect.
+      'logLevel: info',
+      // Something to redirect, written a way the rewrite will not touch.
+      [
+        'custom_provider:',
+        '  b:',
+        '    options: {apiKey: sk-live-x, baseURL: https://b.example/v1}',
+      ].join(LF),
+    ]) {
+      await writeFile(join(root, 'home', 'config.yaml'), `${body}${LF}`, 'utf8');
+      const launch = await mcodeAdapter.prepare(ctx);
+      expect(launch.env['MINIMAX_DATA_DIR']).toBe(join(ctx.runDir, 'mcode-data'));
+      // No config, so MCode starts with nothing rather than with the operator's own providers.
+      expect(launch.tempFiles).toBeUndefined();
+      await expect(
+        readFile(join(ctx.runDir, 'mcode-data', 'config.yaml'), 'utf8'),
+      ).rejects.toThrow();
+    }
+  });
+
+  it('refuses an origin `/forward/` cannot carry, rather than aiming the run elsewhere', () => {
+    // `forwardOrProxyBase` answers an origin the decoder will not take with orca's own default
+    // upstream. For the env route that is a reasonable last resort; here it would send the run to
+    // a host the operator never named, which this file's own comment calls worse than not
+    // capturing. Userinfo, a query and a non-HTTP scheme are the three the decoder refuses.
+    for (const origin of [
+      'https://user:pw@gw.example/v1',
+      'https://gw.example/v1?key=SECRET123',
+      'ftp://gw.example/v1',
+    ]) {
+      const config = [
+        'custom_provider:',
+        '  gw:',
+        '    options:',
+        '      apiKey: sk-live-x',
+        `      baseURL: ${origin}`,
+        '',
+      ].join(LF);
+      expect(rewriteIsTrustworthy(config), origin).toBe(false);
+    }
+  });
+
+  it('rewrites a config with CRLF line endings', () => {
+    // The carriage return belongs to the line ending, not to the value. Losing that made every
+    // field on a Windows-written config unparseable, so the whole thing was refused and the run
+    // captured nothing — a silent regression, because a stricter gate does not throw.
+    const config = [
+      'custom_provider:',
+      '  gw:',
+      '    options:',
+      '      apiKey: sk-live-x',
+      '      baseURL: https://gateway.example/v1',
+      '',
+    ].join('\r\n');
+
+    expect(rewriteIsTrustworthy(config)).toBe(true);
+    const out = redirected(config, PROXY);
+    expect(out).not.toContain('sk-live-x');
+    expect(out).toContain('\r\n');
+    const moved = /baseURL: (\S+?)\r/.exec(out)?.[1];
+    expect(decodeForwardPath(new URL(moved!).pathname)?.base).toBe('https://gateway.example/v1');
+  });
+
+  it('writes no config when there is none to read', async () => {
     await rm(join(root, 'home', 'config.yaml'));
     const launch = await mcodeAdapter.prepare(ctx);
-    expect(launch.env).toEqual({});
+    expect(launch.env['MINIMAX_DATA_DIR']).toBe(join(ctx.runDir, 'mcode-data'));
   });
 
   it('passes the user their own arguments', async () => {
