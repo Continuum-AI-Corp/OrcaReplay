@@ -92,6 +92,40 @@ describe('an upstream that never answers', () => {
     expect(seen[0]!.responseBody).toContain('301');
   });
 
+  it('keeps the credential out of the recorded host', async () => {
+    // Caught in review, reproduced before it was fixed. The reason was scrubbed and the `host`
+    // beside it was not: an origin `new URL` rejects was written to the trace whole, and
+    // `persistNetExchange` files `host` as a `net.request` attr. The trace's own redactor is no
+    // backstop — `hunter2` and `key=SECRET123` are under its 20-character entropy floor and match
+    // no shape rule.
+    //
+    // This is the one path where that fallback runs at all. Everywhere else it is reached only
+    // after a response came back, which means undici parsed the URL; here the unparseable origin
+    // is precisely what made the call throw. `createProxy` does not validate origins — only the
+    // CLI does, through `unusableOrigin` — so the library API arrives here with whatever it was
+    // handed.
+    for (const [origin, secret] of [
+      ['https://myuser:hunter2@gw bad', 'hunter2'],
+      ['https://myuser:hunter2@', 'hunter2'],
+      ['gateway.example?key=SECRET123', 'SECRET123'],
+    ] as const) {
+      const seen: NetExchange[] = [];
+      const proxy = await createProxy({
+        mode: 'record',
+        upstream: { openai: origin },
+        onNetExchange: (e) => void seen.push(e),
+      });
+      closers.push(proxy.close);
+
+      await post(`${proxy.url}/v1/responses/input_tokens`, { input: 'x' });
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.host).not.toContain(secret);
+      // Still says which upstream failed, or the event is no use to whoever reads the trace.
+      expect(seen[0]!.host.length).toBeGreaterThan(0);
+    }
+  });
+
   it('keeps the credential out of the recorded reason', async () => {
     // The message names the request that failed, and that message reaches both the agent and the
     // trace. A gateway error quoting the call can quote the key with it.

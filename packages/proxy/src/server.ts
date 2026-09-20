@@ -1343,8 +1343,16 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
         port: url.port !== '' ? Number(url.port) : url.protocol === 'http:' ? 80 : 443,
       };
     } catch {
-      // An origin that does not parse is still worth recording under the string we were given.
-      return { host: origin, port: 443 };
+      // An origin that does not parse is still worth recording under the string we were given —
+      // less anything secret in it. `host` goes into the trace verbatim (`persistNetExchange`
+      // writes it as a `net.request` attr), and §7 says a credential never gets written down.
+      // The trace's own redactor does not cover this: `hunter2` and `key=SECRET123` are under
+      // the 20-character entropy floor and match no shape rule.
+      //
+      // Dead above, live below. A caller that already has a response held a URL undici parsed,
+      // so the fallback cannot run on the success path; `passThrough`'s failure path is the one
+      // place it does, because an origin `new URL` rejects is exactly what made `doFetch` throw.
+      return { host: withoutCredentials(origin), port: 443 };
     }
   }
 
@@ -1361,18 +1369,6 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
    *
    * An origin that does not parse is still worth recording under the string we were given.
    */
-  function netExchangeTarget(origin: string): { host: string; port: number } {
-    try {
-      const url = new URL(origin);
-      return {
-        host: url.hostname,
-        port: url.port !== '' ? Number(url.port) : url.protocol === 'http:' ? 80 : 443,
-      };
-    } catch {
-      return { host: origin, port: 443 };
-    }
-  }
-
   async function passThrough(
     path: string,
     rawBody: string,
@@ -1430,7 +1426,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       // was ever seen. The reason travels in the body, scrubbed, because the message names the
       // origin it was given.
       options.onNetExchange?.({
-        ...netExchangeTarget(origin),
+        ...originParts(origin),
         method: 'POST',
         intercepted: false,
         path,
