@@ -942,7 +942,8 @@ async function replayFork(
         `no workspace snapshot for the checkpoint at seq ${checkpoint.seq} — see fork.no_snapshot; --no-fs forks without it`,
       );
     }
-    await fs.restore(checkpoint.fsTree, worktree);
+    await keepNested(out, fs, checkpoint.fsTree, 'a fresh worktree');
+    await fs.restore(checkpoint.fsTree, worktree, { allowIncomplete: true });
   }
 
   const dir = await ensureRunsDir(ctx.cwd);
@@ -1277,7 +1278,8 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
     // A fresh directory, so there is nothing for a reset to remove: the restore below is the only
     // thing that puts anything here, and what it puts here is the recording's starting state.
     const worktree = await mkdtemp(join(tmpdir(), `orca-replay-${ctx.manifest.run_id}-`));
-    await recorded.restore(initial.fsTree, worktree);
+    await keepNested(out, recorded, initial.fsTree, 'a fresh worktree');
+    await recorded.restore(initial.fsTree, worktree, { allowIncomplete: true });
     return { dir: worktree, release: noRelease, restored: true };
   }
 
@@ -1290,6 +1292,16 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
     warnArtifactsKept(artifacts, out);
     return { dir: ctx.cwd, release: noRelease, restored: false };
   }
+
+  // BEFORE THE COPY, NOT INSIDE THE TRY BELOW.
+  //
+  // This refuses without writing a byte, so it has to run while there is still nothing to undo.
+  // Refusing after the safety copy existed meant the catch called `release`, whose `materialize`
+  // refused for the same reason the guard just did — the operator's own tree holds the same
+  // nested repositories — so a replay that had touched nothing printed "your files are in that
+  // store and were not put back" and left a copy of the whole workspace in a temp directory.
+  const keptNested = await assertRestorable(recorded, initial.fsTree, ctx.cwd, artifacts);
+  keepNestedNote(out, keptNested, 'they are left exactly as they are');
 
   // A store of its own, under the OS temp dir: the safety snapshot is scratch, and writing it into
   // the trace's shadow store would leave an object in a recorded run that nothing references.
@@ -1322,7 +1334,11 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
     if (released) return;
     released = true;
     try {
-      await safety.restore(before.tree, ctx.cwd);
+      // `allowIncomplete`, always: this is the undo of a copy this function took itself, so what
+      // the copy could not hold is also what it cannot have destroyed. Refusing here helped
+      // nobody — it left the working tree in the replay's state and the operator's files in a
+      // scratch directory, which is the one outcome the safety copy exists to prevent.
+      await safety.restore(before.tree, ctx.cwd, { allowIncomplete: true });
     } catch (err) {
       // Say where the copy is before rethrowing. This is the one failure after which the scratch
       // store holds the only copy of the operator's working tree, and until now the path it is at
@@ -1359,18 +1375,10 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
   // and a `release` that puts it back, or it throws with the tree as it found it. That is what
   // lets the caller arm its own guard on the line after the call rather than before it.
   try {
-    // Nothing is deleted until the restore that undoes the deletion is known to be possible.
-    //
-    // `materialize` refuses a tree outright when it holds a nested repository, whose contents no
-    // snapshot ever stored — and refusing is right, because checking it out would silently leave
-    // an empty directory where a corpus was. But the reset runs first, so that refusal used to
-    // arrive with `cache/` and `vector_store/` already gone, and the safety net threw the same
-    // error for the same reason: the operator lost the index and got a message about git instead.
-    // Newly-made recordings no longer contain such a tree (the forced add drops gitlinks), which
-    // leaves the recordings already on disk — exactly the ones a guard has to be here for.
-    await assertRestorable(recorded, initial.fsTree);
-    // And the other direction: whatever the reset is about to delete has to be in the copy taken
-    // a moment ago, not merely in the recording. The two guards own different files.
+    // `assertRestorable` ran before the copy above — it is the half that can refuse without
+    // having done anything. This is the other direction: whatever the reset is about to delete
+    // has to be in the copy taken a moment ago, not merely in the recording. It needs the copy,
+    // so it runs here, and its failure is what `release` is for.
     await assertResettable(safety, ctx.cwd, artifacts);
 
     // Before the restore, not after — and that ordering is the whole definition of the reset.
@@ -1381,7 +1389,11 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
     // — including the case where that state was a populated cache, as it is for a recording of
     // one mid-pipeline stage. Doing it the other way round deleted that stage's own input.
     await resetArtifacts(ctx.cwd, artifacts, out);
-    await recorded.restore(initial.fsTree, ctx.cwd);
+    // `allowIncomplete` only because the guard above has already decided these repositories are
+    // not in anything this replay deletes; where they were, it threw instead of reaching here.
+    await recorded.restore(initial.fsTree, ctx.cwd, {
+      allowIncomplete: keptNested.length > 0,
+    });
   } catch (err) {
     // The original failure is the one to report. `release` can fail for its own reasons, and
     // letting that replace this one told the operator about the cleanup and never about the cause.
@@ -1400,19 +1412,65 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
  * Refuse before deleting, rather than from inside the restore that was meant to undo the deletion.
  *
  * Asked of the tree rather than attempted on it: this runs while the operator's artifacts are
- * still on disk, so it has to be free of side effects. The message names the paths, because
- * "remove the nested .git, or take that path out of the adapter's `artifacts.capture`" is
- * something only the operator can do.
+ * still on disk, so it has to be free of side effects.
+ *
+ * **Only the repositories this replay would destroy.** A snapshot records a nested repository as a
+ * gitlink and never holds its contents, so a restore cannot put one back — and where the replay
+ * deletes the path first, that is the whole of the harm the guard exists for: the reset empties
+ * `cache/`, the restore cannot refill it, and a corpus is gone. Where the replay deletes nothing,
+ * there is nothing to put back: `materialize` writes the tree's files and leaves everything else
+ * alone, so the nested repository is still sitting there when the restore finishes, untouched.
+ *
+ * Refusing that case turned every recording made in a workspace with a submodule or a vendored
+ * checkout into one that could not be replayed at all — and `claude`, like every adapter but
+ * `indexrag`, declares no reset paths, so that is every such recording it makes. Issue #103.
+ *
+ * Returns the ones being left as they are, so the caller can say so and can tell `materialize`
+ * that their absence is expected rather than a gap it should refuse over.
+ *
+ * Exported for the test that pins which of the two it does, for the same reason {@link resetRoots}
+ * is: deciding wrongly here costs the operator either a corpus or every replay in the workspace.
  */
-async function assertRestorable(capture: FsCapture, tree: string): Promise<void> {
+export async function assertRestorable(
+  capture: FsCapture,
+  tree: string,
+  dir: string,
+  artifacts: HarnessArtifacts | undefined,
+): Promise<string[]> {
   const gitlinks = await capture.gitlinks(tree);
-  if (gitlinks.length === 0) return;
-  throw new Error(
-    `this recording cannot be restored: its snapshot holds ${gitlinks.join(', ')} as embedded ` +
-      'git repositories, whose contents it never captured. Nothing has been deleted. Re-record ' +
-      'with the nested repository removed or outside the adapter’s artifact paths, or replay ' +
-      'with --in-place to leave the working tree alone.',
+  if (gitlinks.length === 0) return [];
+  const roots = resetRoots(dir, artifacts);
+  const doomed = gitlinks.filter((path) =>
+    roots.some((root) => path === root || path.startsWith(`${root}/`)),
   );
+  if (doomed.length === 0) return gitlinks;
+  throw new Error(
+    `this replay would delete ${roots.join(', ')} to put the harness back where the recording ` +
+      `started, and cannot put ${doomed.join(', ')} back: the snapshot holds those as embedded ` +
+      'git repositories, whose contents it never captured. Nothing has been deleted. Move them ' +
+      'outside the adapter’s reset paths, or replay with --in-place to leave the working tree ' +
+      'alone.',
+  );
+}
+
+/** Say which nested repositories a restore is about to leave alone, and why it can only do that. */
+function keepNestedNote(out: Output, paths: readonly string[], effect: string): void {
+  if (paths.length === 0) return;
+  out.warn('replay.nested_kept', {
+    paths: paths.join(','),
+    why: 'the snapshot records these as embedded git repositories and never held their contents',
+    effect,
+  });
+}
+
+/** The same note, for the restores that write into a directory of their own. */
+async function keepNested(
+  out: Output,
+  capture: FsCapture,
+  tree: string,
+  where: string,
+): Promise<void> {
+  keepNestedNote(out, await capture.gitlinks(tree), `they are absent from ${where}`);
 }
 
 /** What the adapter that made this recording says about its own artifacts, if anything. */
