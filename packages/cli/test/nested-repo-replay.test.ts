@@ -394,3 +394,101 @@ describe('a recording whose snapshot holds a nested repository inside a reset pa
     timeout,
   );
 });
+
+/**
+ * What the in-place path owes the operator, now that it no longer refuses.
+ *
+ * `orca replay` restores the recording's tree into the operator's own directory and runs the
+ * recorded agent there, live — orca does not intercept tool execution, so a recorded build step,
+ * generator or `rm` reaches inside a nested repository like any other path. The safety copy holds
+ * that repository only as a gitlink, so nothing it does there is reversible.
+ *
+ * That hole cannot be closed by a snapshot: git stores a nested repository as a commit id and
+ * never its contents. What can be closed is the operator being told the opposite — the note used
+ * to say "they are left exactly as they are" and the line under it "your files are restored when
+ * the replay ends", of the one region where neither was true.
+ */
+describe('a recording whose agent writes inside the nested repository', () => {
+  const timeout = 120_000;
+  const nested = ['tools', 'nested-repo'];
+  let dir: string;
+  let scratch: string;
+  let env: NodeJS.ProcessEnv;
+  let runId: string;
+
+  /** The operator's own uncommitted work, inside a vendored checkout they are patching. */
+  async function operatorsWork(): Promise<void> {
+    await writeFile(join(dir, ...nested, 'vendored.txt'), 'my own uncommitted patch');
+    await writeFile(join(dir, ...nested, 'notes.txt'), 'notes only I have');
+  }
+
+  beforeEach(async () => {
+    scratch = await mkdtemp(join(tmpdir(), 'orca-inside-tmp-'));
+    dir = await mkdtemp(join(tmpdir(), 'orca-inside-ws-'));
+    env = { ...process.env, NO_COLOR: '1', TMPDIR: scratch, TMP: scratch, TEMP: scratch };
+    await initRepo(dir);
+    await nestRepo(dir, nested.join('/'));
+    await writeFile(
+      join(dir, 'a.mjs'),
+      [
+        "import { writeFileSync, rmSync, mkdirSync, existsSync } from 'node:fs';",
+        "import { join } from 'node:path';",
+        "const inside = join(process.cwd(), 'tools', 'nested-repo');",
+        'if (!existsSync(inside)) mkdirSync(inside, { recursive: true });',
+        "writeFileSync(join(inside, 'vendored.txt'), 'written by the replayed agent');",
+        "rmSync(join(inside, 'notes.txt'), { force: true });",
+        "process.stdout.write('HI');",
+      ].join('\n'),
+    );
+    await run(process.execPath, [cli, 'record', 'node', '--', 'node', 'a.mjs'], {
+      cwd: dir,
+      env,
+      timeout: timeout / 2,
+    });
+    [runId] = (await readdir(join(dir, '.orca', 'runs'))) as [string];
+    await operatorsWork();
+  }, timeout);
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+    await rm(scratch, { recursive: true, force: true });
+  });
+
+  it(
+    'says so before the agent runs, rather than promising a restore it cannot perform',
+    async () => {
+      const { stdout, stderr } = await run(process.execPath, [cli, 'replay', runId!], {
+        cwd: dir,
+        env,
+        timeout: timeout / 2,
+      });
+      const out = `${stdout}${stderr}`;
+      // Not "they are left exactly as they are", which was only ever true of the restore.
+      expect(out).toContain('orca holds no copy of what is inside them');
+      expect(out).toContain('--worktree');
+      // And the unqualified promise on the next line carries the same exception, since that is
+      // the sentence the operator actually acts on.
+      expect(out).toContain('restored when the replay ends, except inside tools/nested-repo');
+    },
+    timeout,
+  );
+
+  it(
+    'and --worktree, which it points at, really does keep the agent out',
+    async () => {
+      const { stdout, stderr } = await run(
+        process.execPath,
+        [cli, 'replay', runId!, '--worktree'],
+        { cwd: dir, env, timeout: timeout / 2 },
+      );
+      expect(`${stdout}${stderr}`).toContain('absent from a fresh worktree');
+      // The advice has to hold, or it is worse than none: the same recording, run this way,
+      // leaves the operator's copy alone entirely.
+      expect(await readFile(join(dir, ...nested, 'vendored.txt'), 'utf8')).toBe(
+        'my own uncommitted patch',
+      );
+      expect(await readFile(join(dir, ...nested, 'notes.txt'), 'utf8')).toBe('notes only I have');
+    },
+    timeout,
+  );
+});

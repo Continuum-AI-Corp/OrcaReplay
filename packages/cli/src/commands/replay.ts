@@ -1301,7 +1301,14 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
   // nested repositories — so a replay that had touched nothing printed "your files are in that
   // store and were not put back" and left a copy of the whole workspace in a temp directory.
   const keptNested = await assertRestorable(recorded, initial.fsTree, ctx.cwd, artifacts);
-  keepNestedNote(out, keptNested, 'they are left exactly as they are');
+  // Not "they are left exactly as they are", which is only true of the restore. The replay runs
+  // the recorded agent live in this directory, and orca does not intercept what it does — so a
+  // recorded build step, generator or `rm` reaches inside these repositories like any other
+  // path, and the safety copy that reverses the rest of the tree holds nothing of theirs.
+  keepNestedNote(out, keptNested, {
+    effect: 'orca holds no copy of what is inside them, so whatever this replay does there stays',
+    next: 'replay with --worktree to run the agent somewhere orca can put back',
+  });
 
   // A store of its own, under the OS temp dir: the safety snapshot is scratch, and writing it into
   // the trace's shadow store would leave an object in a recorded run that nothing references.
@@ -1323,7 +1330,12 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
   out.info('replay.restored', {
     to: initial.fsTree,
     your_tree: before.tree,
-    note: 'your files are restored when the replay ends',
+    // The unqualified sentence is the one the operator acts on, so where it is not true of the
+    // whole tree it does not get to be said of the whole tree.
+    note:
+      keptNested.length === 0
+        ? 'your files are restored when the replay ends'
+        : `your files are restored when the replay ends, except inside ${keptNested.join(', ')}`,
   });
 
   // Two callers, on purpose — see `Workspace.release`. Restoring twice would be wrong rather than
@@ -1334,10 +1346,14 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
     if (released) return;
     released = true;
     try {
-      // `allowIncomplete`, always: this is the undo of a copy this function took itself, so what
-      // the copy could not hold is also what it cannot have destroyed. Refusing here helped
-      // nobody — it left the working tree in the replay's state and the operator's files in a
-      // scratch directory, which is the one outcome the safety copy exists to prevent.
+      // `allowIncomplete`, always — and the gap it tolerates is real, not notional. The nested
+      // repositories this copy holds only as gitlinks are the one part of the tree the replay
+      // can change and this cannot put back, which is why `replay.nested_kept` says so before
+      // the agent starts rather than leaving it to be discovered here.
+      //
+      // Refusing at this point recovers none of that and abandons everything the copy *does*
+      // hold: it left the working tree in the replay's state and the operator's own files in a
+      // scratch directory, which is the one outcome a safety copy exists to prevent.
       await safety.restore(before.tree, ctx.cwd, { allowIncomplete: true });
     } catch (err) {
       // Say where the copy is before rethrowing. This is the one failure after which the scratch
@@ -1453,13 +1469,24 @@ export async function assertRestorable(
   );
 }
 
-/** Say which nested repositories a restore is about to leave alone, and why it can only do that. */
-function keepNestedNote(out: Output, paths: readonly string[], effect: string): void {
+/**
+ * Say which nested repositories a restore cannot write, and what that costs here.
+ *
+ * `effect` differs by caller because the consequence does: a fork writes into a directory of its
+ * own, where the repository is simply missing and the operator's copy is never in reach. An
+ * in-place replay runs the agent over the operator's own tree, where it is very much in reach and
+ * orca cannot put it back.
+ */
+function keepNestedNote(
+  out: Output,
+  paths: readonly string[],
+  fields: { effect: string; next?: string },
+): void {
   if (paths.length === 0) return;
   out.warn('replay.nested_kept', {
     paths: paths.join(','),
     why: 'the snapshot records these as embedded git repositories and never held their contents',
-    effect,
+    ...fields,
   });
 }
 
@@ -1470,7 +1497,9 @@ async function keepNested(
   tree: string,
   where: string,
 ): Promise<void> {
-  keepNestedNote(out, await capture.gitlinks(tree), `they are absent from ${where}`);
+  keepNestedNote(out, await capture.gitlinks(tree), {
+    effect: `they are absent from ${where}`,
+  });
 }
 
 /** What the adapter that made this recording says about its own artifacts, if anything. */
