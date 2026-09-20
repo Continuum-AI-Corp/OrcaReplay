@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,8 +14,32 @@ import {
   replayDemonstrated,
   type TraceEvent,
 } from '../src/commands/quickstart.js';
+
 import { parseArgs } from '../src/args.js';
 import { Output } from '../src/out.js';
+
+/**
+ * Owner-only on Windows, where that is an ACL rather than a mode.
+ *
+ * Two shapes, because two things protect two different sets of paths. A path orca narrows itself
+ * may carry nothing inherited — an inherited entry there is one the workspace handed down, which
+ * is the whole defect. For everything written *beneath* it the opposite holds: inheritance is
+ * exactly how they are protected, so `(I)` is expected and only the trustee count is the promise.
+ *
+ * Counted rather than named, because the names icacls prints are localized. Elsewhere there is
+ * nothing to check: the modes are asserted by `restrictToOwner`'s own tests in @orcareplay/core.
+ */
+async function expectOwnerOnly(
+  path: string,
+  how: 'narrowed' | 'inherited' = 'narrowed',
+): Promise<void> {
+  if (process.platform !== 'win32') return;
+  const icacls = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'icacls.exe');
+  const { stdout } = await promisify(execFile)(icacls, [path]);
+  if (how === 'narrowed') expect(stdout, path).not.toContain('(I)');
+  const granted = stdout.split(/\r?\n/).filter((line) => line.includes(':(')).length;
+  expect(granted, `${path}: expected owner, SYSTEM and Administrators only`).toBe(3);
+}
 
 const run = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -123,6 +147,46 @@ describe('orca quickstart', () => {
     expect(printed).toMatch(/3\/3 turns from the trace/);
     expect(printed).toContain('0 live calls');
     expect(printed).toContain('Nothing above talked to a model');
+  });
+
+  /**
+   * The store this lays down is the store every later `record`, `attach` and `fork` in that
+   * directory writes into, because `ensureRunsDir` restricts and gitignores only a store it is the
+   * one to create. quickstart made it with a bare `mkdir` instead, so the directory the README's
+   * first line produces skipped both — and nothing afterwards ever repaired it.
+   *
+   * `.gitignore` is the half that can be checked on any platform. The ACL is the half that made it
+   * a security hole, and is checked where it exists.
+   */
+  it('creates the store the way every other command does', async () => {
+    const { out } = capture();
+    const result = await quickstartCommand(parseArgs(['quickstart']), out, dir);
+
+    await expect(readFile(join(result.dir, '.orca', '.gitignore'), 'utf8')).resolves.toContain('*');
+    await expectOwnerOnly(join(result.dir, '.orca', 'runs'));
+
+    // And the run itself, which is *copied* in rather than written — so what protects it is not
+    // the same thing on the two platforms, and both halves are checked here rather than one being
+    // assumed. On POSIX `cp` reproduces the source's permissions, and every shipped asset is 0644
+    // in git, so the recording landed 0644 under a 0755 directory until `applyStoreModes`.
+    //
+    // On Windows the modes are discarded and what the copy gets is the *destination's* inherited
+    // ACL, not the source's — measured, because a review read `CopyFileEx`'s "security resource
+    // attributes" line as the DACL travelling with the file. It does not: a file copied out of a
+    // world-readable package into a narrowed directory comes out at three trustees. Checked on a
+    // file inside the run, not only on the store root, so that stays a measurement rather than a
+    // belief.
+    const runDir = join(result.dir, '.orca', 'runs', result.runId);
+    await expectOwnerOnly(runDir, 'inherited');
+    for (const name of ['events.jsonl', 'manifest.json']) {
+      await expectOwnerOnly(join(runDir, name), 'inherited');
+      if (process.platform !== 'win32') {
+        expect((await stat(join(runDir, name))).mode & 0o777, name).toBe(0o600);
+      }
+    }
+    if (process.platform !== 'win32') {
+      expect((await stat(runDir)).mode & 0o777, runDir).toBe(0o700);
+    }
   });
 
   /**

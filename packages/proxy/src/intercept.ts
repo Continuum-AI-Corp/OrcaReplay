@@ -302,10 +302,32 @@ export interface TunnelRecord {
   error?: string;
 }
 
+/**
+ * What actually went wrong, because "handshake" was covering four things that are not one.
+ *
+ * Every one of these was reported as `tls.handshake_failed`. A body that would not decompress is
+ * not a handshake; neither is a WebSocket upgrade this proxy declines to relay. The one that
+ * matters most was buried with them: a client refusing OUR certificate reads as a failure between
+ * orca and the origin, so the operator goes looking at the network when the fix is to put the run
+ * CA into the agent's trust store.
+ */
+export type InterceptFailureKind =
+  /** The client would not complete TLS with us — usually our per-run CA is not in its trust store. */
+  | 'client_handshake'
+  /** We could not establish or keep the TLS/h2 session to the origin. */
+  | 'upstream_session'
+  /** An h2 session or stream faulted after it was up. */
+  | 'session'
+  /** A request or response body could not be decoded, so it is recorded opaque. */
+  | 'body_opaque'
+  /** A protocol this proxy does not relay, declined rather than half-relayed. */
+  | 'upgrade_refused';
+
 export interface InterceptFailure {
   host: string;
   port: number;
   reason: string;
+  kind: InterceptFailureKind;
 }
 
 export interface TlsInterceptOptions {
@@ -444,6 +466,7 @@ export function attachTlsIntercept(
       host: target?.host ?? 'unknown',
       port: target?.port ?? 0,
       reason: `orca cannot relay an ${String(req.headers.upgrade)} upgrade through an intercepted connection`,
+      kind: 'upgrade_refused',
     });
     socket.end('HTTP/1.1 501 Not Implemented\r\nconnection: close\r\n\r\n');
   };
@@ -466,7 +489,12 @@ export function attachTlsIntercept(
       ...(originTrust ? { ca: originTrust } : {}),
     });
     session.on('error', (err) => {
-      options.onFailure?.({ host: target.host, port: target.port, reason: String(err) });
+      options.onFailure?.({
+        host: target.host,
+        port: target.port,
+        reason: String(err),
+        kind: 'upstream_session',
+      });
       h2Upstreams.delete(key);
     });
     session.on('close', () => h2Upstreams.delete(key));
@@ -540,7 +568,10 @@ export function attachTlsIntercept(
     });
 
     server.on('upgrade', onUpgrade);
-    server.on('tlsClientError', (err, socket) => reportH2(socket, err));
+    // The one that was worth telling apart: the client refused OUR certificate.
+    server.on('tlsClientError', (err, socket) =>
+      reportH2(socket, err, 'handshake', 'client_handshake'),
+    );
     server.on('sessionError', (err, session) => reportH2(session?.socket, err));
     server.on('clientError', (err, socket) => reportH2(socket, err));
     server.on('error', (err) => reportH2(undefined, err));
@@ -559,12 +590,18 @@ export function attachTlsIntercept(
    * complaining -- "HTTP/2 keepalive ping timed out" -- with nothing on this side saying why, which
    * is the same blindness the HTTP/1.1 path avoids by reporting handshake failures.
    */
-  const reportH2 = (socket: unknown, reason: unknown, what = 'session'): void => {
+  const reportH2 = (
+    socket: unknown,
+    reason: unknown,
+    what = 'session',
+    kind: InterceptFailureKind = 'session',
+  ): void => {
     const target = targetOf(socket);
     options.onFailure?.({
       host: target?.host ?? 'unknown',
       port: target?.port ?? 0,
       reason: `h2 ${what}: ${String(reason)}`,
+      kind,
     });
   };
   /**
@@ -684,6 +721,7 @@ export function attachTlsIntercept(
               host: target.host,
               port: target.port,
               reason: `request body left opaque: ${String(err)}`,
+              kind: 'body_opaque',
             });
             recordedRequest = requestBody.text();
           }
@@ -698,6 +736,7 @@ export function attachTlsIntercept(
             host: target.host,
             port: target.port,
             reason: `response body left opaque: ${decoded.error}`,
+            kind: 'body_opaque',
           });
         }
         options.onNetExchange?.({
@@ -936,6 +975,7 @@ export function attachTlsIntercept(
               host: target.host,
               port: target.port,
               reason: `request body left opaque: ${String(err)}`,
+              kind: 'body_opaque',
             });
             recordedRequest = requestBody.text();
           }
@@ -950,6 +990,7 @@ export function attachTlsIntercept(
             host: target.host,
             port: target.port,
             reason: `response body left opaque: ${decoded.error}`,
+            kind: 'body_opaque',
           });
         }
         options.onNetExchange?.({

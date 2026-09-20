@@ -1,11 +1,29 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { installShellShim, readShellFrames } from '../src/index.js';
+
+/**
+ * The transport holds `shell-frames.jsonl` — argv and cwd verbatim, the most secret-dense text in
+ * a run. `mkdtemp` gives 0700 on POSIX and, on Windows, whatever `%TEMP%` hands down: measured on
+ * one machine that was a local group and a second account, both with Modify. So the check is the
+ * ACL there, where `(I)` marks an entry inherited from outside.
+ */
+async function expectOwnerOnly(path: string): Promise<void> {
+  if (process.platform !== 'win32') {
+    expect((await stat(path)).mode & 0o777, path).toBe(0o700);
+    return;
+  }
+  const icacls = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'icacls.exe');
+  const { stdout } = await promisify(execFile)(icacls, [path]);
+  expect(stdout, path).not.toContain('(I)');
+  const granted = stdout.split(/\r?\n/).filter((line) => line.includes(':(')).length;
+  expect(granted, `${path}: expected owner, SYSTEM and Administrators only`).toBe(3);
+}
 
 const run = promisify(execFile);
 
@@ -15,6 +33,23 @@ const run = promisify(execFile);
  * failure in the capture path must cost the capture, never the command.
  */
 describe('shell shim', () => {
+  it('narrows the transport before a single frame can land in it', async () => {
+    // Before the writes, not after: `icacls` does not re-propagate to children that already exist,
+    // so a directory narrowed once `owner.pid` and the frames file were there would leave both of
+    // them holding the ACL they inherited. Asserting the files too is how that ordering is pinned.
+    const runDir = await mkdtemp(join(tmpdir(), 'orca-shim-acl-'));
+    const shim = await installShellShim({ runDir });
+    expect(shim.transportDir, 'no transport was minted').toBeDefined();
+    await expectOwnerOnly(shim.transportDir!);
+    if (process.platform === 'win32') {
+      const { stdout } = await promisify(execFile)(
+        join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'icacls.exe'),
+        [shim.framesPath],
+      );
+      // Inherited — from the directory this test just proved is owner-only, which is the point.
+      expect(stdout.split(/\r?\n/).filter((l) => l.includes(':(')).length).toBe(3);
+    }
+  });
   let runDir: string;
   let shim: Awaited<ReturnType<typeof installShellShim>>;
 

@@ -7,10 +7,11 @@ import {
   type KeyObject,
 } from 'node:crypto';
 import { rmSync } from 'node:fs';
-import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { isIPv4, isIPv6 } from 'node:net';
 import { join } from 'node:path';
 import { rootCertificates } from 'node:tls';
+import { restrictToOwner } from '@orcareplay/core';
 import {
   derBitString,
   derBoolean,
@@ -274,16 +275,18 @@ export class RunCa {
     const certPem = signCertificate(tbs, authority.privateKey);
     const dir = join(options.runDir, 'tls');
     await mkdir(dir, { recursive: true, mode: DIR_MODE });
-    // Explicit, because the mode passed to mkdir is only a ceiling — umask can lower it, and
-    // "0700" is a promise this feature makes rather than a preference.
-    await chmod(dir, DIR_MODE);
+    // Explicit, because the mode passed to mkdir is only a ceiling — umask can lower it, and on
+    // Windows it is not a floor either, it is ignored. "0700" is a promise this feature makes
+    // rather than a preference, so it is made again on a directory that already exists, and made
+    // in ACLs where that is the only thing the filesystem understands.
+    await restrictToOwner(dir, DIR_MODE);
 
     // Node types `export` as `string | Buffer` across all overloads; PEM is always a string.
     const keyPem = authority.privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
     await writeFile(join(dir, 'ca.key'), keyPem, { mode: FILE_MODE });
-    await chmod(join(dir, 'ca.key'), FILE_MODE);
+    await restrictToOwner(join(dir, 'ca.key'), FILE_MODE);
     await writeFile(join(dir, 'ca.crt'), certPem, { mode: FILE_MODE });
-    await chmod(join(dir, 'ca.crt'), FILE_MODE);
+    await restrictToOwner(join(dir, 'ca.crt'), FILE_MODE);
 
     // SSL_CERT_FILE and REQUESTS_CA_BUNDLE *replace* an OpenSSL client's trust store rather than
     // adding to it. Handing the child a file with only our CA in it would break every host we
@@ -292,7 +295,7 @@ export class RunCa {
     await writeFile(join(dir, 'ca-bundle.crt'), `${certPem}${rootCertificates.join('\n')}\n`, {
       mode: FILE_MODE,
     });
-    await chmod(join(dir, 'ca-bundle.crt'), FILE_MODE);
+    await restrictToOwner(join(dir, 'ca-bundle.crt'), FILE_MODE);
 
     return new RunCa({
       dir,

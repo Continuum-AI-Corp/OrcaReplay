@@ -247,33 +247,41 @@ describe('runShim', () => {
     ).rejects.toThrow(/oversized/);
   });
 
-  it('forwards SIGTERM to the child and unregisters its handlers afterwards', async () => {
-    const before = process.listenerCount('SIGTERM');
-    const { stdin, stdout, stderr, out } = io();
-    const done = runShim({
-      name: 'trapper',
-      command: process.execPath,
-      args: [
-        '-e',
-        'const t = setInterval(() => {}, 1000);' +
-          'process.on("SIGTERM", () => { process.stdout.write("terminated\\n"); process.exitCode = 7; clearInterval(t); });' +
-          'process.stdout.write("ready\\n");',
-      ],
-      stdin,
-      stdout,
-      stderr,
-    });
-    await new Promise<void>((resolve) => {
-      const wait = (): void => {
-        if (out.bytes().toString('utf8').includes('ready')) resolve();
-        else setTimeout(wait, 10);
-      };
-      wait();
-    });
-    expect(process.listenerCount('SIGTERM')).toBe(before + 1);
-    process.emit('SIGTERM');
-    expect(await done).toBe(7);
-    expect((await out.drained()).toString('utf8')).toContain('terminated');
-    expect(process.listenerCount('SIGTERM')).toBe(before);
-  });
+  /**
+   * Windows has no SIGTERM. `process.emit('SIGTERM')` runs the handler, but the child never
+   * receives a signal and exits with its own code instead of the one the handler forwards —
+   * there is no mechanism here to test, rather than a mechanism that is broken.
+   */
+  it.skipIf(process.platform === 'win32')(
+    'forwards SIGTERM to the child and unregisters its handlers afterwards',
+    async () => {
+      const before = process.listenerCount('SIGTERM');
+      const { stdin, stdout, stderr, out } = io();
+      const done = runShim({
+        name: 'trapper',
+        command: process.execPath,
+        args: [
+          '-e',
+          'const t = setInterval(() => {}, 1000);' +
+            'process.on("SIGTERM", () => { process.stdout.write("terminated\\n"); process.exitCode = 7; clearInterval(t); });' +
+            'process.stdout.write("ready\\n");',
+        ],
+        stdin,
+        stdout,
+        stderr,
+      });
+      await new Promise<void>((resolve) => {
+        const wait = (): void => {
+          if (out.bytes().toString('utf8').includes('ready')) resolve();
+          else setTimeout(wait, 10);
+        };
+        wait();
+      });
+      expect(process.listenerCount('SIGTERM')).toBe(before + 1);
+      process.emit('SIGTERM');
+      expect(await done).toBe(7);
+      expect((await out.drained()).toString('utf8')).toContain('terminated');
+      expect(process.listenerCount('SIGTERM')).toBe(before);
+    },
+  );
 });

@@ -192,6 +192,43 @@ wrong until it is rewritten.
 
 ---
 
+## Haystack
+
+```console
+orca record generic-openai -- python your_pipeline.py
+orca replay last
+```
+
+**Measured:** a `Pipeline` with `ChatPromptBuilder` and `OpenAIChatGenerator` on haystack-ai
+**3.1.1**. Recorded 1 exchange, replayed with the origin down at `exact=1 divergences=0
+unmatched=0`.
+
+**Embeddings replay too, and that is the answer to the obvious next question.** A second check runs
+the ordinary RAG shape — `OpenAIDocumentEmbedder` to build the store, `OpenAITextEmbedder` on the
+query, `InMemoryEmbeddingRetriever`, then the generator. Both embedder components reach the proxy
+the same way the generator does, and both are recorded as *retrieval* calls, whose answers are a
+function of their requests and so are replayed by key rather than by the matching ladder. Measured:
+`exact=1 divergences=0 unmatched=0 retrieval=2/2` with the origin down. A Haystack pipeline that
+embeds at query time replays completely offline.
+
+**Nothing is passed to the generator, and that is the case that matters.** `OpenAIChatGenerator`
+takes an optional `api_base_url`, and every Haystack example leaves it out — which is the shape
+worth checking, because the origin then comes from the environment rather than from the pipeline's
+own code. Read off the source: the component stores `api_base_url` as given and hands it to the
+client as `base_url`, so `None` means the OpenAI SDK falls back to `OPENAI_BASE_URL`, which
+`generic-openai` sets.
+
+A pipeline whose generator *is* given an explicit `api_base_url` is the compiled-in-origin case,
+and the answer there is the same as for Mastra and the Vercel AI SDK: orca cannot redirect what the
+code hardcodes. Leave it unset, or point it at the proxy yourself.
+
+**The API moved in 3.x.** `OpenAIGenerator` is gone from `haystack.components.generators`; the chat
+component is `OpenAIChatGenerator` under `haystack.components.generators.chat`. Examples written
+against Haystack 2.x will not import on 3.1.1, and that is a Haystack change rather than anything
+about capture.
+
+---
+
 ## Aider
 
 ```console

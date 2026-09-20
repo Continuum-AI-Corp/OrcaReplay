@@ -4,6 +4,13 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { EARLIEST_TS_MS, LATEST_TS_MS } from '@orcareplay/schema';
 import type { ShellFrame } from './runner.js';
+import {
+  assertPrivatePathIdentity,
+  privatePathIdentity,
+  removePrivateDirectory,
+  restrictToOwner,
+  type PrivatePathIdentity,
+} from '@orcareplay/core';
 
 /**
  * Shells an agent actually reaches for. Shimming more binaries buys detail and costs blast radius.
@@ -64,9 +71,10 @@ export interface InstalledShim {
  */
 export async function installShellShim(options: InstallOptions): Promise<InstalledShim> {
   const dir = join(options.runDir, 'shims');
-  const transportDir = options.framesPath
+  const transport = options.framesPath
     ? undefined
-    : await mkdtemp(join(tmpdir(), 'orca-shell-'));
+    : await secureTransport(await mkdtemp(join(tmpdir(), 'orca-shell-')));
+  const transportDir = transport?.dir;
   const framesPath = options.framesPath ?? join(transportDir!, 'shell-frames.jsonl');
   const shims = options.shims ?? DEFAULT_SHIMS;
 
@@ -96,7 +104,7 @@ export async function installShellShim(options: InstallOptions): Promise<Install
     await chmod(path, 0o755);
   }
 
-  if (transportDir !== undefined) {
+  if (transportDir !== undefined && !windows) {
     // Who to ask about later: orca's sweep decides an abandoned transport by whether the process
     // that minted it is still running, because the directory's own mtime stops moving the moment
     // it is created — every frame after that is an append to the file inside it.
@@ -105,9 +113,14 @@ export async function installShellShim(options: InstallOptions): Promise<Install
     );
   }
 
-  await writeFile(framesPath, '', { flag: 'a', mode: 0o600 }).catch(() => {
-    // An unwritable frames file must not stop the run; the shim swallows write errors too.
-  });
+  if (transport === undefined || !windows) {
+    await writeFile(framesPath, '', { flag: 'a', mode: 0o600 }).catch(() => {
+      // Caller-owned files and POSIX retain their best-effort capture policy.
+    });
+  }
+  // Shim generation awaited other work after transport setup. Refuse a replacement before
+  // returning paths a child can append to; never rewrite owner.pid outside the guarded setup.
+  if (transport?.identity) await assertPrivatePathIdentity(transport.dir, transport.identity);
 
   return {
     dir,
@@ -350,4 +363,44 @@ function quotePosix(value: string): string {
 
 function quoteCmd(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
+}
+
+/**
+ * The transport, narrowed before a single byte goes into it.
+ *
+ * `mkdtemp` is documented as giving a directory only this user can enter, and on POSIX it does —
+ * 0700. On Windows the mode is discarded and the directory takes whatever `%TEMP%` hands down,
+ * which is not always the profile: measured on one machine it carried a local group and a second
+ * account, both with Modify. What lands here is `shell-frames.jsonl`, and the doc comment on this
+ * package already says what that is — argv and cwd verbatim, so a `curl -H "Authorization: …"` or
+ * a `git clone https://user:token@host/…` is in it in full.
+ *
+ * Before anything is written, not after: `icacls` does not re-propagate to children that already
+ * exist, so a directory narrowed after `owner.pid` and the frames file were created would leave
+ * both of them holding the ACL they inherited.
+ *
+ * Failing here fails the install. The caller treats that as "this layer is unavailable" and the
+ * run continues without shell capture — which is the right way round: not capturing beats writing
+ * every command the agent runs into a file this cannot vouch for.
+ */
+async function secureTransport(
+  dir: string,
+): Promise<{ dir: string; identity?: PrivatePathIdentity }> {
+  // POSIX mkdtemp already creates 0700, including on filesystems that reject chmod.
+  if (process.platform !== 'win32') return { dir };
+  const was = await privatePathIdentity(dir);
+  try {
+    await restrictToOwner(dir, 0o700);
+    await assertPrivatePathIdentity(dir, was);
+    // Both files belong inside the verified setup. A non-empty directory can still be renamed,
+    // so owner.pid alone cannot protect a deferred frames-file creation.
+    await writeFile(join(dir, 'owner.pid'), String(process.pid), { mode: 0o600, flag: 'wx' });
+    await assertPrivatePathIdentity(dir, was);
+    await writeFile(join(dir, 'shell-frames.jsonl'), '', { mode: 0o600, flag: 'wx' });
+    await assertPrivatePathIdentity(dir, was);
+    return { dir, identity: was };
+  } catch (err) {
+    await removePrivateDirectory(dir, was);
+    throw err;
+  }
 }
