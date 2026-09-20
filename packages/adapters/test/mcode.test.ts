@@ -142,6 +142,7 @@ describe('the mcode adapter', () => {
   it('moves an origin however the config spells it', () => {
     const out = redirected(
       [
+        'custom_provider:',
         '      baseURL: https://one.example/v1',
         '      baseURL: https://two.example/v1 # primary',
         '      base_url: https://three.example/v1',
@@ -169,8 +170,15 @@ describe('the mcode adapter', () => {
   it('launches untouched when the only origin line has no value', () => {
     // `hasOrigin` has to agree with the rewriter about what counts, or the adapter writes a config
     // that redirects nothing and reports the run as captured.
-    expect(hasOrigin(`      baseURL:${LF}      apiKey: sk-live-x${LF}`)).toBe(false);
-    expect(hasOrigin(`      baseURL: https://gateway.example/v1${LF}`)).toBe(true);
+    const custom = (body: string) => `custom_provider:${LF}  gw:${LF}    options:${LF}${body}`;
+    expect(hasOrigin(custom(`      baseURL:${LF}      apiKey: sk-live-x${LF}`))).toBe(false);
+    expect(hasOrigin(custom(`      baseURL: https://gateway.example/v1${LF}`))).toBe(true);
+    // A built-in provider's origin is not one this adapter can move, so it does not count.
+    expect(
+      hasOrigin(
+        `provider:${LF}  minimax_api:${LF}    options:${LF}      baseURL: https://agent.minimaxi.com/v1${LF}`,
+      ),
+    ).toBe(false);
   });
 
   it('leaves everything it did not need to change alone', () => {
@@ -192,6 +200,67 @@ describe('the mcode adapter', () => {
     const launch = await mcodeAdapter.prepare(ctx);
     expect(launch.env).toEqual({});
     expect(launch.tempFiles).toBeUndefined();
+  });
+
+  it('launches untouched when every origin belongs to a built-in provider', async () => {
+    // Caught in review. Asking only "is there a `baseURL` line" said yes to a stock install, where
+    // the only ones are the built-in providers'. The adapter then wrote a redirected config for a
+    // run that records nothing — MCode restores those origins over whatever the file says — and
+    // left a 14 MB copy of its data directory inside the trace to show for it.
+    await writeFile(
+      join(root, 'home', 'config.yaml'),
+      [
+        'logLevel: info',
+        'provider:',
+        '  minimax_api:',
+        '    options:',
+        '      apiKey: sk-live-built-in',
+        '      baseURL: https://agent.minimaxi.com/mavis/api/v1/llm/v1',
+        '',
+      ].join(LF),
+      'utf8',
+    );
+
+    const launch = await mcodeAdapter.prepare(ctx);
+    expect(launch.env).toEqual({});
+    expect(launch.tempFiles).toBeUndefined();
+  });
+
+  it('moves a custom origin, leaves a built-in one, and takes the key out of both', async () => {
+    // The mixed config, which is what a machine with a gateway configured actually looks like.
+    // Origins split by section — the built-in one is MCode's to decide and it takes it back on
+    // startup — but keys do not: this file lands in the run directory and `capture.mjs` copies
+    // that directory into `capture/<model>/trace/` without scrubbing it.
+    await writeFile(
+      join(root, 'home', 'config.yaml'),
+      [
+        'custom_provider:',
+        '  gw:',
+        '    options:',
+        '      apiKey: sk-live-custom',
+        '      baseURL: https://gateway.example/v1',
+        'provider:',
+        '  minimax_api:',
+        '    options:',
+        '      apiKey: sk-live-built-in',
+        '      baseURL: https://agent.minimaxi.com/mavis/api/v1/llm/v1',
+        '',
+      ].join(LF),
+      'utf8',
+    );
+
+    await mcodeAdapter.prepare(ctx);
+    const written = await readFile(join(ctx.runDir, 'mcode-data', 'config.yaml'), 'utf8');
+
+    expect(written).not.toContain('sk-live-custom');
+    expect(written).not.toContain('sk-live-built-in');
+    expect([...written.matchAll(/apiKey:\s*(\S+)/g)].map((m) => m[1])).toEqual([
+      'orca-recorded',
+      'orca-recorded',
+    ]);
+    expect(written).toContain('baseURL: https://agent.minimaxi.com/mavis/api/v1/llm/v1');
+    const moved = /baseURL: (http:\/\/127[^\s]*)/.exec(written)?.[1];
+    expect(decodeForwardPath(new URL(moved!).pathname)?.base).toBe('https://gateway.example/v1');
   });
 
   it('launches untouched when there is no config at all', async () => {

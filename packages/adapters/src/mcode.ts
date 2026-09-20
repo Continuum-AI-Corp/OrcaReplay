@@ -114,29 +114,65 @@ function splitValue(rest: string): Value {
   return { quote: '', value, tail: head.slice(value.length) + comment };
 }
 
-function rewriteField(line: string, proxyUrl: string): string {
+/**
+ * Which top-level section of the config a line is in.
+ *
+ * The two that matter are `custom_provider:` and `provider:`. Only the first holds anything worth
+ * redirecting: MCode restores the built-in providers' own `baseURL` over whatever the file says,
+ * measured on a real run, so pointing one at the proxy changes nothing and a run on it records
+ * nothing either way.
+ *
+ * Keys are a separate question and are taken out of *every* section. The generated file lands in
+ * the run directory and `capture.mjs` copies that directory into `capture/<model>/trace/` without
+ * scrubbing it, so whatever this function decides about origins, no key may be left behind.
+ */
+function sectionsOf(config: string): string[] {
+  let section = '';
+  return config.split('\n').map((line) => {
+    const top = /^([A-Za-z_][\w-]*)[ \t]*:/.exec(line);
+    if (top !== null) section = top[1]!;
+    return section;
+  });
+}
+
+const CUSTOM_SECTION = 'custom_provider';
+
+function rewriteField(line: string, section: string, proxyUrl: string): string {
   const parts = FIELD.exec(line);
   if (parts === null) return line;
   const [, indent, name, separator, rest] = parts;
+  const isKey = /key$/i.test(name!);
+  // A built-in provider's origin is MCode's to decide, and it takes it back on startup.
+  if (!isKey && section !== CUSTOM_SECTION) return line;
   const { value, quote, tail } = splitValue(rest!);
   if (value === '') return line;
-  const replaced = /key$/i.test(name!)
+  const replaced = isKey
     ? PLACEHOLDER_KEY
     : // `v1` when the decoder will not take this origin, matching what the env route falls back to.
       forwardOrProxyBase(proxyUrl, value);
   return `${indent}${name}${separator}${quote}${replaced}${quote}${tail}`;
 }
 
-/** True when there is at least one origin in here for the redirect to move. */
+/**
+ * True when there is an origin in here this adapter can actually move.
+ *
+ * Review caught that asking only "is there a `baseURL` line" said yes to a stock install, where
+ * the only ones belong to the built-in providers. The adapter then wrote a redirected config for a
+ * run that records nothing — MCode restores those origins — and left a 14 MB copy of its data
+ * directory inside the trace for it. A managed-login-only config now takes the untouched branch it
+ * was always meant to take.
+ */
 export function hasOrigin(config: string): boolean {
-  return config.split('\n').some((line) => {
+  const sections = sectionsOf(config);
+  return config.split('\n').some((line, i) => {
+    if (sections[i] !== CUSTOM_SECTION) return false;
     const parts = FIELD.exec(line);
     return parts !== null && !/key$/i.test(parts[2]!) && splitValue(parts[4]!).value !== '';
   });
 }
 
 /**
- * The operator's config with every origin routed through the proxy and every key taken out.
+ * The operator's config with every custom origin routed through the proxy and every key taken out.
  *
  * Rewritten as text rather than parsed and re-emitted. A YAML round-trip would reformat a file
  * orca did not write — comments, quoting, key order — and the only lines that need to change are
@@ -146,19 +182,27 @@ export function hasOrigin(config: string): boolean {
  * away from. Replacing it with orca's own default instead would point a recorded run at a host the
  * operator never named, which is worse than not capturing it.
  *
- * Every provider, not the first. With several configured, rewriting one leaves the rest aimed at
- * their real origins, and a run on one of those is simply missing from the trace.
+ * Every custom provider, not the first. With several configured, rewriting one leaves the rest
+ * aimed at their real origins, and a run on one of those is simply missing from the trace.
  *
- * The key becomes the placeholder because this file is written inside the run directory, and §7
- * says a credential is never written down there. `capture.mjs` copies that whole directory into
- * `capture/<model>/trace/` without scrubbing it, so a key left here leaves with the capture. Orca
- * supplies the real one for the origin it forwards to — that is what `orca setup` configures and
- * what `upstreamHeaders` injects. Without it the gateway answers 401, and the prompt is captured
- * anyway: it travels in the request, which orca records before the origin ever replies.
+ * Keys come out of every section, built-in ones included. The file is written inside the run
+ * directory, and §7 says a credential is never written there; `capture.mjs` then copies that
+ * directory into `capture/<model>/trace/` unscrubbed, so a key left here would leave with the
+ * capture. Orca supplies the real one for the origin it forwards to — that is what `orca setup`
+ * configures and what `upstreamHeaders` injects. Without it the gateway answers 401, and the
+ * prompt is captured anyway: it travels in the request, which orca records before the origin ever
+ * replies.
+ *
+ * What MCode writes back into this file on startup is its own: measured against a config whose
+ * every key had been replaced by a distinct canary, it restored the built-in provider's `apiKey`
+ * as the literal `sk-xxx` from its bundle, and no canary reached the run directory. The
+ * credentials it would have had to read instead live in `<dataDir>/auth/`, which moves with
+ * `MINIMAX_DATA_DIR` — the run's copy holds two lock files and nothing else.
  */
 export function redirected(config: string, proxyUrl: string): string {
+  const sections = sectionsOf(config);
   return config
     .split('\n')
-    .map((line) => rewriteField(line, proxyUrl))
+    .map((line, i) => rewriteField(line, sections[i]!, proxyUrl))
     .join('\n');
 }
