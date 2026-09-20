@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { RecordContext } from '@orcareplay/plugin-api';
 import { decodeForwardPath } from '@orcareplay/proxy';
 import { checkAdapterContract, formatContractResult } from '../src/contract.js';
-import { hasOrigin, mcodeAdapter, redirected } from '../src/mcode.js';
+import { hasOrigin, mcodeAdapter, redirected, rewriteIsTrustworthy } from '../src/mcode.js';
 import { defaultAdapters } from '../src/registry.js';
 
 /**
@@ -298,6 +298,16 @@ describe('the mcode adapter', () => {
         '        sk-live-x',
         '      baseURL: https://e.example/v1',
       ],
+      // Review, this round: the `#` was captured as the value, so the same-line check
+      // passed while the real key sat on the line below.
+      'value is only a comment': [
+        'custom_provider:',
+        '  g:',
+        '    options:',
+        '      apiKey: # rotated',
+        '        sk-live-x',
+        '      baseURL: https://g.example/v1',
+      ],
       'block scalar': [
         'custom_provider:',
         '  d:',
@@ -329,22 +339,97 @@ describe('the mcode adapter', () => {
     }
   });
 
-  it('takes a key out wherever on the line it is written', () => {
-    // The scrub itself is shape-independent, so that refusing above is about origins rather than
-    // about keys sneaking past.
+  it('understands the one shape, quotes and comments and spellings included', () => {
+    // What the allowlist accepts. Everything else is refused by the test above rather than
+    // rewritten, so this is the whole of what the rewrite claims to handle.
     const out = redirected(
       [
         'custom_provider:',
-        '  b:',
-        '    options: {apiKey: sk-live-flow, baseURL: https://b.example/v1}',
-        '      - api_key: sk-live-list',
+        '  a:',
+        '    options:',
+        '      apiKey: sk-live-plain',
+        '      apiKey: sk-live-commented # rotate me',
+        '      api_key: sk-live-snake',
+        '      api-key: sk-live-dash',
+        '      APIKEY: sk-live-upper',
+        '      apiKey: "sk-live-quoted"',
+        "      apiKey: 'sk-live-single'   # note",
+        // A quoted *name*, which review found neither the scrub nor the gate could see.
+        '      "apiKey": sk-live-quoted-name',
+        "      'api_key': sk-live-quoted-snake",
+        '      # your apiKey goes above',
+        '      baseURL: https://gateway.example/v1',
+        '      "baseURL": https://quoted.example/v1',
         '',
       ].join(LF),
       PROXY,
     );
+
     expect(out).not.toContain('sk-live-');
-    expect(out).toContain('{apiKey: orca-recorded, baseURL: https://b.example/v1}');
-    expect(out).toContain('- api_key: orca-recorded');
+    // Nine keys in, nine placeholders out — not eight with one line quietly skipped.
+    expect([...out.matchAll(/orca-recorded/g)]).toHaveLength(9);
+    // Quoting, spacing and comments are the operator's and survive.
+    expect(out).toContain('apiKey: "orca-recorded"');
+    expect(out).toContain("apiKey: 'orca-recorded'   # note");
+    expect(out).toContain('"apiKey": orca-recorded');
+    expect(out).toContain('# rotate me');
+    // A comment that merely mentions the field is left alone rather than refused.
+    expect(out).toContain('# your apiKey goes above');
+    // Both origins move, including the one whose name is quoted.
+    const moved = [...out.matchAll(/"?baseURL"?: (\S+)/g)].map((m) => m[1]!);
+    expect(moved.map((base) => decodeForwardPath(new URL(base).pathname)?.base)).toEqual([
+      'https://gateway.example/v1',
+      'https://quoted.example/v1',
+    ]);
+  });
+
+  it('does not mistake a field value that mentions a key for a key field', () => {
+    // Caught by running the adapter against a real config after tightening the gate. Every
+    // custom provider in one carries `authMode: api-key`, where `api-key` is the *value*. A scan
+    // that looked anywhere on the line read it as a field it could not parse and refused the
+    // whole config: a recording that should have captured six exchanges captured none. The colon
+    // after the name is what tells a name from a value.
+    const config = [
+      'custom_provider:',
+      '  gw:',
+      '    options:',
+      '      apiKey: sk-live-x',
+      '      baseURL: https://gateway.example/v1',
+      '      authMode: api-key',
+      '',
+    ].join(LF);
+
+    expect(rewriteIsTrustworthy(config)).toBe(true);
+    const out = redirected(config, PROXY);
+    expect(out).not.toContain('sk-live-x');
+    expect(out).toContain('authMode: api-key');
+  });
+
+  it('does not refuse over a built-in origin it does not need to understand', async () => {
+    // The scoping is deliberate. A built-in provider's origin is never rewritten — MCode takes
+    // it back on startup — so its shape is none of this adapter's business, and refusing over it
+    // would make an ordinary config uncaptured for no gain. Keys are the opposite: those are
+    // refused wherever they are unreadable, because an unreadable key is one left on disk.
+    await writeFile(
+      join(root, 'home', 'config.yaml'),
+      [
+        'custom_provider:',
+        '  gw:',
+        '    options:',
+        '      apiKey: sk-live-custom',
+        '      baseURL: https://gateway.example/v1',
+        'provider:',
+        '  minimax_api:',
+        '    options: {baseURL: https://agent.minimaxi.com/v1}',
+        '',
+      ].join(LF),
+      'utf8',
+    );
+
+    await mcodeAdapter.prepare(ctx);
+    const written = await readFile(join(ctx.runDir, 'mcode-data', 'config.yaml'), 'utf8');
+    expect(written).not.toContain('sk-live-custom');
+    expect(written).toContain('{baseURL: https://agent.minimaxi.com/v1}');
   });
 
   it('launches untouched when there is no config at all', async () => {
