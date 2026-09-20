@@ -1456,14 +1456,26 @@ export async function assertRestorable(
   const gitlinks = await capture.gitlinks(tree);
   if (gitlinks.length === 0) return [];
   const roots = resetRoots(dir, artifacts);
+  // Containment in BOTH directions, because the reset is destructive either way.
+  //
+  // `path.startsWith(root)` is the obvious half: the repository sits inside a path being deleted.
+  // `root.startsWith(path)` is the half that reads backwards and matters just as much — a
+  // multi-segment declaration such as `resetBeforeReplay: ['data/cache']` with a nested
+  // repository at `data` deletes a path *inside* the operator's own repository. Nothing else
+  // catches that: `assertResettable` asks `uncaptured(['data/cache'])`, and git does not look
+  // inside an embedded repository, so it comes back empty and the reset goes ahead. The files
+  // are then gone with nothing anywhere holding a byte of them, under exit 0.
   const doomed = gitlinks.filter((path) =>
-    roots.some((root) => path === root || path.startsWith(`${root}/`)),
+    roots.some(
+      (root) => path === root || path.startsWith(`${root}/`) || root.startsWith(`${path}/`),
+    ),
   );
   if (doomed.length === 0) return gitlinks;
   throw new Error(
     `this replay would delete ${roots.join(', ')} to put the harness back where the recording ` +
       `started, and cannot put ${doomed.join(', ')} back: the snapshot holds those as embedded ` +
-      'git repositories, whose contents it never captured. Nothing has been deleted. Move them ' +
+      'git repositories, whose contents it never captured — whether the reset removes one ' +
+      'outright or reaches inside it. Nothing has been deleted. Move them ' +
       'outside the adapter’s reset paths, or replay with --in-place to leave the working tree ' +
       'alone.',
   );

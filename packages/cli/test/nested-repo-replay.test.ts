@@ -116,6 +116,34 @@ describe('assertRestorable', () => {
     await expect(assertRestorable(capture, tree, dir, artifacts(['too']))).resolves.toHaveLength(2);
   });
 
+  it('refuses when the reset path is inside the repository, not the other way round', async () => {
+    // The mirror image of the case above, and the one a containment test written in the obvious
+    // direction misses. `resetBeforeReplay: ['data/cache']` — a multi-segment declaration, which
+    // `resetRoots` exists to support — with a nested repository at `data`. The reset deletes a
+    // path *inside* the operator's repository.
+    //
+    // Nothing else catches it. `assertResettable` asks `uncaptured(['data/cache'])`, and git does
+    // not look inside an embedded repository, so that comes back empty and it passes. The replay
+    // then removes `data/cache`, restores with `allowIncomplete`, and neither the recording nor
+    // the safety copy holds a byte of it — gone for good, under exit 0.
+    const nest = await mkdtemp(join(tmpdir(), 'orca-nested-ancestor-'));
+    try {
+      await initRepo(nest);
+      await nestRepo(nest, 'data');
+      await mkdir(join(nest, 'data', 'cache'), { recursive: true });
+      await writeFile(join(nest, 'data', 'cache', 'index.bin'), 'the index the pipeline built');
+      const inner = await FsCapture.start({ runDir: join(nest, '.orca-run'), cwd: nest });
+      const snapshot = await inner.snapshotTurn(0);
+      // The gitlink really is the ancestor, not the reset path itself.
+      expect(await inner.gitlinks(snapshot.tree)).toEqual(['data']);
+      await expect(
+        assertRestorable(inner, snapshot.tree, nest, artifacts(['data/cache'])),
+      ).rejects.toThrow(/cannot put data back/);
+    } finally {
+      await rm(nest, { recursive: true, force: true });
+    }
+  });
+
   it('has nothing to say about a workspace that holds no nested repository', async () => {
     const plain = await mkdtemp(join(tmpdir(), 'orca-nested-plain-'));
     try {
