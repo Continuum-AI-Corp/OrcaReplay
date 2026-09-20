@@ -97,6 +97,14 @@ describe('config', () => {
     },
   );
 
+  it('reads nothing at all when a test supplies no environment', async () => {
+    // The guard on vitest.setup.ts. `record`, `replay`, `attach` and `compare` all resolve their
+    // upstream through `readConfig()` with no argument. If that ever returns the config of whoever
+    // is running the suite, tests start sending live requests to their gateway — and never in CI,
+    // which has no config, so nothing would say so.
+    await expect(readConfig()).resolves.toEqual({});
+  });
+
   it('never installs a half-written config, however many writers race', async () => {
     // The staging file used to be named after the destination alone, so every writer addressed one
     // scratch path with nothing serialising them: B's truncate landed on the file A was about to
