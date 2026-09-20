@@ -34,7 +34,12 @@ apagada y luego bifurcada en el punto de control 4 hacia dos modelos, calificada
 
 ## Pruébalo en tres comandos
 
+Un único paquete npm llamado `orcareplay`, que coloca un único comando llamado `orca` en tu PATH. No
+existe una herramienta aparte llamada «orca», y no se instala nada dentro de tu agente.
+
 ```console
+npm i -g orcareplay             # el paquete es orcareplay; el comando es orca
+
 orca record claude              # tu agente, sin tocar, haciendo lo que hace
 orca replay last                # la misma ejecución otra vez — sin red, sin tokens, sin cobro
 orca replay last --from 4 --model claude-haiku-4-5 --ui
@@ -43,10 +48,6 @@ orca replay last --from 4 --model claude-haiku-4-5 --ui
 La tercera línea es por la que la gente se queda: los mismos archivos, el mismo prefijo de
 conversación, otro modelo a partir del paso 4. El modelo es la única variable, y eso es lo que hace
 que la respuesta signifique algo.
-
-```console
-npm i -g orcareplay
-```
 
 ## Por qué existe
 

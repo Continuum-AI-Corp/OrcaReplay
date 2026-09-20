@@ -32,7 +32,12 @@ Claude、GPT、Gemini、Grok、DeepSeek、Qwen ほかに届く。`orca setup` �
 
 ## 3つのコマンドで試す
 
+npm パッケージは `orcareplay` ひとつだけで、PATH に `orca` というコマンドをひとつ置きます。
+「orca」という別のツールは存在せず、エージェントの中には何もインストールされません。
+
 ```console
+npm i -g orcareplay             # パッケージは orcareplay、入るコマンドは orca
+
 orca record claude              # あなたのエージェントを、そのまま、いつもどおりに
 orca replay last                # 同じ実行をもう一度——通信なし、トークンなし、課金なし
 orca replay last --from 4 --model claude-haiku-4-5 --ui
@@ -40,10 +45,6 @@ orca replay last --from 4 --model claude-haiku-4-5 --ui
 
 人が留まる理由は3行目にある。同じファイル、同じ会話の前半、ステップ4から先だけ別のモデル。
 変数はモデルだけ——だからこそ答えに意味が出る。
-
-```console
-npm i -g orcareplay
-```
 
 ## なぜ作ったのか
 

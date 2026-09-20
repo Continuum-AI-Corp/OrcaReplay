@@ -36,7 +36,12 @@ forked at checkpoint 4 onto two models and graded by `npx tsc --noEmit`. Nothing
 
 ## Try it in three commands
 
+One npm package named `orcareplay`, which puts one command named `orca` on your PATH. There is no
+separate tool called "orca", and nothing is installed into your agent.
+
 ```console
+npm i -g orcareplay             # the package is orcareplay; the command it installs is orca
+
 orca record claude              # your agent, unmodified, doing whatever it does
 orca replay last                # the same run again — no network, no tokens, no charge
 orca replay last --from 4 --model claude-haiku-4-5 --ui
@@ -44,10 +49,6 @@ orca replay last --from 4 --model claude-haiku-4-5 --ui
 
 The third line is the one people stay for: same files, same conversation prefix, different model
 from step 4 onward. The model is the only variable, which is what makes the answer mean anything.
-
-```console
-npm i -g orcareplay
-```
 
 The three commands at the top need an agent installed, a key, a network and real tokens. If you
 have none of those yet, one command brings its own:

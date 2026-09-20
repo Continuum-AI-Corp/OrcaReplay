@@ -34,7 +34,12 @@ Rien ici n'est mis en scène.</sup>
 
 ## L'essayer en trois commandes
 
+Un seul paquet npm, `orcareplay`, qui installe une seule commande nommée `orca` dans votre PATH. Il
+n'existe pas d'outil distinct appelé « orca », et rien n'est installé dans votre agent.
+
 ```console
+npm i -g orcareplay             # le paquet est orcareplay ; la commande est orca
+
 orca record claude              # votre agent, tel quel, faisant ce qu'il fait
 orca replay last                # la même exécution à nouveau — pas de réseau, pas de jetons, pas de facture
 orca replay last --from 4 --model claude-haiku-4-5 --ui
@@ -43,10 +48,6 @@ orca replay last --from 4 --model claude-haiku-4-5 --ui
 C'est la troisième ligne qui retient les gens : mêmes fichiers, même préfixe de conversation, un
 modèle différent à partir de l'étape 4. Le modèle est la seule variable, et c'est ce qui donne un
 sens à la réponse.
-
-```console
-npm i -g orcareplay
-```
 
 ## Pourquoi cet outil existe
 

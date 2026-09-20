@@ -31,7 +31,12 @@ Gemini、Grok、DeepSeek、Qwen 等等。它是 `orca setup` 的默认网关，�
 
 ## 三条命令上手
 
+一个 npm 包 `orcareplay`，它在 PATH 上放一条名为 `orca` 的命令。没有另一个叫「orca」的工具，
+也不会往你的 agent 里装任何东西。
+
 ```console
+npm i -g orcareplay             # 包名是 orcareplay，它装的命令叫 orca
+
 orca record claude              # 你的 agent，原封不动，该干嘛干嘛
 orca replay last                # 同一次运行再来一遍——不联网、不耗 token、不花钱
 orca replay last --from 4 --model claude-haiku-4-5 --ui
@@ -39,10 +44,6 @@ orca replay last --from 4 --model claude-haiku-4-5 --ui
 
 第三行才是让人留下来的那条：同样的文件、同样的对话前缀，从第 4 步起换一个模型。模型是唯一的变量，
 这正是答案有意义的原因。
-
-```console
-npm i -g orcareplay
-```
 
 ## 为什么会有这个东西
 
