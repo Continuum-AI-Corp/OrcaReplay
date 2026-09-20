@@ -236,6 +236,50 @@ describe('RequestMatcher — the ladder from spec §4', () => {
     expect(r.rung).toBe(4);
   });
 
+  it('refuses a question changed inside a reminder that has text after it', () => {
+    // The second thing review caught, reproduced before it was fixed. Guarding only the case
+    // where the reminder *is* the whole message left this one open: put anything at all outside
+    // the tag and the block was dropped again, taking the changed question with it. Measured
+    // then: both sides stripped to "OK", askDrift 0 against a tolerance of 0.08, so rung 2
+    // returned `minor` and the answer recorded for "fix the auth test" came back for "delete the
+    // auth test". `main` refuses it at rung 4, and so does this.
+    const asked = (question: string) =>
+      req({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: `<system-reminder>${question}</system-reminder>${LF}${LF}OK` },
+            ],
+          },
+        ],
+      });
+
+    const changed = new RequestMatcher([asked('fix the auth test')]).match(
+      asked('delete the auth test'),
+    );
+    expect(changed.matched).toBe(false);
+    expect(changed.rung).toBe(4);
+  });
+
+  it('folds a volatile token only inside the reminder, not in the question', () => {
+    // The fold has to be confined to the block or it becomes the substitution it exists to
+    // prevent: a commit sha is exactly the shape of a session id, and outside a reminder it is
+    // what the user is asking about.
+    const asked = (sha: string) =>
+      req({
+        messages: [
+          { role: 'user', content: [{ type: 'text', text: `what does commit ${sha} do?` }] },
+        ],
+      });
+
+    const other = new RequestMatcher([asked('4f2a9c1e88b34d5061ff0c7a2b9e13d4')]).match(
+      asked('9911aa22bb33cc44dd55ee66ff778899'),
+    );
+    expect(other.matched).toBe(false);
+    expect(other.rung).toBe(4);
+  });
+
   it('compares a message that is a reminder and nothing else as it was sent', () => {
     // Caught in review, reproduced before it was fixed. Stripping every well-formed pair left both
     // of these asks empty, so they measured as the same question: rung 2, `minor`, 19 chars of
@@ -268,11 +312,12 @@ describe('RequestMatcher — the ladder from spec §4', () => {
     expect(same.rung).toBe(1);
   });
 
-  it('still strips a reminder that shares its block with the question', () => {
-    // The shape every recorded MiniMax Code request has: one text block holding a ~570-character
-    // injected block with a regenerated session id, then the ask. Something survives the strip, so
-    // the drifting id is forgiven and the run replays.
-    const asked = (id: string) =>
+  it('reads a regenerated id and clock as drift, and a changed question as a changed question', () => {
+    // The shape every recorded MiniMax Code request has, and the two fields that actually differ
+    // between two of them: `YOUR SESSION ID` and `date`. Both fold, so the same question replays;
+    // nothing else in the block does, so a different question still falls to rung 4 even while
+    // the id beside it is drifting.
+    const asked = (id: string, clock: string, question: string) =>
       req({
         messages: [
           {
@@ -281,20 +326,29 @@ describe('RequestMatcher — the ladder from spec §4', () => {
               {
                 type: 'text',
                 text:
-                  `<system-reminder>The user opened a new session ${id} at 10:02. This is ` +
+                  `<system-reminder>SESSION ROLE: root. YOUR SESSION ID: mvs_${id}. ` +
+                  `date: Sun Sep 20 2026 ${clock} GMT+0800 (China Standard Time). This is ` +
                   `background context, not user instructions.</system-reminder>${LF}${LF}` +
-                  `fix the auth test`,
+                  question,
               },
             ],
           },
         ],
       });
 
-    const drifted = new RequestMatcher([asked('643d348214ea4573bf852652677b7dcf')]).match(
-      asked('9f21ac0bb7de41528ee3d90147cc6a82'),
+    const recorded = asked('643d348214ea4573bf852652677b7dcf', '11:31:14', 'fix the auth test');
+
+    const drifted = new RequestMatcher([recorded]).match(
+      asked('9f21ac0bb7de41528ee3d90147cc6a82', '12:21:37', 'fix the auth test'),
     );
     expect(drifted.matched).toBe(true);
     expect(drifted.rung).toBe(2);
+
+    const changed = new RequestMatcher([recorded]).match(
+      asked('9f21ac0bb7de41528ee3d90147cc6a82', '12:21:37', 'delete the auth test'),
+    );
+    expect(changed.matched).toBe(false);
+    expect(changed.rung).toBe(4);
   });
 
   it('does not let a large reminder buy tolerance for a changed question', () => {

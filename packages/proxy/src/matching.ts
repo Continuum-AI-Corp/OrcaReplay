@@ -436,56 +436,87 @@ const ASK_DRIFT_MAX = 512;
 const SYSTEM_REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
 
 /**
+ * The tokens a harness regenerates inside that block on every request, folded to one value.
+ *
+ * Deleting the whole block was wrong twice over, and review caught both. Anything inside a pair
+ * became invisible to the ask guard, so a question that lived inside one could change without the
+ * measurement noticing — `<system-reminder>fix the auth test</system-reminder>` against
+ * `<system-reminder>delete the database</system-reminder>` matched at rung 2 and served the first
+ * one's answer for the second. Keeping the block whenever anything survived outside it only
+ * narrowed that hole: put a single `OK` after the tag and the same substitution slipped through
+ * again. The tag is data wherever it appears — a pasted log, a tool result quoting one — so there
+ * is no position in the message where its contents can be assumed not to matter.
+ *
+ * What can be assumed is narrower: these particular tokens are regenerated per request. So the
+ * block stays and is compared; only a value from this list is folded. A changed question inside a
+ * reminder still reads as a changed question, because a question is none of these things.
+ *
+ * Taken from the recordings rather than guessed. All sixteen captured MiniMax Code requests differ
+ * inside the block in exactly two places — `YOUR SESSION ID:` and `date:` — and with these rules
+ * the sixteen reduce to one form. The id needs both shapes: `mvs_` + 32 hex sits right on the
+ * redactor's entropy threshold, so whether it arrives raw or as `<secret:high_entropy>` depends on
+ * the id's own characters, and the two have to fold together. `foldPlaceholders` has already run
+ * by then and removed the per-value digest.
+ */
+const VOLATILE: ReadonlyArray<readonly [RegExp, string]> = [
+  [/<secret:[a-z0-9_]+>/gi, '<volatile>'],
+  [/[0-9a-z]{0,12}_?[0-9a-f]{16,}/gi, '<volatile>'],
+  // `Date.toString()`, which is what MiniMax Code sends, then ISO 8601, then a bare clock.
+  [
+    /[A-Z][a-z]{2} [A-Z][a-z]{2} [0-9]{1,2} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT[+-][0-9]{4}( [(][^)]*[)])?/g,
+    '<volatile>',
+  ],
+  [
+    /[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})?/g,
+    '<volatile>',
+  ],
+  [/[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?/g, '<volatile>'],
+];
+
+/**
+ * Only inside the block. Outside it the same shapes are the user's own content — a commit sha they
+ * are asking about, a time they want changed — and folding those would be the very substitution
+ * this guard exists to refuse.
+ */
+function withoutVolatility<T>(value: T): T {
+  return mapStrings(value, (s) =>
+    s.replace(SYSTEM_REMINDER, (block) =>
+      VOLATILE.reduce((acc, [re, to]) => acc.replace(re, to), block),
+    ),
+  );
+}
+
+/** The ask with its scaffolding gone: what is left is the question, which is what the budget is a fraction of. */
+function withoutReminders<T>(value: T): T {
+  return mapStrings(value, (s) => s.replace(SYSTEM_REMINDER, ''));
+}
+
+/**
  * `Infinity` when one side has no trailing message at all and the other does.
  *
- * The reminders come out of the *ask* only. Rung 2's whole-request distance still counts every
- * character of them, so a reminder that grew by a kilobyte is still drift and the match still
- * reports as minor rather than exact — what this stops is a regenerated id being read as a
- * different question.
+ * Rung 2's whole-request distance still counts every character of the reminders, so a reminder
+ * that grew by a kilobyte is still drift and the match still reports as minor rather than exact —
+ * what this stops is a regenerated id being read as a different question.
  */
 function askDistance(live: Record<string, unknown>, recorded: Record<string, unknown>): number {
   const a = trailingMessage(live);
   const b = trailingMessage(recorded);
   if (a === undefined || b === undefined) return a === b ? 0 : Number.POSITIVE_INFINITY;
-  return leafDistance(withoutReminders(a), withoutReminders(b));
+  return leafDistance(withoutVolatility(a), withoutVolatility(b));
 }
 
 /**
- * Scaffolding is only scaffolding when the text it sits in still says something without it.
+ * A fraction of the question, not of the scaffolding around it.
  *
- * Deleting every well-formed pair unconditionally made the guard blind to any difference that lay
- * inside one. A trailing message that is nothing but a reminder strips to nothing on both sides,
- * so `fix the auth test` and `delete the database` measured as the same ask and rung 2 served the
- * first one's answer for the second — the exact failure this measurement exists to prevent, walked
- * in through the thing meant to protect it. It is reachable without a harness bug: the tag is data
- * wherever it appears, and a pasted log or a tool result can carry it as the whole message.
+ * The two are measured on different text on purpose. Drift is everything that is not a folded
+ * token, so it sees the whole ask; the budget is a share of what the user actually asked, so the
+ * reminders come out of it entirely. Taking the budget from the raw ask instead let the injected
+ * block buy room for a changed question — at 2,000 characters of reminder it reached 40 while the
+ * drift between "fix the auth test" and "delete the auth test" is 6, and the recorded answer to
+ * one was served for the other at rung 2. That was the first thing review caught here.
  *
- * So a reminder comes out only when something is left behind. In all sixteen recorded MiniMax Code
- * requests the reminder shares its text block with the question — about 570 characters of injected
- * block against a 30-character ask — so the case this change was written for still strips, while
- * the message that is reminder and nothing else is compared as it was sent.
- *
- * A harness that gave a drifting reminder a content block of its own would get no help here: that
- * block would strip to nothing and be counted whole, as it is on `main` today. That is the safe
- * direction to be wrong in for a measurement whose only job is to refuse.
- */
-function withoutReminders<T>(value: T): T {
-  return mapStrings(value, (s) => {
-    const stripped = s.replace(SYSTEM_REMINDER, '');
-    return stripped.trim() === '' ? s : stripped;
-  });
-}
-
-/**
- * The budget is measured on the same text the drift is, or the two are in different spaces.
- *
- * `askDistance` compares the ask with its reminders removed, so a tolerance taken from the raw ask
- * is inflated by exactly the part that no longer counts — and the bigger the harness's injected
- * block, the wider the gap a changed question can hide in. With a 2,000-character reminder the
- * budget reached 40 while the stripped drift between "fix the auth test" and "delete the auth
- * test" is 6, so the recorded answer to one was served for the other at rung 2, labelled `minor`.
- * That is the failure the ask guard exists to prevent, reintroduced by widening only one side of
- * its own comparison.
+ * An ask that is nothing but a reminder leaves no question, and a budget of about one character:
+ * identical still matches, anything else is a different run.
  */
 function askTolerance(recorded: Record<string, unknown>): number {
   const ask = trailingMessage(recorded);
