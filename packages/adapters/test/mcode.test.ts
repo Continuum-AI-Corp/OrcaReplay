@@ -263,6 +263,90 @@ describe('the mcode adapter', () => {
     expect(decodeForwardPath(new URL(moved!).pathname)?.base).toBe('https://gateway.example/v1');
   });
 
+  it('refuses to write a config it cannot prove is clean', async () => {
+    // Caught in review. The rewrite was anchored to the start of a line, so a key written in a
+    // flow map or as a list item went through untouched — while `hasOrigin` still said yes,
+    // because another provider had an ordinary `baseURL`. The file was written with those keys in
+    // it, into the run directory `capture.mjs` copies into `capture/<model>/trace/` unscrubbed.
+    //
+    // Keys are taken out by shape-independent pattern now. These shapes are still refused, for the
+    // other half of the same promise: their *origins* cannot be moved, so a run on one of those
+    // providers would be talking to its real host with nothing in the trace to say so.
+    const configs = {
+      'flow map': [
+        'custom_provider:',
+        '  b:',
+        '    options: {apiKey: sk-live-x, baseURL: https://b.example/v1}',
+      ],
+      'list item': [
+        'custom_provider:',
+        '  c:',
+        '    options:',
+        '      - apiKey: sk-live-x',
+        '      - baseURL: https://c.example/v1',
+      ],
+      // The value lives on the next line, where no field pattern reaches it. Replacing the `>`
+      // would leave the key in the file under a field that now reads as clean.
+      // Found while mutation-testing the gate, not reported: `apiKey:` alone puts the value
+      // below as an indented scalar, which matched no pattern at all — so it was neither
+      // scrubbed nor noticed, and went into the run directory whole.
+      'value on the next line': [
+        'custom_provider:',
+        '  e:',
+        '    options:',
+        '      apiKey:',
+        '        sk-live-x',
+        '      baseURL: https://e.example/v1',
+      ],
+      'block scalar': [
+        'custom_provider:',
+        '  d:',
+        '    options:',
+        '      apiKey: >',
+        '        sk-live-x',
+        '      baseURL: https://d.example/v1',
+      ],
+      // The one that actually shipped: one provider orca can rewrite, one it cannot.
+      'block and flow together': [
+        'custom_provider:',
+        '  a:',
+        '    options:',
+        '      apiKey: sk-live-a',
+        '      baseURL: https://a.example/v1',
+        '  b:',
+        '    options: {apiKey: sk-live-x, baseURL: https://b.example/v1}',
+      ],
+    };
+
+    for (const [shape, lines] of Object.entries(configs)) {
+      await writeFile(join(root, 'home', 'config.yaml'), lines.join(LF) + LF, 'utf8');
+      const launch = await mcodeAdapter.prepare(ctx);
+      expect(launch.env, shape).toEqual({});
+      expect(launch.tempFiles, shape).toBeUndefined();
+      await expect(
+        readFile(join(ctx.runDir, 'mcode-data', 'config.yaml'), 'utf8'),
+      ).rejects.toThrow();
+    }
+  });
+
+  it('takes a key out wherever on the line it is written', () => {
+    // The scrub itself is shape-independent, so that refusing above is about origins rather than
+    // about keys sneaking past.
+    const out = redirected(
+      [
+        'custom_provider:',
+        '  b:',
+        '    options: {apiKey: sk-live-flow, baseURL: https://b.example/v1}',
+        '      - api_key: sk-live-list',
+        '',
+      ].join(LF),
+      PROXY,
+    );
+    expect(out).not.toContain('sk-live-');
+    expect(out).toContain('{apiKey: orca-recorded, baseURL: https://b.example/v1}');
+    expect(out).toContain('- api_key: orca-recorded');
+  });
+
   it('launches untouched when there is no config at all', async () => {
     await rm(join(root, 'home', 'config.yaml'));
     const launch = await mcodeAdapter.prepare(ctx);

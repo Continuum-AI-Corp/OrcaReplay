@@ -54,7 +54,11 @@ export const mcodeAdapter: Adapter = {
     // move. Launching untouched leaves the operator with MCode's own behaviour and orca's empty
     // capture warning, which is a truer answer than a redirect aimed at a provider that is not
     // there.
-    if (original === undefined || !hasOrigin(original)) {
+    if (
+      original === undefined ||
+      !hasOrigin(original) ||
+      !rewriteIsTrustworthy(original, ctx.proxyUrl)
+    ) {
       return { command: 'mcode', args: [...ctx.userArgs], env: {} };
     }
 
@@ -92,7 +96,30 @@ function configPath(env: Record<string, string | undefined>): string {
  * line ending are three separate things to get right, and a regex that got all three would be
  * harder to read than the file it is parsing.
  */
-const FIELD = /^([ \t]*)(baseURL|base[_-]url|apiKey|api[_-]key)([ \t]*:[ \t]*)([^\n]*)$/i;
+/** A `baseURL` line in block style, which is the only shape this rewrite can move an origin in. */
+const FIELD = /^([ \t]*)(baseURL|base[_-]url)([ \t]*:[ \t]*)([^\n]*)$/i;
+
+/**
+ * Every `apiKey`-ish and `baseURL`-ish field in the text, wherever YAML allows one to be written.
+ *
+ * Not anchored to the start of a line, which is the point. Review found that a line-anchored
+ * rewrite left a key untouched in two shapes a config can legitimately use — a flow map,
+ * `options: {apiKey: sk-live-…, baseURL: …}`, and a list item, `- apiKey: sk-live-…` — while
+ * `hasOrigin` still said yes because another provider had an ordinary `baseURL`. The file was
+ * written with those keys in it, into the run directory that `capture.mjs` copies into
+ * `capture/<model>/trace/` unscrubbed.
+ *
+ * A value ends at whitespace or at a flow delimiter, so a trailing comment, a neighbouring entry
+ * in a flow map and a closing brace are all left where they are.
+ */
+const ANY_KEY = /\bapi[_-]?key[ \t]*:[ \t]*(?:(['"])([^'"]*)\1|([^,}\]\s'"]+))/gi;
+const ANY_BASE = /\bbase[_-]?url[ \t]*:[ \t]*(?:(['"])([^'"]*)\1|([^,}\]\s'"]+))/gi;
+
+/** Every `api…key:` field, whether or not a value follows it on the same line. */
+const KEY_FIELD = /\bapi[_-]?key[ \t]*:/gi;
+
+/** `|` and `>` say the value is on the following lines, where no field pattern can reach it. */
+const BLOCK_SCALAR = /^[|>][+-]?[0-9]*$/;
 
 /** A YAML comment starts at ` #`; a bare `#` inside a URL is a fragment, not a comment. */
 const COMMENT = /\s#/;
@@ -112,6 +139,10 @@ function splitValue(rest: string): Value {
   // `\r` too, so a CRLF config does not leave the carriage return inside the value.
   const value = head.replace(/[ \t\r]+$/, '');
   return { quote: '', value, tail: head.slice(value.length) + comment };
+}
+
+function valuesOf(text: string, pattern: RegExp): string[] {
+  return [...text.matchAll(pattern)].map((m) => m[2] ?? m[3] ?? '');
 }
 
 /**
@@ -137,20 +168,26 @@ function sectionsOf(config: string): string[] {
 
 const CUSTOM_SECTION = 'custom_provider';
 
-function rewriteField(line: string, section: string, proxyUrl: string): string {
+function rewriteOrigin(line: string, section: string, proxyUrl: string): string {
+  // A built-in provider's origin is MCode's to decide, and it takes it back on startup.
+  if (section !== CUSTOM_SECTION) return line;
   const parts = FIELD.exec(line);
   if (parts === null) return line;
   const [, indent, name, separator, rest] = parts;
-  const isKey = /key$/i.test(name!);
-  // A built-in provider's origin is MCode's to decide, and it takes it back on startup.
-  if (!isKey && section !== CUSTOM_SECTION) return line;
   const { value, quote, tail } = splitValue(rest!);
   if (value === '') return line;
-  const replaced = isKey
-    ? PLACEHOLDER_KEY
-    : // `v1` when the decoder will not take this origin, matching what the env route falls back to.
-      forwardOrProxyBase(proxyUrl, value);
-  return `${indent}${name}${separator}${quote}${replaced}${quote}${tail}`;
+  // `v1` when the decoder will not take this origin, matching what the env route falls back to.
+  const moved = forwardOrProxyBase(proxyUrl, value);
+  return `${indent}${name}${separator}${quote}${moved}${quote}${tail}`;
+}
+
+/** Every key replaced by the placeholder, in whatever shape it was written. */
+function withoutKeys(config: string): string {
+  return config.replace(ANY_KEY, (whole: string, quote?: string) => {
+    const at = whole.indexOf(':');
+    const q = quote ?? '';
+    return `${whole.slice(0, at + 1)} ${q}${PLACEHOLDER_KEY}${q}`;
+  });
 }
 
 /**
@@ -167,8 +204,45 @@ export function hasOrigin(config: string): boolean {
   return config.split('\n').some((line, i) => {
     if (sections[i] !== CUSTOM_SECTION) return false;
     const parts = FIELD.exec(line);
-    return parts !== null && !/key$/i.test(parts[2]!) && splitValue(parts[4]!).value !== '';
+    return parts !== null && splitValue(parts[4]!).value !== '';
   });
+}
+
+/**
+ * Whether the rewrite can be trusted with this config at all.
+ *
+ * A rewrite that cannot prove it did its job does not get written, and the three checks are what
+ * that proof needs.
+ *
+ * Two are about keys, and both are made before the rewrite, because a key the scrub cannot see
+ * is also a key a check on the result cannot see. Every field must carry its value on the same
+ * line — `apiKey:` alone leaves it below as an indented scalar, which matched nothing and went
+ * through whole — and no value may be a block scalar, whose `|` would be replaced while the key
+ * stayed on the lines beneath a field that now reads as clean.
+ *
+ * The third reads the rewritten text: every origin inside `custom_provider:` must now point at
+ * the proxy, or a provider orca claimed to redirect would still be talking to its real host,
+ * uncaptured and unmentioned.
+ *
+ * The cost of refusing is an uncaptured run — the same untouched launch a config with no custom
+ * provider gets — which is the side to fail on when the alternative is writing a credential down.
+ */
+export function rewriteIsTrustworthy(config: string, proxyUrl: string): boolean {
+  const values = valuesOf(config, ANY_KEY);
+  // Every field has to carry its value on the same line, or the scrub cannot reach it.
+  // `apiKey:` alone puts the key on the next line as an indented scalar, which matched
+  // nothing at all — neither the rewrite nor a check looking at what the rewrite left.
+  if (values.length !== (config.match(KEY_FIELD) ?? []).length) return false;
+  if (values.some((value) => BLOCK_SCALAR.test(value))) return false;
+  const rewritten = redirected(config, proxyUrl);
+  const sections = sectionsOf(rewritten);
+  return rewritten
+    .split('\n')
+    .every(
+      (line, i) =>
+        sections[i] !== CUSTOM_SECTION ||
+        valuesOf(line, ANY_BASE).every((value) => value === '' || value.startsWith(proxyUrl)),
+    );
 }
 
 /**
@@ -185,13 +259,13 @@ export function hasOrigin(config: string): boolean {
  * Every custom provider, not the first. With several configured, rewriting one leaves the rest
  * aimed at their real origins, and a run on one of those is simply missing from the trace.
  *
- * Keys come out of every section, built-in ones included. The file is written inside the run
- * directory, and §7 says a credential is never written there; `capture.mjs` then copies that
- * directory into `capture/<model>/trace/` unscrubbed, so a key left here would leave with the
- * capture. Orca supplies the real one for the origin it forwards to — that is what `orca setup`
- * configures and what `upstreamHeaders` injects. Without it the gateway answers 401, and the
- * prompt is captured anyway: it travels in the request, which orca records before the origin ever
- * replies.
+ * Keys come out of every section, built-in included, and by a pattern that does not care where on
+ * the line the field sits. The file is written inside the run directory, and §7 says a credential
+ * is never written there; `capture.mjs` then copies that directory into `capture/<model>/trace/`
+ * unscrubbed, so a key left here would leave with the capture. Orca supplies the real one for the
+ * origin it forwards to — that is what `orca setup` configures and what `upstreamHeaders` injects.
+ * Without it the gateway answers 401, and the prompt is captured anyway: it travels in the
+ * request, which orca records before the origin ever replies.
  *
  * What MCode writes back into this file on startup is its own: measured against a config whose
  * every key had been replaced by a distinct canary, it restored the built-in provider's `apiKey`
@@ -201,8 +275,9 @@ export function hasOrigin(config: string): boolean {
  */
 export function redirected(config: string, proxyUrl: string): string {
   const sections = sectionsOf(config);
-  return config
+  const moved = config
     .split('\n')
-    .map((line, i) => rewriteField(line, sections[i]!, proxyUrl))
+    .map((line, i) => rewriteOrigin(line, sections[i]!, proxyUrl))
     .join('\n');
+  return withoutKeys(moved);
 }
