@@ -1,6 +1,11 @@
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { RUN_ID_PATTERN } from '@orcareplay/schema';
+import {
+  assertPrivatePathIdentity,
+  privatePathIdentity,
+  restrictToOwner,
+} from './private-files.js';
 
 export interface RunRef {
   runId: string;
@@ -36,8 +41,42 @@ export function runsDir(cwd: string): string {
  */
 export async function ensureRunsDir(cwd: string): Promise<string> {
   const dir = runsDir(cwd);
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  const ignore = join(orcaDir(cwd), '.gitignore');
+  const orca = orcaDir(cwd);
+
+  if (process.platform === 'win32') {
+    // Secure the container before creating the store inside it. Ownership is checked as well:
+    // removing a foreign owner's ACE alone would leave it able to restore its own access.
+    await mkdir(orca, { recursive: true, mode: 0o700 });
+    const orcaWas = await privatePathIdentity(orca);
+    await restrictToOwner(orca, 0o700);
+    await assertPrivatePathIdentity(orca, orcaWas);
+
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    // Check again after making the container non-empty. These checks detect replacement during
+    // setup; they do not lock ancestors against an account that can keep replacing them later.
+    await assertPrivatePathIdentity(orca, orcaWas);
+    const dirWas = await privatePathIdentity(dir);
+    await restrictToOwner(dir, 0o700);
+    await assertPrivatePathIdentity(dir, dirWas);
+  } else {
+    // POSIX, unchanged: only when this call created it, which is what passing `mode` to mkdir
+    // already meant. Every file beneath gets its own 0600 from the writer regardless, so the
+    // directory's mode is not load-bearing, and one the user has deliberately opened up is theirs
+    // to have opened up. `chmod` follows a symlink here, and pointing a store at another disk is
+    // an ordinary thing to do, so there is no link check either.
+    const created = (await mkdir(dir, { recursive: true, mode: 0o700 })) !== undefined;
+    // Swallowed, the way `sync.ts` swallows the same call three times over. `mkdir`'s mode is a
+    // request a filesystem without permissions ignores; `chmod` on that same filesystem fails. And
+    // `ensureRunsDir` is the first thing `record`, `attach`, `replay`, `pull` and `quickstart` all
+    // do, so making it fatal would abort every one of them on an exFAT or vfat workspace that
+    // worked before. What it buys is narrow enough to be worth losing there: umask can only clear
+    // bits, so `mkdir(0o700)` is already at most 0700 and this only restores what an exotic one
+    // took away. On Windows, where the mode is discarded and the ACL is the whole protection, the
+    // branch above stays fatal.
+    if (created) await restrictToOwner(dir, 0o700).catch(() => undefined);
+  }
+
+  const ignore = join(orca, '.gitignore');
   if (!(await stat(ignore).catch(() => null))) {
     await writeFile(
       ignore,

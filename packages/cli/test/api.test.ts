@@ -56,7 +56,9 @@ describe('Orca — the programmatic API', () => {
     expect(result.runId).toMatch(/^run_[0-9a-f]+$/);
     expect(result.exitCode).toBe(0);
     expect(result.events).toBeGreaterThan(4);
-    expect(result.runDir).toContain('.orca/runs/');
+    // `join`, not a literal: the assertion spelled the separator `/` and so only ever held on
+    // POSIX. The API returns a real path, and on Windows that is `.orca\runs\run_…`.
+    expect(result.runDir).toContain(join('.orca', 'runs'));
   });
 
   it('warns in the result, not only on a terminal, when nothing was captured', async () => {

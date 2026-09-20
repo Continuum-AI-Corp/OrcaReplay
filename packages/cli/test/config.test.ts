@@ -1,6 +1,8 @@
-import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readdir, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parseArgs } from '../src/args.js';
 import {
@@ -10,6 +12,30 @@ import {
   resolveUpstream,
   writeConfig,
 } from '../src/config.js';
+
+/**
+ * 0600 and 0700 say nothing on Windows: `chmod` there sets the read-only attribute and `stat`
+ * answers 0o666 whatever was asked for. What actually decides who may read the file is its ACL, so
+ * that is what gets checked — `(I)` marks an inherited entry, and an inherited entry on this path
+ * is one the config directory handed down to it. `restrictToOwner`'s own tests in
+ * @orcareplay/core cover exactly which trustees are left; the property here is that none of them
+ * came from outside.
+ */
+async function expectOwnerOnly(path: string, mode: number): Promise<void> {
+  if (process.platform !== 'win32') {
+    expect((await stat(path)).mode & 0o777, path).toBe(mode);
+    return;
+  }
+  const icacls = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'icacls.exe');
+  const { stdout } = await promisify(execFile)(icacls, [path]);
+  // Nothing inherited...
+  expect(stdout, path).not.toContain('(I)');
+  // ...and nothing else granted. `(I)` alone would pass a surviving *explicit* ACE for a third
+  // party, which is exactly what `/inheritance:r` plus `/grant:r` used to leave behind. Counted
+  // rather than named, because the names icacls prints are localized.
+  const granted = stdout.split(/\r?\n/).filter((line) => line.includes(':(')).length;
+  expect(granted, `${path}: expected owner, SYSTEM and Administrators only`).toBe(3);
+}
 
 /**
  * Config exists for one job: let `orca compare --models a,b,c` reach several models without the
@@ -26,25 +52,95 @@ describe('config', () => {
   });
 
   afterEach(async () => {
-    await rm(home, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   });
 
-  // POSIX only. Windows has no mode bits: `chmod 0o600` is a no-op on NTFS and `stat` answers
-  // 0o666 whatever was asked for, so this asserts something the platform cannot provide. Skipped
-  // rather than loosened — the guarantee is real where it can be made, and a test that accepted
-  // 0o666 would stop noticing if it were lost on Linux too.
-  it.skipIf(process.platform === 'win32')(
-    'stores the file where only its owner can read it',
-    async () => {
-      // It holds an API key. 0600 is the same bar ~/.aws/credentials and ~/.npmrc set, and the
-      // directory has to match or the file's mode is decoration.
-      await writeConfig({ gateway: { url: 'https://gw.example', api_key: 'sk-secret' } }, env);
+  it('stores the file where only its owner can read it', async () => {
+    // It holds an API key. 0600 is the same bar ~/.aws/credentials and ~/.npmrc set, and the
+    // directory has to match or the file's mode is decoration.
+    //
+    // This ran on POSIX only, on the reading that Windows "cannot provide" the guarantee, because
+    // `chmod 0o600` is a no-op on NTFS. It cannot provide it *as mode bits*. It has permissions
+    // all the same, and without this the key sat in a file the whole machine could read.
+    await writeConfig({ gateway: { url: 'https://gw.example', api_key: 'sk-secret' } }, env);
 
-      const path = configPath(env);
-      expect((await stat(path)).mode & 0o777).toBe(0o600);
-      expect((await stat(join(home, 'orca'))).mode & 0o777).toBe(0o700);
+    await expectOwnerOnly(configPath(env), 0o600);
+    await expectOwnerOnly(join(home, 'orca'), 0o700);
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'never leaves the key on disk when it cannot protect the file',
+    async () => {
+      // `mode: 0o600` is discarded on Windows, so until `restrictToOwner` has run the file carries
+      // whatever the directory handed down. Written straight to its final path, a failure there —
+      // icacls unavailable, `SystemRoot` unset — left the key readable by every account, while
+      // `orca setup` reported an error that mentioned none of it. Measured before this was fixed.
+      await writeConfig({ gateway: { url: 'https://gw.example', api_key: 'sk-earlier' } }, env);
+
+      const saved = process.env['SystemRoot'];
+      delete process.env['SystemRoot'];
+      try {
+        await expect(
+          writeConfig({ gateway: { url: 'https://gw.example', api_key: 'sk-must-not-land' } }, env),
+        ).rejects.toThrow(/SystemRoot/);
+      } finally {
+        process.env['SystemRoot'] = saved;
+      }
+
+      // Nowhere under the config directory — the staging file included — and the config that was
+      // already there is intact. Truncating in place, or deleting on failure, would have taken it.
+      const dir = join(home, 'orca');
+      for (const name of await readdir(dir)) {
+        expect(await readFile(join(dir, name), 'utf8'), name).not.toContain('sk-must-not-land');
+      }
+      expect(await readFile(configPath(env), 'utf8')).toContain('sk-earlier');
     },
   );
+
+  it('reads nothing at all when a test supplies no environment', async () => {
+    // The guard on vitest.setup.ts. `record`, `replay`, `attach` and `compare` all resolve their
+    // upstream through `readConfig()` with no argument. If that ever returns the config of whoever
+    // is running the suite, tests start sending live requests to their gateway — and never in CI,
+    // which has no config, so nothing would say so.
+    await expect(readConfig()).resolves.toEqual({});
+  });
+
+  it('never installs a half-written config, however many writers race', async () => {
+    // The staging file used to be named after the destination alone, so every writer addressed one
+    // scratch path with nothing serialising them: B's truncate landed on the file A was about to
+    // rename into place, and A installed an *empty* config over the user's own while reporting
+    // success. `readConfig` swallows the parse failure, so the gateway and its key simply vanish.
+    //
+    // The property is that nobody installs a partial file — not that every racing writer wins. On
+    // Windows a rename onto a path another writer holds open fails with EPERM, and that is the
+    // better half of the trade: a loud failure leaving the previous config intact, where writing
+    // straight to the destination used to interleave two configs into one file in silence.
+    //
+    // Said plainly rather than implied: this does not reproduce the interleaving, and it was not
+    // written as though it did. Restoring the shared name and running thirty writers over eight
+    // rounds produced no empty and no corrupt config here, because Windows refuses the concurrent
+    // open instead of truncating. The interleaving is a POSIX shape, and the reason to fix it by
+    // convention — `BlobStore.put` and scrub's `commit` both randomise — rather than by a test
+    // that happens to catch it. What this does guard is the invariant either way: whatever ends up
+    // installed parses, and no scratch file is left to be mistaken for one.
+    const results = await Promise.allSettled(
+      Array.from({ length: 5 }, (_, n) =>
+        writeConfig({ gateway: { url: `https://gw-${n}.example`, api_key: `sk-${n}` } }, env),
+      ),
+    );
+    expect(
+      results.some((r) => r.status === 'fulfilled'),
+      'every writer failed',
+    ).toBe(true);
+
+    const config = await readConfig(env);
+    expect(config.gateway?.url, 'installed an empty or partial config').toMatch(
+      /^https:\/\/gw-\d+\.example$/,
+    );
+    expect(config.gateway?.api_key).toMatch(/^sk-\d+$/);
+    // And no scratch file survives to be mistaken for a config later.
+    expect((await readdir(join(home, 'orca'))).filter((f) => f.includes('incoming'))).toEqual([]);
+  });
 
   it('round-trips what was written', async () => {
     await writeConfig(

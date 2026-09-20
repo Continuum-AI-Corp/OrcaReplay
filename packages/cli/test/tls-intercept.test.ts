@@ -374,27 +374,41 @@ describe('orca record --tls-intercept', () => {
     expect(lines.join('')).not.toContain('tls.intercept_required');
   });
 
-  it('trusts the run CA through the child environment and nowhere else', async () => {
-    const result = await record(['--tls-intercept', '--tls-hosts', `127.0.0.1:${model.port}`]);
-    const env = await childEnv();
+  /**
+   * Windows environment variables are case-insensitive, so `HTTPS_PROXY` and `https_proxy` are one
+   * variable there and only one casing reads back. The child is configured correctly either way —
+   * every lookup finds it — but the assertion that the two spellings agree cannot hold on a
+   * platform where there are not two of them.
+   */
+  it.skipIf(process.platform === 'win32')(
+    'trusts the run CA through the child environment and nowhere else',
+    async () => {
+      const result = await record(['--tls-intercept', '--tls-hosts', `127.0.0.1:${model.port}`]);
+      const env = await childEnv();
 
-    expect(env.HTTPS_PROXY).toBe(env.https_proxy);
-    expect(env.HTTPS_PROXY).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
-    // Additive for Node, whole-store replacements for the OpenSSL family — hence two files.
-    expect(env.NODE_EXTRA_CA_CERTS).toBe(join(result.runDir, 'tls', 'ca.crt'));
-    for (const key of ['SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE']) {
-      expect(env[key], key).toBe(join(result.runDir, 'tls', 'ca-bundle.crt'));
-    }
-    // The agent's own calls to the recording proxy must not be sent through the recording proxy.
-    expect(env.NO_PROXY).toContain('127.0.0.1');
+      expect(env.HTTPS_PROXY).toBe(env.https_proxy);
+      expect(env.HTTPS_PROXY).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      // Additive for Node, whole-store replacements for the OpenSSL family — hence two files.
+      expect(env.NODE_EXTRA_CA_CERTS).toBe(join(result.runDir, 'tls', 'ca.crt'));
+      for (const key of ['SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE']) {
+        expect(env[key], key).toBe(join(result.runDir, 'tls', 'ca-bundle.crt'));
+      }
+      // The agent's own calls to the recording proxy must not be sent through the recording proxy.
+      expect(env.NO_PROXY).toContain('127.0.0.1');
 
-    // Nothing global. Orca's own process was never asked to trust the run CA, and the variables
-    // it set on the child are absent from — or unchanged in — its own environment.
-    for (const key of ['NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE', 'NO_PROXY']) {
-      expect(process.env[key], key).toBe(ambient[key]);
-    }
-    expect(process.env.NODE_EXTRA_CA_CERTS ?? '').not.toContain(result.runDir);
-  });
+      // Nothing global. Orca's own process was never asked to trust the run CA, and the variables
+      // it set on the child are absent from — or unchanged in — its own environment.
+      for (const key of [
+        'NODE_EXTRA_CA_CERTS',
+        'SSL_CERT_FILE',
+        'REQUESTS_CA_BUNDLE',
+        'NO_PROXY',
+      ]) {
+        expect(process.env[key], key).toBe(ambient[key]);
+      }
+      expect(process.env.NODE_EXTRA_CA_CERTS ?? '').not.toContain(result.runDir);
+    },
+  );
 
   it('captures an allowlisted host and tunnels everything else', async () => {
     process.env.ORCA_TEST_TARGETS = JSON.stringify([

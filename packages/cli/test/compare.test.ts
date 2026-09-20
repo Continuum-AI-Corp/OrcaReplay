@@ -18,34 +18,24 @@ const FAKE_AGENT = join(here, 'fixtures', 'fake-agent.mjs');
 
 describe('compare without --models', () => {
   /**
-   * An empty config, supplied rather than assumed.
+   * This test used to swap `XDG_CONFIG_HOME` itself, because `compareCommand` falls back to
+   * `readConfig()` and so read the *real* `~/.config/orca`: on a machine where anyone had run
+   * `orca setup`, that config has models in it and this never reached the branch it names.
    *
-   * `compareCommand` falls back to `readConfig()`, which reads the *real* `~/.config/orca`. On a
-   * machine where anyone has run `orca setup` that config has models in it, so this test never
-   * reached the branch it names — it got as far as "no runs recorded" instead and failed on the
-   * wrong error. Nothing to do with the platform; CI passes only because CI has no config.
+   * vitest.setup.ts now does that for the whole suite, and for a larger reason than this test —
+   * the same fallback was sending live requests to the developer's gateway from the fork tests.
    */
-  async function withEmptyConfig<T>(fn: (cwd: string) => Promise<T>): Promise<T> {
-    const home = await mkdtemp(join(tmpdir(), 'orca-cmp-cfg-'));
-    const previous = process.env.XDG_CONFIG_HOME;
-    process.env.XDG_CONFIG_HOME = join(home, 'config');
-    try {
-      return await fn(home);
-    } finally {
-      if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
-      else process.env.XDG_CONFIG_HOME = previous;
-      await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-    }
-  }
-
   it('tells you both ways to supply models when none are available', async () => {
     const lines: string[] = [];
     const out = new Output({ write: (l) => void lines.push(l), isTTY: false });
-    await withEmptyConfig(async (home) => {
+    const home = await mkdtemp(join(tmpdir(), 'orca-cmp-cfg-'));
+    try {
       await expect(compareCommand(parseArgs(['compare', 'last']), out, home)).rejects.toThrow(
         /orca setup/,
       );
-    });
+    } finally {
+      await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    }
   });
 });
 

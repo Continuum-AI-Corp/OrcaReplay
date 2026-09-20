@@ -1,10 +1,35 @@
+import { execFile } from 'node:child_process';
 import { createPublicKey, X509Certificate } from 'node:crypto';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { rootCertificates } from 'node:tls';
+import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RunCa } from '../src/ca.js';
+
+/**
+ * 0600 and 0700 say nothing on Windows: `chmod` there sets the read-only attribute and `stat`
+ * answers 0o666 whatever was asked for. What actually decides who may read the file is its ACL, so
+ * that is what gets checked — `(I)` marks an inherited entry, and an inherited entry on this path
+ * is one the workspace handed down to it. `restrictToOwner`'s own tests in @orcareplay/core cover
+ * exactly which trustees are left; the property here is that none of them came from outside.
+ */
+async function expectOwnerOnly(path: string, mode: number): Promise<void> {
+  if (process.platform !== 'win32') {
+    expect((await stat(path)).mode & 0o777, path).toBe(mode);
+    return;
+  }
+  const icacls = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'icacls.exe');
+  const { stdout } = await promisify(execFile)(icacls, [path]);
+  // Nothing inherited...
+  expect(stdout, path).not.toContain('(I)');
+  // ...and nothing else granted. `(I)` alone would pass a surviving *explicit* ACE for a third
+  // party, which is exactly what `/inheritance:r` plus `/grant:r` used to leave behind. Counted
+  // rather than named, because the names icacls prints are localized.
+  const granted = stdout.split(/\r?\n/).filter((line) => line.includes(':(')).length;
+  expect(granted, `${path}: expected owner, SYSTEM and Administrators only`).toBe(3);
+}
 
 /**
  * The certificate authority a `--tls-intercept` run mints for itself.
@@ -76,13 +101,15 @@ describe('per-run certificate authority', () => {
     expect(ca.issue('api.openai.com').certPem).not.toBe(ca.issue('api.anthropic.com').certPem);
   });
 
-  it('keeps the private key at 0600 inside a 0700 directory', async () => {
-    const dirMode = (await stat(ca.dir)).mode & 0o777;
-    const keyMode = (await stat(ca.keyPath)).mode & 0o777;
-    const certMode = (await stat(ca.certPath)).mode & 0o777;
-    expect(dirMode).toBe(0o700);
-    expect(keyMode).toBe(0o600);
-    expect(certMode).toBe(0o600);
+  it('keeps the private key to its owner, in whatever the filesystem uses to say so', async () => {
+    // This key signs the certificates the agent has been told to trust for the life of the run.
+    // Anyone who can read it can impersonate every intercepted host to that agent; anyone who can
+    // write it can substitute a CA of their own. On Windows the inherited ACL granted both to
+    // every account on the machine, and the 0600 that was supposed to prevent it did nothing.
+    await expectOwnerOnly(ca.dir, 0o700);
+    await expectOwnerOnly(ca.keyPath, 0o600);
+    await expectOwnerOnly(ca.certPath, 0o600);
+    await expectOwnerOnly(ca.bundlePath, 0o600);
     expect(ca.dir.startsWith(runDir)).toBe(true);
   });
 

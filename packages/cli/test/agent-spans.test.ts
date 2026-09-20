@@ -51,6 +51,25 @@ afterEach(async () => {
  * bootstrap has to have.
  */
 describe('turning SDK spans into trace events', () => {
+  it('narrows its transport before the first span can land in it', async () => {
+    // The comment this replaces asserted "`mkdtemp` gives a directory only this user can enter" —
+    // true on POSIX, and on Windows the mode is discarded and the directory takes whatever `%TEMP%`
+    // hands down. Narrowed before `spans.jsonl` exists, because `icacls` does not re-propagate.
+    const runDir = await mkdtemp(join(tmpdir(), 'orca-spans-acl-'));
+    const spans = await installAgentSpans(runDir);
+    if (process.platform !== 'win32') {
+      expect((await stat(spans.transportDir)).mode & 0o777).toBe(0o700);
+      return;
+    }
+    const icacls = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'icacls.exe');
+    for (const path of [spans.transportDir, spans.spansPath]) {
+      const { stdout } = await promisify(execFile)(icacls, [path]);
+      expect(stdout.split(/\r?\n/).filter((l) => l.includes(':(')).length, path).toBe(3);
+    }
+    // The directory itself owns its ACL rather than inheriting one.
+    const { stdout } = await promisify(execFile)(icacls, [spans.transportDir]);
+    expect(stdout, spans.transportDir).not.toContain('(I)');
+  });
   it('keeps a handoff, naming both ends', () => {
     const event = eventForSpan({
       kind: 'span',

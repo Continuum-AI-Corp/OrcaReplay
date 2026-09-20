@@ -29,6 +29,9 @@ export default defineConfig({
     // permanent on npm if it goes wrong, and would have sat here green and unrun.
     include: ['packages/*/test/**/*.test.ts', 'scripts/**/*.test.ts'],
     environment: 'node',
+    // Every worker starts with an empty XDG_CONFIG_HOME — see the file for why that is not a
+    // convenience but the difference between a hermetic suite and one that calls a real gateway.
+    setupFiles: ['./vitest.setup.ts'],
     testTimeout: 30_000,
     hookTimeout: 30_000,
     pool: 'forks',
