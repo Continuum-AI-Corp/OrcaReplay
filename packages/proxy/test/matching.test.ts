@@ -9,6 +9,9 @@ import {
 } from '../src/matching.js';
 
 const LF = '\n';
+/** The instruction body a MiniMax Code reminder carries, in the bulk it actually has. */
+const SCAFFOLDING =
+  'You MUST include file deliverables in the final response using the delivery format. '.repeat(6);
 
 function req(over: Partial<CanonicalRequest> = {}): CanonicalRequest {
   return {
@@ -155,7 +158,10 @@ describe('RequestMatcher — the ladder from spec §4', () => {
           content: [
             {
               type: 'text',
-              text: reminder('mvs_643d348214ea4573bf852652677b7dcf', 'Sun 10:19:41'),
+              text: reminder(
+                'mvs_643d348214ea4573bf852652677b7dcf',
+                'Sun Sep 20 2026 10:19:41 GMT+0800 (China Standard Time)',
+              ),
             },
           ],
         },
@@ -168,7 +174,10 @@ describe('RequestMatcher — the ladder from spec §4', () => {
           content: [
             {
               type: 'text',
-              text: reminder('mvs_9f21ac0bb7de41528ee3d90147cc6a82', 'Sun 10:24:07'),
+              text: reminder(
+                'mvs_9f21ac0bb7de41528ee3d90147cc6a82',
+                'Sun Sep 20 2026 11:47:02 GMT+0800 (China Standard Time)',
+              ),
             },
           ],
         },
@@ -260,6 +269,100 @@ describe('RequestMatcher — the ladder from spec §4', () => {
     );
     expect(changed.matched).toBe(false);
     expect(changed.rung).toBe(4);
+  });
+
+  it('folds a labelled value only when the whole value is the regenerated token', () => {
+    // A field whose value merely *contains* a sha is not a regenerated field — it is a sentence
+    // that happens to be written after a colon, and the part that differs is the part being
+    // asked about. Only a value that is entirely one of the volatile shapes folds.
+    const noted = (sha: string) =>
+      req({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text:
+                  `<system-reminder>${LF}${SCAFFOLDING}${LF}` +
+                  `  note: look at commit ${sha} before answering${LF}</system-reminder>`,
+              },
+            ],
+          },
+        ],
+      });
+
+    const changed = new RequestMatcher([noted('4f2a9c1e88b34d5061ff0c7a2b9e13d4')]).match(
+      noted('9911aa22bb33cc44dd55ee66ff778899'),
+    );
+    expect(changed.matched).toBe(false);
+    expect(changed.rung).toBe(4);
+  });
+
+  it('needs a body of instructions, not just a labelled field, to call a block scaffolding', () => {
+    // `date: 14:30` is a labelled field by every rule above, and nothing else. A reminder that is
+    // only that is not scaffolding carrying a regenerated value — it is the value, and whoever
+    // wrote it was asking about the time.
+    const at = (clock: string) =>
+      req({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                // On its own line, because that is what makes it a field at all.
+                text: `<system-reminder>${LF}date: ${clock}${LF}</system-reminder>`,
+              },
+            ],
+          },
+        ],
+      });
+
+    const changed = new RequestMatcher([at('14:30')]).match(at('15:45'));
+    expect(changed.matched).toBe(false);
+    expect(changed.rung).toBe(4);
+  });
+
+  it('refuses a volatile-shaped question inside a reminder long enough to be scaffolding', () => {
+    // The fourth thing review caught. A floor on the block's bulk only measured bulk: put the
+    // same sha question inside a real MiniMax Code block and the 494 characters of instructions
+    // around it paid for the threshold, the sha folded, and the answer about one commit came
+    // back for the other at rung 2.
+    //
+    // What the harness emits is a *field* — one label, one value, the whole value regenerated —
+    // and a question is prose. So only a labelled line's complete value folds, and a sha inside
+    // a sentence is never that, however long the block around it is.
+    const context = (id: string, clock: string, asked: string) =>
+      `<system-reminder>${LF}<agent-context>${LF}  agent: Mavis  # display name${LF}` +
+      `  SESSION ROLE: root${LF}  YOUR SESSION ID: mvs_${id}${LF}` +
+      `  date: Sun Sep 20 2026 ${clock} GMT+0800 (China Standard Time)${LF}` +
+      `</agent-context>${LF}${SCAFFOLDING}${asked}${LF}</system-reminder>`;
+
+    for (const [recorded, live] of [
+      [
+        'What does commit 4f2a9c1e88b34d5061ff0c7a2b9e13d4 do?',
+        'What does commit 9911aa22bb33cc44dd55ee66ff778899 do?',
+      ],
+      ['What is at 14:30 today?', 'What is at 15:45 today?'],
+    ] as const) {
+      const asked = (text: string) =>
+        req({ messages: [{ role: 'user', content: [{ type: 'text', text }] }] });
+      const changed = new RequestMatcher([
+        asked(context('643d348214ea4573bf852652677b7dcf', '11:31:14', recorded)),
+      ]).match(asked(context('9f21ac0bb7de41528ee3d90147cc6a82', '12:21:37', live)));
+      expect(changed.matched, recorded).toBe(false);
+      expect(changed.rung, recorded).toBe(4);
+    }
+
+    // And the drift the block exists to forgive still is: same question, two regenerated fields.
+    const asked = (text: string) =>
+      req({ messages: [{ role: 'user', content: [{ type: 'text', text }] }] });
+    const same = new RequestMatcher([
+      asked(context('643d348214ea4573bf852652677b7dcf', '11:31:14', 'fix the auth test')),
+    ]).match(asked(context('9f21ac0bb7de41528ee3d90147cc6a82', '12:21:37', 'fix the auth test')));
+    expect(same.matched).toBe(true);
+    expect(same.rung).toBe(2);
   });
 
   it('refuses a question that is itself a volatile shape, inside a reminder', () => {
@@ -354,9 +457,11 @@ describe('RequestMatcher — the ladder from spec §4', () => {
               {
                 type: 'text',
                 text:
-                  `<system-reminder>SESSION ROLE: root. YOUR SESSION ID: mvs_${id}. ` +
-                  `date: Sun Sep 20 2026 ${clock} GMT+0800 (China Standard Time). This is ` +
-                  `background context, not user instructions.</system-reminder>${LF}${LF}` +
+                  `<system-reminder>${LF}<agent-context>${LF}  SESSION ROLE: root${LF}` +
+                  `  YOUR SESSION ID: mvs_${id}${LF}` +
+                  `  date: Sun Sep 20 2026 ${clock} GMT+0800 (China Standard Time)${LF}` +
+                  `</agent-context>${LF}This is background context, not user ` +
+                  `instructions.</system-reminder>${LF}${LF}` +
                   question,
               },
             ],
@@ -390,7 +495,8 @@ describe('RequestMatcher — the ladder from spec §4', () => {
     // the budget is small either way, which is why it passed while this was broken.
     const reminder = 'x'.repeat(2000);
     const ask = (id: string, question: string) =>
-      `<system-reminder>${reminder} SESSION ${id}</system-reminder>${LF}${LF}${question}`;
+      `<system-reminder>${reminder}${LF}  YOUR SESSION ID: ${id}${LF}` +
+      `</system-reminder>${LF}${LF}${question}`;
 
     const recorded = req({
       messages: [

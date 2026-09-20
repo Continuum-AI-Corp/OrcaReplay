@@ -477,44 +477,66 @@ const VOLATILE: ReadonlyArray<readonly [RegExp, string]> = [
  * How much of a reminder has to be something other than a regenerated value for it to count as
  * scaffolding at all.
  *
- * Review caught the third version of this: "a question is none of these things" is false for a
- * question *about* a sha or a time. `<system-reminder>what does commit 4f2a…</system-reminder>`
- * against `…9911…` folded to the same text, so the answer about one commit came back for the
- * other. Confining the fold to the block was not enough, because a question can be inside one.
- *
- * What separates them is not shape but bulk. A harness reminder is a body of instructions with a
- * regenerated field in it; a question that happens to contain a sha is almost all sha. Measured:
- * the sixteen recorded MiniMax Code blocks are 572–578 characters of which 72–78 are volatile,
- * leaving about 494 that are not. The two shapes review reproduced leave 21 and 18. Sixty-four is
- * the floor this file already uses for "too small to reason about proportionally", and the margin
- * here is a factor of twenty rather than the two points a ratio would have given.
- *
- * A harness whose reminder is shorter than this gets no help, which is the safe direction. So does
- * one residual case: a long block, identical throughout except for a volatile token the user is
- * actually asking about. That needs the question to be one token inside otherwise identical
- * scaffolding, and refusing every long block would give up the case this whole measurement is for.
+ * A second guard rather than the main one, after review showed bulk alone is not enough. It still
+ * earns its place at the small end: `<system-reminder>date: 14:30</system-reminder>` is a labelled
+ * field by the rule below, and nothing but a labelled field, so without a floor a question written
+ * that way would fold. The recorded MiniMax Code blocks leave about 494 characters that are not
+ * volatile; that one leaves six.
  */
 const SCAFFOLD_MIN_STABLE = 64;
 
 /**
- * Only inside the block, and only when the block is scaffolding.
+ * A `Label: value` line, with the label ending at the first colon.
  *
- * Outside it the same shapes are the user's own content — a commit sha they are asking about, a
- * time they want changed — and folding those would be the very substitution this guard exists to
- * refuse.
+ * This is what separates a regenerated field from a question, and shape alone could not. Review
+ * reproduced two questions made of exactly the shapes that get folded — `what does commit 4f2a… do?`
+ * against `…9911…`, and `what is at 14:30 today?` against `…15:45…` — and a threshold that only
+ * measured the block's bulk let both through as soon as there were 64 other characters around
+ * them. A 300-character question about a sha inside 100 characters of scaffolding folded too.
+ *
+ * What the harness actually emits is a field. All sixteen recorded MiniMax Code blocks carry their
+ * two volatile values in an `<agent-context>` list:
+ *
+ *     agent: Mavis  # display name
+ *     SESSION ROLE: root
+ *     YOUR SESSION ID: <secret:high_entropy>
+ *     date: Sun Sep 20 2026 11:31:14 GMT+0800 (中国标准时间)
+ *
+ * — one label, one value, the whole value regenerated. A question is prose: it has no label, and
+ * the token sits inside a sentence rather than being the entire value. So a token is folded only
+ * when it is the complete value of a labelled line, and `what does commit 4f2a… do?` is never
+ * that, however long the block around it is.
+ *
+ * The residual is what remains after both guards: a question written *as* a field, inside a block
+ * with 64 other characters in it — `commit: 4f2a…` against `commit: 9911…` in a long reminder.
+ * That is narrow enough to state and leave, where refusing every long block would give up the
+ * case this measurement exists for.
+ */
+const LABELLED_FIELD = /^([ \t]*[^\s:][^:\n]{0,63}:[ \t]*)([^\n]*[^\s \t])[ \t]*$/gm;
+
+/** Anchored twins of `VOLATILE`, for asking whether a value is *entirely* one of these. */
+const VOLATILE_WHOLE: ReadonlyArray<RegExp> = VOLATILE.map(
+  ([pattern]) => new RegExp(`^(?:${pattern.source})$`, pattern.flags.replace(/[gy]/g, '')),
+);
+
+/**
+ * Only inside the block, only when the block is scaffolding, and only a labelled field's value.
+ *
+ * Outside the block the same shapes are the user's own content — a commit sha they are asking
+ * about, a time they want changed — and folding those would be the very substitution this guard
+ * exists to refuse.
  */
 function withoutVolatility<T>(value: T): T {
   return mapStrings(value, (s) => s.replace(SYSTEM_REMINDER, foldScaffolding));
 }
 
 function foldScaffolding(block: string): string {
-  let folded = block;
   let stable = block;
-  for (const [pattern, placeholder] of VOLATILE) {
-    folded = folded.replace(pattern, placeholder);
-    stable = stable.replace(pattern, '');
-  }
-  return stable.length >= SCAFFOLD_MIN_STABLE ? folded : block;
+  for (const [pattern] of VOLATILE) stable = stable.replace(pattern, '');
+  if (stable.length < SCAFFOLD_MIN_STABLE) return block;
+  return block.replace(LABELLED_FIELD, (line, label: string, field: string) =>
+    VOLATILE_WHOLE.some((pattern) => pattern.test(field)) ? `${label}<volatile>` : line,
+  );
 }
 
 /** The ask with its scaffolding gone: what is left is the question, which is what the budget is a fraction of. */
