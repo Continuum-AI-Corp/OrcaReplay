@@ -1301,14 +1301,6 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
   // nested repositories — so a replay that had touched nothing printed "your files are in that
   // store and were not put back" and left a copy of the whole workspace in a temp directory.
   const keptNested = await assertRestorable(recorded, initial.fsTree, ctx.cwd, artifacts);
-  // Not "they are left exactly as they are", which is only true of the restore. The replay runs
-  // the recorded agent live in this directory, and orca does not intercept what it does — so a
-  // recorded build step, generator or `rm` reaches inside these repositories like any other
-  // path, and the safety copy that reverses the rest of the tree holds nothing of theirs.
-  keepNestedNote(out, keptNested, {
-    effect: 'orca holds no copy of what is inside them, so whatever this replay does there stays',
-    next: 'replay with --worktree to run the agent somewhere orca can put back',
-  });
 
   // A store of its own, under the OS temp dir: the safety snapshot is scratch, and writing it into
   // the trace's shadow store would leave an object in a recorded run that nothing references.
@@ -1327,15 +1319,34 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
   });
   const before = await safety.snapshotTurn(0);
 
+  // BOTH TREES, because the gap belongs to whichever of them holds a gitlink.
+  //
+  // `keptNested` is what the *recording* cannot write. What `release` below actually skips is
+  // every gitlink in the *copy of the operator's own tree*, and those are not the same set: a
+  // repository cloned into the workspace since the recording was made is in the second and not
+  // the first. Reporting only the first said nothing about it and then promised, unqualified,
+  // that the files come back — while the replayed agent's writes inside it stayed.
+  const keptHere = await safety.gitlinks(before.tree);
+  const kept = [...new Set([...keptNested, ...keptHere])].sort();
+
+  // Not "they are left exactly as they are", which is only true of the restore. The replay runs
+  // the recorded agent live in this directory, and orca does not intercept what it does — so a
+  // recorded build step, generator or `rm` reaches inside these repositories like any other
+  // path, and neither snapshot holds anything of theirs. Said before the agent starts.
+  keepNestedNote(out, kept, {
+    effect: 'orca holds no copy of what is inside them, so whatever this replay does there stays',
+    next: 'replay with --worktree to run the agent somewhere orca can put back',
+  });
+
   out.info('replay.restored', {
     to: initial.fsTree,
     your_tree: before.tree,
     // The unqualified sentence is the one the operator acts on, so where it is not true of the
     // whole tree it does not get to be said of the whole tree.
     note:
-      keptNested.length === 0
+      kept.length === 0
         ? 'your files are restored when the replay ends'
-        : `your files are restored when the replay ends, except inside ${keptNested.join(', ')}`,
+        : `your files are restored when the replay ends, except inside ${kept.join(', ')}`,
   });
 
   // Two callers, on purpose — see `Workspace.release`. Restoring twice would be wrong rather than
@@ -1405,8 +1416,11 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
     // — including the case where that state was a populated cache, as it is for a recording of
     // one mid-pipeline stage. Doing it the other way round deleted that stage's own input.
     await resetArtifacts(ctx.cwd, artifacts, out);
-    // `allowIncomplete` only because the guard above has already decided these repositories are
-    // not in anything this replay deletes; where they were, it threw instead of reaching here.
+    // `keptNested`, not `kept`: this writes the *recording's* tree, so the only gaps it can meet
+    // are that tree's own gitlinks. A repository the operator added since is not in it to skip.
+    //
+    // Tolerated only because the guard above has already decided these repositories are not in
+    // anything this replay deletes; where they were, it threw instead of reaching here.
     await recorded.restore(initial.fsTree, ctx.cwd, {
       allowIncomplete: keptNested.length > 0,
     });
@@ -1465,11 +1479,13 @@ export async function assertRestorable(
   // catches that: `assertResettable` asks `uncaptured(['data/cache'])`, and git does not look
   // inside an embedded repository, so it comes back empty and the reset goes ahead. The files
   // are then gone with nothing anywhere holding a byte of them, under exit 0.
-  const doomed = gitlinks.filter((path) =>
-    roots.some(
-      (root) => path === root || path.startsWith(`${root}/`) || root.startsWith(`${path}/`),
-    ),
-  );
+  const doomed = gitlinks.filter((path) => {
+    const one = fold(path);
+    return roots.some((root) => {
+      const other = fold(root);
+      return one === other || one.startsWith(`${other}/`) || other.startsWith(`${one}/`);
+    });
+  });
   if (doomed.length === 0) return gitlinks;
   throw new Error(
     `this replay would delete ${roots.join(', ')} to put the harness back where the recording ` +
@@ -1479,6 +1495,18 @@ export async function assertRestorable(
       'outside the adapter’s reset paths, or replay with --in-place to leave the working tree ' +
       'alone.',
   );
+}
+
+/**
+ * Compare paths the way the filesystem underneath them does.
+ *
+ * `rm -rf <dir>/Cache` removes `cache` on Windows, and git treats the two as one path there,
+ * so a case-sensitive prefix test calls a corpus safe and then deletes it. Folded on the
+ * platforms whose filesystems are case-insensitive by default; erring that way costs at worst
+ * a replay refused on a case-sensitive APFS volume, and erring the other way costs the corpus.
+ */
+function fold(path: string): string {
+  return process.platform === 'win32' || process.platform === 'darwin' ? path.toLowerCase() : path;
 }
 
 /**
@@ -1585,9 +1613,16 @@ export function resetRoots(dir: string, artifacts: HarnessArtifacts | undefined)
     if (declared === '' || declared === '.' || declared === '..' || declared.includes('*'))
       continue;
     // Never outside the workspace, whatever an adapter declares.
-    if (!isInsideDir(dir, resolve(dir, declared))) continue;
-    // Forward slashes: this is handed to `git ls-files` as a pathspec as well as to `resolve`.
-    roots.push(declared.split(/[\\/]/).join('/'));
+    const resolved = resolve(dir, declared);
+    if (!isInsideDir(dir, resolved)) continue;
+    // Through `resolve` and back, so what leaves here is the path the deletion will act on
+    // rather than the spelling the adapter happened to use. `./cache`, `data//cache` and
+    // `tools/../cache` all reach `rm` as one path and have to leave here as one too: the
+    // guard below compares these strings, and a guard looking at a different set from the
+    // `rm` is worse than none. Forward slashes, since this is also a `git ls-files` pathspec.
+    const root = relative(dir, resolved).split(/[\\/]/).join('/');
+    if (root === '') continue;
+    roots.push(root);
   }
   return [...new Set(roots)];
 }

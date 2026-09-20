@@ -116,6 +116,29 @@ describe('assertRestorable', () => {
     await expect(assertRestorable(capture, tree, dir, artifacts(['too']))).resolves.toHaveLength(2);
   });
 
+  it('normalizes the declared path the way the deletion does, before comparing', async () => {
+    // `resetArtifacts` deletes `resolve(dir, root)`; the containment test compares the declared
+    // string. For anything but a clean relative path the two disagree — and it is the guard that
+    // must not, because the `rm` happens either way. Every form below removes `<dir>/cache`.
+    for (const declared of ['./cache', 'tools/../cache', 'cache/./']) {
+      await expect(
+        assertRestorable(capture, tree, dir, artifacts([declared])),
+        declared,
+      ).rejects.toThrow(/cannot put cache\/corpus back/);
+    }
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'compares case the way the filesystem does, where the filesystem does not care',
+    async () => {
+      // `rm -rf <dir>/Cache` on Windows removes `cache`, and git treats the two as one path.
+      // A case-sensitive prefix test therefore calls a corpus safe and then deletes it.
+      await expect(assertRestorable(capture, tree, dir, artifacts(['Cache']))).rejects.toThrow(
+        /cannot put cache\/corpus back/,
+      );
+    },
+  );
+
   it('refuses when the reset path is inside the repository, not the other way round', async () => {
     // The mirror image of the case above, and the one a containment test written in the obvious
     // direction misses. `resetBeforeReplay: ['data/cache']` — a multi-segment declaration, which
@@ -234,6 +257,30 @@ describe('orca replay, in a workspace holding a nested git repository', () => {
       // when they ran the command is what they have when it finishes.
       expect(await readFile(join(dir, 'output.txt'), 'utf8')).toBe('my own uncommitted edit');
       expect(await safetyCopies()).toEqual([]);
+    },
+    timeout,
+  );
+
+  it(
+    'names a repository the operator added since the recording, which only the copy knows about',
+    async () => {
+      // The gap belongs to whichever tree holds the gitlink, and the two are not the same set.
+      // `assertRestorable` reads the recording's; what `release` actually skips is every gitlink
+      // in the copy of the operator's own tree. A repository cloned into the workspace after the
+      // recording was made is in the second and not the first — so reporting only the first said
+      // nothing about it and then promised, unqualified, that the files come back.
+      const fresh = join(dir, 'vendored-since');
+      await mkdir(fresh, { recursive: true });
+      await initRepo(fresh);
+      await writeFile(join(fresh, 'mine.txt'), 'work only I have');
+      await run('git', ['add', '-A'], { cwd: fresh });
+      await run('git', ['commit', '-qm', 'since'], { cwd: fresh });
+
+      const { code, out } = await replay();
+      expect(code, out).toBe(0);
+      expect(out).toContain('vendored-since');
+      expect(out).toContain('restored when the replay ends, except inside');
+      expect(out).toContain('orca holds no copy of what is inside them');
     },
     timeout,
   );
