@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { RecordContext } from '@orcareplay/plugin-api';
 import { decodeForwardPath } from '@orcareplay/proxy';
 import { checkAdapterContract, formatContractResult } from '../src/contract.js';
-import { mcodeAdapter, redirected } from '../src/mcode.js';
+import { hasOrigin, mcodeAdapter, redirected } from '../src/mcode.js';
 import { defaultAdapters } from '../src/registry.js';
 
 /**
@@ -14,6 +14,9 @@ import { defaultAdapters } from '../src/registry.js';
  * client is Node's `fetch`, which consults no proxy variable — so neither of the two routes that
  * came before it reaches this one.
  */
+const LF = '\n';
+const PROXY = 'http://127.0.0.1:44100';
+
 describe('the mcode adapter', () => {
   let root: string;
   let ctx: RecordContext;
@@ -105,6 +108,69 @@ describe('the mcode adapter', () => {
       'orca-recorded',
       'orca-recorded',
     ]);
+  });
+
+  it('takes the key out however the config spells it', () => {
+    // Caught in review. The first version anchored the value to the end of the line, so
+    // `apiKey: sk-live-… # rotate me` matched nothing and the live key was written into the
+    // generated config — while `baseURL` on another line still matched, so the file was written
+    // anyway. That file lands in the run directory, and `capture.mjs` copies the whole run into
+    // `capture/<model>/trace/` without scrubbing it, so the key would have left with the capture.
+    // The same anchor missed `api_key:`.
+    const spellings = [
+      '      apiKey: sk-live-plain',
+      '      apiKey: sk-live-commented # rotate me',
+      '      api_key: sk-live-snake',
+      '      api-key: sk-live-dash',
+      '      apiKey: "sk-live-quoted"',
+      "      apiKey: 'sk-live-single'   # note",
+      '      APIKEY: sk-live-upper',
+    ].join(LF);
+
+    const out = redirected(
+      `${spellings}${LF}      baseURL: https://gateway.example/v1${LF}`,
+      PROXY,
+    );
+    expect(out).not.toContain('sk-live-');
+    // Seven keys in, seven placeholders out — not six with one line quietly skipped.
+    expect([...out.matchAll(/orca-recorded/g)]).toHaveLength(7);
+    // Quoting and the comment are the operator's, and survive.
+    expect(out).toContain('apiKey: "orca-recorded"');
+    expect(out).toContain('# rotate me');
+  });
+
+  it('moves an origin however the config spells it', () => {
+    const out = redirected(
+      [
+        '      baseURL: https://one.example/v1',
+        '      baseURL: https://two.example/v1 # primary',
+        '      base_url: https://three.example/v1',
+        '      baseURL: "https://four.example/v1"',
+        '',
+      ].join(LF),
+      PROXY,
+    );
+    const bases = [...out.matchAll(/base[_-]?url:\s*"?(\S+?)"?(?:\s|$)/gi)].map((m) => m[1]!);
+    expect(bases.map((base) => decodeForwardPath(new URL(base).pathname)?.base)).toEqual([
+      'https://one.example/v1',
+      'https://two.example/v1',
+      'https://three.example/v1',
+      'https://four.example/v1',
+    ]);
+  });
+
+  it('does not mistake a neighbouring field for a credential', () => {
+    // The rewrite is narrow on purpose: it changes the two fields it knows and nothing else, so a
+    // value that merely looks key-shaped is left as the operator wrote it.
+    const out = redirected(`      notAKey: sk-not-a-credential-field${LF}`, PROXY);
+    expect(out).toContain('notAKey: sk-not-a-credential-field');
+  });
+
+  it('launches untouched when the only origin line has no value', () => {
+    // `hasOrigin` has to agree with the rewriter about what counts, or the adapter writes a config
+    // that redirects nothing and reports the run as captured.
+    expect(hasOrigin(`      baseURL:${LF}      apiKey: sk-live-x${LF}`)).toBe(false);
+    expect(hasOrigin(`      baseURL: https://gateway.example/v1${LF}`)).toBe(true);
   });
 
   it('leaves everything it did not need to change alone', () => {

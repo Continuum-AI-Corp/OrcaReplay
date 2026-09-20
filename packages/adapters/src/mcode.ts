@@ -54,7 +54,7 @@ export const mcodeAdapter: Adapter = {
     // move. Launching untouched leaves the operator with MCode's own behaviour and orca's empty
     // capture warning, which is a truer answer than a redirect aimed at a provider that is not
     // there.
-    if (original === undefined || !REWRITABLE.test(original)) {
+    if (original === undefined || !hasOrigin(original)) {
       return { command: 'mcode', args: [...ctx.userArgs], env: {} };
     }
 
@@ -78,16 +78,69 @@ function configPath(env: Record<string, string | undefined>): string {
   return dir !== undefined ? join(dir, 'config.yaml') : join(homedir(), '.minimax', 'config.yaml');
 }
 
-const BASE_URL = /^(\s*baseURL:[ \t]*)(\S+)[ \t]*$/gm;
-const API_KEY = /^(\s*apiKey:[ \t]*)(\S+)[ \t]*$/gm;
-const REWRITABLE = /^\s*baseURL:[ \t]*\S+[ \t]*$/m;
+/**
+ * A `key: value` line in the config, whatever YAML lets it look like.
+ *
+ * Review caught the first version of this, which was two anchored regexes requiring the value to
+ * run to the end of the line: `apiKey: sk-live-… # rotate me` matched neither, so the live key was
+ * written into the generated config while `baseURL` on another line still matched and the file was
+ * written anyway. That file lands in the run directory and `capture.mjs` copies the whole run into
+ * `capture/<model>/trace/` unscrubbed, so the key would have ridden out with the capture. The same
+ * anchor missed the `api_key:` spelling.
+ *
+ * Matched by line and split in code rather than by one larger regex. Quoting, comments and a CRLF
+ * line ending are three separate things to get right, and a regex that got all three would be
+ * harder to read than the file it is parsing.
+ */
+const FIELD = /^([ \t]*)(baseURL|base[_-]url|apiKey|api[_-]key)([ \t]*:[ \t]*)([^\n]*)$/i;
+
+/** A YAML comment starts at ` #`; a bare `#` inside a URL is a fragment, not a comment. */
+const COMMENT = /\s#/;
+
+interface Value {
+  value: string;
+  quote: string;
+  tail: string;
+}
+
+function splitValue(rest: string): Value {
+  const quoted = /^(['"])([^'"]*)\1([\s\S]*)$/.exec(rest);
+  if (quoted !== null) return { quote: quoted[1]!, value: quoted[2]!, tail: quoted[3]! };
+  const at = rest.search(COMMENT);
+  const head = at === -1 ? rest : rest.slice(0, at);
+  const comment = at === -1 ? '' : rest.slice(at);
+  // `\r` too, so a CRLF config does not leave the carriage return inside the value.
+  const value = head.replace(/[ \t\r]+$/, '');
+  return { quote: '', value, tail: head.slice(value.length) + comment };
+}
+
+function rewriteField(line: string, proxyUrl: string): string {
+  const parts = FIELD.exec(line);
+  if (parts === null) return line;
+  const [, indent, name, separator, rest] = parts;
+  const { value, quote, tail } = splitValue(rest!);
+  if (value === '') return line;
+  const replaced = /key$/i.test(name!)
+    ? PLACEHOLDER_KEY
+    : // `v1` when the decoder will not take this origin, matching what the env route falls back to.
+      forwardOrProxyBase(proxyUrl, value);
+  return `${indent}${name}${separator}${quote}${replaced}${quote}${tail}`;
+}
+
+/** True when there is at least one origin in here for the redirect to move. */
+export function hasOrigin(config: string): boolean {
+  return config.split('\n').some((line) => {
+    const parts = FIELD.exec(line);
+    return parts !== null && !/key$/i.test(parts[2]!) && splitValue(parts[4]!).value !== '';
+  });
+}
 
 /**
  * The operator's config with every origin routed through the proxy and every key taken out.
  *
  * Rewritten as text rather than parsed and re-emitted. A YAML round-trip would reformat a file
- * orca did not write — comments, quoting, key order — and the only two lines that need to change
- * are recognisable without understanding the rest.
+ * orca did not write — comments, quoting, key order — and the only lines that need to change are
+ * recognisable without understanding the rest.
  *
  * Each origin goes through `/forward/`, so the request arrives naming the destination it was taken
  * away from. Replacing it with orca's own default instead would point a recorded run at a host the
@@ -97,18 +150,15 @@ const REWRITABLE = /^\s*baseURL:[ \t]*\S+[ \t]*$/m;
  * their real origins, and a run on one of those is simply missing from the trace.
  *
  * The key becomes the placeholder because this file is written inside the run directory, and §7
- * says a credential is never written down there. Orca supplies the real one for the origin it
- * forwards to — that is what `orca setup` configures and what `upstreamHeaders` injects. Without
- * it the gateway answers 401, and the prompt is captured anyway: it travels in the request, which
- * orca records before the origin ever replies.
+ * says a credential is never written down there. `capture.mjs` copies that whole directory into
+ * `capture/<model>/trace/` without scrubbing it, so a key left here leaves with the capture. Orca
+ * supplies the real one for the origin it forwards to — that is what `orca setup` configures and
+ * what `upstreamHeaders` injects. Without it the gateway answers 401, and the prompt is captured
+ * anyway: it travels in the request, which orca records before the origin ever replies.
  */
 export function redirected(config: string, proxyUrl: string): string {
   return config
-    .replace(
-      BASE_URL,
-      (_m, prefix: string, url: string) =>
-        // `v1` when the decoder will not take this origin, matching what the env route falls back to.
-        `${prefix}${forwardOrProxyBase(proxyUrl, url)}`,
-    )
-    .replace(API_KEY, (_m, prefix: string) => `${prefix}${PLACEHOLDER_KEY}`);
+    .split('\n')
+    .map((line) => rewriteField(line, proxyUrl))
+    .join('\n');
 }
