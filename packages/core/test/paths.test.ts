@@ -1,6 +1,8 @@
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   ensureRunsDir,
@@ -98,6 +100,112 @@ describe('"last" after a replay', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+});
+
+describe('ensureRunsDir on a store that already exists', () => {
+  /**
+   * The Windows ACL was applied only when this call created `.orca/runs`, and `mkdir` returns
+   * undefined for a directory that already exists — so a store skipped once was skipped forever.
+   * That is every install predating the fix, and every store `orca quickstart` laid down.
+   *
+   * POSIX keeps create-only semantics: there the mode is not load-bearing (every file beneath gets
+   * its own 0600 from the writer) and a directory the user opened up deliberately is theirs.
+   */
+  it.runIf(process.platform === 'win32')(
+    'restricts a directory it did not create, because an inherited ACL is nobody’s choice',
+    async () => {
+      const dir = join(cwd, '.orca', 'runs');
+      await mkdir(dir, { recursive: true });
+      const icacls = join(process.env['SystemRoot']!, 'System32', 'icacls.exe');
+      const read = async (): Promise<string> => (await promisify(execFile)(icacls, [dir])).stdout;
+
+      expect(await read(), 'precondition: a hand-made store inherits').toContain('(I)');
+
+      await ensureRunsDir(cwd);
+
+      expect(await read()).not.toContain('(I)');
+    },
+  );
+});
+
+describe('ensureRunsDir and the directory the store stands in', () => {
+  /**
+   * The store's container, not only the store. Modify on `.orca` is enough to delete `runs` — a
+   * child's own DACL does not decide whether its parent may remove it — and leave a junction in
+   * its place, which needs no privilege on Windows. `mkdir(…, { recursive: true })` then accepts
+   * the junction as an existing directory, and `icacls` does not follow a reparse point: the
+   * narrowing lands on the junction while every trace is written through it into whatever it
+   * points at, under that directory's ACL, with `restrictToOwner` reporting success throughout.
+   */
+  it.runIf(process.platform === 'win32')(
+    'narrows the directory the store stands in, not only the store',
+    async () => {
+      await mkdir(join(cwd, '.orca', 'runs'), { recursive: true });
+      const icacls = join(process.env['SystemRoot']!, 'System32', 'icacls.exe');
+      const read = async (path: string): Promise<string> =>
+        (await promisify(execFile)(icacls, [path])).stdout;
+
+      expect(await read(join(cwd, '.orca')), 'precondition').toContain('(I)');
+
+      await ensureRunsDir(cwd);
+
+      for (const path of [join(cwd, '.orca'), join(cwd, '.orca', 'runs')]) {
+        expect(await read(path), path).not.toContain('(I)');
+      }
+    },
+  );
+
+  /**
+   * A link already in place, which narrowing the container does nothing about — and that is the
+   * population this exists for. `icacls` does not follow a reparse point, so the permissions
+   * would land on the link entry while the recording went through it into whatever it points at.
+   */
+  it.runIf(process.platform === 'win32')('refuses a store that is a link', async () => {
+    const elsewhere = join(cwd, 'elsewhere');
+    await mkdir(elsewhere);
+    await mkdir(join(cwd, '.orca'));
+    await promisify(execFile)('cmd.exe', [
+      '/d',
+      '/s',
+      '/c',
+      'mklink',
+      '/J',
+      join(cwd, '.orca', 'runs'),
+      elsewhere,
+    ]);
+
+    // `is a link`, not `is a link to <target>`: the check is `lstat` on the entry now, which
+    // answers whether this is a reparse point without resolving where it points. That is
+    // deliberate — `realpath` resolves, and a path that resolves elsewhere without being a link
+    // (a `subst` drive, a mapped drive, an 8.3 short name) was being refused as one.
+    await expect(ensureRunsDir(cwd)).rejects.toThrow(/is a link,/);
+  });
+
+  /**
+   * The container, which is the half the store's protection now rests on: it is created and
+   * narrowed *before* `runs` exists, so that nothing else can delete or replace what goes under
+   * it. A link standing there is refused before a single directory is made inside it.
+   */
+  it.runIf(process.platform === 'win32')(
+    'refuses a store whose container is a link, before making anything inside it',
+    async () => {
+      const elsewhere = join(cwd, 'elsewhere');
+      await mkdir(elsewhere);
+      await promisify(execFile)('cmd.exe', [
+        '/d',
+        '/s',
+        '/c',
+        'mklink',
+        '/J',
+        join(cwd, '.orca'),
+        elsewhere,
+      ]);
+
+      await expect(ensureRunsDir(cwd)).rejects.toThrow(/is a link,/);
+      // And nothing was written through it on the way to finding out.
+      expect(await readdir(elsewhere)).toEqual([]);
+    },
+  );
 });
 
 describe('path helpers', () => {

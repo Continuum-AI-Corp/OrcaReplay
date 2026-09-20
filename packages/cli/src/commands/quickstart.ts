@@ -1,8 +1,9 @@
 import { execFile } from 'node:child_process';
-import { cp, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, cp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { ensureRunsDir } from '@orcareplay/core';
 import { parseArgs, type ParsedArgs } from '../args.js';
 import { Output } from '../out.js';
 import { replayCommand } from './replay.js';
@@ -58,6 +59,34 @@ async function shippedRunId(): Promise<string> {
   const id = manifest.run_id;
   if (id === undefined) throw new Error('the shipped quickstart trace has no run_id');
   return id;
+}
+
+/**
+ * The store's modes, applied to a tree that was copied in rather than written.
+ *
+ * `cp` reproduces the source's permissions, and every shipped asset is 0644 in git, so without
+ * this the recording landed 0644 under a 0755 directory — in the store SECURITY.md calls 0600 and
+ * 0700. `pull` is the other command that *installs* a run rather than writing it, and chmods every
+ * entry for the same reason.
+ *
+ * The POSIX half of the promise, and only that half. On Windows `chmod` touches the read-only
+ * attribute and nothing else, and what protects the copy there is the ACL it takes from the
+ * directory it is copied *into* — not, as a review read `CopyFileEx`'s "security resource
+ * attributes" to mean, the one it came from. Measured: a file copied out of a world-readable
+ * source into a narrowed directory comes out at the destination's three trustees. The quickstart
+ * test asserts that on a file inside the run rather than leaving it as a belief.
+ */
+async function applyStoreModes(dir: string): Promise<void> {
+  // Each one swallowed: a filesystem without permissions ignores `cp`'s modes and rejects
+  // `chmod`, so a fatal call here would abort `orca quickstart` on an exFAT or vfat directory
+  // rather than leaving it where main already left it. `sync.ts` swallows the same call for the
+  // same reason.
+  await chmod(dir, 0o700).catch(() => undefined);
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) await applyStoreModes(path);
+    else await chmod(path, 0o600).catch(() => undefined);
+  }
 }
 
 /**
@@ -301,10 +330,20 @@ export async function quickstartCommand(
     );
   }
 
-  await mkdir(join(target, '.orca', 'runs'), { recursive: true });
+  // Through core, not a bare mkdir. This is the last caller that made the store by hand, and it
+  // is the one the README's first line runs — so what it laid down was the store every later
+  // `record`, `attach` and `fork` in that directory writes into. Two things were skipped:
+  // `.orca/.gitignore`, and on Windows the owner-only ACL, which `ensureRunsDir` applies and which
+  // nothing else ever repairs. `orca pull` was moved off its own bare mkdir for the same reasons.
+  await ensureRunsDir(target);
   await cp(join(ASSET, 'project'), target, { recursive: true });
   const runDir = join(target, '.orca', 'runs', runId);
   await cp(join(ASSET, 'trace'), runDir, { recursive: true });
+  // `cp` reproduces the source's permissions, and the source is a shipped npm package: every asset
+  // is 0644 in git, so the run landed 0644 under a 0755 directory — world-readable, in the store
+  // SECURITY.md says is 0600/0700. `pull` is the other command that *installs* a run rather than
+  // writing it, and it chmods every entry for exactly this reason.
+  await applyStoreModes(runDir);
   await adoptTrace(runDir, target);
 
   const all = await events();

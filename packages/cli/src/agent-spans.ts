@@ -1,4 +1,10 @@
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import {
+  assertPrivatePathIdentity,
+  privatePathIdentity,
+  removePrivateDirectory,
+  restrictToOwner,
+} from '@orcareplay/core';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MCP_RECORD_START, objectsOnLine } from '@orcareplay/mcp-shim';
@@ -270,14 +276,39 @@ export async function installAgentSpans(runDir: string): Promise<AgentSpanCaptur
   await writeFile(join(dir, SITECUSTOMIZE), SITECUSTOMIZE_SOURCE, 'utf8');
   const transportDir = await mkdtemp(join(tmpdir(), 'orca-spans-'));
   const spansPath = join(transportDir, SPANS_FILENAME);
-  // Best-effort: an unwritable transport must not stop the run, and the child creating it instead
-  // still lands inside a directory only this user can enter.
-  await writeFile(spansPath, '', { flag: 'a', mode: 0o600 }).catch(() => undefined);
-  // Who to ask about later. A sweep that finds this directory after orca is gone has no other way
-  // to tell an abandoned transport from one a longer run is still appending to.
-  await writeFile(join(transportDir, TRANSPORT_OWNER), String(process.pid), {
-    mode: 0o600,
-  }).catch(() => undefined);
+  const was = process.platform === 'win32' ? await privatePathIdentity(transportDir) : undefined;
+  // Narrowed before the first write, for the reason the comment above no longer gets to assume:
+  // `mkdtemp` gives a directory only this user can enter on POSIX, and on Windows gives whatever
+  // `%TEMP%` hands down. `icacls` does not re-propagate, so this has to happen before `spansPath`
+  // and the owner file exist, not after. A failure here fails the install, and the caller degrades
+  // to no agent-span capture rather than writing into a directory it cannot vouch for.
+  try {
+    // Windows only: `mkdtemp` already creates 0700 on POSIX, so there the call can only
+    // fail — on a filesystem without permissions it would abort a recording that main
+    // completed. On Windows the mode is discarded and this is the whole protection.
+    if (was) {
+      await restrictToOwner(transportDir, 0o700);
+      await assertPrivatePathIdentity(transportDir, was);
+      await writeFile(join(transportDir, TRANSPORT_OWNER), String(process.pid), {
+        mode: 0o600,
+        flag: 'wx',
+      });
+      await assertPrivatePathIdentity(transportDir, was);
+      await writeFile(spansPath, '', { mode: 0o600, flag: 'wx' });
+      await assertPrivatePathIdentity(transportDir, was);
+    }
+  } catch (err) {
+    if (was) await removePrivateDirectory(transportDir, was);
+    throw err;
+  }
+  if (!was) {
+    // POSIX mkdtemp supplies the protection at creation. Keep its existing best-effort writes;
+    // on Windows both files already exist and must never be recreated outside the identity guard.
+    await writeFile(spansPath, '', { flag: 'a', mode: 0o600 }).catch(() => undefined);
+    await writeFile(join(transportDir, TRANSPORT_OWNER), String(process.pid), {
+      mode: 0o600,
+    }).catch(() => undefined);
+  }
   return { spansPath, pythonPath: dir, transportDir };
 }
 
