@@ -34,7 +34,12 @@
 
 ## جرّبه بثلاثة أوامر
 
+حزمة npm واحدة اسمها `orcareplay`، تضع أمرًا واحدًا اسمه `orca` في مسار PATH لديك. لا توجد أداة
+منفصلة باسم « orca »، ولا يُثبَّت أي شيء داخل وكيلك.
+
 ```console
+npm i -g orcareplay             # the package is orcareplay; the command is orca
+
 orca record claude              # وكيلك، دون تعديل، يفعل ما يفعله
 orca replay last                # التشغيل نفسه مرة أخرى — بلا شبكة، بلا رموز، بلا تكلفة
 orca replay last --from 4 --model claude-haiku-4-5 --ui
@@ -42,10 +47,6 @@ orca replay last --from 4 --model claude-haiku-4-5 --ui
 
 السطر الثالث هو ما يجعل الناس يبقون: الملفات نفسها، وبادئة المحادثة نفسها، ونموذج مختلف ابتداءً من
 الخطوة 4. النموذج هو المتغيّر الوحيد، وهذا ما يجعل للإجابة معنى.
-
-```console
-npm i -g orcareplay
-```
 
 ## لماذا وُجد هذا
 

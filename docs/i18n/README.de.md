@@ -33,7 +33,12 @@ abgeschaltetem Netz abgespielt, dann an Checkpoint 4 auf zwei Modelle abgezweigt
 
 ## In drei Befehlen ausprobieren
 
+Ein npm-Paket namens `orcareplay`, das einen einzigen Befehl namens `orca` in deinen PATH legt. Es
+gibt kein separates Werkzeug namens „orca“, und in deinen Agenten wird nichts installiert.
+
 ```console
+npm i -g orcareplay             # Das Paket heißt orcareplay, der Befehl orca
+
 orca record claude              # dein Agent, unverändert, bei dem was er ohnehin tut
 orca replay last                # derselbe Lauf noch einmal — kein Netz, keine Tokens, keine Kosten
 orca replay last --from 4 --model claude-haiku-4-5 --ui
@@ -42,10 +47,6 @@ orca replay last --from 4 --model claude-haiku-4-5 --ui
 Die dritte Zeile ist die, wegen der man bleibt: dieselben Dateien, dasselbe Gesprächspräfix, ab
 Schritt 4 ein anderes Modell. Das Modell ist die einzige Variable — und genau das gibt der Antwort
 ihre Bedeutung.
-
-```console
-npm i -g orcareplay
-```
 
 ## Warum es das gibt
 

@@ -32,7 +32,12 @@ Claude, GPT, Gemini, Grok, DeepSeek, Qwen 등에 닿는다. `orca setup`이 기�
 
 ## 세 개의 명령으로 시작하기
 
+npm 패키지는 `orcareplay` 하나이며, PATH에 `orca`라는 명령 하나를 설치합니다. "orca"라는 별도의
+도구는 없으며, 에이전트 안에는 아무것도 설치되지 않습니다.
+
 ```console
+npm i -g orcareplay             # 패키지는 orcareplay, 설치되는 명령은 orca
+
 orca record claude              # 당신의 에이전트를, 손대지 않은 채, 하던 대로
 orca replay last                # 같은 실행을 한 번 더 — 통신 없음, 토큰 없음, 과금 없음
 orca replay last --from 4 --model claude-haiku-4-5 --ui
@@ -40,10 +45,6 @@ orca replay last --from 4 --model claude-haiku-4-5 --ui
 
 사람들이 머무는 이유는 세 번째 줄이다. 같은 파일, 같은 대화 앞부분, 4단계부터만 다른 모델.
 변수는 모델 하나뿐이고, 그래서 답에 의미가 생긴다.
-
-```console
-npm i -g orcareplay
-```
 
 ## 왜 만들었나
 
