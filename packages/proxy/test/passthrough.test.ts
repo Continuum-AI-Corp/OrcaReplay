@@ -92,22 +92,28 @@ describe('an upstream that never answers', () => {
     expect(seen[0]!.responseBody).toContain('301');
   });
 
-  it('keeps the credential out of the recorded host', async () => {
-    // Caught in review, reproduced before it was fixed. The reason was scrubbed and the `host`
-    // beside it was not: an origin `new URL` rejects was written to the trace whole, and
-    // `persistNetExchange` files `host` as a `net.request` attr. The trace's own redactor is no
-    // backstop — `hunter2` and `key=SECRET123` are under its 20-character entropy floor and match
-    // no shape rule.
+  it('keeps the credential out of the recorded host, whatever shape the origin is', async () => {
+    // Caught in review twice. The reason was scrubbed and the `host` beside it was not, so an
+    // origin `new URL` rejects went into the trace whole — `persistNetExchange` files `host` as a
+    // `net.request` attr. The first fix reached for `withoutCredentials`, which is written for
+    // prose: its scheme-less rule needs a dotted host and its userinfo rule cannot cross a space,
+    // so four of these six still leaked. The first version of this test used only the dotted
+    // shape, which is exactly why that survived a commit meant to close it.
     //
-    // This is the one path where that fallback runs at all. Everywhere else it is reached only
-    // after a response came back, which means undici parsed the URL; here the unparseable origin
-    // is precisely what made the call throw. `createProxy` does not validate origins — only the
-    // CLI does, through `unusableOrigin` — so the library API arrives here with whatever it was
-    // handed.
+    // The trace's own redactor is no backstop: `hunter2` and `SECRET123` are under its
+    // 20-character entropy floor and match no shape rule.
+    //
+    // This is the one path where the fallback runs at all — everywhere else it is reached only
+    // after a response came back, which means undici parsed the URL. `createProxy` does not
+    // validate origins; only the CLI does, through `unusableOrigin`.
     for (const [origin, secret] of [
       ['https://myuser:hunter2@gw bad', 'hunter2'],
       ['https://myuser:hunter2@', 'hunter2'],
+      ['https://myuser:hun ter2@gw', 'hun ter2'],
       ['gateway.example?key=SECRET123', 'SECRET123'],
+      ['gw?key=SECRET123', 'SECRET123'],
+      ['localhost?key=SECRET123', 'SECRET123'],
+      ['192.168.0.1?key=SECRET123', 'SECRET123'],
     ] as const) {
       const seen: NetExchange[] = [];
       const proxy = await createProxy({
@@ -120,7 +126,9 @@ describe('an upstream that never answers', () => {
       await post(`${proxy.url}/v1/responses/input_tokens`, { input: 'x' });
 
       expect(seen).toHaveLength(1);
-      expect(seen[0]!.host).not.toContain(secret);
+      expect(seen[0]!.host, `host for ${origin}`).not.toContain(secret);
+      // The reason travels in the same event and quotes the request, so it carries the origin too.
+      expect(seen[0]!.responseBody, `reason for ${origin}`).not.toContain(secret);
       // Still says which upstream failed, or the event is no use to whoever reads the trace.
       expect(seen[0]!.host.length).toBeGreaterThan(0);
     }

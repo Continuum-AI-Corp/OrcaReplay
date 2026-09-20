@@ -228,6 +228,37 @@ export function withoutCredentials(text: string): string {
   );
 }
 
+/**
+ * An origin orca could not parse, reduced to what is safe to write down.
+ *
+ * `withoutCredentials` is written for prose — an error message, a warning line — and pays for that
+ * with rules that only fire on text that looks like a URL in a sentence. Its scheme-less query rule
+ * needs a dotted host, `[a-z0-9][a-z0-9.-]*\.[a-z][a-z0-9-]*`, and its userinfo rule cannot cross a
+ * space. Review found four shapes it leaves whole, each verified by running it:
+ *
+ *   gw?key=SECRET123          localhost?key=SECRET123
+ *   192.168.0.1?key=SECRET123 (digits after the dot)    https://user:pa ss@gw (space in userinfo)
+ *
+ * The first test written here happened to use the one dotted shape that works, which is how the
+ * gap survived a commit whose whole subject was closing it.
+ *
+ * An origin is not prose, so it does not need those rules. It is one token, and everything in it
+ * that could hold a secret is positional: a query or fragment is whatever follows the first `?` or
+ * `#`, and userinfo is whatever precedes the last `@` in the authority. Cutting on position works
+ * on a string no parser accepted — which is the only kind that reaches here.
+ */
+export function scrubOrigin(origin: string): string {
+  const withoutQuery = origin.replace(/[?#][\s\S]*$/, '');
+  const schemeEnd = withoutQuery.indexOf('://');
+  const scheme = schemeEnd === -1 ? '' : withoutQuery.slice(0, schemeEnd + 3);
+  const rest = withoutQuery.slice(scheme.length);
+  const pathStart = rest.indexOf('/');
+  const authority = pathStart === -1 ? rest : rest.slice(0, pathStart);
+  const path = pathStart === -1 ? '' : rest.slice(pathStart);
+  const at = authority.lastIndexOf('@');
+  return `${scheme}${at === -1 ? authority : authority.slice(at + 1)}${path}`;
+}
+
 export interface RecordedExchange {
   seq: number;
   dialect: string;
@@ -1352,7 +1383,11 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
       // Dead above, live below. A caller that already has a response held a URL undici parsed,
       // so the fallback cannot run on the success path; `passThrough`'s failure path is the one
       // place it does, because an origin `new URL` rejects is exactly what made `doFetch` throw.
-      return { host: withoutCredentials(origin), port: 443 };
+      //
+      // `redactString` after the cut, not instead of it: its shape rules and 20-character
+      // entropy floor catch neither `hunter2` nor `key=SECRET123`, so it is a backstop for a
+      // real key that happens to be in there, not the thing doing the work.
+      return { host: redactor.redactString(scrubOrigin(origin)).value, port: 443 };
     }
   }
 
@@ -1369,6 +1404,19 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
    *
    * An origin that does not parse is still worth recording under the string we were given.
    */
+  /**
+   * Why the call did not go out, with the origin in it made safe first.
+   *
+   * The message names the request, so it carries the origin — and undici quotes it verbatim:
+   * `Failed to parse URL from gw?key=SECRET123/v1/...`. Running only the prose rules over that
+   * leaves the key in, for the same shapes `scrubOrigin` exists to handle, so the known origin is
+   * replaced by its scrubbed form before the prose pass ever looks at the sentence.
+   */
+  function reasonFor(err: unknown, origin: string): string {
+    const scrubbed = String(err).split(origin).join(scrubOrigin(origin));
+    return redactor.redactString(withoutCredentials(scrubbed)).value;
+  }
+
   async function passThrough(
     path: string,
     rawBody: string,
@@ -1435,7 +1483,7 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
         requestTruncated: false,
         status: 0,
         responseHeaders: {},
-        responseBody: `orca did not forward this call: ${redactor.redactString(withoutCredentials(String(err))).value}`,
+        responseBody: `orca did not forward this call: ${reasonFor(err, origin)}`,
         responseTruncated: false,
         responseBytes: 0,
         durationMs: Date.now() - startedAt,
