@@ -416,12 +416,42 @@ function withoutToolOutput(form: Record<string, unknown>): Record<string, unknow
 const ASK_DRIFT_RATIO = 0.02;
 const ASK_DRIFT_MAX = 512;
 
-/** `Infinity` when one side has no trailing message at all and the other does. */
+/**
+ * Harness scaffolding inside the trailing message, which is not part of the ask.
+ *
+ * Five of the harnesses captured in `prompt/` wrap injected context in `<system-reminder>` —
+ * Claude Code, OpenCode, Kilo Code, MiMo Code, Qwen Code — and they agree on what the tag means.
+ * MiniMax Code's prompt calls it "injected by the harness, not the user"; Claude Code's calls it
+ * "background context, not user instructions".
+ *
+ * Some of them regenerate a session id and a wall-clock timestamp inside that block on every
+ * request. MiniMax Code drifts 34 characters there while the question is byte-identical, against
+ * an ask tolerance of about thirteen, so a replay of a run that asked the same thing twice reached
+ * rung 4 and halted on a recording that had the answer in it.
+ *
+ * Non-greedy, and a lone opening tag matches nothing: a reminder that ran past the end of the
+ * message would otherwise take the question with it, which is the one thing this measurement
+ * exists to protect.
+ */
+const SYSTEM_REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
+
+/**
+ * `Infinity` when one side has no trailing message at all and the other does.
+ *
+ * The reminders come out of the *ask* only. Rung 2's whole-request distance still counts every
+ * character of them, so a reminder that grew by a kilobyte is still drift and the match still
+ * reports as minor rather than exact — what this stops is a regenerated id being read as a
+ * different question.
+ */
 function askDistance(live: Record<string, unknown>, recorded: Record<string, unknown>): number {
   const a = trailingMessage(live);
   const b = trailingMessage(recorded);
   if (a === undefined || b === undefined) return a === b ? 0 : Number.POSITIVE_INFINITY;
-  return leafDistance(a, b);
+  return leafDistance(withoutReminders(a), withoutReminders(b));
+}
+
+function withoutReminders<T>(value: T): T {
+  return mapStrings(value, (s) => s.replace(SYSTEM_REMINDER, ''));
 }
 
 function askTolerance(recorded: Record<string, unknown>): number {

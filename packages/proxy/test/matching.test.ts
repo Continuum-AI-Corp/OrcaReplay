@@ -8,6 +8,8 @@ import {
   structuralDistance,
 } from '../src/matching.js';
 
+const LF = '\n';
+
 function req(over: Partial<CanonicalRequest> = {}): CanonicalRequest {
   return {
     model: 'claude-opus-5',
@@ -126,6 +128,130 @@ describe('RequestMatcher — the ladder from spec §4', () => {
       req({
         messages: [
           { role: 'user', content: [{ type: 'text', text: 'do something completely different' }] },
+        ],
+      }),
+    );
+    expect(r.matched).toBe(false);
+    expect(r.rung).toBe(4);
+  });
+
+  it('reads a drifting harness reminder as drift, not as a changed question', () => {
+    // MiniMax Code prepends a `<system-reminder>` block to the user's message carrying a session id
+    // it regenerates every request and a wall-clock timestamp. Measured through this matcher on two
+    // recordings of the identical question: 34 characters of drift against an ask tolerance of about
+    // thirteen, so strict replay reached rung 4 and halted on a recording that had the answer in it.
+    //
+    // The tag is not MiniMax's. Claude Code, OpenCode, Kilo Code, MiMo Code and Qwen Code all use it
+    // for injected context, and say so in their own prompts — "injected by the harness, not the
+    // user". Taking them at their word is what this asserts.
+    const reminder = (id: string, at: string) =>
+      `<system-reminder>${LF}<agent-context>${LF}  YOUR SESSION ID: ${id}${LF}` +
+      `  date: ${at}${LF}</agent-context>${LF}</system-reminder>${LF}${LF}fix the auth test`;
+
+    const first = req({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: reminder('mvs_643d348214ea4573bf852652677b7dcf', 'Sun 10:19:41'),
+            },
+          ],
+        },
+      ],
+    });
+    const second = req({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: reminder('mvs_9f21ac0bb7de41528ee3d90147cc6a82', 'Sun 10:24:07'),
+            },
+          ],
+        },
+      ],
+    });
+
+    const m = new RequestMatcher([first]);
+    const r = m.match(second);
+    expect(r.matched).toBe(true);
+    expect(r.rung).toBe(2);
+    // Matched, and saying so: the reminder still counts toward the whole-request distance, so this
+    // is a minor divergence rather than an exact match.
+    expect(r.divergence?.level).toBe('minor');
+    expect(r.divergence?.distance).toBeGreaterThan(0);
+  });
+
+  it('still refuses a changed question buried under a reminder', () => {
+    // The guard the last test relaxes is load-bearing, so it has to survive the relaxation: only
+    // the reminder leaves the ask measurement, never the question beside it.
+    const wrap = (ask: string) =>
+      `<system-reminder>${LF}injected by the harness${LF}</system-reminder>${LF}${LF}${ask}`;
+
+    const recorded = req({
+      messages: [{ role: 'user', content: [{ type: 'text', text: wrap('fix the auth test') }] }],
+    });
+    const m = new RequestMatcher([recorded]);
+    const r = m.match(
+      req({
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'text', text: wrap('delete the auth test') }],
+          },
+        ],
+      }),
+    );
+    expect(r.matched).toBe(false);
+    expect(r.rung).toBe(4);
+  });
+
+  it('does not let two reminders swallow the question between them', () => {
+    // Non-greedy, tested where it is the only thing that matters. A harness that injects a reminder
+    // on both sides of the ask — MiniMax Code already injects one before it — would, under a greedy
+    // match, have everything from the first opening tag to the last closing one removed, taking the
+    // question with it. Then any question would match any other.
+    const between = (ask: string) =>
+      `<system-reminder>${LF}before${LF}</system-reminder>${LF}${ask}${LF}` +
+      `<system-reminder>${LF}after${LF}</system-reminder>`;
+
+    const m = new RequestMatcher([
+      req({
+        messages: [
+          { role: 'user', content: [{ type: 'text', text: between('fix the auth test') }] },
+        ],
+      }),
+    ]);
+    const r = m.match(
+      req({
+        messages: [
+          { role: 'user', content: [{ type: 'text', text: between('delete the database') }] },
+        ],
+      }),
+    );
+    expect(r.matched).toBe(false);
+    expect(r.rung).toBe(4);
+  });
+
+  it('does not let an unterminated reminder swallow the question', () => {
+    // Non-greedy is not enough on its own: a lone opening tag must match nothing, or a truncated
+    // reminder would take the rest of the message — and the ask — out of the comparison with it.
+    const recorded = req({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: '<system-reminder> fix the auth test' }] },
+      ],
+    });
+    const m = new RequestMatcher([recorded]);
+    const r = m.match(
+      req({
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'text', text: '<system-reminder> delete everything instead' }],
+          },
         ],
       }),
     );
