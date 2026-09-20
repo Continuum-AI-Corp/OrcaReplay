@@ -474,16 +474,47 @@ const VOLATILE: ReadonlyArray<readonly [RegExp, string]> = [
 ];
 
 /**
- * Only inside the block. Outside it the same shapes are the user's own content — a commit sha they
- * are asking about, a time they want changed — and folding those would be the very substitution
- * this guard exists to refuse.
+ * How much of a reminder has to be something other than a regenerated value for it to count as
+ * scaffolding at all.
+ *
+ * Review caught the third version of this: "a question is none of these things" is false for a
+ * question *about* a sha or a time. `<system-reminder>what does commit 4f2a…</system-reminder>`
+ * against `…9911…` folded to the same text, so the answer about one commit came back for the
+ * other. Confining the fold to the block was not enough, because a question can be inside one.
+ *
+ * What separates them is not shape but bulk. A harness reminder is a body of instructions with a
+ * regenerated field in it; a question that happens to contain a sha is almost all sha. Measured:
+ * the sixteen recorded MiniMax Code blocks are 572–578 characters of which 72–78 are volatile,
+ * leaving about 494 that are not. The two shapes review reproduced leave 21 and 18. Sixty-four is
+ * the floor this file already uses for "too small to reason about proportionally", and the margin
+ * here is a factor of twenty rather than the two points a ratio would have given.
+ *
+ * A harness whose reminder is shorter than this gets no help, which is the safe direction. So does
+ * one residual case: a long block, identical throughout except for a volatile token the user is
+ * actually asking about. That needs the question to be one token inside otherwise identical
+ * scaffolding, and refusing every long block would give up the case this whole measurement is for.
+ */
+const SCAFFOLD_MIN_STABLE = 64;
+
+/**
+ * Only inside the block, and only when the block is scaffolding.
+ *
+ * Outside it the same shapes are the user's own content — a commit sha they are asking about, a
+ * time they want changed — and folding those would be the very substitution this guard exists to
+ * refuse.
  */
 function withoutVolatility<T>(value: T): T {
-  return mapStrings(value, (s) =>
-    s.replace(SYSTEM_REMINDER, (block) =>
-      VOLATILE.reduce((acc, [re, to]) => acc.replace(re, to), block),
-    ),
-  );
+  return mapStrings(value, (s) => s.replace(SYSTEM_REMINDER, foldScaffolding));
+}
+
+function foldScaffolding(block: string): string {
+  let folded = block;
+  let stable = block;
+  for (const [pattern, placeholder] of VOLATILE) {
+    folded = folded.replace(pattern, placeholder);
+    stable = stable.replace(pattern, '');
+  }
+  return stable.length >= SCAFFOLD_MIN_STABLE ? folded : block;
 }
 
 /** The ask with its scaffolding gone: what is left is the question, which is what the budget is a fraction of. */

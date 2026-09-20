@@ -262,6 +262,34 @@ describe('RequestMatcher — the ladder from spec §4', () => {
     expect(changed.rung).toBe(4);
   });
 
+  it('refuses a question that is itself a volatile shape, inside a reminder', () => {
+    // The third thing review caught, reproduced before it was fixed. Confining the fold to the
+    // block was not enough: a question can be inside one, and a question about a sha or a time is
+    // made of exactly the shapes that get folded. Measured then: both sides folded to the same
+    // text, askDrift 0 against a tolerance of 0.04, so rung 2 served the answer about commit
+    // 4f2a… for the question about commit 9911…
+    //
+    // What tells the two apart is bulk, not shape. A harness reminder is a body of instructions
+    // with a regenerated field in it — the recorded MiniMax Code blocks leave about 494 characters
+    // that are not volatile — while these leave 21 and 18.
+    for (const [recorded, live] of [
+      [
+        '<system-reminder>what does commit 4f2a9c1e88b34d5061ff0c7a2b9e13d4 do?</system-reminder>',
+        '<system-reminder>what does commit 9911aa22bb33cc44dd55ee66ff778899 do?</system-reminder>',
+      ],
+      [
+        '<system-reminder>what is at 14:30 today?</system-reminder>',
+        '<system-reminder>what is at 15:45 today?</system-reminder>',
+      ],
+    ] as const) {
+      const asked = (text: string) =>
+        req({ messages: [{ role: 'user', content: [{ type: 'text', text }] }] });
+      const changed = new RequestMatcher([asked(recorded)]).match(asked(live));
+      expect(changed.matched, recorded).toBe(false);
+      expect(changed.rung, recorded).toBe(4);
+    }
+  });
+
   it('folds a volatile token only inside the reminder, not in the question', () => {
     // The fold has to be confined to the block or it becomes the substitution it exists to
     // prevent: a commit sha is exactly the shape of a session id, and outside a reminder it is
