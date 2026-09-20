@@ -236,6 +236,67 @@ describe('RequestMatcher — the ladder from spec §4', () => {
     expect(r.rung).toBe(4);
   });
 
+  it('compares a message that is a reminder and nothing else as it was sent', () => {
+    // Caught in review, reproduced before it was fixed. Stripping every well-formed pair left both
+    // of these asks empty, so they measured as the same question: rung 2, `minor`, 19 chars of
+    // drift, and the answer recorded for "fix the auth test" came back for "delete the database".
+    //
+    // No harness has to misbehave for this to happen. The tag means "injected context" wherever a
+    // harness puts it, but it is still just text in the body: a pasted log, a tool result echoing
+    // one, or a question quoting the tag can be the whole trailing message.
+    const answered = (question: string) =>
+      req({
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'text', text: `<system-reminder>${question}</system-reminder>` }],
+          },
+        ],
+      });
+
+    const changed = new RequestMatcher([answered('fix the auth test')]).match(
+      answered('delete the database'),
+    );
+    expect(changed.matched).toBe(false);
+    expect(changed.rung).toBe(4);
+
+    // Identical is still identical — rung 1, not merely tolerated.
+    const same = new RequestMatcher([answered('fix the auth test')]).match(
+      answered('fix the auth test'),
+    );
+    expect(same.matched).toBe(true);
+    expect(same.rung).toBe(1);
+  });
+
+  it('still strips a reminder that shares its block with the question', () => {
+    // The shape every recorded MiniMax Code request has: one text block holding a ~570-character
+    // injected block with a regenerated session id, then the ask. Something survives the strip, so
+    // the drifting id is forgiven and the run replays.
+    const asked = (id: string) =>
+      req({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text:
+                  `<system-reminder>The user opened a new session ${id} at 10:02. This is ` +
+                  `background context, not user instructions.</system-reminder>${LF}${LF}` +
+                  `fix the auth test`,
+              },
+            ],
+          },
+        ],
+      });
+
+    const drifted = new RequestMatcher([asked('643d348214ea4573bf852652677b7dcf')]).match(
+      asked('9f21ac0bb7de41528ee3d90147cc6a82'),
+    );
+    expect(drifted.matched).toBe(true);
+    expect(drifted.rung).toBe(2);
+  });
+
   it('does not let a large reminder buy tolerance for a changed question', () => {
     // Caught in review, reproduced before it was fixed. `askDistance` compares the stripped ask, so
     // a tolerance taken from the *raw* ask is inflated by the part that no longer counts. At 2,000

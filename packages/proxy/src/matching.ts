@@ -450,8 +450,30 @@ function askDistance(live: Record<string, unknown>, recorded: Record<string, unk
   return leafDistance(withoutReminders(a), withoutReminders(b));
 }
 
+/**
+ * Scaffolding is only scaffolding when the text it sits in still says something without it.
+ *
+ * Deleting every well-formed pair unconditionally made the guard blind to any difference that lay
+ * inside one. A trailing message that is nothing but a reminder strips to nothing on both sides,
+ * so `fix the auth test` and `delete the database` measured as the same ask and rung 2 served the
+ * first one's answer for the second — the exact failure this measurement exists to prevent, walked
+ * in through the thing meant to protect it. It is reachable without a harness bug: the tag is data
+ * wherever it appears, and a pasted log or a tool result can carry it as the whole message.
+ *
+ * So a reminder comes out only when something is left behind. In all sixteen recorded MiniMax Code
+ * requests the reminder shares its text block with the question — about 570 characters of injected
+ * block against a 30-character ask — so the case this change was written for still strips, while
+ * the message that is reminder and nothing else is compared as it was sent.
+ *
+ * A harness that gave a drifting reminder a content block of its own would get no help here: that
+ * block would strip to nothing and be counted whole, as it is on `main` today. That is the safe
+ * direction to be wrong in for a measurement whose only job is to refuse.
+ */
 function withoutReminders<T>(value: T): T {
-  return mapStrings(value, (s) => s.replace(SYSTEM_REMINDER, ''));
+  return mapStrings(value, (s) => {
+    const stripped = s.replace(SYSTEM_REMINDER, '');
+    return stripped.trim() === '' ? s : stripped;
+  });
 }
 
 /**
