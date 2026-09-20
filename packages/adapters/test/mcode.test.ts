@@ -569,6 +569,31 @@ describe('the mcode adapter', () => {
         '',
       ].join(LF);
 
+    // Every section, not just the custom one — scoping this to `custom_provider:` contradicted
+    // the rule a few lines up that keys come out of all of them, and review found the gap:
+    // `provider:` carrying `authSecret: <32 hex>` passed everything, because the redactor
+    // cannot see 32 hex characters either.
+    for (const built of [
+      [
+        'provider:',
+        '  minimax_api:',
+        '    options:',
+        '      authSecret: b8e793df1a6e4b1088eeaa608388afc9',
+      ],
+      ['rootToken: b8e793df1a6e4b1088eeaa608388afc9'],
+    ]) {
+      const config = [
+        'custom_provider:',
+        '  gw:',
+        '    options:',
+        '      apiKey: sk-live-x',
+        '      baseURL: https://gateway.example/v1',
+        ...built,
+        '',
+      ].join(LF);
+      expect(rewriteIsTrustworthy(config, PROXY), built[0]).toBe(false);
+    }
+
     for (const line of [
       '      token: sk-live-AbCdEf0123456789XyZ',
       '      secret: b8e793df1a6e4b1088eeaa608388afc9',

@@ -126,10 +126,20 @@ const OPAQUE_TOKEN = /^[A-Za-z0-9+/_=-]{24,}$/;
 /** Any `name: value` line at all, so a field this file does not rewrite can still be looked at. */
 const ANY_FIELD = /^[ \t]*(['"]?)([^:'"]+)\1[ \t]*:[ \t]*(.*?)[ \t\r]*$/;
 
+/**
+ * Every section, not just the custom one.
+ *
+ * Scoping this to `custom_provider:` contradicted the invariant a few lines up — keys are taken
+ * out of *every* section, because the file lands in the run directory whatever section they are
+ * in. Review found the gap: `provider:` carrying `authSecret: <32 hex>` passed everything, since
+ * the redactor's entropy sweep cannot see 32 hex characters either. A real config has no opaque
+ * token under any name in any section, so there is nothing to pay for reading all of them.
+ *
+ * It also covers the configs whose section this file cannot track at all — a quoted top-level key,
+ * a leading byte-order mark — where every line reads as section `''`.
+ */
 function hasUnaccountedToken(config: string): boolean {
-  const sections = sectionsOf(config);
-  return config.split('\n').some((line, i) => {
-    if (sections[i] !== CUSTOM_SECTION) return false;
+  return config.split('\n').some((line) => {
     const parts = ANY_FIELD.exec(lineBody(line));
     if (parts === null) return false;
     // The two this file rewrites are accounted for by the checks above.
@@ -282,8 +292,8 @@ export function rewriteIsTrustworthy(config: string, proxyUrl: string): boolean 
   // Shannon entropy is exactly the threshold, so a hex key never trips it — which is the commonest
   // shape a session key or an API key takes.
   //
-  // So the second net is shape rather than entropy: inside `custom_provider:`, a field this file
-  // does not rewrite whose value is one opaque token of twenty-four characters or more is
+  // So the second net is shape rather than entropy: anywhere in the file, a field this one does
+  // not rewrite whose value is a single opaque token of twenty-four characters or more is
   // something it cannot account for, and is refused. No value in a real config matches that —
   // names, kinds, model ids and `api-key` all carry punctuation or are shorter.
   //
