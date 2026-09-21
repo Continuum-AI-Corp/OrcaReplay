@@ -907,7 +907,15 @@ function buildScrubber(cwd) {
     // against the committed Crush capture, which has exactly that shape. So each line has to look
     // like an entry: `(clean)`, or one or two status letters and a space. `Recent commits:` does
     // not, because `R` is a status letter but `e` is not a space.
-    [/^Status:\n(?:(?:\(clean\)|[ MADRCU?!]{1,2} [^\n]*)\n)*/gm, 'Status:\n{{GIT_STATUS}}\n'],
+    //
+    // One or more, not zero or more, and that quantifier is the whole difference between a rule
+    // and a bug. With `*` the group matches nothing at all after any `Status:` line, so the rule
+    // fired where there was nothing to scrub — a `Status:` followed by a blank line or by prose
+    // had `{{GIT_STATUS}}` inserted above it and its own content pushed down, and running the
+    // scrubber over an already-scrubbed file added a second placeholder every time. With `+` the
+    // rule only rewrites a block it actually recognised, which also makes it idempotent:
+    // `{{GIT_STATUS}}` is not an entry, so a second pass matches nothing.
+    [/^Status:\n(?:(?:\(clean\)|[ MADRCU?!]{1,2} [^\n]*)\n)+/gm, 'Status:\n{{GIT_STATUS}}\n'],
     [pathRe(join(home, '.claude', 'projects')), '{{CLAUDE_PROJECTS}}'],
     // ZCode names its per-project memory directory `<basename>-<16 hex of the absolute path>`,
     // which `{{PROJECT_SLUG}}` below does not match — that rule knows Claude Code's shape, the

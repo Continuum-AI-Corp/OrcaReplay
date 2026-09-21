@@ -216,19 +216,17 @@ function accountedFor(rewritten: string, proxyUrl: string): boolean {
   const base = originOf(proxyUrl);
   if (base === undefined) return false;
   let ok = true;
-  const inspect = (node: unknown, key: string): void => {
+  const inspect = (node: unknown): void => {
     if (Array.isArray(node)) {
-      // An array takes its field's name with it: `personalModelIds` is a list of model ids, and
-      // each element is as structural as the field that holds them.
-      node.forEach((item) => inspect(item, key));
+      node.forEach(inspect);
       return;
     }
     if (node !== null && typeof node === 'object') {
-      Object.entries(node as Record<string, unknown>).forEach(([k, v]) => inspect(v, k));
+      Object.values(node as Record<string, unknown>).forEach(inspect);
       return;
     }
     if (typeof node !== 'string') return;
-    if (node === PLACEHOLDER_KEY) return;
+    if (node === PLACEHOLDER_KEY || SCHEMA_ENUM.has(node)) return;
     // Origins are judged by their parsed origin, not by a prefix. `startsWith(proxyUrl)` was the
     // first version of this line, and `http://127.0.0.1:44100.evil.example` starts with
     // `http://127.0.0.1:44100` — so the one check standing between a real host and the trace was
@@ -249,9 +247,9 @@ function accountedFor(rewritten: string, proxyUrl: string): boolean {
       if (carried !== undefined && OPAQUE_TOKEN.test(carried)) ok = false;
       return;
     }
-    if (!STRUCTURAL_FIELD.test(key) && OPAQUE_TOKEN.test(node)) ok = false;
+    if (OPAQUE_TOKEN.test(node)) ok = false;
   };
-  inspect(JSON.parse(rewritten), '');
+  inspect(JSON.parse(rewritten));
   return ok;
 }
 
@@ -269,9 +267,8 @@ function accountedFor(rewritten: string, proxyUrl: string): boolean {
  * recording — landed verbatim in the run directory under `api.headers`, which ZCode documents as
  * an arbitrary string map and is exactly where a gateway's signed header lives.
  *
- * So the separators are back and the false positive is answered where it belongs, by naming the
- * fields whose values are identifiers rather than by blinding the net to a whole character class.
- * See `STRUCTURAL_FIELD`.
+ * So the separators are back, and the false positive is answered by `SCHEMA_ENUM` rather than by
+ * blinding the net to a whole character class.
  *
  * `/` stays out, for the reason MiniMax Code's comment gives — a provider-qualified model id is
  * full of it — and, measured here, because a Windows path in a config is otherwise one unbroken
@@ -280,22 +277,27 @@ function accountedFor(rewritten: string, proxyUrl: string): boolean {
 const OPAQUE_TOKEN = /[A-Za-z0-9+_=-]{24,}/;
 
 /**
- * The fields in ZCode's provider config whose values are identifiers, not secrets.
+ * The values ZCode's schema defines that are long enough to look like a credential.
  *
- * A short, named list, and the one place this net reasons about names at all. That is a real cost
- * and it is the smaller one: the alternative was removing `-` and `_` from the alphabet above,
- * which bought this exemption at the price of a blind spot covering every hyphenated credential in
- * the file. A wrong entry here is bounded to one field name; a wrong alphabet was unbounded.
+ * A set of exact strings, and the distinction from what this was two drafts ago is the whole
+ * point. That version exempted four *field names* — `type`, `modelId`, `personalModelIds`,
+ * `modelOrder` — and review was right about what that costs: the only thing left between a
+ * credential under one of those names and the run directory was the redactor, which this same
+ * file documents as missing hex and low-entropy shapes. A name is something a credential can be
+ * filed under. A value cannot be filed as `zhipu-coding-plan-api-key`; it has to *be* it.
  *
- * Each is here because it was measured, against `provider.example.json` and ZCode's own
- * `PROVIDER_CONFIG.md`: `type` carries `zhipu-coding-plan-api-key` (25 characters), and the three
- * model-id fields carry provider-qualified ids — `anthropic/claude-3-5-sonnet-20241022` is 26
- * characters after the `/` that ends the run. Nothing else in that schema exceeds the threshold.
+ * `PROVIDER_CONFIG.md` defines six: `api-key`, `zhipu-coding-plan-api-key` and `zhipu-account` for
+ * `access.type`, and `anthropic-messages`, `openai-chat-completions` and `openai-responses` for
+ * `api.type`. Only the second reaches twenty-four characters, so only it needs to be here; the
+ * rest are listed because the next person to read this should not have to go and check.
  *
- * The exemption is from the shape check only. The redactor still reads every one of these values,
- * so an `sk-` token or a JWT filed under `modelId` is still refused.
+ * What this does not cover is a model id, because model ids are not a closed set. A config naming
+ * one of twenty-four characters or more — `anthropic/claude-3-5-sonnet-20241022` is twenty-six
+ * after the `/` that ends the run — is refused, and the run falls back to orca's own provider.
+ * That is a capture that still gets the prompt and no longer reaches the operator's gateway, which
+ * is the direction to fail in, and the end-of-run warning is what says so.
  */
-const STRUCTURAL_FIELD = /^(?:type|modelId|personalModelIds|modelOrder)$/;
+const SCHEMA_ENUM = new Set(['zhipu-coding-plan-api-key']);
 
 const SECRET_WORD = 'key|token|secret|password|credential|auth|authorization|cookie|jwt|bearer';
 const SECRET_TITLE = 'Key|Token|Secret|Password|Credential|Auth|Authorization|Cookie|Jwt|Bearer';

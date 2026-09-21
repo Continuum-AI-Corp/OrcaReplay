@@ -211,28 +211,59 @@ describe('the zcode adapter', () => {
     expect(out).toBeUndefined();
   });
 
-  it('lets an identifier be as long as identifiers get', () => {
-    // The cost of putting `-` and `_` back, and where it is paid: four field names whose values
-    // are identifiers, exempt from the shape check and still read by the redactor. Each is here
-    // because it was measured against ZCode's schema — `type` carries a 25-character enum, and a
-    // provider-qualified model id is 26 characters after the `/` that ends the run.
-    const model = 'anthropic/claude-3-5-sonnet-20241022';
+  it('exempts a schema value by what it is, not by the field it sits in', () => {
+    // The cost of putting `-` and `_` back, and two drafts of getting it wrong. The first draft
+    // exempted four field *names* — `type`, `modelId`, `personalModelIds`, `modelOrder` — and
+    // review named what that costs: under one of those names the only thing left between a
+    // credential and the run directory was the redactor, which misses hex and low-entropy shapes.
+    // A name is something a credential can be filed under; a value has to *be* the enum.
+    const enumValue = 'zhipu-coding-plan-api-key';
+    expect(
+      redirectedConfig(JSON.stringify({ config: { p: { access: { type: enumValue } } } }), PROXY),
+    ).toBeDefined();
+    // And the same string is exempt wherever it appears, because the exemption is the string.
+    expect(
+      redirectedConfig(JSON.stringify({ config: { p: { anything: enumValue } } }), PROXY),
+    ).toBeDefined();
+
+    // The shapes the name-based version admitted, under every name it used to trust.
+    for (const name of ['type', 'modelId', 'personalModelIds', 'modelOrder']) {
+      for (const value of [
+        'abc123-abc123-abc123-abc123',
+        'deadbeef-deadbeef-deadbeef',
+        'deadbeefdeadbeefdeadbeefdeadbeef',
+        // A lowercase uuid is identifier-shaped by every rule short of an exact match, which is
+        // what ruled out narrowing the exemption by value shape instead of by value.
+        '0a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d',
+      ]) {
+        const held = name.endsWith('s') ? [value] : value;
+        const out = redirectedConfig(JSON.stringify({ config: { x: { [name]: held } } }), PROXY);
+        expect(out ?? '', `${name} = ${value.slice(0, 14)}`).not.toContain(value);
+      }
+    }
+  });
+
+  it('refuses a model id long enough to be a credential, and says so here', () => {
+    // The documented cost of having no name-based exemption: model ids are not a closed set, so a
+    // config naming one of twenty-four characters or more is refused and the run falls back to
+    // orca's own provider. That is a capture that still gets the prompt and no longer reaches the
+    // operator's gateway — the direction to fail in. Pinned so the trade-off is visible rather
+    // than discovered.
+    expect(
+      redirectedConfig(
+        JSON.stringify({ config: { p: { modelId: 'anthropic/claude-3-5-sonnet-20241022' } } }),
+        PROXY,
+      ),
+    ).toBeUndefined();
+    // The ones ZCode itself ships are all shorter, so the ordinary config is unaffected.
     expect(
       redirectedConfig(
         JSON.stringify({
-          config: {
-            p: { access: { type: 'zhipu-coding-plan-api-key' }, personalModelIds: [model] },
-            m: { providerModelRules: [{ modelId: model }], modelOrder: [model] },
-          },
+          config: { p: { personalModelIds: ['glm-4.6', 'deepseek/deepseek-v4-flash-free'] } },
         }),
         PROXY,
       ),
     ).toBeDefined();
-    // The same string under a name nothing accounts for is refused, which is the direction to
-    // fail in: it costs a carried config, not a credential.
-    expect(
-      redirectedConfig(JSON.stringify({ config: { p: { notAField: model } } }), PROXY),
-    ).toBeUndefined();
   });
 
   it('reaches a credential spelled in capitals', () => {

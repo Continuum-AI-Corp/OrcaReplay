@@ -130,8 +130,9 @@ capture taken inside this repository, on a feature branch with a dirty tree, and
 one on `master`, produce byte-identical files.
 
 The `prompt as sent` column is still the length before scrubbing, and that does vary with the
-directory: 9,084 characters in an empty repository, 9,525 in this one, the difference being a
-branch name and a list of whatever was dirty. The row records the empty-repository number.
+directory, because the branch name and the dirty list are part of what was sent: 9,084 characters
+in an empty repository, and more inside a checkout by however much its own git state comes to.
+The row records the empty-repository figure, which is the one that reproduces.
 
 The nine after them were captured before their harness had one, through `orca record exec` with
 the agent pointed at the proxy -- so `capture.mjs <harness>` will answer `unknown harness` for
