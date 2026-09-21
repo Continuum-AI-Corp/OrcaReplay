@@ -163,6 +163,14 @@ describe('the zcode adapter', () => {
       'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.abc',
       'deadbeefdeadbeefdeadbeefdeadbeef',
       'AKIAIOSFODNN7EXAMPLE',
+      // Separator-broken, and the shapes that walked through both nets when the opaque-token
+      // alphabet excluded `-` and `_`. The redactor declines them too — entropy about 2.8 bits
+      // per character against a 4.0 threshold for the first, no digit for the second — so the
+      // comment claiming it was the net for them was simply wrong.
+      'abc123-abc123-abc123-abc123',
+      'deadbeef-deadbeef-deadbeef',
+      'k1a2b3c4_k1a2b3c4_k1a2b3c4',
+      'AbCd-EfGh-IjKl-MnOp-QrSt-UvWx',
     ];
     for (const name of ['monkey', 'authMode', 'notAFieldAnyoneNamed', 'key', 'auth']) {
       for (const value of shapes) {
@@ -172,6 +180,59 @@ describe('the zcode adapter', () => {
         expect(out ?? '', `${name} = ${value.slice(0, 12)}`).not.toContain(value);
       }
     }
+  });
+
+  it('refuses a signed header, which is where a real one lives', () => {
+    // The reachable version of the above, and how it was found: `api.headers` is documented in
+    // ZCode's own PROVIDER_CONFIG.md as "Additional HTTP headers, e.g. {"X-Client-Name":...}" —
+    // an arbitrary string map, and exactly where a gateway's signed header goes. Measured in a
+    // real recording before the fix: all three values below reached
+    // `<runDir>/zcode-config/provider_config.json` verbatim, which capture.mjs copies into the
+    // unscrubbed `trace/`. The plain `apiKey` beside them was replaced correctly the whole time,
+    // which is what made it look fine.
+    const out = redirectedConfig(
+      JSON.stringify({
+        config: {
+          p: {
+            access: { apiKey: 'sk-live-PLAIN-CANARY-1' },
+            api: {
+              headers: {
+                'X-Gateway-Sig': 'abc123-abc123-abc123-abc123',
+                'X-Request-Signature': 'deadbeef-deadbeef-deadbeef',
+                'X-Tenant-Id': 'k1a2b3c4_k1a2b3c4_k1a2b3c4',
+                'X-Client-Name': 'zcode-cli',
+              },
+            },
+          },
+        },
+      }),
+      PROXY,
+    );
+    expect(out).toBeUndefined();
+  });
+
+  it('lets an identifier be as long as identifiers get', () => {
+    // The cost of putting `-` and `_` back, and where it is paid: four field names whose values
+    // are identifiers, exempt from the shape check and still read by the redactor. Each is here
+    // because it was measured against ZCode's schema — `type` carries a 25-character enum, and a
+    // provider-qualified model id is 26 characters after the `/` that ends the run.
+    const model = 'anthropic/claude-3-5-sonnet-20241022';
+    expect(
+      redirectedConfig(
+        JSON.stringify({
+          config: {
+            p: { access: { type: 'zhipu-coding-plan-api-key' }, personalModelIds: [model] },
+            m: { providerModelRules: [{ modelId: model }], modelOrder: [model] },
+          },
+        }),
+        PROXY,
+      ),
+    ).toBeDefined();
+    // The same string under a name nothing accounts for is refused, which is the direction to
+    // fail in: it costs a carried config, not a credential.
+    expect(
+      redirectedConfig(JSON.stringify({ config: { p: { notAField: model } } }), PROXY),
+    ).toBeUndefined();
   });
 
   it('reaches a credential spelled in capitals', () => {

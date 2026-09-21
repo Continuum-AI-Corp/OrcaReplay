@@ -84,15 +84,14 @@ When you have enough information to act, act. Do not re-derive facts already est
 
 gitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.
 
-Current branch: main
+Current branch: {{GIT_BRANCH}}
 
 Main branch (you will usually use this for PRs): main
 
 Git user: {{GIT_USER}}
 
 Status:
-?? capture/
-?? prompt/
+{{GIT_STATUS}}
 
 Recent commits:
 {{RECENT_COMMITS}}

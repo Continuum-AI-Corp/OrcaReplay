@@ -376,14 +376,9 @@ Today's date: 9/18/2026
 
 
 Git status (snapshot at conversation start - may be outdated):
-Current branch: prompts/openrouter-top
+Current branch: {{GIT_BRANCH}}
 Status:
-?? .aider.chat.history.md
-?? .aider.input.history
-?? .venv/
-?? _crush/
-?? prompt/AIDER/
-?? prompt/GOOSE/
+{{GIT_STATUS}}
 Recent commits:
 9075582 Capture 6 more zero-cost coding harness system prompts
 b4df941 feat(langgraph): record which node ran, and the ones that call no model (#92)

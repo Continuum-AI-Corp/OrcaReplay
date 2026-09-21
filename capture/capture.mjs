@@ -893,7 +893,30 @@ function buildScrubber(cwd) {
 
   const rules = [
     [/Recent commits:\n(?:[0-9a-f]{7,40} [^\n]*\n?)+/g, 'Recent commits:\n{{RECENT_COMMITS}}\n'],
+    // The branch that happened to be checked out and the files that happened to be dirty. ZCode
+    // puts both in its system prompt, so a capture taken inside a checkout records them: measured,
+    // the same capture is 9,084 characters from an empty repository and 9,530 from this one, the
+    // difference being a branch name and a list of the files being worked on. Neither is a fact
+    // about the harness, and leaving them in made `regenerate` overwrite the committed artifact
+    // with whatever the operator's tree looked like — the failure `{{RUN_ID}}` below exists to
+    // prevent, arriving by a different door.
+    [/^Current branch: [^\n]*/gm, 'Current branch: {{GIT_BRANCH}}'],
+    // The status block ends where porcelain output stops, not at a blank line. Claude Code's
+    // prompt puts `Recent commits:` directly after it with nothing in between, and a rule that
+    // consumed every non-empty line swallowed that heading and the commits under it — caught
+    // against the committed Crush capture, which has exactly that shape. So each line has to look
+    // like an entry: `(clean)`, or one or two status letters and a space. `Recent commits:` does
+    // not, because `R` is a status letter but `e` is not a space.
+    [/^Status:\n(?:(?:\(clean\)|[ MADRCU?!]{1,2} [^\n]*)\n)*/gm, 'Status:\n{{GIT_STATUS}}\n'],
     [pathRe(join(home, '.claude', 'projects')), '{{CLAUDE_PROJECTS}}'],
+    // ZCode names its per-project memory directory `<basename>-<16 hex of the absolute path>`,
+    // which `{{PROJECT_SLUG}}` below does not match — that rule knows Claude Code's shape, the
+    // whole path with its separators replaced. Sixteen hex is also below the `{{HEX}}` floor of
+    // thirty-two, so without this the slug went into the artifact verbatim and the capture became
+    // a fact about the directory it was taken in: measured, `tmp-zcode-cap-4d499eaeb9ee4ee2` from
+    // one directory and `tmp-zc-fixed-013df1bece516efe` from another, three characters apart and
+    // a different file. Same reason as `{{RUN_ID}}` below.
+    [/([\\/]\.zcode[\\/]cli[\\/]memories[\\/]projects[\\/])[^\\/\s"']+/g, '$1{{PROJECT_SLUG}}'],
     [pathRe(join(home, '.codex')), '{{CODEX_HOME}}'],
     [pathRe(join(home, '.claude')), '{{CLAUDE_HOME}}'],
     [pathRe(cwd), '{{CWD}}'],

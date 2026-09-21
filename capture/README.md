@@ -121,12 +121,17 @@ upstream, and the upstream does not serve `glm-4.6` -- `upstream 400`, carried b
 stream. The prompt is unaffected: it travels in the request, and all 9,084 characters of it were
 on disk before the response arrived.
 
-Regenerate this one with `--cwd` pointing somewhere disposable. ZCode's prompt embeds the working
-directory's git branch and `git status` output, so a capture taken inside a checkout records
-whichever branch was out and every file that happened to be dirty; taken in an empty repository it
-reads `Current branch: master` and `(clean)`, which is what the committed artifact says. Measured:
-the same capture run from this repository is 9,530 characters, and run from an empty one is 9,084
-and hashes identical to what is committed.
+ZCode's prompt embeds three things about the directory it runs in rather than about the harness:
+the git branch, the `git status` output, and the name of its per-project memory directory, which
+is `<basename>-<16 hex of the absolute path>`. All three are scrubbed to placeholders now, for the
+reason the `{{RUN_ID}}` rule gives -- an artifact that changes with the machine makes `regenerate`
+produce a diff every time and mean nothing when it does. Measured after the change: the same
+capture taken inside this repository, on a feature branch with a dirty tree, and taken in an empty
+one on `master`, produce byte-identical files.
+
+The `prompt as sent` column is still the length before scrubbing, and that does vary with the
+directory: 9,084 characters in an empty repository, 9,525 in this one, the difference being a
+branch name and a list of whatever was dirty. The row records the empty-repository number.
 
 The nine after them were captured before their harness had one, through `orca record exec` with
 the agent pointed at the proxy -- so `capture.mjs <harness>` will answer `unknown harness` for
@@ -146,7 +151,8 @@ Four are worth a sentence each, because the shape of the capture is not obvious 
               was taken on 2026-09-18, before `pathRe` learned to match a path written with
               forward slashes, so eight `<location>` lines carried `C:/Users/<name>/.claude/...`
               and two account uuids straight through the audit that is supposed to stop exactly
-              that. Re-scrubbed with the current rules; 29,335 characters as sent, 28,839 on disk.
+              that. Re-scrubbed with the current rules; 29,335 characters as sent, 28,741 on disk
+              after the second re-scrub below.
   openclaw    38 tools, the largest set here, and its first line is an HTML comment
               (`<!-- openclaw:attempt:STABLE -->`) rather than an identity sentence.
 
@@ -184,6 +190,13 @@ model.
 
 Sizes are the prompt as sent. The file on disk is a few hundred characters shorter, since the
 placeholders are shorter than the paths they replace; `meta.json` carries both figures.
+
+Four rows were re-scrubbed when the branch and status rules were added, because their captures
+predate them and carried the capture machine's working state into a published file: `claude-opus-5`
+listed fifteen dirty paths, `claude-fable-5-1` three, `crush` six including a `.venv/`, and
+`claude-opus-4-8` two, each under the branch that happened to be checked out. None of it is a
+credential and none of it is a fact about the harness, which is the test that applies here. The
+as-sent figures in the table are unchanged, since scrubbing happens after the prompt is sent.
 
 Only the scrubbed prompts under `prompt/` are committed. A capture's own folder stays local:
 `capture/.gitignore` excludes every subdirectory and `index.json`, because the request bodies carry

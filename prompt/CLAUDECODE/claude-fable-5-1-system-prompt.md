@@ -118,16 +118,14 @@ Before running a command that changes system state (such as restarts, deletes, o
 
 gitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.
 
-Current branch: capture-system-prompts
+Current branch: {{GIT_BRANCH}}
 
 Main branch (you will usually use this for PRs): main
 
 Git user: {{GIT_USER}}
 
 Status:
-M capture/capture.mjs
- D prompt/claude-fable-5-1-system-prompt.md
-?? prompt/opencode-gpt-5-6-sol-system-prompt.md
+{{GIT_STATUS}}
 
 Recent commits:
 {{RECENT_COMMITS}}

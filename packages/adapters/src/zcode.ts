@@ -216,13 +216,15 @@ function accountedFor(rewritten: string, proxyUrl: string): boolean {
   const base = originOf(proxyUrl);
   if (base === undefined) return false;
   let ok = true;
-  const inspect = (node: unknown): void => {
+  const inspect = (node: unknown, key: string): void => {
     if (Array.isArray(node)) {
-      node.forEach(inspect);
+      // An array takes its field's name with it: `personalModelIds` is a list of model ids, and
+      // each element is as structural as the field that holds them.
+      node.forEach((item) => inspect(item, key));
       return;
     }
     if (node !== null && typeof node === 'object') {
-      Object.values(node as Record<string, unknown>).forEach(inspect);
+      Object.entries(node as Record<string, unknown>).forEach(([k, v]) => inspect(v, k));
       return;
     }
     if (typeof node !== 'string') return;
@@ -247,32 +249,53 @@ function accountedFor(rewritten: string, proxyUrl: string): boolean {
       if (carried !== undefined && OPAQUE_TOKEN.test(carried)) ok = false;
       return;
     }
-    if (OPAQUE_TOKEN.test(node)) ok = false;
+    if (!STRUCTURAL_FIELD.test(key) && OPAQUE_TOKEN.test(node)) ok = false;
   };
-  inspect(JSON.parse(rewritten));
+  inspect(JSON.parse(rewritten), '');
   return ok;
 }
 
 /**
  * One opaque run of token characters, long enough that nothing in a real config is one.
  *
- * Neither `-`, `_` nor `/` is in the alphabet, and all three exclusions were paid for. MiniMax
- * Code's version of this allows `-` and `_`, and measured clean against a real MiniMax config;
- * pointed at ZCode's own shipped `provider.example.json` it refuses the file, because
- * `"type": "zhipu-coding-plan-api-key"` is twenty-five characters of exactly those. That is an
- * enum value, and refusing it would mean no ZCode config with a coding-plan provider is ever
- * carried. `/` is out for the reason MiniMax Code's comment gives — a provider-qualified model id
- * is full of it — and, measured here, because a Windows path in a config is one unbroken run of
- * it otherwise.
+ * `-` and `_` are in the alphabet, as they are in MiniMax Code's version, and an earlier draft of
+ * this file took them out. The reason was a real false positive — ZCode's own shipped
+ * `provider.example.json` has `"type": "zhipu-coding-plan-api-key"`, twenty-five characters of
+ * exactly those, and taking the separators out was how that file stopped being refused. The
+ * comment justifying it said a credential written with separators is caught by the redactor
+ * instead. Review measured that claim and it is false: `abc123-abc123-abc123-abc123` has entropy
+ * around 2.8 bits per character against a 4.0 threshold, and `deadbeef-deadbeef-deadbeef` has no
+ * digit so `looksRandom` declines it. Both walked through both nets, and — measured in a real
+ * recording — landed verbatim in the run directory under `api.headers`, which ZCode documents as
+ * an arbitrary string map and is exactly where a gateway's signed header lives.
  *
- * What separates a credential from all three is that a credential has no word structure: it is a
- * single run, where an enum, a model id and a path are short segments with separators between
- * them. So the alphabet is the run, and the separators end it.
+ * So the separators are back and the false positive is answered where it belongs, by naming the
+ * fields whose values are identifiers rather than by blinding the net to a whole character class.
+ * See `STRUCTURAL_FIELD`.
  *
- * The cost is a credential written with a separator inside every twenty-four characters, which
- * the redactor above is the net for: it is the one that knows `sk-`, a JWT and an AWS key id.
+ * `/` stays out, for the reason MiniMax Code's comment gives — a provider-qualified model id is
+ * full of it — and, measured here, because a Windows path in a config is otherwise one unbroken
+ * run of it.
  */
-const OPAQUE_TOKEN = /[A-Za-z0-9+=]{24,}/;
+const OPAQUE_TOKEN = /[A-Za-z0-9+_=-]{24,}/;
+
+/**
+ * The fields in ZCode's provider config whose values are identifiers, not secrets.
+ *
+ * A short, named list, and the one place this net reasons about names at all. That is a real cost
+ * and it is the smaller one: the alternative was removing `-` and `_` from the alphabet above,
+ * which bought this exemption at the price of a blind spot covering every hyphenated credential in
+ * the file. A wrong entry here is bounded to one field name; a wrong alphabet was unbounded.
+ *
+ * Each is here because it was measured, against `provider.example.json` and ZCode's own
+ * `PROVIDER_CONFIG.md`: `type` carries `zhipu-coding-plan-api-key` (25 characters), and the three
+ * model-id fields carry provider-qualified ids — `anthropic/claude-3-5-sonnet-20241022` is 26
+ * characters after the `/` that ends the run. Nothing else in that schema exceeds the threshold.
+ *
+ * The exemption is from the shape check only. The redactor still reads every one of these values,
+ * so an `sk-` token or a JWT filed under `modelId` is still refused.
+ */
+const STRUCTURAL_FIELD = /^(?:type|modelId|personalModelIds|modelOrder)$/;
 
 const SECRET_WORD = 'key|token|secret|password|credential|auth|authorization|cookie|jwt|bearer';
 const SECRET_TITLE = 'Key|Token|Secret|Password|Credential|Auth|Authorization|Cookie|Jwt|Bearer';

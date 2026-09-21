@@ -32,7 +32,7 @@ For actions that are hard to reverse or outward-facing, confirm first unless dur
 
 # Memory
 
-You have a persistent file-based memory at `{{HOME}}\.zcode\cli\memories\projects\tmp-zcode-cap-4d499eaeb9ee4ee2\memory/`. This directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence). Each memory is one file holding one fact, with frontmatter:
+You have a persistent file-based memory at `{{HOME}}\.zcode\cli\memories\projects\{{PROJECT_SLUG}}\memory/`. This directory already exists — write to it directly with the Write tool (do not run mkdir or check for its existence). Each memory is one file holding one fact, with frontmatter:
 
 ```markdown
 ---
@@ -77,14 +77,14 @@ Before running a command that changes system state — restarts, deletes, config
 
 gitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.
 
-Current branch: master
+Current branch: {{GIT_BRANCH}}
 
 Main branch (you will usually use this for PRs): main
 
 Git user: {{GIT_USER}}
 
 Status:
-(clean)
+{{GIT_STATUS}}
 
 Recent commits:
 {{RECENT_COMMITS}}
