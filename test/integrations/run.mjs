@@ -153,6 +153,22 @@ const CHECKS = [
     retrieval: 2,
   },
   {
+    id: 'typesafe-jev',
+    what: "TypeSafe's System One API, a model shape no wire dialect claims, replayed by key",
+    run: ['python', 'agents/jev_agent.py'],
+    needs: 'typesafe_sdk',
+    // The stub stands in for api.typesafe.ai, under the variable the SDK actually reads. Set here
+    // rather than through ORCA_BASE_URL_VARS on purpose: that would bypass the adapter's own
+    // redirect, and the redirect is half of what this check exists to prove.
+    originEnv: { TYPESAFE_BASE_URL: '' },
+    // Not a model exchange, and that is the finding rather than a shortfall. Jev answers typed
+    // propositions with probabilities — there is no conversation to match on a ladder and no other
+    // provider to fork onto — so it is recorded as a retrieval call and replayed by key. `exchanges`
+    // is 0 on purpose; `retrieval` is what this check asserts.
+    exchanges: 0,
+    retrieval: 1,
+  },
+  {
     id: 'browser-use',
     what: "browser-use's own ChatOpenAI, which passes an unset base_url straight through",
     run: ['python', 'agents/browser_use_agent.py'],
@@ -342,6 +358,10 @@ async function orca(argv, cwd, extraEnv = {}) {
     // A key has to be present or the SDKs refuse to build a client; it never leaves the machine.
     OPENAI_API_KEY: 'stub-key',
     ANTHROPIC_API_KEY: 'stub-key',
+    // typesafe-sdk raises at construction without one, so a System One check cannot even
+    // build its client otherwise. Never sent anywhere: the stub ignores it and a replay
+    // answers from the trace.
+    TYPESAFE_API_KEY: 'stub-key',
     // Reaches the replayed agent too, which is how a check makes the replay behave differently
     // from the recording — the only way to test a match that is not byte equality.
     ...extraEnv,
@@ -439,6 +459,15 @@ async function runCheck(check) {
           ORCA_BASE_URL_VARS: check.secondOrigin,
         }
       : {};
+    // A check that needs the stub's address under a provider's own variable name. `originEnv` maps
+    // variable -> path, and the adapter decides what to do with it — which is the point: this is
+    // how the built-in redirect gets exercised rather than bypassed with ORCA_BASE_URL_VARS.
+    const originEnv = Object.fromEntries(
+      Object.entries(check.originEnv ?? {}).map(([name, path]) => [
+        name,
+        `http://127.0.0.1:${origin.port}${path}`,
+      ]),
+    );
     const recorded = await orca(
       [
         'record',
@@ -454,7 +483,7 @@ async function runCheck(check) {
           : check.run),
       ],
       dir,
-      splitEnv,
+      { ...splitEnv, ...originEnv },
     );
     if (recorded.code !== 0)
       throw new Error(

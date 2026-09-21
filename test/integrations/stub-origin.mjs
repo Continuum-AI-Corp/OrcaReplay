@@ -133,6 +133,35 @@ function responses(seen) {
  * by default and a stub that always returned floats would exercise a path real clients do not
  * take.
  */
+function systemOne(seen) {
+  // TypeSafe's System One shape: one answer per question, typed the way the question was.
+  // Deterministic on purpose — the check asserts a replay reproduces this byte for byte, and a
+  // stub that varied would make a passing replay indistinguishable from a lucky one.
+  const questions = seen.questions ?? {};
+  const answers = {};
+  for (const [name, q] of Object.entries(questions)) {
+    if (q?.type === 'choice') {
+      const keys = Object.keys(q.criteria ?? { unknown: '' });
+      const rest = keys.length - 1;
+      answers[name] = {
+        type: 'choice',
+        choice: keys[0],
+        confidence: 0.87,
+        probabilities: Object.fromEntries(
+          keys.map((k, i) => [k, i === 0 ? 0.87 : Number((0.13 / (rest || 1)).toFixed(4))]),
+        ),
+      };
+    } else {
+      answers[name] = { type: 'noul', noul: 0.95 };
+    }
+  }
+  return {
+    model: seen.model === 'jev-latest' ? 'jev-1.13.0' : (seen.model ?? 'jev-1.13.0'),
+    answers,
+    usage: { input_tokens: 307, output_tokens: 20 },
+  };
+}
+
 function embeddings(seen) {
   const inputs = Array.isArray(seen.input) ? seen.input : [seen.input ?? ''];
   const base64 = seen.encoding_format === 'base64';
@@ -195,6 +224,14 @@ const server = createServer((req, res) => {
       // whether orca captured it, not whether the client sent valid JSON.
     }
 
+    // Before every OpenAI-shaped branch: System One is a different wire dialect entirely — typed
+    // propositions in, calibrated probabilities out — and its client cannot parse a chat
+    // completion any more than an embeddings client can.
+    if (req.url?.includes('/systemone')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(systemOne(seen)));
+      return;
+    }
     // Before `/completions`, which it does not end in, but ahead of the generic branch for the
     // same reason the others are: an embeddings client cannot parse a chat completion.
     if (req.url?.endsWith('/embeddings')) {

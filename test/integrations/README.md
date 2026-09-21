@@ -49,6 +49,7 @@ a matrix that only exercised a plain completion would have said nothing about ei
 | `llama-index` | LlamaIndex's own OpenAI LLM, which reads the older base-URL variable and not the new one | LlamaIndex |
 | `haystack` | a Haystack `Pipeline` whose generator takes no `api_base_url` | Haystack 3.x, and any component that lets the OpenAI SDK build its own client |
 | `haystack-rag` | the same, embedding at query time: document embeddings, a query embedding, retrieval, then an answer | RAG pipelines whose embeddings must replay too |
+| `typesafe-jev` | TypeSafe's System One API — a model shape no wire dialect claims | Jev, and any stateless request→answer endpoint replayed by key rather than by the ladder |
 | `browser-use` | its own `ChatOpenAI` passes an unset `base_url` through | browser-use, and the pattern any wrapper using the official SDK follows |
 | `vision-repaint` | a screenshot recorded intact, and replayed against a different one | agents with eyes, and what a match means when the pixels move |
 | `ai-sdk-openai` | a real `@ai-sdk/openai` client reading `OPENAI_BASE_URL`, no fetch preload | the Vercel AI SDK's env-aware path, which the bare-`fetch` fixtures cannot pin |
@@ -58,7 +59,7 @@ a matrix that only exercised a plain completion would have said nothing about ei
 | `rag-index` | a concurrent index build, an embedding batch, and an answer over retrieved context | IndexRAG, LlamaIndex, GraphRAG, LightRAG — every pipeline that indexes before it answers |
 | `rag-split-origin` | the same run with embeddings at a **second origin of the same wire dialect** | any stack whose chat and embeddings do not share a provider |
 
-Twenty-two checks. Covering the layer underneath still covers what stands on it — that is what the
+Twenty-three checks. Covering the layer underneath still covers what stands on it — that is what the
 `litellm` row is for — but three of these exist because that stopped being enough, and each of the
 three was added after running the framework itself said something the layer could not.
 

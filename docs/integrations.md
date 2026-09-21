@@ -192,6 +192,62 @@ wrong until it is rewritten.
 
 ---
 
+## TypeSafe (Jev)
+
+```console
+orca record generic-openai -- python your_app.py
+orca replay last
+```
+
+**Measured:** a `TypeSafeClient().system_one(...)` call on typesafe-sdk **0.7.0**, with two typed
+questions. Recorded as one retrieval call and replayed with the origin down at `retrieval=1/1`.
+
+**It is a model API, and it is not a model *exchange*.** Jev answers typed propositions with
+calibrated probabilities rather than text — you hand it a block of state and a set of questions,
+and it returns one probability per question. There is no messages array, no assistant turn and no
+second provider that could answer the same request, so none of orca's wire dialects claims
+`/v1/systemone`. Before this it recorded as opaque network traffic and orca said so:
+
+```
+warn proxy.unclaimed_path path=/v1/systemone
+  detail="forwarded and recorded, but no wire dialect claims this path"
+  consequence="it replays as opaque network traffic and cannot be forked to another model"
+```
+
+What it *is* is a stateless function from a request to an answer, which is the shape orca already
+replays by key — the same one embeddings and rerank use. So it is a **retrieval rule**, not a
+dialect, and a run of it reports `retrieval` rather than `exchanges`:
+
+```
+info capture.retrieval_only exchanges=0 retrieval=1
+  note="this run made no model calls; its retrieval calls are recorded and replay offline"
+```
+
+**Repeated identical calls are safe even if Jev is not deterministic.** The replay index maps a key
+to a *queue* and takes one entry per served call, so N recorded answers are served N times in the
+order they were recorded — not the same answer N times.
+
+**What you give up is forking.** `orca replay --from n --model X` cannot re-ask a System One call as
+some other model, because no other model speaks it. The rule declares `forkable: false` rather than
+offering a translation nothing could perform.
+
+### Two things specific to it
+
+**`generic-openai` forwards `TYPESAFE_BASE_URL`, and as a forward rather than a bare proxy base.**
+That origin has no wire dialect, so an unclaimed `/v1/systemone` pointed at the bare proxy would be
+sent to whichever OpenAI-shaped upstream the run was configured with and answered with a 404
+— measured. The forward carries the real destination with it. Your own `TYPESAFE_BASE_URL` is
+honoured when you set one, so a self-hosted or staging endpoint keeps working.
+
+**Replaying needs `TYPESAFE_API_KEY` set to something, and orca will not invent it.** The SDK
+raises at *construction* — not at the call — when that variable is unset, so a replay of a recorded
+System One run needs some value in it even though the answer comes from the trace. Any string does;
+on replay it is never sent anywhere. orca passes yours through and does not make one up, because
+`generic-openai` is the adapter for harnesses nobody has characterised and an invented credential
+can change which provider such a harness picks — a rule its contract check enforces.
+
+---
+
 ## Haystack
 
 ```console

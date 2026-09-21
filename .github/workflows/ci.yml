@@ -62,7 +62,7 @@ jobs:
       # The frameworks this speaks for. A check whose package is missing is skipped rather than
       # failed, so a contributor can run the suite without all of them.
       - run: >
-          pip install openai anthropic litellm langgraph langchain-openai browser-use haystack-ai
+          pip install openai anthropic litellm langgraph langchain-openai browser-use haystack-ai typesafe-sdk
           crewai openai-agents openhands-sdk llama-index-core llama-index-llms-openai
       # Mastra is the one framework here that is JS, and it is 130 MB — more than this repo's whole
       # dependency tree. `--no-save` keeps it out of package.json so it costs this job and nothing

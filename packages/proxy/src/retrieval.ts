@@ -102,6 +102,13 @@ function describeEmbedding(raw: unknown): string {
   return n === undefined ? model : `${n} input${n === 1 ? '' : 's'} to ${model}`;
 }
 
+function describeSystemOne(raw: unknown): string {
+  const body = asRecord(raw);
+  const n = Object.keys(asRecord(body['questions'])).length;
+  const model = typeof body['model'] === 'string' ? body['model'] : 'an unnamed model';
+  return `${n} question${n === 1 ? '' : 's'} through ${model}`;
+}
+
 function describeRerank(raw: unknown): string {
   const body = asRecord(raw);
   const n = countOf(body['documents']);
@@ -217,6 +224,33 @@ export function defaultRetrievalRules(): RetrievalRule[] {
       // embedding answers which text. Order-insensitive matching would have to assume the
       // correspondence, and an assumption here misfiles a vector in an index with nothing to
       // notice afterwards.
+      forkable: false,
+    },
+    {
+      /**
+       * TypeSafe's System One endpoint, which Jev answers.
+       *
+       * **A retrieval rule rather than a dialect, and the interface says why.** A `Dialect` exists
+       * to make an exchange forkable: six of its ten members — `withModel`, `ownsModel`,
+       * `fromCanonicalRequest`, `fromCanonicalResponse`, `toCanonicalRequest`,
+       * `toCanonicalResponse` — are there to translate one provider's conversation into another's.
+       * System One has no conversation to translate. You hand it a block of state and a set of
+       * typed propositions; it hands back a probability per proposition. There is no messages
+       * array, no assistant turn, and no other provider to fork onto, so those six members could
+       * only be written as lies.
+       *
+       * What it *is* is a stateless function from a request to an answer, which is exactly what
+       * this rule set is for. `forkable: false` then says the true thing rather than a translation
+       * nothing could perform.
+       *
+       * Repeated identical calls are safe even if the service is not deterministic: the index maps
+       * a key to a *queue*, and `consume` takes one entry per served call, so N recorded answers
+       * are served N times in the order they were recorded.
+       */
+      id: 'typesafe-systemone',
+      matches: (path) => path.endsWith('/systemone'),
+      key: retrievalKey,
+      describe: describeSystemOne,
       forkable: false,
     },
     {

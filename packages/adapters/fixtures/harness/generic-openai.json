@@ -1,14 +1,21 @@
 {
   "adapter": "generic-openai",
   "harness_versions": null,
-  "verified_at": "2026-08-29",
+  "verified_at": "2026-09-22",
   "command": "my-agent",
-  "env_vars": ["ANTHROPIC_BASE_URL", "OPENAI_API_BASE", "OPENAI_API_KEY", "OPENAI_BASE_URL"],
+  "env_vars": [
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_API_BASE",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "TYPESAFE_BASE_URL"
+  ],
   "base_urls": {
     "OPENAI_BASE_URL": "/v1",
     "OPENAI_API_BASE": "/v1",
-    "ANTHROPIC_BASE_URL": ""
+    "ANTHROPIC_BASE_URL": "",
+    "TYPESAFE_BASE_URL": "/forward/https%3A%2F%2Fapi.typesafe.ai"
   },
-  "optional_env_vars": ["ANTHROPIC_API_KEY"],
-  "note": "The escape hatch: the command is the first user arg, so 'my-agent' here is the test's argv rather than a fixed binary. OPENAI_API_BASE is set alongside OPENAI_BASE_URL for pre-1.0 SDKs and ports."
+  "optional_env_vars": ["ANTHROPIC_API_KEY", "TYPESAFE_API_KEY"],
+  "note": "The escape hatch: the command is the first user arg, so 'my-agent' here is the test's argv rather than a fixed binary. OPENAI_API_BASE is set alongside OPENAI_BASE_URL for pre-1.0 SDKs and ports. TYPESAFE_BASE_URL is a /forward/ rather than a bare proxy base: no wire dialect claims /v1/systemone, so an unclaimed path aimed at the bare base goes to whichever OpenAI-shaped upstream the run configured and 404s. The forward carries the real destination; the user's own TYPESAFE_BASE_URL still wins, which redirected_env_vars does not cover because the fallback is what this entry pins."
 }

@@ -99,6 +99,8 @@ describe('which endpoints are retrieval', () => {
     ['/v2/embed', 'cohere-embed'],
     ['/v1/rerank', 'rerank'],
     ['/rerank', 'rerank'],
+    ['/v1/systemone', 'typesafe-systemone'],
+    ['/systemone', 'typesafe-systemone'],
   ])('claims %s as %s', (path, id) => {
     expect(selectRetrievalRule(rules, path)?.id).toBe(id);
   });
@@ -119,6 +121,48 @@ describe('which endpoints are retrieval', () => {
     // Changing the embedding model would change the vector space the index was built in. That is
     // a rebuild, not a fork, and the type says so rather than a comment somewhere.
     for (const rule of rules) expect(rule.forkable).toBe(false);
+  });
+});
+
+/**
+ * TypeSafe's System One, which is a model API and still belongs here rather than among the
+ * dialects.
+ *
+ * A `Dialect` exists to make an exchange forkable onto another provider: most of its members are
+ * translations between one provider's conversation and another's. System One has no conversation —
+ * typed propositions in, a probability per proposition out — so there is nothing to translate and
+ * nowhere to fork to. It is a stateless function from a request to an answer, which is what this
+ * rule set is for.
+ */
+describe('System One', () => {
+  const rules = defaultRetrievalRules();
+
+  it('is never offered as forkable, because there is no second provider to fork onto', () => {
+    expect(selectRetrievalRule(rules, '/v1/systemone')?.forkable).toBe(false);
+  });
+
+  it('describes a call by what was actually asked', () => {
+    const rule = selectRetrievalRule(rules, '/v1/systemone');
+    expect(
+      rule?.describe?.({
+        model: 'jev-latest',
+        state: 'Help! My payouts have been failing for 3 days.',
+        questions: { is_urgent: { type: 'noul' }, team: { type: 'choice' } },
+      }),
+    ).toBe('2 questions through jev-latest');
+  });
+
+  it('says so rather than inventing a count when the body is not what it expected', () => {
+    const rule = selectRetrievalRule(rules, '/v1/systemone');
+    expect(rule?.describe?.({})).toBe('0 questions through an unnamed model');
+    expect(rule?.describe?.('not an object')).toBe('0 questions through an unnamed model');
+  });
+
+  it('keys on the request, so two different questions are two different calls', () => {
+    const rule = selectRetrievalRule(rules, '/v1/systemone');
+    const one = rule?.key({ model: 'jev-latest', state: 's', questions: { a: { type: 'noul' } } });
+    const two = rule?.key({ model: 'jev-latest', state: 's', questions: { b: { type: 'noul' } } });
+    expect(one).not.toBe(two);
   });
 });
 
