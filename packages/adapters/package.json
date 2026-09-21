@@ -1,6 +1,6 @@
 {
   "name": "@orcareplay/adapters",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "license": "Apache-2.0",
   "repository": {
@@ -17,10 +17,10 @@
     "dist"
   ],
   "dependencies": {
-    "@orcareplay/core": "0.3.0",
-    "@orcareplay/node-instrument": "0.3.0",
-    "@orcareplay/plugin-api": "0.3.0",
-    "@orcareplay/proxy": "0.3.0",
-    "@orcareplay/shell-shim": "0.3.0"
+    "@orcareplay/core": "0.4.0",
+    "@orcareplay/node-instrument": "0.4.0",
+    "@orcareplay/plugin-api": "0.4.0",
+    "@orcareplay/proxy": "0.4.0",
+    "@orcareplay/shell-shim": "0.4.0"
   }
 }
