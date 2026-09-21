@@ -236,6 +236,34 @@ describe('the zcode adapter', () => {
     }
   });
 
+  it('looks inside a forwarded URL for a credential its own path carried', () => {
+    // Pointing at the proxy is not the same as being empty. The net used to return early for any
+    // value whose origin is the proxy's, and the rewrite gives every origin that shape — so a
+    // credential in an origin's *path* was exempted by the act of forwarding it. Review found the
+    // one case where that matters: 32 hex characters is the shape the redactor is documented to
+    // miss, and percent-encoding leaves the run intact, so neither net ever looked at it.
+    // Measured before the fix: the key below was written into the run directory verbatim.
+    for (const url of [
+      'https://api.example.com/v1/keys/deadbeefdeadbeefdeadbeefdeadbeef',
+      'https://api.example.com/a/b/cafebabecafebabecafebabecafebabe/v1',
+    ]) {
+      const out = redirectedConfig(JSON.stringify({ config: { p: { baseUrl: url } } }), PROXY);
+      // Refused outright: the config is written as orca's own single provider instead.
+      expect(out, url).toBeUndefined();
+    }
+    // And the shape this must not start refusing: an origin whose path carries nothing, and a
+    // value the rewrite has already pointed at the proxy.
+    expect(
+      redirectedConfig(
+        JSON.stringify({ config: { p: { baseUrl: 'https://gw.example/v1' } } }),
+        PROXY,
+      ),
+    ).toBeDefined();
+    expect(
+      redirectedConfig(JSON.stringify({ config: { p: { baseUrl: `${PROXY}/v1` } } }), PROXY),
+    ).toBeDefined();
+  });
+
   it('carries ZCode’s own shipped example config rather than refusing it', () => {
     // A tightened net has to be re-run against real input, and this is the closest thing to it
     // that ships: `provider.example.json` from the `zcode-app-cli` package, reproduced here by

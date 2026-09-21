@@ -232,7 +232,19 @@ function accountedFor(rewritten: string, proxyUrl: string): boolean {
     // `http://127.0.0.1:44100` — so the one check standing between a real host and the trace was
     // a substring match that a hostname can walk straight through.
     if (isOrigin(node)) {
-      if (originOf(node) !== base) ok = false;
+      if (originOf(node) !== base) {
+        ok = false;
+        return;
+      }
+      // Pointing at the proxy is not the same as being empty. A forwarded value carries the origin
+      // it replaced inside its own path, so exempting it for pointing at the proxy exempts
+      // whatever that origin's path carried — and review found the one shape that matters getting
+      // through: a 32-hex key in a `baseUrl` path. Percent-encoding leaves the run intact, and 32
+      // hex characters is exactly what the redactor above is documented to miss, so neither net
+      // looked at it. Measured before the fix: `https://api.example.com/v1/keys/<32 hex>` was
+      // written into the run directory with the key verbatim.
+      const carried = decodeForwardPath(new URL(node).pathname)?.base;
+      if (carried !== undefined && OPAQUE_TOKEN.test(carried)) ok = false;
       return;
     }
     if (OPAQUE_TOKEN.test(node)) ok = false;
