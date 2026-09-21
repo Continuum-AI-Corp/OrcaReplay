@@ -290,6 +290,9 @@ async function runRecording(
       next: "add --tls-intercept, and --tls-hosts '+host' for a host outside the defaults",
     });
   }
+  // A `config` adapter points the agent somewhere too — through a file rather than a variable —
+  // so it needs no interception and must not be told to turn it on. It is named here only so
+  // that the branch above is read as the narrow thing it is.
 
   /** Model exchanges the proxy actually captured — the number the warning below turns on. */
   let modelExchanges = 0;
@@ -762,9 +765,18 @@ async function runRecording(
           'network traffic rather than as replayable model exchanges'
         : baseUrls.length > 0
           ? 'the agent never called the proxy — it may not read a base-URL variable'
-          : tls.ca
-            ? 'this adapter captures at the transport, and nothing orca decrypted looked like a model call'
-            : 'this adapter captures at the transport, and interception was not on';
+          : adapter.capture === 'config'
+            ? // Not a missing flag. This adapter redirects by writing the harness's own config,
+              // so an empty capture means there was nothing in that config to redirect — the
+              // harness has no provider configured, or it is on a built-in login whose origin a
+              // file cannot move. Telling this operator to add `--tls-intercept` would send them
+              // after a route that cannot work: MiniMax Code's client is Node's `fetch`, which
+              // reads no proxy variable, so interception sees nothing either.
+              `${adapter.id} is redirected through its own config, and this run had no ` +
+              'configured provider to redirect'
+            : tls.ca
+              ? 'this adapter captures at the transport, and nothing orca decrypted looked like a model call'
+              : 'this adapter captures at the transport, and interception was not on';
     if (retrievalOnly) {
       out.info('capture.retrieval_only', {
         exchanges: 0,

@@ -69,11 +69,16 @@ describe('every registered adapter', () => {
     // because a coding agent's product *is* the working tree. Everything else is universal.
     const conditional: readonly string[] = ['harness-versions', 'artifacts-resettable'];
     const universal = CONTRACT_CHECKS.filter((c) => !conditional.includes(c));
-    // An adapter that captures at the transport redirects nothing on purpose, so the one check
-    // that asks "where does this point the harness" cannot apply to it. The exemption is narrow
-    // by construction: it is subtracted here by name, so a transport adapter that stopped passing
-    // any *other* check would still fail this test rather than quietly opt out of the contract.
-    const exempt = adapter.capture === 'transport' ? ['redirects-model-traffic'] : [];
+    // An adapter that captures at the transport redirects nothing on purpose, and one that
+    // captures through a config file redirects somewhere the launch environment cannot show —
+    // so the one check that asks "where does this point the harness" cannot apply to either. The
+    // exemption is narrow by construction: it is subtracted here by name, so an exempt adapter
+    // that stopped passing any *other* check would still fail this test rather than quietly opt
+    // out of the contract.
+    const exempt =
+      adapter.capture === 'transport' || adapter.capture === 'config'
+        ? ['redirects-model-traffic']
+        : [];
     const required = universal.filter((c) => !exempt.includes(c));
     expect(result.passed).toEqual(expect.arrayContaining([...required]));
     for (const check of exempt) expect(result.passed).not.toContain(check);

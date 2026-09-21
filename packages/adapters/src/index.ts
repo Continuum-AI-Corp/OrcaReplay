@@ -14,6 +14,7 @@ export * from './node.js';
 export * from './openclaw.js';
 export * from './mcp-config.js';
 export * from './kilo.js';
+export * from './mcode.js';
 export * from './mimo.js';
 export * from './opencode.js';
 export * from './qwen.js';

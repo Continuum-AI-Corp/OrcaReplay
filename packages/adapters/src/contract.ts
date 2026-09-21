@@ -242,18 +242,27 @@ function prepareShape(primary: Attempt): CheckOutcome {
 function redirectsModelTraffic(
   primary: Attempt,
   base: RecordContext,
-  capture: 'env' | 'transport',
+  capture: 'env' | 'transport' | 'config',
 ): CheckOutcome {
   if ('error' in primary) return notVerified('prepare-shape');
   const env = primary.launch.env;
   if (!isStringRecord(env)) return notVerified('prepare-shape');
 
-  // An adapter that captures at the transport redirects nothing on purpose: `--tls-intercept`
-  // terminates the agent's own TLS, and the run — not the adapter — puts `HTTPS_PROXY` and the run
-  // CA into the child's environment. Failing it for "points the harness nowhere" would be scoring
-  // it against a mechanism it does not use. It is still held to every other check, including the
-  // one below that any origin it *does* set must point at the proxy.
-  if (capture === 'transport') {
+  // Two mechanisms put no base-URL variable in the launch environment, and neither is the broken
+  // adapter this check exists to catch.
+  //
+  // `transport` redirects nothing on purpose: `--tls-intercept` terminates the agent's own TLS,
+  // and the run — not the adapter — puts `HTTPS_PROXY` and the run CA into the child's
+  // environment. `config` redirects through a file instead, for a harness that keeps its origin
+  // in one: the environment carries only the pointer to the directory that file lives in, and
+  // whether the file redirects anything cannot be read from `env`. Worse, it is usually a copy of
+  // the operator's own config, so under this check's synthetic workspace there is nothing to copy
+  // and the honest launch is an untouched one — which this check would read as a redirect that
+  // failed. Both are verified where the mechanism is visible, in the adapter's own tests.
+  //
+  // Either way the exemption is narrow: both are held to every other check, including the one
+  // below that any origin they *do* set must point at the proxy.
+  if (capture === 'transport' || capture === 'config') {
     const stray = Object.entries(env)
       .filter(([name]) => BASE_URL_LIKE.test(name))
       .filter(([, value]) => !pointsAtHost(value, hostOf(base.proxyUrl) ?? base.proxyUrl));

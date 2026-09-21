@@ -4,6 +4,7 @@ import { codexAdapter } from './codex.js';
 import { cursorAdapter } from './cursor.js';
 import { hermesAdapter } from './hermes.js';
 import { kiloAdapter } from './kilo.js';
+import { mcodeAdapter } from './mcode.js';
 import { mimoAdapter } from './mimo.js';
 import { execAdapter } from './exec.js';
 import { genericOpenAiAdapter } from './generic-openai.js';
@@ -95,6 +96,7 @@ export function defaultAdapters(): AdapterRegistry {
   registry.register(openCodeAdapter);
   registry.register(qwenAdapter);
   registry.register(mimoAdapter);
+  registry.register(mcodeAdapter);
   registry.register(kiloAdapter);
   registry.register(cursorAdapter);
   registry.register(gooseAdapter);

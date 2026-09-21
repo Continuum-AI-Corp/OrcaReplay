@@ -49,8 +49,16 @@ export interface Adapter {
    * because "sets no base-URL variable" is otherwise indistinguishable from the broken adapter the
    * contract's `redirects-model-traffic` check exists to catch. An adapter that says `transport`
    * is asserting that pointing nowhere is the intent, and takes the check's exemption in exchange.
+   *
+   * `config` — the adapter redirects through a configuration file rather than the environment,
+   * for a harness that keeps its origin in one and reads no variable for it. MiniMax Code is the
+   * first: `MINIMAX_DATA_DIR` moves the whole data directory, and the config orca writes there
+   * carries the redirect. It takes the same exemption as `transport` and for the same reason —
+   * the redirect is real but is not an environment variable, so a check that only reads the
+   * launch environment is scoring it against a mechanism it does not use. What it redirects is
+   * checked where the file can actually be read: the adapter's own tests.
    */
-  capture?: 'env' | 'transport';
+  capture?: 'env' | 'transport' | 'config';
   detect(cwd: string): Promise<boolean>;
   prepare(ctx: RecordContext): Promise<Launch>;
   /**

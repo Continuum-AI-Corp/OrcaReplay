@@ -497,6 +497,7 @@ describe('AdapterRegistry', () => {
       'opencode',
       'qwen',
       'mimo',
+      'mcode',
       'kilo',
       'cursor',
       'goose',
