@@ -117,22 +117,149 @@ describe('the zcode adapter', () => {
     expect([...out!.matchAll(/orca-recorded/g)]).toHaveLength(6);
   });
 
-  it('moves an origin wherever it is nested, and leaves a documentation link alone', () => {
+  it('moves an origin under a key name it has never seen', () => {
+    // The first version of this read key names — `baseUrl`, `apiUrl` — and review named what that
+    // misses. An origin is dangerous because the harness can dial it, and that is a property of
+    // the value, so the value is what decides. `endpoint`, `host`, `url` and a name invented for
+    // this test all move; so does the link to a key-management console, which is the price of not
+    // keeping a name list, and is a link in a copy of a config that outlives one run by nothing.
     const out = redirectedConfig(
       JSON.stringify({
         a: { baseUrl: 'https://one.example/v1' },
-        b: [{ c: { base_url: 'https://two.example/v1' } }],
-        // Not an origin the harness calls: it is where a human goes to mint a key.
-        d: { apiKeyManagementUrl: 'https://three.example/keys' },
+        b: [{ c: { endpoint: 'https://two.example/v1' } }],
+        d: { host: 'https://three.example/v1' },
+        e: { url: 'https://four.example/v1' },
+        f: { someNameZCodeHasNotInventedYet: 'https://five.example/v1' },
+        g: { apiKeyManagementUrl: 'https://six.example/keys' },
       }),
       PROXY,
     );
-    const moved = [...out!.matchAll(/"base_?[uU]rl": "([^"]+)"/g)].map((m) => m[1]!);
-    expect(moved.map((u) => decodeForwardPath(new URL(u).pathname)?.base)).toEqual([
+    expect(out).toBeDefined();
+    const urls = [...out!.matchAll(/"(https?:\/\/[^"]+)"/g)].map((m) => m[1]!);
+    expect(urls).toHaveLength(6);
+    expect(urls.map((u) => decodeForwardPath(new URL(u).pathname)?.base)).toEqual([
       'https://one.example/v1',
       'https://two.example/v1',
+      'https://three.example/v1',
+      'https://four.example/v1',
+      'https://five.example/v1',
+      'https://six.example/keys',
     ]);
-    expect(out).toContain('https://three.example/keys');
+  });
+
+  it('refuses a config carrying a credential under a name the rewrite does not know', () => {
+    // The net, and the reason it is not built like the rewrite. `isSecret` is an allowlist and
+    // will always be incomplete — review found `APIKEY`, `Authorization` and `jwt` walking
+    // through the first version of it — so what gets written is judged by what the values look
+    // like, not by what they are called. Refusing means the run gets orca's own provider instead
+    // of the operator's, which is the side to fail on when the alternative is a key on disk.
+    const shapes = [
+      'sk-live-CANARY0000000000000000000',
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.abc',
+      'deadbeefdeadbeefdeadbeefdeadbeef',
+      'AKIAIOSFODNN7EXAMPLE',
+    ];
+    for (const name of ['monkey', 'authMode', 'notAFieldAnyoneNamed']) {
+      for (const value of shapes) {
+        const out = redirectedConfig(JSON.stringify({ config: { x: { [name]: value } } }), PROXY);
+        // Either the name was recognised and the value replaced, or the file was refused whole.
+        // What must not happen is the value surviving into the run directory.
+        expect(out ?? '', `${name} = ${value.slice(0, 12)}`).not.toContain(value);
+      }
+    }
+  });
+
+  it('reaches a credential spelled in capitals', () => {
+    // `APIKey` and `APIKEY` walked through the first version: its camel-case branch required a
+    // lowercase letter before `Key`. Widening it case-insensitively would have matched `monkey`,
+    // and a rewrite with a false positive does not refuse, it corrupts — so case carries meaning
+    // in these branches, and this test is what says which way.
+    const out = redirectedConfig(
+      JSON.stringify({
+        a: { APIKey: 'sk-live-a' },
+        b: { APIKEY: 'sk-live-b' },
+        c: { APISecret: 'sk-live-c' },
+        d: { Authorization: 'sk-live-d' },
+        e: { jwt: 'sk-live-e' },
+        f: { Cookie: 'sk-live-f' },
+      }),
+      PROXY,
+    );
+    expect(out).toBeDefined();
+    expect(out).not.toContain('sk-live-');
+    expect([...out!.matchAll(/orca-recorded/g)]).toHaveLength(6);
+  });
+
+  it('carries ZCode’s own shipped example config rather than refusing it', () => {
+    // A tightened net has to be re-run against real input, and this is the closest thing to it
+    // that ships: `provider.example.json` from the `zcode-app-cli` package, reproduced here by
+    // shape. MiniMax Code's alphabet for an opaque token allows `-`, which makes
+    // `zhipu-coding-plan-api-key` — an enum value, 25 characters — look like a credential and
+    // refuses the whole file. Every ZCode config with a coding-plan provider would be uncaptured.
+    const out = redirectedConfig(
+      JSON.stringify({
+        schemaVersion: 1,
+        config: {
+          providerConfigRules: {
+            providerRules: [
+              {
+                providerId: 'zhipu',
+                config: {
+                  access: {
+                    type: 'zhipu-coding-plan-api-key',
+                    apiKey: 'sk-live-must-not-be-copied',
+                    apiKeyManagementUrl: 'https://z.ai/manage-apikey/apikey-list',
+                  },
+                  api: { type: 'openai-chat-completions', baseUrl: 'https://api.example.com/v1' },
+                  personalModelIds: ['deepseek/deepseek-v4-flash-free'],
+                },
+              },
+            ],
+          },
+        },
+      }),
+      PROXY,
+    );
+    expect(out).toBeDefined();
+    expect(out).toContain('zhipu-coding-plan-api-key');
+    // A provider-qualified model id is not a credential either, and `/` is out of the alphabet
+    // for that reason before it is out for Windows paths.
+    expect(out).toContain('deepseek/deepseek-v4-flash-free');
+    expect(out).not.toContain('sk-live-');
+  });
+
+  it('blanks ZCode’s whole environment namespace, then names the provider file', async () => {
+    // The child runs on `{ ...process.env, ...launch.env }`, so an overlay that sets one variable
+    // leaves every other one the operator had — and `ZCODE_BASE_URL` is an origin. A replay on
+    // such a machine reaches a real host by a route the proxy is not in a position to block,
+    // spends the operator's quota, and reports success because nothing arrived.
+    ctx.env = {
+      ...ctx.env,
+      ZCODE_BASE_URL: 'https://real.z.ai',
+      ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: '/home/op/builtin.json',
+      ZCODE_CREDENTIAL_SECRET: 'sk-live-must-not-survive',
+      ZAI_OAUTH_ORIGIN: 'https://real.z.ai',
+      BIGMODEL_API_BASE_URL: 'https://open.bigmodel.cn',
+      OPENAI_BASE_URL: 'https://api.openai.com/v1',
+      OPENAI_API_KEY: 'sk-live-must-not-survive',
+      // Not ZCode's, and not ZCode's to blank.
+      PATH: '/usr/bin',
+    };
+    const launch = await zcodeAdapter.prepare(ctx);
+    for (const name of [
+      'ZCODE_BASE_URL',
+      'ZCODE_BUILTIN_PROVIDER_CONFIG_FILE',
+      'ZCODE_CREDENTIAL_SECRET',
+      'ZAI_OAUTH_ORIGIN',
+      'BIGMODEL_API_BASE_URL',
+      'OPENAI_BASE_URL',
+      'OPENAI_API_KEY',
+    ]) {
+      expect(launch.env[name], name).toBe('');
+    }
+    expect(launch.env['PATH']).toBeUndefined();
+    // Set last, so the sweep cannot blank the one variable the adapter depends on.
+    expect(launch.env['ZCODE_PERSONAL_PROVIDER_CONFIG_FILE']).toBe(launch.tempFiles![0]);
   });
 
   it('writes its own provider rather than half of the operator’s', async () => {

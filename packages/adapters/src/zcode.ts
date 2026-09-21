@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { Redactor } from '@orcareplay/core';
 import type { Adapter, Launch, RecordContext } from '@orcareplay/plugin-api';
 import { decodeForwardPath, forwardBasePath } from '@orcareplay/proxy';
 import { detectAgent } from './detect.js';
@@ -9,12 +10,23 @@ import { forwardOrProxyBase, PLACEHOLDER_KEY, readEnv } from './env.js';
 /**
  * ZCode — Z.ai's coding agent, captured by handing it a provider file of orca's own.
  *
- * The second adapter to take the config route, and much the easier of the two, because ZCode's
- * provider file is JSON. MiniMax Code's is YAML, which this project rewrote as text — a decision
- * that cost eight rounds of review, every one of them a spelling the rewrite had not anticipated:
- * a flow map, a list item, a block scalar, a value on the next line, a quoted name, a value that
- * was only a comment. None of that exists here. `JSON.parse` returns a tree, `redirected` walks
- * every node of it, and "did I reach every key" stops being a question anyone has to argue about.
+ * The second adapter to take the config route. ZCode's provider file is JSON, where MiniMax Code's
+ * is YAML that this project rewrote as text — a decision that cost eight rounds of review, every
+ * one of them a spelling the rewrite had not anticipated: a flow map, a list item, a block scalar,
+ * a value on the next line, a quoted name, a value that was only a comment. `JSON.parse` returns a
+ * tree and `redirectedConfig` walks every node of it, so none of those shapes exist here.
+ *
+ * That settles *structure*, and an earlier draft of this comment claimed it settled more: that
+ * "did I reach every key" stops being a question. It does not. Parsing tells this file where the
+ * values are; it says nothing about which of them are secret. Review found the gap — `isSecret`
+ * knew `apiKey` and `api_key` and did not know `APIKEY`, `Authorization` or `jwt`, and `isOrigin`
+ * knew `baseUrl` and did not know `endpoint` — so a credential filed under a name this file had
+ * not thought of was copied into the run directory verbatim, which is what §7 exists to stop.
+ *
+ * So the same two-part shape MiniMax Code arrived at applies here too, and for the same reason.
+ * The rewrite is an allowlist, because it has to produce correct output. The net under it is not,
+ * because every shape a net cannot parse is a value it never looks at: `accountedFor` walks the
+ * *result* and judges values by what they look like rather than by what they are called.
  *
  * `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` names the file, which is a better lever than MiniMax
  * Code's relocatable data directory: one variable, one file, and the operator's own
@@ -31,7 +43,9 @@ import { forwardOrProxyBase, PLACEHOLDER_KEY, readEnv } from './env.js';
  * (`Bundled 与 Active ZCode Built-in Release 均不可用`), measured. Redirecting them would mean
  * locating and rewriting the shipped file, which is install-specific. So a run on an account
  * provider is not captured, the same limit MiniMax Code has for its built-ins, and the end-of-run
- * warning is what says so.
+ * warning is what says so. The sweep below blanks that variable rather than pointing it anywhere,
+ * which leaves ZCode reading its own bundled file and booting — measured, a full capture — and
+ * takes away an operator's custom built-in file as a second route out.
  */
 export const zcodeAdapter: Adapter = {
   id: 'zcode',
@@ -61,11 +75,59 @@ export const zcodeAdapter: Adapter = {
     return {
       command: 'zcode',
       args: [...ctx.userArgs],
-      env: { ZCODE_PERSONAL_PROVIDER_CONFIG_FILE: config },
+      env: isolatedEnv(ctx.env, config),
       tempFiles: [config],
     };
   },
 };
+
+/**
+ * ZCode's whole environment namespace, blanked, then the provider file put back.
+ *
+ * The child runs on `{ ...process.env, ...launch.env }`, so an overlay that sets one variable
+ * leaves every other one the operator had. Review found what that costs: `ZCODE_BASE_URL` is an
+ * origin, and an operator who had set it kept it — the redirected config bought nothing, because
+ * the harness had a second route to a real host that the proxy is not in a position to block. A
+ * replay on such a machine calls out for real, spends the operator's quota, and reports success
+ * because nothing reached the proxy.
+ *
+ * Naming the live variables one at a time is not something this file can do honestly. ZCode's
+ * bundle names two hundred `ZCODE_*` variables and reads them through a table of minified
+ * constants (`Hee="ZCODE_PERSONAL_PROVIDER_CONFIG_FILE"`, read as `process.env[Hee]`), so grepping
+ * for `process.env.ZCODE_BASE_URL` finds one hit and proves nothing about the other hundred and
+ * ninety-nine. Among the names are four more origins (`ZCODE_ENDPOINT_ORIGIN`,
+ * `ZCODE_PRODUCTION_BASE_URL`, `ZCODE_TEST_BASE_URL`, `ZCODE_DEPS_BASE_URL`), three credentials
+ * (`ZCODE_CREDENTIAL_SECRET`, `ZCODE_OFFICIAL_MCP_AUTH_PROVIDER_JWT_TOKEN`,
+ * `ZCODE_CUA_PERMISSION_BROKER_TOKEN`), three data directories and two proxies. The sweep covers
+ * all of them, and covers the ones a later version adds.
+ *
+ * The overlay can only set, not unset, so they arrive empty rather than absent. That is the
+ * difference between a run that cannot reach a real origin and one that quietly can.
+ */
+function isolatedEnv(
+  env: Record<string, string | undefined>,
+  configPath: string,
+): Record<string, string> {
+  const overlay: Record<string, string> = {};
+  for (const name of Object.keys(env)) if (VENDOR_ENV.test(name)) overlay[name] = '';
+  // Borrowed from the wider ecosystem rather than ZCode's own namespace, and named one at a time
+  // because a `OPENAI_`/`ANTHROPIC_` prefix sweep would reach well past this harness. These four
+  // are the ones ZCode's bundle names.
+  for (const name of BORROWED_ENV) if (env[name] !== undefined) overlay[name] = '';
+  // Last, so the sweep above cannot blank the one variable this adapter depends on.
+  overlay['ZCODE_PERSONAL_PROVIDER_CONFIG_FILE'] = configPath;
+  return overlay;
+}
+
+/** Every namespace ZCode's own bundle reads from: its own, Z.ai's, BigModel's, GLM's. */
+const VENDOR_ENV = /^(?:ZCODE|ZAI|Z_AI|BIGMODEL|GLM)_/i;
+
+const BORROWED_ENV = [
+  'OPENAI_API_KEY',
+  'OPENAI_BASE_URL',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_BASE_URL',
+];
 
 /** The file ZCode reads, which the operator may already have pointed elsewhere. */
 function providerConfigPath(env: Record<string, string | undefined>): string {
@@ -82,11 +144,14 @@ function providerConfigPath(env: Record<string, string | undefined>): string {
  * not JSON, or an origin `/forward/` will not carry. The caller then writes its own file, so the
  * run is captured against a provider orca controls instead of half-redirected against theirs.
  *
- * The walk is over the parsed tree, so it reaches a `baseUrl` wherever it is nested and does not
- * care how the file was formatted. Keys are matched by name at any depth for the same reason:
- * `apiKey`, `api_key`, `token`, `secret` and anything else ending in `key` or `token` becomes the
- * placeholder, because the file lands in the run directory and §7 says a credential is never
- * written there.
+ * The walk is over the parsed tree, so it reaches a value wherever it is nested and does not care
+ * how the file was formatted. Origins are recognised by their *value* — anything that reads as an
+ * `http://` or `https://` URL — rather than by the name it is filed under, because review found
+ * `isOrigin` matching `baseUrl` and missing `endpoint`, `host`, `url` and `server`, each of which
+ * would have left a provider talking to its real host while this function still reported success.
+ *
+ * Secrets are still matched by name, because a rewrite has to know which value to replace. That
+ * is an allowlist and it will be incomplete; `accountedFor` is the net under it.
  */
 export function redirectedConfig(source: string, proxyUrl: string): string | undefined {
   let parsed: unknown;
@@ -103,7 +168,7 @@ export function redirectedConfig(source: string, proxyUrl: string): string | und
     for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
       if (isSecret(key) && typeof value === 'string') {
         out[key] = value === '' ? value : PLACEHOLDER_KEY;
-      } else if (isOrigin(key) && typeof value === 'string' && value !== '') {
+      } else if (typeof value === 'string' && isOrigin(value)) {
         if (!carries(value)) carried = false;
         out[key] = forwardOrProxyBase(proxyUrl, value);
       } else {
@@ -113,30 +178,125 @@ export function redirectedConfig(source: string, proxyUrl: string): string | und
     return out;
   };
   const moved = walk(parsed);
-  return carried ? `${JSON.stringify(moved, null, 2)}\n` : undefined;
+  if (!carried) return undefined;
+  const rewritten = `${JSON.stringify(moved, null, 2)}\n`;
+  return accountedFor(rewritten, proxyUrl) ? rewritten : undefined;
 }
 
-const SECRET_WORD = 'key|token|secret|password|credential';
+/**
+ * Whether every value in the rewritten config is one this file can account for.
+ *
+ * The net under the rewrite, and deliberately not built the way the rewrite is. The rewrite
+ * understands a set of names and replaces what it finds under them, which is right for something
+ * that has to produce correct output. A net built that way has the failure the other way round:
+ * every name it does not know is a value it never looks at. So this one reads values.
+ *
+ * Three questions, because each of the first two has a measured hole:
+ *
+ * 1. Orca's own redactor, asked whether anything still looks like a secret. It catches an `sk-`
+ *    token, a real JWT, a forty-character random string and an AWS key id, and changes nothing in
+ *    a rewritten config, forwarded URLs included. It does not catch thirty-two hex characters:
+ *    that string's maximum Shannon entropy is exactly the threshold, so a hex key never trips it.
+ * 2. Shape rather than entropy: a value carrying one opaque run of twenty-four or more token
+ *    characters is something this file cannot account for. See `OPAQUE_TOKEN` for the alphabet,
+ *    which is narrower than MiniMax Code's and had to be.
+ * 3. An origin the rewrite did not move. After the walk above, every `http`-shaped value should
+ *    point at the proxy; one that does not means the rewrite passed over it, which is the
+ *    "partial redirect with nothing in the trace to say so" this adapter exists to prevent.
+ *
+ * What survives all three is a short low-entropy value under a name the rewrite does not know —
+ * `"auth": "hunter2"`. These narrow the hole; they do not close it. Refusing costs an uncaptured
+ * custom provider, which is the side to fail on when the alternative is writing a credential down.
+ */
+function accountedFor(rewritten: string, proxyUrl: string): boolean {
+  if (new Redactor().redactString(rewritten).value !== rewritten) return false;
+
+  const base = proxyUrl.replace(/\/+$/, '');
+  let ok = true;
+  const inspect = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      node.forEach(inspect);
+      return;
+    }
+    if (node !== null && typeof node === 'object') {
+      Object.values(node as Record<string, unknown>).forEach(inspect);
+      return;
+    }
+    if (typeof node !== 'string') return;
+    // Already accounted for: the placeholder the rewrite wrote, and a value it moved to the proxy.
+    if (node === PLACEHOLDER_KEY || node.startsWith(base)) return;
+    if (isOrigin(node) || OPAQUE_TOKEN.test(node)) ok = false;
+  };
+  inspect(JSON.parse(rewritten));
+  return ok;
+}
 
 /**
- * Any name a credential is kept under, rather than the two this file happens to have seen.
+ * One opaque run of token characters, long enough that nothing in a real config is one.
  *
- * Three boundaries, because a config uses three conventions and the first version of this only
- * knew two: `token` on its own, `api_key` and `api-key` with a separator, and `apiKey` with none
- * at all. The camel case one is matched case-sensitively on purpose — a lowercase `key` after a
- * letter is the end of `monkey`, not a field.
+ * Neither `-`, `_` nor `/` is in the alphabet, and all three exclusions were paid for. MiniMax
+ * Code's version of this allows `-` and `_`, and measured clean against a real MiniMax config;
+ * pointed at ZCode's own shipped `provider.example.json` it refuses the file, because
+ * `"type": "zhipu-coding-plan-api-key"` is twenty-five characters of exactly those. That is an
+ * enum value, and refusing it would mean no ZCode config with a coding-plan provider is ever
+ * carried. `/` is out for the reason MiniMax Code's comment gives — a provider-qualified model id
+ * is full of it — and, measured here, because a Windows path in a config is one unbroken run of
+ * it otherwise.
+ *
+ * What separates a credential from all three is that a credential has no word structure: it is a
+ * single run, where an enum, a model id and a path are short segments with separators between
+ * them. So the alphabet is the run, and the separators end it.
+ *
+ * The cost is a credential written with a separator inside every twenty-four characters, which
+ * the redactor above is the net for: it is the one that knows `sk-`, a JWT and an AWS key id.
+ */
+const OPAQUE_TOKEN = /[A-Za-z0-9+=]{24,}/;
+
+const SECRET_WORD = 'key|token|secret|password|credential|auth|authorization|cookie|jwt|bearer';
+const SECRET_TITLE = 'Key|Token|Secret|Password|Credential|Auth|Authorization|Cookie|Jwt|Bearer';
+const SECRET_UPPER = SECRET_TITLE.toUpperCase();
+
+/**
+ * Any name a credential is kept under, rather than the handful this file happens to have seen.
+ *
+ * Four boundaries, because a config uses four conventions and the first version of this knew two.
+ * `token` on its own and `api_key` with a separator it had. `APIKey` and `APIKEY` it did not: the
+ * camel-case branch required a *lowercase* letter before `Key`, so a name that spelled its prefix
+ * in capitals walked straight through — and `APIKEY` is a spelling MiniMax Code's own test list
+ * says must be stripped.
+ *
+ * Case matters in the last two branches and is not a detail. Matching `key$` case-insensitively
+ * after any letter, which is the obvious widening, also matches `monkey` — and a rewrite with a
+ * false positive does not refuse, it corrupts. So a capital or a digit may precede a Titlecase or
+ * an ALLCAPS word, and a lowercase letter may precede a Titlecase one, and an all-lowercase `key`
+ * after a letter stays what it is: the end of a longer word.
+ *
+ * Still incomplete by construction — `accessKeyId` ends in neither — which is why the value-shaped
+ * net in `accountedFor` is the thing being relied on, and this is only the first pass.
  */
 function isSecret(key: string): boolean {
   return (
     new RegExp(`^(?:${SECRET_WORD})s?$`, 'i').test(key) ||
     new RegExp(`[-_](?:${SECRET_WORD})s?$`, 'i').test(key) ||
-    /[a-z0-9](?:Key|Token|Secret|Password|Credential)s?$/.test(key)
+    new RegExp(`[A-Za-z0-9](?:${SECRET_TITLE})s?$`).test(key) ||
+    new RegExp(`[A-Z0-9](?:${SECRET_UPPER})S?$`).test(key)
   );
 }
 
-/** `baseUrl`, and the spellings a later version might use for it. */
-function isOrigin(key: string): boolean {
-  return /^base[-_]?url$/i.test(key) || /^(api|endpoint)[-_]?(url|origin)$/i.test(key);
+/**
+ * An origin, recognised by the value rather than by the name it is filed under.
+ *
+ * `isOrigin` used to read key names — `baseUrl`, `apiUrl`, `endpointUrl` — and review pointed out
+ * what that misses: `endpoint`, `host`, `url`, `server`, and whatever a later ZCode calls it. A
+ * name list is the wrong tool for the question, because the thing that makes a value dangerous is
+ * that the harness can dial it, and that is visible in the value.
+ *
+ * The cost is that a URL nobody dials — a link to the console where a human mints a key — is
+ * forwarded too. It is a link in a copy of a config that exists for the length of one run, so
+ * being routed through a proxy that is about to disappear costs it nothing.
+ */
+function isOrigin(value: string): boolean {
+  return /^https?:\/\//i.test(value);
 }
 
 /**

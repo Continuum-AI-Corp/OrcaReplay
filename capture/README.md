@@ -115,10 +115,18 @@ MiniMax Code has one, `capture.mjs mcode`, and its three modes are three prompts
 ZCode has one too, `capture.mjs zcode`; it is the second harness here redirected through its own
 config file rather than an environment variable, and the first whose file is JSON, so the rewrite
 walks a parsed tree instead of matching text. Its prefix column is blank because the turn was
-refused before any tokens were counted -- the adapter carried the operator's own origin through
-the proxy, that gateway does not serve `glm-4.6`, and the refusal came back as `200` with an
-`upstream 400` frame inside the stream. The prompt is unaffected: it travels in the request, and
-all 9,084 characters of it were on disk before the response arrived.
+refused before any tokens were counted: this machine has no personal provider config, so the
+adapter wrote its own single provider pointed at the proxy, orca forwarded that to its default
+upstream, and the upstream does not serve `glm-4.6` -- `upstream 400`, carried back inside a `200`
+stream. The prompt is unaffected: it travels in the request, and all 9,084 characters of it were
+on disk before the response arrived.
+
+Regenerate this one with `--cwd` pointing somewhere disposable. ZCode's prompt embeds the working
+directory's git branch and `git status` output, so a capture taken inside a checkout records
+whichever branch was out and every file that happened to be dirty; taken in an empty repository it
+reads `Current branch: master` and `(clean)`, which is what the committed artifact says. Measured:
+the same capture run from this repository is 9,530 characters, and run from an empty one is 9,084
+and hashes identical to what is committed.
 
 The nine after them were captured before their harness had one, through `orca record exec` with
 the agent pointed at the proxy -- so `capture.mjs <harness>` will answer `unknown harness` for
