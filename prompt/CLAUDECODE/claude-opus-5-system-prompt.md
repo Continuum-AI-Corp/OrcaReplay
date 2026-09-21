@@ -98,28 +98,14 @@ Do not use the Agent tool, workflows, or deep-research unless the user, a CLAUDE
 
 gitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.
 
-Current branch: capture-opencode
+Current branch: {{GIT_BRANCH}}
 
 Main branch (you will usually use this for PRs): main
 
 Git user: {{GIT_USER}}
 
 Status:
-M capture/README.md
- M capture/capture.mjs
- M packages/cli/src/tls-capture.ts
- M packages/core/src/redaction.ts
- M packages/proxy/src/intercept.ts
- M prompt/CLAUDECODE/claude-opus-5-system-prompt.md
- M prompt/OPENCODE/big-pickle-system-prompt.md
- M prompt/OPENCODE/ling-3-0-flash-fin-free-system-prompt.md
- M prompt/OPENCODE/mimo-v2-5-free-system-prompt.md
- M prompt/OPENCODE/muse-spark-1-2-contributor-free-system-prompt.md
- M prompt/OPENCODE/nemotron-3-5-lightning-free-system-prompt.md
- M prompt/OPENCODE/nemotron-3-ultra-free-system-prompt.md
-?? capture/CURSOR-HTTP2.md
-?? prompt/CURSOR/
-?? prompt/QWENCODE/
+{{GIT_STATUS}}
 
 Recent commits:
 {{RECENT_COMMITS}}

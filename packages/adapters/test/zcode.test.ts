@@ -163,6 +163,14 @@ describe('the zcode adapter', () => {
       'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.abc',
       'deadbeefdeadbeefdeadbeefdeadbeef',
       'AKIAIOSFODNN7EXAMPLE',
+      // Separator-broken, and the shapes that walked through both nets when the opaque-token
+      // alphabet excluded `-` and `_`. The redactor declines them too — entropy about 2.8 bits
+      // per character against a 4.0 threshold for the first, no digit for the second — so the
+      // comment claiming it was the net for them was simply wrong.
+      'abc123-abc123-abc123-abc123',
+      'deadbeef-deadbeef-deadbeef',
+      'k1a2b3c4_k1a2b3c4_k1a2b3c4',
+      'AbCd-EfGh-IjKl-MnOp-QrSt-UvWx',
     ];
     for (const name of ['monkey', 'authMode', 'notAFieldAnyoneNamed', 'key', 'auth']) {
       for (const value of shapes) {
@@ -172,6 +180,90 @@ describe('the zcode adapter', () => {
         expect(out ?? '', `${name} = ${value.slice(0, 12)}`).not.toContain(value);
       }
     }
+  });
+
+  it('refuses a signed header, which is where a real one lives', () => {
+    // The reachable version of the above, and how it was found: `api.headers` is documented in
+    // ZCode's own PROVIDER_CONFIG.md as "Additional HTTP headers, e.g. {"X-Client-Name":...}" —
+    // an arbitrary string map, and exactly where a gateway's signed header goes. Measured in a
+    // real recording before the fix: all three values below reached
+    // `<runDir>/zcode-config/provider_config.json` verbatim, which capture.mjs copies into the
+    // unscrubbed `trace/`. The plain `apiKey` beside them was replaced correctly the whole time,
+    // which is what made it look fine.
+    const out = redirectedConfig(
+      JSON.stringify({
+        config: {
+          p: {
+            access: { apiKey: 'sk-live-PLAIN-CANARY-1' },
+            api: {
+              headers: {
+                'X-Gateway-Sig': 'abc123-abc123-abc123-abc123',
+                'X-Request-Signature': 'deadbeef-deadbeef-deadbeef',
+                'X-Tenant-Id': 'k1a2b3c4_k1a2b3c4_k1a2b3c4',
+                'X-Client-Name': 'zcode-cli',
+              },
+            },
+          },
+        },
+      }),
+      PROXY,
+    );
+    expect(out).toBeUndefined();
+  });
+
+  it('exempts a schema value by what it is, not by the field it sits in', () => {
+    // The cost of putting `-` and `_` back, and two drafts of getting it wrong. The first draft
+    // exempted four field *names* — `type`, `modelId`, `personalModelIds`, `modelOrder` — and
+    // review named what that costs: under one of those names the only thing left between a
+    // credential and the run directory was the redactor, which misses hex and low-entropy shapes.
+    // A name is something a credential can be filed under; a value has to *be* the enum.
+    const enumValue = 'zhipu-coding-plan-api-key';
+    expect(
+      redirectedConfig(JSON.stringify({ config: { p: { access: { type: enumValue } } } }), PROXY),
+    ).toBeDefined();
+    // And the same string is exempt wherever it appears, because the exemption is the string.
+    expect(
+      redirectedConfig(JSON.stringify({ config: { p: { anything: enumValue } } }), PROXY),
+    ).toBeDefined();
+
+    // The shapes the name-based version admitted, under every name it used to trust.
+    for (const name of ['type', 'modelId', 'personalModelIds', 'modelOrder']) {
+      for (const value of [
+        'abc123-abc123-abc123-abc123',
+        'deadbeef-deadbeef-deadbeef',
+        'deadbeefdeadbeefdeadbeefdeadbeef',
+        // A lowercase uuid is identifier-shaped by every rule short of an exact match, which is
+        // what ruled out narrowing the exemption by value shape instead of by value.
+        '0a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d',
+      ]) {
+        const held = name.endsWith('s') ? [value] : value;
+        const out = redirectedConfig(JSON.stringify({ config: { x: { [name]: held } } }), PROXY);
+        expect(out ?? '', `${name} = ${value.slice(0, 14)}`).not.toContain(value);
+      }
+    }
+  });
+
+  it('refuses a model id long enough to be a credential, and says so here', () => {
+    // The documented cost of having no name-based exemption: model ids are not a closed set, so a
+    // config naming one of twenty-four characters or more is refused and the run falls back to
+    // orca's own provider. That is a capture that still gets the prompt and no longer reaches the
+    // operator's gateway — the direction to fail in. Pinned so the trade-off is visible rather
+    // than discovered.
+    expect(
+      redirectedConfig(
+        JSON.stringify({ config: { p: { modelId: 'anthropic/claude-3-5-sonnet-20241022' } } }),
+        PROXY,
+      ),
+    ).toBeUndefined();
+    // The ones ZCode itself ships are all shorter, so the ordinary config is unaffected.
+    expect(
+      redirectedConfig(
+        JSON.stringify({
+          config: { p: { personalModelIds: ['glm-4.6', 'deepseek/deepseek-v4-flash-free'] } },
+        }),
+        PROXY,
+      ),
+    ).toBeDefined();
   });
 
   it('reaches a credential spelled in capitals', () => {

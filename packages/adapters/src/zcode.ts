@@ -226,7 +226,7 @@ function accountedFor(rewritten: string, proxyUrl: string): boolean {
       return;
     }
     if (typeof node !== 'string') return;
-    if (node === PLACEHOLDER_KEY) return;
+    if (node === PLACEHOLDER_KEY || SCHEMA_ENUM.has(node)) return;
     // Origins are judged by their parsed origin, not by a prefix. `startsWith(proxyUrl)` was the
     // first version of this line, and `http://127.0.0.1:44100.evil.example` starts with
     // `http://127.0.0.1:44100` — so the one check standing between a real host and the trace was
@@ -256,23 +256,48 @@ function accountedFor(rewritten: string, proxyUrl: string): boolean {
 /**
  * One opaque run of token characters, long enough that nothing in a real config is one.
  *
- * Neither `-`, `_` nor `/` is in the alphabet, and all three exclusions were paid for. MiniMax
- * Code's version of this allows `-` and `_`, and measured clean against a real MiniMax config;
- * pointed at ZCode's own shipped `provider.example.json` it refuses the file, because
- * `"type": "zhipu-coding-plan-api-key"` is twenty-five characters of exactly those. That is an
- * enum value, and refusing it would mean no ZCode config with a coding-plan provider is ever
- * carried. `/` is out for the reason MiniMax Code's comment gives — a provider-qualified model id
- * is full of it — and, measured here, because a Windows path in a config is one unbroken run of
- * it otherwise.
+ * `-` and `_` are in the alphabet, as they are in MiniMax Code's version, and an earlier draft of
+ * this file took them out. The reason was a real false positive — ZCode's own shipped
+ * `provider.example.json` has `"type": "zhipu-coding-plan-api-key"`, twenty-five characters of
+ * exactly those, and taking the separators out was how that file stopped being refused. The
+ * comment justifying it said a credential written with separators is caught by the redactor
+ * instead. Review measured that claim and it is false: `abc123-abc123-abc123-abc123` has entropy
+ * around 2.8 bits per character against a 4.0 threshold, and `deadbeef-deadbeef-deadbeef` has no
+ * digit so `looksRandom` declines it. Both walked through both nets, and — measured in a real
+ * recording — landed verbatim in the run directory under `api.headers`, which ZCode documents as
+ * an arbitrary string map and is exactly where a gateway's signed header lives.
  *
- * What separates a credential from all three is that a credential has no word structure: it is a
- * single run, where an enum, a model id and a path are short segments with separators between
- * them. So the alphabet is the run, and the separators end it.
+ * So the separators are back, and the false positive is answered by `SCHEMA_ENUM` rather than by
+ * blinding the net to a whole character class.
  *
- * The cost is a credential written with a separator inside every twenty-four characters, which
- * the redactor above is the net for: it is the one that knows `sk-`, a JWT and an AWS key id.
+ * `/` stays out, for the reason MiniMax Code's comment gives — a provider-qualified model id is
+ * full of it — and, measured here, because a Windows path in a config is otherwise one unbroken
+ * run of it.
  */
-const OPAQUE_TOKEN = /[A-Za-z0-9+=]{24,}/;
+const OPAQUE_TOKEN = /[A-Za-z0-9+_=-]{24,}/;
+
+/**
+ * The values ZCode's schema defines that are long enough to look like a credential.
+ *
+ * A set of exact strings, and the distinction from what this was two drafts ago is the whole
+ * point. That version exempted four *field names* — `type`, `modelId`, `personalModelIds`,
+ * `modelOrder` — and review was right about what that costs: the only thing left between a
+ * credential under one of those names and the run directory was the redactor, which this same
+ * file documents as missing hex and low-entropy shapes. A name is something a credential can be
+ * filed under. A value cannot be filed as `zhipu-coding-plan-api-key`; it has to *be* it.
+ *
+ * `PROVIDER_CONFIG.md` defines six: `api-key`, `zhipu-coding-plan-api-key` and `zhipu-account` for
+ * `access.type`, and `anthropic-messages`, `openai-chat-completions` and `openai-responses` for
+ * `api.type`. Only the second reaches twenty-four characters, so only it needs to be here; the
+ * rest are listed because the next person to read this should not have to go and check.
+ *
+ * What this does not cover is a model id, because model ids are not a closed set. A config naming
+ * one of twenty-four characters or more — `anthropic/claude-3-5-sonnet-20241022` is twenty-six
+ * after the `/` that ends the run — is refused, and the run falls back to orca's own provider.
+ * That is a capture that still gets the prompt and no longer reaches the operator's gateway, which
+ * is the direction to fail in, and the end-of-run warning is what says so.
+ */
+const SCHEMA_ENUM = new Set(['zhipu-coding-plan-api-key']);
 
 const SECRET_WORD = 'key|token|secret|password|credential|auth|authorization|cookie|jwt|bearer';
 const SECRET_TITLE = 'Key|Token|Secret|Password|Credential|Auth|Authorization|Cookie|Jwt|Bearer';
