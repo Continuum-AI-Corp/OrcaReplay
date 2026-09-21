@@ -48,6 +48,19 @@ describe('resetRoots', () => {
     expect(resetRoots(dir, artifacts(['cache', 'cache/**', 'cache/']))).toEqual(['cache']);
   });
 
+  it('answers with the path the deletion acts on, not the spelling it was declared in', () => {
+    // `resetArtifacts` removes `resolve(dir, root)` and the guard before it compares these
+    // strings, so a declaration that resolves to `cache` has to leave here as `cache`. It did
+    // not: `./cache` and `data//cache` came back unchanged, the guard's prefix test then missed
+    // a nested repository under them, and the `rm` took it anyway.
+    expect(resetRoots(dir, artifacts(['./cache']))).toEqual(['cache']);
+    expect(resetRoots(dir, artifacts(['data//cache']))).toEqual(['data/cache']);
+    expect(resetRoots(dir, artifacts(['data/./cache']))).toEqual(['data/cache']);
+    expect(resetRoots(dir, artifacts(['tools/../cache']))).toEqual(['cache']);
+    // And one that resolves to the workspace itself names no path to delete.
+    expect(resetRoots(dir, artifacts(['cache/..']))).toEqual([]);
+  });
+
   it('answers in the spelling both `resolve` and a git pathspec accept', () => {
     expect(resetRoots(dir, artifacts(['data\\cache']))).toEqual(['data/cache']);
   });
