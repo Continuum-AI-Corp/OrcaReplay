@@ -216,6 +216,51 @@ describe('table cells cannot drive the terminal', () => {
     expect(rows[1]).toContain('<redacted>');
   });
 
+  /**
+   * ORDER, AND THEN POSITION.
+   *
+   * Two findings, one line apart. The taming first ran before the secret check, and every pattern
+   * is anchored with `\b`: tamed, an ESC is spelled `\x1b`, whose last character is a hex digit —
+   * a word character — so a control character immediately BEFORE a key-shaped token removed the
+   * boundary the anchor needs. Testing the raw string fixed that and not the next case: a control
+   * character INSIDE the token matched nothing either way, because the character class stops at
+   * the first byte outside it — while every character of the key still reached the terminal, in
+   * order. What a reader can reassemble is what has to be judged, so `looksSecret` strips control
+   * characters before testing as well. That also closes it for `info key=value`, which had the
+   * same blind spot from the same cause.
+   */
+  describe('a key survives no placement of a control character', () => {
+    const sink = () => {
+      const lines: string[] = [];
+      return { lines, write: (s: string) => void lines.push(s) };
+    };
+    const KEY = 'sk-abcdefghij0123456789kl';
+    const at = (code: number, cut: number): string =>
+      KEY.slice(0, cut) + String.fromCharCode(code) + KEY.slice(cut);
+
+    // 0 is before the token; 3 is just after `sk-`; 8 and 20 are inside the run of key characters.
+    const places: [number, number][] = [];
+    for (const code of [27, 9, 10, 13, 0])
+      for (const cut of [0, 3, 8, 20]) places.push([code, cut]);
+
+    it.each(places)('table(): control %i at offset %i', (code, cut) => {
+      const s = sink();
+      new Output({ write: s.write, isTTY: false }).table(['A'], [[at(code, cut)]]);
+      const row = stripAnsi(s.lines.join(''));
+      // Recoverable = every character of the key reaches the reader, however it is spelled.
+      expect(row.replace(/\\x[0-9a-f]{2}/g, '')).not.toContain(KEY);
+      expect(row).toContain('<redacted>');
+    });
+
+    it.each(places)('info key=value: control %i at offset %i', (code, cut) => {
+      const s = sink();
+      new Output({ write: s.write, isTTY: false }).info('probe', { models: at(code, cut) });
+      const line = stripAnsi(s.lines.join(''));
+      expect(line.replace(/\\[nrt]|\u00[0-9a-f]{2}/g, '')).not.toContain(KEY);
+      expect(line).toContain('<redacted>');
+    });
+  });
+
   /** A failure is a sentence this code composed; taming it must not blank the explanation. */
   it('tames a failure message without discarding it', () => {
     const s = sink();

@@ -182,10 +182,13 @@ export class Output {
     // BEFORE THE WIDTHS, because a cell is as wide as what is printed, and what is printed is the
     // tamed form. A cell is a value, so a secret shape replaces the whole of it, exactly as
     // `info key=value` has always done — §7 is about output, not about which door it left by.
-    const clean = (c: string): string => {
-      const shown = tame(c);
-      return looksSecret(shown) ? '<redacted>' : shown;
-    };
+    // RAW FIRST, then tame — the order `formatValue` has always used. Taming before judging put a
+    // hex digit where a control character had been, and every pattern is anchored with `\b`: an
+    // ESC, tab or newline immediately before a key-shaped token therefore removed the boundary
+    // the anchor needs, and the cell printed in full. The taming let through exactly the input it
+    // exists for. `looksSecret` now also judges the control-stripped form, which is what closes
+    // the same trick played one character later, inside the token.
+    const clean = (c: string): string => (looksSecret(c) ? '<redacted>' : tame(c));
     const heads = headers.map(clean);
     const cells = rows.map((r) => heads.map((_, i) => clean(r[i] ?? '')));
     const widths = heads.map((h, i) =>
@@ -222,9 +225,18 @@ export class Output {
   }
 }
 
-/** By shape alone — what a table cell can be judged on, having no key to be named by. */
+/**
+ * By shape alone — what a table cell can be judged on, having no key to be named by.
+ *
+ * JUDGED ON WHAT A READER COULD REASSEMBLE, not only on the bytes as they arrived. Every pattern
+ * is anchored and its character class stops at the first byte outside it, so `sk-` followed by an
+ * ESC and then the rest of the key matched nothing at all — while printing every character of
+ * that key, in order, to the terminal. Removing the control characters before testing closes it,
+ * and closes it for `info key=value` too, which had the same blind spot from the same cause.
+ */
 function looksSecret(raw: string): boolean {
-  return SECRET_PATTERNS.some((re) => re.test(raw));
+  const stripped = raw.replace(CONTROL_RE, '');
+  return SECRET_PATTERNS.some((re) => re.test(raw) || re.test(stripped));
 }
 
 function isSecret(key: string, raw: string): boolean {
