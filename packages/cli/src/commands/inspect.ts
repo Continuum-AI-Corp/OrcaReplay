@@ -9,6 +9,7 @@ import {
   resolveRunSelector,
   runGraph,
 } from '@orcareplay/core';
+import { listGatewayRuns } from './sync.js';
 import type { RunGraph } from '@orcareplay/core';
 import {
   buildTimeline,
@@ -30,7 +31,11 @@ export async function listCommand(
   args: ParsedArgs,
   out: Output,
   cwd = process.cwd(),
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
+  // `--remote`, not `--gateway`: naming the host is optional here exactly as it is for push and
+  // pull, so the switch and the override stay two different things.
+  if (args.bool('remote')) return listGatewayCommand(args, out, env);
   const runs = await listRuns(cwd);
   if (runs.length === 0) {
     out.plain('no runs recorded yet');
@@ -55,6 +60,48 @@ export async function listCommand(
       r.dir,
     ]),
   );
+}
+
+/**
+ * The same question asked of the gateway: what is there that this machine could have.
+ *
+ * The columns are the ones the gateway's own console shows, minus the two a terminal cannot use:
+ * cost belongs to billing, and "open" is a link. SOURCE stays because it is the one that changes
+ * what a run contains — the gateway records the model and route layers, and shell, file, mcp and
+ * net rows appear only on a run pushed from here.
+ */
+async function listGatewayCommand(
+  args: ParsedArgs,
+  out: Output,
+  env: NodeJS.ProcessEnv,
+): Promise<void> {
+  const runs = await listGatewayRuns(args, env);
+  if (runs.length === 0) {
+    out.plain('the gateway is holding no runs for this key');
+    return;
+  }
+  // A run the gateway recorded itself carries no client app, and a run may carry no model list at
+  // all. An em dash says "the gateway did not report this"; an empty cell reads as a rendering
+  // fault, and `1970-01-01` for a missing timestamp reads as a fact — the wrong one.
+  const said = (s: string): string => (s === '' ? '—' : s);
+  out.table(
+    ['RUN', 'STARTED', 'SOURCE', 'APP', 'TURNS', 'MODELS', 'OUTCOME'],
+    runs.map((r) => [
+      r.runKey,
+      r.createdAt === 0
+        ? '—'
+        : new Date(r.createdAt * 1000).toISOString().slice(0, 16).replace('T', ' '),
+      said(r.source),
+      said(r.clientApp),
+      String(r.turns),
+      said(r.models.join(', ')),
+      said(r.outcome),
+    ]),
+  );
+  // The listing exists to be acted on, and `pull` is the only thing to do with a run that is not
+  // here yet — so it says so rather than leaving the reader to guess the next command.
+  out.plain('');
+  out.plain('  orca pull <run>      # fetch one into this machine’s store');
 }
 
 /** `orca show` — the timeline, in the terminal. */

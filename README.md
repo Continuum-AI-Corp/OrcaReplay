@@ -378,9 +378,10 @@ An OrcaRouter gateway sits on the wire, so it sees what no laptop can: every key
 every CI job, and the routing decision behind each call. Both write the same `orca-trace v0`, so the
 interesting direction was never one or the other. It was moving a run between them.
 
-Until now that round trip was a browser download and a form upload. Two commands:
+Until now that round trip was a browser download and a form upload. Three commands:
 
 ```console
+$ orca list --remote  # what the gateway is holding
 $ orca push [run]     # this machine  ->  the gateway
 $ orca pull <run>     # the gateway   ->  this machine
 ```
@@ -395,6 +396,27 @@ loopback one.</sub>
 
 `push` defaults to the last run, like every other run-taking command. `pull` will not: "last" means
 nothing on a machine that has not seen the run yet, so it takes an id.
+
+Which is what `orca list --remote` is for. An id you do not have is not a default you can supply,
+and the only place to read one used to be the console in a browser — so the command that needs an
+id lived on a tab the terminal could not open. `--remote` asks the gateway the same question
+`orca list` asks this directory, over the GET on the path push already POSTs to:
+
+```console
+$ orca list --remote --limit 3
+RUN                           STARTED           SOURCE   APP          TURNS  MODELS                    OUTCOME
+run_3b8f0c6d1e27a459c0f7d382  2026-09-22 00:13  upload   claude-code  4      claude-sonnet-4-5         ok
+run_7c1d5e2a9b40f3a8e6d2b401  2026-09-20 20:26  gateway  —            12     claude-sonnet-4-5, gpt-5  ok
+run_41a9d0e7c3b6825fd1470e9a  2026-09-19 19:26  gateway  —            3      gpt-5-mini                error
+
+  orca pull <run>      # fetch one into this machine’s store
+```
+
+A run the gateway recorded itself has no client app, so that column reads `—` rather than blank.
+`--source gateway` narrows to those; `--source upload` narrows to what was pushed to it.
+Without the flag you get both. `--limit` sets how many (20 by default). `--gateway` stays what it
+is for push and pull — an optional override of *which* host — rather than doubling as the switch,
+so a destination you have already named needs no url typed at it.
 
 ### What it needs
 
@@ -439,9 +461,10 @@ key you exported for your own gateway.
   issued for, so pointing it elsewhere refuses the push rather than authenticating it with someone
   else's credential. The one case left through is a key whose only destination is the one this
   invocation names: nothing earlier associated it with a host, which is the CI shape.
-- **Never anonymously.** A push with no key is refused, not attempted. An unauthenticated POST is
-  exactly what a misconfigured public endpoint accepts, and a `200` is a poor way to learn your run
-  went somewhere with no owner.
+- **Never anonymously.** None of the three is attempted without a key. An unauthenticated request
+  is exactly what a misconfigured public endpoint answers, and a `200` is a poor way to learn
+  either that your run went somewhere with no owner, or that what a listing showed you was never
+  scoped to you.
 - **Never a partial replace.** `pull --force` writes the new copy beside the old one and swaps by
   rename, so a crash leaves a complete run either way, and the next pull finishes or rolls back
   whatever the last one left behind. `--force` asks to replace a recording, which is not a licence
@@ -825,6 +848,7 @@ Finding an old session:
 
 ```console
 orca list                       # every run here, newest first, with what it was forked from
+orca list --remote              # and what the gateway is holding, without opening a browser
 orca show run_d0a2ee7ce615      # the timeline in the terminal
 orca replay last                # `last` = newest recording (it skips replay traces)
 orca replay run_d0a2ee7ce615    # or name one outright
@@ -833,6 +857,8 @@ orca gc --older-than 7d --dry-run   # what would be reclaimed, before anything i
 
 `orca list` reads the run directories directly, so it works on a trace someone sent you: drop it in
 `.orca/runs/` and every command sees it. Nothing indexes, and there is no database to corrupt.
+`--remote` is the one exception, and it is not an index either: it asks the gateway and prints the
+answer, holding nothing.
 
 ## Privacy
 

@@ -46,6 +46,7 @@ export interface ParsedArgs {
  * work for these; they are handled before this point.
  */
 export const VALUELESS = new Set([
+  'remote',
   'ui',
   'json',
   'loose',
@@ -92,7 +93,7 @@ export const VALUELESS = new Set([
  * request. Knowing which flags are numeric is what lets a value be checked once, up front, rather
  * than nine times by hand — which is what `orca gc --keep` had been doing alone.
  */
-export const NUMERIC = new Set(['from', 'to', 'port', 'keep']);
+export const NUMERIC = new Set(['from', 'to', 'port', 'keep', 'limit']);
 
 function coerce(raw: string): FlagValue {
   if (raw === 'true') return true;
