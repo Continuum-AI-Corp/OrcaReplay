@@ -504,6 +504,9 @@ describe('AdapterRegistry', () => {
       'hermes',
       'grok',
       'openclaw',
+      // Last of the harnesses on purpose: detection returns the first claim, so a newly added
+      // adapter goes behind the ones that already answered for these machines.
+      'zcode',
       // The only detector here that reads the workspace rather than the machine: it asks whether
       // *this directory* is an IndexRAG checkout, which is a fact about the run rather than about
       // what happens to be installed.

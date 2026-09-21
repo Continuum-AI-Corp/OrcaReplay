@@ -156,7 +156,7 @@ function parseArgs(argv) {
 
 const { harness, flags } = parseArgs(process.argv.slice(2));
 
-const USAGE = `usage: node capture/capture.mjs <claude|codex|opencode|qwen|mimo|mcode|kilo|cursor> [options]
+const USAGE = `usage: node capture/capture.mjs <claude|codex|opencode|qwen|mimo|mcode|zcode|kilo|cursor|hermes> [options]
 
   --model <id>       model to capture. default: the harness's own default
   --prompt-mode <m>  mcode only: tui, coding or work. default: coding
@@ -567,6 +567,52 @@ const PROFILES = {
 
     // Three prompts from one binary, so the mode is part of what the file is named for.
     promptVariant: () => `-${promptMode()}`,
+
+    extract: extractOpenAiShaped,
+  },
+
+  /**
+   * ZCode, Z.ai's coding agent, captured through the provider file it is handed.
+   *
+   * The `zcode` adapter writes a redirected copy of the operator's provider config into the run
+   * and names it with `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE`, so nothing here has to move an
+   * origin: by the time the harness starts, its own configuration already points at the proxy.
+   *
+   * No model is defaulted, and `--model` is not passed unless asked for. ZCode builds a model from
+   * its catalogue before it builds a request, so an id it does not know ends the run at `Model
+   * creation failed` with nothing captured; the adapter's fallback config names `glm-4.6`, which
+   * is what a bare run asks for.
+   *
+   * `--mode yolo` is ZCode's own default for `--prompt` and is passed explicitly so the capture
+   * does not stop on a permission question. The prompt travels in the request, so a turn the
+   * upstream refuses costs the capture nothing — the ordinary case here, since the key in the
+   * generated config is the placeholder. A refusal need not arrive as a status: measured once as
+   * `200` carrying an `upstream 400` frame inside the stream, `stop_reason=error` and no usage
+   * block, with the request and its 27 tool schemas already on disk.
+   */
+  zcode: {
+    id: 'zcode',
+    adapter: 'zcode',
+    promptDir: 'ZCODE',
+    defaultInteractive: false,
+    recordFlags: [],
+    defaultModel: '',
+    recordArgs: (model, prompt) => [
+      '--',
+      '--prompt',
+      prompt,
+      '--mode',
+      'yolo',
+      ...(model ? ['--model', model] : []),
+    ],
+    consoleArgs: (model, prompt) => [
+      '--prompt',
+      `"${prompt}"`,
+      '--mode',
+      'yolo',
+      ...(model ? ['--model', model] : []),
+    ],
+    forceAnthropicUpstream: false,
 
     extract: extractOpenAiShaped,
   },

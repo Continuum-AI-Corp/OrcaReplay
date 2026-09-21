@@ -1,0 +1,10 @@
+{
+  "adapter": "zcode",
+  "harness_versions": ">=3.14.1",
+  "verified_at": "2026-09-21",
+  "command": "zcode",
+  "env_vars": ["ZCODE_PERSONAL_PROVIDER_CONFIG_FILE"],
+  "base_urls": {},
+  "optional_env_vars": [],
+  "note": "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE names the provider file, and the adapter always sets it -- here too, where the fixture's empty home leaves nothing to carry into it. Replay calls the same prepare with the operator's current environment, so an adapter that redirected nothing there would let a replay run live on their real providers and still report success because nothing reached the proxy. Given a config it can read, the adapter writes a redirected copy of it instead; that path is checked in test/zcode.test.ts. ZCode's file is JSON, so the rewrite parses a tree and walks every node rather than matching text -- the completeness question MiniMax Code's YAML rewrite kept answering wrongly does not arise. Verified against zcode-runtime 0.16.9 (zcode-app-cli 3.14.1-27, a wrapper whose zcode-runtime.lock.json records the official ZCode-3.14.1-linux-x64.deb and its sha512) by running it: `orca record zcode -- --prompt 'Reply with exactly: ZCODE-OK' --mode yolo` recorded a request carrying an 8,770-character system prompt beginning 'You are ZCode, an interactive coding agent', 27 tools, and two <system-reminder> blocks of 6,568 and 305 characters in the user turns. `orca replay` then reproduced it offline: reused=1/1, unmatched=0, egress=blocked, one minor divergence for a redaction digest that is salted per run. Two things measured rather than assumed: ZCODE_HOME does NOT relocate ~/.zcode, so the adapter cannot isolate the way MiniMax Code's does; and an empty ZCODE_BUILTIN_PROVIDER_CONFIG_FILE makes ZCode refuse to start, so the eight account-backed built-in providers are not redirected and a run on one of them is not captured. A model id orca invented also ends the run at `Model creation failed` before a request exists, which is why the fallback config names glm-4.6."
+}
