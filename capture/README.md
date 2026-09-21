@@ -92,6 +92,7 @@ Measured on one machine, and the reason the table is here rather than in a folde
 | `deepseek/deepseek-v4-flash-free` | mcode | `exec --prompt-mode tui` | 14,777 chars | 18 | - |
 | `deepseek/deepseek-v4-flash-free` | mcode | `exec --prompt-mode coding` | 16,157 chars | 18 | - |
 | `deepseek/deepseek-v4-flash-free` | mcode | `exec --prompt-mode work` | 17,721 chars | 18 | - |
+| `glm-4.6` | zcode | `--prompt --mode yolo` | 9,084 chars | 27 | - |
 | `gpt-5.6-sol` | openclaw | `agent exec` | 21,762 chars | 38 | - |
 | `gemini-3.5-flash` | gemini | non-interactive | 25,084 chars | 8 | - |
 | `deepseek-v4.1-flash` | crush | non-interactive | 29,335 chars | 26 | - |
@@ -109,13 +110,29 @@ which is why `capture.mjs` files these only under `--allow-failed` and says so. 
 and `kilo-auto/free` completed, but neither response carried a usage block to read. Hermes
 completed too, on the same anonymous tier, and its response carried no usage block either.
 
-**The twelve rows below Hermes have no prefix count either, and nine of them have no profile.**
+**The thirteen rows below Hermes have no prefix count either, and nine of them have no profile.**
 MiniMax Code has one, `capture.mjs mcode`, and its three modes are three prompts from one binary.
-The nine after it were captured before their harness had one, through `orca record exec` with the
-agent pointed at the proxy -- so `capture.mjs <harness>` will answer `unknown harness` for every
-one of them, and the way to reproduce one today is the way it was taken: run the agent under
-`orca record` with its provider base URL moved, and read the system prompt out of the request.
-Writing profiles for them is the follow-up that turns these rows into one-liners.
+ZCode has one too, `capture.mjs zcode`; it is the second harness here redirected through its own
+config file rather than an environment variable, and the first whose file is JSON, so the rewrite
+walks a parsed tree instead of matching text. Its prefix column is blank because the turn was
+refused before any tokens were counted: this machine has no personal provider config, so the
+adapter wrote its own single provider pointed at the proxy, orca forwarded that to its default
+upstream, and the upstream does not serve `glm-4.6` -- `upstream 400`, carried back inside a `200`
+stream. The prompt is unaffected: it travels in the request, and all 9,084 characters of it were
+on disk before the response arrived.
+
+Regenerate this one with `--cwd` pointing somewhere disposable. ZCode's prompt embeds the working
+directory's git branch and `git status` output, so a capture taken inside a checkout records
+whichever branch was out and every file that happened to be dirty; taken in an empty repository it
+reads `Current branch: master` and `(clean)`, which is what the committed artifact says. Measured:
+the same capture run from this repository is 9,530 characters, and run from an empty one is 9,084
+and hashes identical to what is committed.
+
+The nine after them were captured before their harness had one, through `orca record exec` with
+the agent pointed at the proxy -- so `capture.mjs <harness>` will answer `unknown harness` for
+every one of them, and the way to reproduce one today is the way it was taken: run the agent
+under `orca record` with its provider base URL moved, and read the system prompt out of the
+request. Writing profiles for them is the follow-up that turns these rows into one-liners.
 
 Four are worth a sentence each, because the shape of the capture is not obvious from the row:
 

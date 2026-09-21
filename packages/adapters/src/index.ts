@@ -21,3 +21,4 @@ export * from './qwen.js';
 export * from './registry.js';
 export * from './scaffold.js';
 export * from './session.js';
+export * from './zcode.js';

@@ -156,7 +156,7 @@ function parseArgs(argv) {
 
 const { harness, flags } = parseArgs(process.argv.slice(2));
 
-const USAGE = `usage: node capture/capture.mjs <claude|codex|opencode|qwen|mimo|mcode|kilo|cursor> [options]
+const USAGE = `usage: node capture/capture.mjs <claude|codex|opencode|qwen|mimo|mcode|zcode|kilo|cursor|hermes> [options]
 
   --model <id>       model to capture. default: the harness's own default
   --prompt-mode <m>  mcode only: tui, coding or work. default: coding
@@ -567,6 +567,48 @@ const PROFILES = {
 
     // Three prompts from one binary, so the mode is part of what the file is named for.
     promptVariant: () => `-${promptMode()}`,
+
+    extract: extractOpenAiShaped,
+  },
+
+  /**
+   * ZCode, Z.ai's coding agent, captured through the provider file it is handed.
+   *
+   * The `zcode` adapter writes a redirected copy of the operator's provider config into the run
+   * and names it with `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE`, so nothing here has to move an
+   * origin: by the time the harness starts, its own configuration already points at the proxy.
+   *
+   * `--model` is not a flag this harness has: `zcode --prompt … --model glm-4.6` answers
+   * `Unknown option '--model'` and prints its help, measured. The model is chosen in the provider
+   * config, under `defaultModelSelection`, so the adapter's config is what names it — `glm-4.6`,
+   * a real catalogue id, because ZCode builds a model from its catalogue before it builds a
+   * request and an id it does not know ends the run at `Model creation failed` with nothing
+   * captured. `modelFromConfig` is what keeps `--model` off the command line and out of the
+   * `regenerate` string, and makes passing it an error rather than a failed run.
+   *
+   * Capture this one with `--cwd` pointing somewhere disposable. ZCode's prompt embeds the
+   * working directory's git branch and `git status` output, so a capture taken inside a checkout
+   * records whichever branch was out and every file that happened to be dirty. The committed
+   * artifact was taken in an empty directory and reads `Current branch: master` and `(clean)`.
+   *
+   * `--mode yolo` is ZCode's own default for `--prompt` and is passed explicitly so the capture
+   * does not stop on a permission question. The prompt travels in the request, so a turn the
+   * upstream refuses costs the capture nothing — the ordinary case here, since the key in the
+   * generated config is the placeholder. A refusal need not arrive as a status: measured once as
+   * `200` carrying an `upstream 400` frame inside the stream, `stop_reason=error` and no usage
+   * block, with the request and its 27 tool schemas already on disk.
+   */
+  zcode: {
+    id: 'zcode',
+    adapter: 'zcode',
+    promptDir: 'ZCODE',
+    defaultInteractive: false,
+    recordFlags: [],
+    defaultModel: '',
+    modelFromConfig: true,
+    recordArgs: (_model, prompt) => ['--', '--prompt', prompt, '--mode', 'yolo'],
+    consoleArgs: (_model, prompt) => ['--prompt', `"${prompt}"`, '--mode', 'yolo'],
+    forceAnthropicUpstream: false,
 
     extract: extractOpenAiShaped,
   },
@@ -1436,7 +1478,11 @@ function writeCapture(profile, cwd, runId, interactive, dirOverride) {
   // turn was kept after an error, which is the ordinary case for a harness captured without a
   // credential.
   meta.regenerate =
-    `node capture/capture.mjs ${profile.id} --model ${model}` +
+    `node capture/capture.mjs ${profile.id}` +
+    // A harness that takes its model from its own config has no `--model` to print. Leaving it on
+    // made this string fail with `Unknown option '--model'` for the one profile in that shape,
+    // which is the opposite of the contract above.
+    (profile.modelFromConfig ? '' : ` --model ${model}`) +
     (profile.promptVariant
       ? ` --prompt-mode ${variant.slice(1)}`
       : interactive === profile.defaultInteractive
@@ -1605,6 +1651,16 @@ if (!WIN && interactive) {
 }
 
 const cwd = resolve(typeof flags.cwd === 'string' ? flags.cwd : process.cwd());
+// Refused rather than ignored. The harness would answer `Unknown option '--model'` and print its
+// help, which costs a run and reads like a bug in orca; and silently dropping the flag would file
+// the capture under a model nobody asked for.
+if (profile.modelFromConfig && typeof flags.model === 'string') {
+  console.error(
+    `${profile.id} takes its model from its provider config, not the command line, so --model ` +
+      'has nothing to set. Point the adapter at the model you want and capture without it.',
+  );
+  process.exit(1);
+}
 const model = typeof flags.model === 'string' ? flags.model : profile.defaultModel;
 const userPrompt =
   typeof flags.prompt === 'string' ? flags.prompt : 'Reply with exactly: ok. Do not use any tools.';

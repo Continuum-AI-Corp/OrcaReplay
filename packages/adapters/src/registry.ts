@@ -15,6 +15,7 @@ import { openClawAdapter } from './openclaw.js';
 import { nodeAdapter } from './node.js';
 import { openCodeAdapter } from './opencode.js';
 import { qwenAdapter } from './qwen.js';
+import { zcodeAdapter } from './zcode.js';
 
 export class AdapterRegistry {
   readonly #adapters = new Map<string, Adapter>();
@@ -103,6 +104,12 @@ export function defaultAdapters(): AdapterRegistry {
   registry.register(hermesAdapter);
   registry.register(grokAdapter);
   registry.register(openClawAdapter);
+  // Last of the harnesses, because detection returns the first adapter that claims the workspace
+  // and every earlier slot takes one away from an adapter that already had it. ZCode's detector
+  // reads the machine — `~/.zcode`, or `zcode` on PATH — so on a machine with two agents
+  // installed the bare `orca record` should keep answering what it answered before this adapter
+  // existed. Nothing about ZCode earns it a place ahead of them.
+  registry.register(zcodeAdapter);
   // Before the three that decline to detect: its detector reads *this directory* rather than the
   // machine, so it is the one adapter here that can honestly claim a workspace.
   registry.register(indexRagAdapter);
