@@ -228,6 +228,49 @@ export function withoutCredentials(text: string): string {
   );
 }
 
+/**
+ * An origin orca could not parse, reduced to the host it names and nothing else.
+ *
+ * Three rounds of review here, each finding a shape the last one let through, and the lesson is
+ * the same each time: a string no parser accepted has no structure to rely on, so nothing may be
+ * kept because of where it sits — only because of what it is made of.
+ *
+ * `withoutCredentials` went first. It is written for prose and its rules need prose shapes: a
+ * dotted host for the scheme-less query rule, no whitespace inside userinfo. `gw?key=SECRET123`,
+ * `localhost?key=…`, `192.168.0.1?key=…` and `https://user:pa ss@gw` all went through it whole.
+ *
+ * Cutting by position went second, and left `https://gw key=SECRET123`: a secret in a
+ * whitespace-separated token after the host is still "after the last `@`", so it was kept as part
+ * of the host.
+ *
+ * So the last step is a whitelist — the characters a host and a port are made of, and the first
+ * one that is not ends it. A path is not returned at all: the success branch of `originParts`
+ * gives `url.hostname`, the exchange records its request path in its own field, and a path that
+ * reached here unparsed could carry a secret as easily as a query could.
+ *
+ * An origin with no host left — `https://user:pass@` — yields the empty string, which is the
+ * honest answer: there was no host in it to name.
+ *
+ * `redactString` still runs over the result at the call site, as a backstop for a long key rather
+ * than the thing doing the work: its shape rules and 20-character entropy floor catch neither
+ * `hunter2` nor `SECRET123`.
+ */
+export function scrubOrigin(origin: string): string {
+  const withoutQuery = origin.replace(/[?#][\s\S]*$/, '');
+  const schemeEnd = withoutQuery.indexOf('://');
+  const rest = schemeEnd === -1 ? withoutQuery : withoutQuery.slice(schemeEnd + 3);
+  const pathStart = rest.indexOf('/');
+  const authority = pathStart === -1 ? rest : rest.slice(0, pathStart);
+  const at = authority.lastIndexOf('@');
+  const host = at === -1 ? authority : authority.slice(at + 1);
+  // A host, then a port only if it is one. Allowing a bare `:` for the port let a whole
+  // `user:password` through when the origin had no `@` to cut at — `https://myuser:hunter2`
+  // came back whole — because userinfo and host:port are the same shape until something
+  // says which it is. Digits after the colon say it. An IPv6 literal keeps its brackets,
+  // which is what separates its colons from that one.
+  return /^(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._-]+)(?::[0-9]+)?/.exec(host)?.[0] ?? '';
+}
+
 export interface RecordedExchange {
   seq: number;
   dialect: string;
@@ -596,9 +639,13 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
   // secrets themselves. Without a redactor on this side the two are never in the same
   // representation, and a recording of any real harness — whose own system prompt carries a
   // session id — cannot match itself.
+  // Shared with the passthrough failure path, which writes an upstream's own error message into
+  // the trace: a gateway that quotes the call it refused can quote the credential with it, and §7
+  // says never write it — not "write it and let a later layer catch it".
+  const redactor = new Redactor();
   const matcher = new RequestMatcher(
     replayable.map((e) => e.canonicalRequest),
-    { redactor: new Redactor(), concurrency: () => peakInFlight },
+    { redactor, concurrency: () => peakInFlight },
   );
 
   /**
@@ -1339,8 +1386,20 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
         port: url.port !== '' ? Number(url.port) : url.protocol === 'http:' ? 80 : 443,
       };
     } catch {
-      // An origin that does not parse is still worth recording under the string we were given.
-      return { host: origin, port: 443 };
+      // An origin that does not parse is still worth recording under the string we were given —
+      // less anything secret in it. `host` goes into the trace verbatim (`persistNetExchange`
+      // writes it as a `net.request` attr), and §7 says a credential never gets written down.
+      // The trace's own redactor does not cover this: `hunter2` and `key=SECRET123` are under
+      // the 20-character entropy floor and match no shape rule.
+      //
+      // Dead above, live below. A caller that already has a response held a URL undici parsed,
+      // so the fallback cannot run on the success path; `passThrough`'s failure path is the one
+      // place it does, because an origin `new URL` rejects is exactly what made `doFetch` throw.
+      //
+      // `redactString` after the cut, not instead of it: its shape rules and 20-character
+      // entropy floor catch neither `hunter2` nor `key=SECRET123`, so it is a backstop for a
+      // real key that happens to be in there, not the thing doing the work.
+      return { host: redactor.redactString(scrubOrigin(origin)).value, port: 443 };
     }
   }
 
@@ -1352,6 +1411,24 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
    * Filing it with the model exchanges would inflate `reused=n/m` with turns replay will never
    * serve, and an operator would be reading a fidelity number that is not one.
    */
+  /**
+   * An origin string as a host and a port, for the two places that record one.
+   *
+   * An origin that does not parse is still worth recording under the string we were given.
+   */
+  /**
+   * Why the call did not go out, with the origin in it made safe first.
+   *
+   * The message names the request, so it carries the origin — and undici quotes it verbatim:
+   * `Failed to parse URL from gw?key=SECRET123/v1/...`. Running only the prose rules over that
+   * leaves the key in, for the same shapes `scrubOrigin` exists to handle, so the known origin is
+   * replaced by its scrubbed form before the prose pass ever looks at the sentence.
+   */
+  function reasonFor(err: unknown, origin: string): string {
+    const scrubbed = String(err).split(origin).join(scrubOrigin(origin));
+    return redactor.redactString(withoutCredentials(scrubbed)).value;
+  }
+
   async function passThrough(
     path: string,
     rawBody: string,
@@ -1379,18 +1456,52 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
 
     stats.passedThrough += 1;
     const origin = passthroughOrigin(headers, forwardBase);
-    const upstreamRes = await doFetch(`${origin}${path}`, {
-      method: 'POST',
-      // `upstreamHeaders` too, as `goLive` does. Omitting them sent a gateway the agent's own
-      // credential — often the `orca-recorded` placeholder — and the call came back 401 for a
-      // reason nothing in the trace explained.
-      headers: {
-        'content-type': 'application/json',
-        ...headers,
-        ...headersForOrigin(origin),
-      },
-      body: rawBody,
-    });
+    let upstreamRes: Awaited<ReturnType<typeof doFetch>>;
+    try {
+      upstreamRes = await doFetch(`${origin}${path}`, {
+        method: 'POST',
+        // `upstreamHeaders` too, as `goLive` does. Omitting them sent a gateway the agent's own
+        // credential — often the `orca-recorded` placeholder — and the call came back 401 for a
+        // reason nothing in the trace explained.
+        headers: {
+          'content-type': 'application/json',
+          ...headers,
+          ...headersForOrigin(origin),
+        },
+        body: rawBody,
+      });
+    } catch (err) {
+      // An upstream that never answered is still something the agent asked for, and a trace
+      // that leaves it out says the run made fewer calls than it did. Before this the throw
+      // reached the server's catch-all: the agent got its 500 — which was right — and nothing
+      // else happened. No event, no warning, and the replay later blamed "opaque network
+      // traffic" that had never been captured.
+      //
+      // Not an exotic path. `fetchPinned` refuses every redirect on purpose, and a gateway
+      // behind a CDN answers an unknown path with one: `api.orcarouter.ai` sends `301` to its
+      // own marketing site, and MiniMax Code posts to `/v1/responses/input_tokens` before every
+      // call, so two requests per run went missing and said nothing.
+      //
+      // `status: 0` is the same thing it means for an intercepted exchange: no response header
+      // was ever seen. The reason travels in the body, scrubbed, because the message names the
+      // origin it was given.
+      options.onNetExchange?.({
+        ...originParts(origin),
+        method: 'POST',
+        intercepted: false,
+        path,
+        requestHeaders: recordableHeaders,
+        requestBody: rawBody,
+        requestTruncated: false,
+        status: 0,
+        responseHeaders: {},
+        responseBody: `orca did not forward this call: ${reasonFor(err, origin)}`,
+        responseTruncated: false,
+        responseBytes: 0,
+        durationMs: Date.now() - startedAt,
+      });
+      throw err;
+    }
 
     const responseHeaders: Record<string, string> = {};
     upstreamRes.headers.forEach((value, key) => {

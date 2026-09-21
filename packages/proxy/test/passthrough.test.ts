@@ -45,6 +45,140 @@ async function post(url: string, body: unknown, headers: Record<string, string> 
 
 const EMBEDDING = { object: 'list', data: [{ embedding: [0.1, 0.2] }] };
 
+describe('an upstream that never answers', () => {
+  /**
+   * The failure this locks out.
+   *
+   * `fetchPinned` refuses every redirect on purpose — undici strips `authorization` across origins
+   * but not `x-api-key`, so following one could hand a gateway's key to whoever the `Location`
+   * names. The refusal is a throw, and the throw used to leave `passThrough` before it recorded
+   * anything: the agent got its 500, the operator saw nothing, and the trace said the run made
+   * fewer calls than it did.
+   *
+   * Found on a real gateway. `api.orcarouter.ai` sits behind a CDN that answers an unknown API path
+   * with `301` to its own marketing site, and MiniMax Code posts to `/v1/responses/input_tokens`
+   * before every call — so every recording of that harness through that gateway lost two requests
+   * and said nothing. The same run against a gateway answering `404` recorded them: eighteen events
+   * against four, which is how it was isolated.
+   */
+  it('records the call it could not forward, rather than dropping it', async () => {
+    const seen: NetExchange[] = [];
+    const proxy = await createProxy({
+      mode: 'record',
+      upstream: { openai: 'https://gateway.example' },
+      fetchImpl: (async () => {
+        throw new Error(
+          'https://gateway.example/v1/responses/input_tokens answered 301 redirecting to ' +
+            'https://www.example. orca does not follow it: your key is in this request.',
+        );
+      }) as unknown as typeof fetch,
+      onNetExchange: (e) => void seen.push(e),
+    });
+    closers.push(proxy.close);
+
+    const res = await post(`${proxy.url}/v1/responses/input_tokens`, { input: 'count me' });
+
+    // The agent still learns it failed — that part was already right.
+    expect(res.status).toBe(500);
+
+    expect(seen).toHaveLength(1);
+    // `status: 0` means the same thing it means for an intercepted exchange: no response header was
+    // ever seen. A `404` here would claim the origin answered.
+    expect(seen[0]!.status).toBe(0);
+    expect(seen[0]!.path).toBe('/v1/responses/input_tokens');
+    expect(seen[0]!.requestBody).toContain('count me');
+    // The reason, so the trace answers "why is there no response" without a rerun.
+    expect(seen[0]!.responseBody).toContain('orca did not forward this call');
+    expect(seen[0]!.responseBody).toContain('301');
+  });
+
+  it('keeps the credential out of the recorded host, whatever shape the origin is', async () => {
+    // Caught in review three times, each round finding a shape the last one let through. An origin
+    // `new URL` rejects went into the trace whole — `persistNetExchange` files `host` as a
+    // `net.request` attr — and the trace's own redactor is no backstop, because `hunter2` and
+    // `SECRET123` are under its 20-character entropy floor and match no shape rule.
+    //
+    // `withoutCredentials` was the first attempt: written for prose, so its rules want prose
+    // shapes, and a dotted host was the only one of these it handled. Cutting by position was the
+    // second, and kept `gw key=SECRET123` because a secret after a space is still "after the last
+    // `@`". A string no parser accepted has no structure to rely on, so the host is now read as a
+    // whitelist: the characters a host and a port are made of, and the first one that is not ends
+    // it.
+    //
+    // This is the one path where the fallback runs at all — everywhere else it is reached only
+    // after a response came back, which means undici parsed the URL. `createProxy` does not
+    // validate origins; only the CLI does, through `unusableOrigin`.
+    for (const [origin, secret, host] of [
+      ['https://myuser:hunter2@gw bad', 'hunter2', 'gw'],
+      ['https://myuser:hun ter2@gw', 'hun ter2', 'gw'],
+      ['https://myuser:hunter2@', 'hunter2', ''],
+      ['gateway.example?key=SECRET123', 'SECRET123', 'gateway.example'],
+      ['gw?key=SECRET123', 'SECRET123', 'gw'],
+      ['localhost?key=SECRET123', 'SECRET123', 'localhost'],
+      ['192.168.0.1?key=SECRET123', 'SECRET123', '192.168.0.1'],
+      ['https://gw key=SECRET123', 'SECRET123', 'gw'],
+      ['https://myuser:pw@host:8080 key=SECRET123', 'SECRET123', 'host:8080'],
+      ['https://host/v1 key=SECRET123', 'SECRET123', 'host'],
+      // An `@` outside the authority is not userinfo. `withoutCredentials` names the first
+      // of these — a scoped package in a path — and the second is its mirror in a query.
+      // Both survived a mutation run until they were written down: drop either cut and the
+      // host is read from the wrong side of an `@` that was never a credential, and the
+      // trace names `scope` or `evil.example` as the upstream that failed.
+      //
+      // The space is in the authority on purpose. A space in a path is percent-encoded
+      // rather than rejected, so `new URL` accepts it and the fallback never runs — the
+      // first version of this case tested nothing at all, which the mutation run showed.
+      ['https://host bad/v1/@scope/pkg', 'scope', 'host'],
+      ['gw?user@evil.example', 'evil.example', 'gw'],
+      // Userinfo and host:port are the same shape until something says which it is, and an
+      // origin with no `@` has nothing to cut at. Digits after the colon are what say it:
+      // without that rule `https://myuser:hunter2` was recorded whole, password included.
+      ['https://myuser:hunter2', 'hunter2', 'myuser'],
+      ['https://user:PASSWORD', 'PASSWORD', 'user'],
+      // And a real port survives, or the trace stops naming which upstream failed.
+      ['http://[::1]:8080 key=SECRET123', 'SECRET123', '[::1]:8080'],
+    ] as const) {
+      const seen: NetExchange[] = [];
+      const proxy = await createProxy({
+        mode: 'record',
+        upstream: { openai: origin },
+        onNetExchange: (e) => void seen.push(e),
+      });
+      closers.push(proxy.close);
+
+      await post(`${proxy.url}/v1/responses/input_tokens`, { input: 'x' });
+
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.host, `host for ${origin}`).not.toContain(secret);
+      // The reason travels in the same event and quotes the request, so it carries the origin too.
+      expect(seen[0]!.responseBody, `reason for ${origin}`).not.toContain(secret);
+      // Still names the upstream that failed, where there was one to name. `https://user:pass@`
+      // has no host in it, and saying so is better than inventing one.
+      expect(seen[0]!.host, `host for ${origin}`).toBe(host);
+    }
+  });
+
+  it('keeps the credential out of the recorded reason', async () => {
+    // The message names the request that failed, and that message reaches both the agent and the
+    // trace. A gateway error quoting the call can quote the key with it.
+    const seen: NetExchange[] = [];
+    const proxy = await createProxy({
+      mode: 'record',
+      upstream: { openai: 'https://gateway.example' },
+      fetchImpl: (async () => {
+        throw new Error('refused: authorization: Bearer sk-live-must-not-be-written-down');
+      }) as unknown as typeof fetch,
+      onNetExchange: (e) => void seen.push(e),
+    });
+    closers.push(proxy.close);
+
+    await post(`${proxy.url}/v1/responses/input_tokens`, { input: 'x' });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.responseBody).not.toContain('sk-live-must-not-be-written-down');
+  });
+});
+
 describe('Anthropic path boundary', () => {
   it.each(['/v1/messages', '/anthropic/v1/messages', '/coding/v1/messages'])(
     'recognizes the versioned Anthropic endpoint %s',
