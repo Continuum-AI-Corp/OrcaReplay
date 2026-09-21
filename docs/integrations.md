@@ -390,27 +390,42 @@ an environment variable. That route needs `--tls-intercept` and the host named e
 ## Vercel AI SDK, and anything with its origin compiled in
 
 ```console
+orca record generic-openai -- node your_app.mjs
+```
+
+Since `@ai-sdk/openai` 2.0.41, `createOpenAI({ apiKey })` and the bare
+`openai` provider honour `OPENAI_BASE_URL`; an explicit `baseURL` argument still wins. Prefer
+`orca record generic-openai --` for that case.
+
+When the origin is compiled into source (or the client truly ignores the environment), the
+`node` adapter installs a preload through `NODE_OPTIONS` that redirects at `globalThis.fetch` —
+the one place every JS client agrees on:
+
+```console
 orca record node -- node your_app.mjs
 ```
 
-`@ai-sdk/openai` takes its origin as a constructor argument and reads nothing from the environment.
-The `node` adapter installs a preload through `NODE_OPTIONS` that redirects at `globalThis.fetch` —
-the one place every JS client agrees on.
-
-**Measured:** an agent posting to a hardcoded `https://api.openai.com/v1/chat/completions`,
-recorded and replayed at `exact=1 divergences=0`.
+**Measured:** `createOpenAI({ apiKey })` under `generic-openai` (no preload) records and
+replays at `exact=1 divergences=0`. An agent posting to a hardcoded
+`https://api.openai.com/v1/chat/completions` does the same via the node preload.
 
 ---
 
 ## Mastra
 
 ```console
-orca record node -- node your_agent.mjs
+orca record generic-openai -- node your_agent.mjs
 ```
 
-Mastra takes its model from `@ai-sdk/openai`, so it inherits that provider's behaviour exactly: the
-origin is a constructor argument and the environment is not consulted. The `node` adapter's fetch
-preload is what captures it.
+Mastra takes its model from `@ai-sdk/openai`, so it inherits that provider's behaviour: with no
+explicit `baseURL`, it reads `OPENAI_BASE_URL` (since `@ai-sdk/openai` 2.0.41). Prefer
+`orca record generic-openai --` for that route.
+
+If the origin is compiled in, use the `node` adapter's fetch preload instead:
+
+```console
+orca record node -- node your_agent.mjs
+```
 
 **Measured:** an `Agent` calling `generate()`, recorded and replayed at `exact=1 divergences=0` with
 the origin stopped.

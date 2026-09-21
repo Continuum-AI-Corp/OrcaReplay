@@ -11,10 +11,9 @@ import { applyNamedBaseUrls, passKey, passThrough, proxyBase, readEnv } from './
  * A JS agent that never reads a base-URL variable.
  *
  * Every other adapter here redirects an environment variable and stops. That covers most
- * harnesses and misses a whole class: `@ai-sdk/openai` takes its origin as a constructor argument
- * and reads nothing from the environment, so a Vercel AI SDK agent under `orca record` runs
- * perfectly, exits 0, and writes an empty trace. The same is true of any agent that hardcodes a
- * base URL, which is most of them once someone has pinned a gateway in code.
+ * harnesses and misses a whole class: an agent that hardcodes a base URL — which is most of
+ * them once someone has pinned a gateway in code — never consults those variables, so under
+ * `orca record` it runs perfectly, exits 0, and writes an empty trace.
  *
  * So this one redirects at the only place all of them agree on — `globalThis.fetch` — by writing
  * a self-contained preload into the run directory and pointing `NODE_OPTIONS` at it. It is a

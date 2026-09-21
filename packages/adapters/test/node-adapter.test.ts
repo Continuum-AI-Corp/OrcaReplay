@@ -12,8 +12,8 @@ import { nodeAdapter } from '../src/node.js';
  * The adapter for a JS agent that reads no base-URL variable.
  *
  * Every other adapter works by pointing an environment variable at the proxy. This one exists
- * because a whole class of agents ignores them — `@ai-sdk/openai` takes its origin as a
- * constructor argument and nothing else — so the redirect has to happen inside the runtime.
+ * because a whole class of agents ignores them — an origin compiled into source, or a gateway
+ * pinned in code — so the redirect has to happen inside the runtime.
  */
 describe('the node adapter', () => {
   let root: string;

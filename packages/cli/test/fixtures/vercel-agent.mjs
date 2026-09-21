@@ -2,10 +2,10 @@
 /**
  * A stand-in for an agent built on the Vercel AI SDK.
  *
- * The one property that matters is what it does *not* do: it reads no base-URL variable. Like
- * `@ai-sdk/openai`, whose default provider takes its origin as a constructor argument and nothing
- * else, it holds `https://api.openai.com` in code. Under every other adapter that makes it
- * invisible to orca — the run succeeds, exits 0, and the trace is empty.
+ * The one property that matters is what it does *not* do: it reads no base-URL variable. It
+ * holds `https://api.openai.com` in code, the way any agent does once a gateway is pinned in
+ * source. Under every other adapter that makes it invisible to orca — the run succeeds, exits
+ * 0, and the trace is empty.
  *
  * It also hands `fetch` a `Request` object rather than a string on its second turn, because the
  * SDKs that do this are exactly the ones that would slip past a hook that only rewrites strings.

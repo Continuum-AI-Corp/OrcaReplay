@@ -471,7 +471,7 @@ whether orca understands the wire format it speaks once it arrives.
 | **Codex CLI** (API key) | `OPENAI_BASE_URL` → Responses API | works |
 | **Codex CLI** (ChatGPT login) | `--tls-intercept` → Responses API | works, [with a decision to make](#when-the-harness-will-not-be-redirected) |
 | **OpenAI Agents SDK** | `OPENAI_BASE_URL` → Responses API | works — the SDK itself, on the Responses API it defaults to, records and replays at `exact=1`, [in CI](test/integrations/); [its own tracing is a second egress](docs/integrations.md#openai-agents-sdk) |
-| **Vercel AI SDK** | fetch hook — `orca record node -- node app.mjs` | works — an agent posting to an origin compiled into its source records and replays at `exact=1`, [in CI](test/integrations/) |
+| **Vercel AI SDK** | `OPENAI_BASE_URL` via `@ai-sdk/openai` (since 2.0.41) — `orca record generic-openai --`; fetch hook (`orca record node --`) when the origin is compiled in | works — env-aware SDK clients via `generic-openai` at `exact=1`, [in CI](test/integrations/); an agent posting to an origin compiled into its source records and replays at `exact=1` |
 | **grok-cli** (and its Telegram bot) | `orca record grok` — `GROK_BASE_URL`, plus the hook for its sub-agents | works |
 | **OpenClaw** | `orca record openclaw` — the hook for the gateway, inherited variables for the agents it spawns | works |
 | **opencode** | `orca record opencode` | adapter shipped, both origins redirected |
@@ -726,7 +726,7 @@ Early. `v0` is the walking skeleton of the three commands above. Everything belo
 | Trace format v0 + JSON Schema | working |
 | Anthropic / OpenAI-compatible model capture | working |
 | OpenAI Responses API capture | working — the format the OpenAI Agents SDK and the Codex CLI default to. Records, replays offline and forks; a fork stays on the wire format the agent speaks |
-| Agents that read no base-URL variable | working — `orca record node -- <cmd>` writes a preload into the run directory and redirects `globalThis.fetch` for an allowlist of provider hosts. Node and Bun both, since Bun ignores `--require` in `NODE_OPTIONS`. This is how a Vercel AI SDK agent is captured |
+| Agents that read no base-URL variable | working — `orca record node -- <cmd>` writes a preload into the run directory and redirects `globalThis.fetch` for an allowlist of provider hosts. Node and Bun both, since Bun ignores `--require` in `NODE_OPTIONS`. Use this when the origin is compiled into source; ordinary `@ai-sdk/openai` clients that honour `OPENAI_BASE_URL` go through `generic-openai` instead |
 | A call orca cannot read | working — forwarded rather than refused, and recorded as `net.request` / `net.response`: evidence, not a replayable turn. A recording that captured nothing warns instead of exiting clean |
 | Machine-readable output (`--json`) | working — one JSON document on stdout, diagnostics on stderr, failures as JSON |
 | Causal graph (`orca graph`) | working — what caused what, as a table or as JSON. Every edge says whether the trace recorded it or orca derived it just now, and names the rule either way. `--to N` narrows to the chain that produced one event |
