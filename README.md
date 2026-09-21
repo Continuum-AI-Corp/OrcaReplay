@@ -403,20 +403,25 @@ id lived on a tab the terminal could not open. `--remote` asks the gateway the s
 `orca list` asks this directory, over the GET on the path push already POSTs to:
 
 ```console
-$ orca list --remote --limit 3
-RUN                           STARTED           SOURCE   APP          TURNS  MODELS                    OUTCOME
-run_3b8f0c6d1e27a459c0f7d382  2026-09-22 00:13  upload   claude-code  4      claude-sonnet-4-5         ok
-run_7c1d5e2a9b40f3a8e6d2b401  2026-09-20 20:26  gateway  —            12     claude-sonnet-4-5, gpt-5  ok
-run_41a9d0e7c3b6825fd1470e9a  2026-09-19 19:26  gateway  —            3      gpt-5-mini                error
+$ orca list --remote --limit 2
+RUN                           STARTED           SOURCE   APP          TURNS  TOOLS  LAYERS       MODELS                    OUTCOME
+run_67a7ce30bd6a              2026-09-15 08:03  upload   claude-code  5      3      model,fs     claude-opus-5             exit 0
+run_c3b56f9910ee6050c468aa7c  2026-09-14 07:03  gateway  —            12     0      model,route  claude-sonnet-4-5, gpt-5  exit 1
 
   orca pull <run>      # fetch one into this machine’s store
 ```
 
-A run the gateway recorded itself has no client app, so that column reads `—` rather than blank.
-`--source gateway` narrows to those; `--source upload` narrows to what was pushed to it.
-Without the flag you get both. `--limit` sets how many (20 by default). `--gateway` stays what it
-is for push and pull — an optional override of *which* host — rather than doubling as the switch,
-so a destination you have already named needs no url typed at it.
+**LAYERS is the column to read.** It is what the two halves of this page are about: `model` and
+`route` come from the gateway, which sees the routing decision no laptop can; `fs`, `shell`, `mcp`
+and `net` come from a run recorded here. It says what is in a run before you spend a download on
+it. SOURCE sits beside it because where a run came from is a different question from what it holds.
+
+Anything the gateway does not report reads `—` rather than blank — a gateway recording has no
+client app, and a deployment whose listing carries no timestamp leaves STARTED unset rather than
+dated 1970. `--source gateway` narrows to what the gateway recorded; `--source upload` to what was
+pushed to it; without the flag you get both. `--limit` sets how many (20 by default). `--gateway`
+stays what it is for push and pull — an optional override of *which* host — rather than doubling
+as the switch, so a destination you have already named needs no url typed at it.
 
 ### What it needs
 
