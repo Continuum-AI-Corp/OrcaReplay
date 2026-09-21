@@ -12,9 +12,14 @@ const PROXY = 'http://127.0.0.1:44100';
 
 /**
  * ZCode is the second harness captured through its own configuration file, and the first whose
- * file is JSON. That is the whole difference: the rewrite parses a tree and walks it, so the
- * question MiniMax Code's text rewrite kept answering wrongly — did this reach every key — is not
- * a question here.
+ * file is JSON. An earlier version of this comment said that was the whole difference — that
+ * because the rewrite parses a tree and walks it, the question MiniMax Code's text rewrite kept
+ * answering wrongly, did this reach every key, is not a question here.
+ *
+ * It is. Parsing settles where the values are and says nothing about which of them are secret,
+ * and review found a credential under `APIKEY` walking straight through. So the tests below are
+ * in two groups, matching the two things the adapter now does: the ones that check the rewrite
+ * did what it understood, and the ones that check the net refused what it did not.
  */
 describe('the zcode adapter', () => {
   let root: string;
@@ -159,7 +164,7 @@ describe('the zcode adapter', () => {
       'deadbeefdeadbeefdeadbeefdeadbeef',
       'AKIAIOSFODNN7EXAMPLE',
     ];
-    for (const name of ['monkey', 'authMode', 'notAFieldAnyoneNamed']) {
+    for (const name of ['monkey', 'authMode', 'notAFieldAnyoneNamed', 'key', 'auth']) {
       for (const value of shapes) {
         const out = redirectedConfig(JSON.stringify({ config: { x: { [name]: value } } }), PROXY);
         // Either the name was recognised and the value replaced, or the file was refused whole.
@@ -188,6 +193,47 @@ describe('the zcode adapter', () => {
     expect(out).toBeDefined();
     expect(out).not.toContain('sk-live-');
     expect([...out!.matchAll(/orca-recorded/g)]).toHaveLength(6);
+  });
+
+  it('leaves a structural field called “key” alone', () => {
+    // `^key$` was in the rewrite's name list, and ZCode's shipped example config has
+    // `logo: { "key": "zai" }` — an image name. The rewrite replaced it with the placeholder,
+    // which is the failure mode a rewrite has that a net does not: it does not refuse, it
+    // corrupts. `key` and `auth` on their own are as often structure as credential, so they are
+    // left to the value-shaped net; under a separator or a prefix they stay in the list.
+    const out = redirectedConfig(
+      JSON.stringify({
+        config: {
+          logo: { key: 'zai' },
+          access: { auth: 'api-key', apiKey: 'sk-live-must-not-be-copied' },
+          options: { key: 'reasoningLevel', map: { key: 'high' } },
+        },
+      }),
+      PROXY,
+    );
+    expect(out).toBeDefined();
+    expect(out).not.toContain('sk-live-');
+    // Three structural `key`s and one `auth`, all still saying what they said.
+    expect([...out!.matchAll(/"key": "([^"]+)"/g)].map((m) => m[1])).toEqual([
+      'zai',
+      'reasoningLevel',
+      'high',
+    ]);
+    expect(out).toContain('"auth": "api-key"');
+  });
+
+  it('compares an origin by its origin, not by a prefix of the proxy URL', () => {
+    // `startsWith(proxyUrl)` was the first version of the net's "already moved" test, and
+    // `http://127.0.0.1:44100.evil.example` starts with `http://127.0.0.1:44100`. A hostname
+    // could walk through the one check standing between a real host and the trace.
+    for (const lookalike of [
+      `${PROXY}.evil.example/v1`,
+      `${PROXY}@evil.example/v1`,
+      'http://127.0.0.1:441000/v1',
+    ]) {
+      const out = redirectedConfig(JSON.stringify({ config: { x: { note: lookalike } } }), PROXY);
+      expect(out ?? '', lookalike).not.toContain('evil.example');
+    }
   });
 
   it('carries ZCode’s own shipped example config rather than refusing it', () => {

@@ -211,7 +211,10 @@ export function redirectedConfig(source: string, proxyUrl: string): string | und
 function accountedFor(rewritten: string, proxyUrl: string): boolean {
   if (new Redactor().redactString(rewritten).value !== rewritten) return false;
 
-  const base = proxyUrl.replace(/\/+$/, '');
+  // A proxy URL this cannot parse leaves nothing to compare against, and `undefined === undefined`
+  // would then wave every origin through. Refuse instead.
+  const base = originOf(proxyUrl);
+  if (base === undefined) return false;
   let ok = true;
   const inspect = (node: unknown): void => {
     if (Array.isArray(node)) {
@@ -223,9 +226,16 @@ function accountedFor(rewritten: string, proxyUrl: string): boolean {
       return;
     }
     if (typeof node !== 'string') return;
-    // Already accounted for: the placeholder the rewrite wrote, and a value it moved to the proxy.
-    if (node === PLACEHOLDER_KEY || node.startsWith(base)) return;
-    if (isOrigin(node) || OPAQUE_TOKEN.test(node)) ok = false;
+    if (node === PLACEHOLDER_KEY) return;
+    // Origins are judged by their parsed origin, not by a prefix. `startsWith(proxyUrl)` was the
+    // first version of this line, and `http://127.0.0.1:44100.evil.example` starts with
+    // `http://127.0.0.1:44100` — so the one check standing between a real host and the trace was
+    // a substring match that a hostname can walk straight through.
+    if (isOrigin(node)) {
+      if (originOf(node) !== base) ok = false;
+      return;
+    }
+    if (OPAQUE_TOKEN.test(node)) ok = false;
   };
   inspect(JSON.parse(rewritten));
   return ok;
@@ -257,6 +267,22 @@ const SECRET_TITLE = 'Key|Token|Secret|Password|Credential|Auth|Authorization|Co
 const SECRET_UPPER = SECRET_TITLE.toUpperCase();
 
 /**
+ * The same words minus the two that mean something else on their own.
+ *
+ * `key` is as often a map entry or an asset name as it is a credential — ZCode's own shipped
+ * example config has `logo: { "key": "zai" }`, and replacing that writes `orca-recorded` into a
+ * field naming an image. `auth` is as often a mode as a token. Measured on that file: the first
+ * version of this list corrupted it.
+ *
+ * Under a separator or a prefix — `api_key`, `apiKey`, `authToken` — both are unambiguous and stay
+ * in. On their own they are left to `accountedFor`, which judges a value by what it looks like
+ * rather than by what it is called, and refuses the file if it cannot account for one. That is the
+ * division of labour this file is supposed to have: the rewrite may only touch what it is sure of,
+ * because a rewrite that guesses wrong does not refuse, it corrupts.
+ */
+const BARE_WORD = 'token|secret|password|credential|authorization|cookie|jwt|bearer';
+
+/**
  * Any name a credential is kept under, rather than the handful this file happens to have seen.
  *
  * Four boundaries, because a config uses four conventions and the first version of this knew two.
@@ -276,7 +302,7 @@ const SECRET_UPPER = SECRET_TITLE.toUpperCase();
  */
 function isSecret(key: string): boolean {
   return (
-    new RegExp(`^(?:${SECRET_WORD})s?$`, 'i').test(key) ||
+    new RegExp(`^(?:${BARE_WORD})s?$`, 'i').test(key) ||
     new RegExp(`[-_](?:${SECRET_WORD})s?$`, 'i').test(key) ||
     new RegExp(`[A-Za-z0-9](?:${SECRET_TITLE})s?$`).test(key) ||
     new RegExp(`[A-Z0-9](?:${SECRET_UPPER})S?$`).test(key)
@@ -297,6 +323,15 @@ function isSecret(key: string): boolean {
  */
 function isOrigin(value: string): boolean {
   return /^https?:\/\//i.test(value);
+}
+
+/** Scheme, host and port, or `undefined` for a string that only looks like a URL. */
+function originOf(value: string): string | undefined {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
