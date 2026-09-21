@@ -89,6 +89,18 @@ Measured on one machine, and the reason the table is here rather than in a folde
 | `mimo-v2.5-pro` | mimo | `run` | 50,618 chars | 16 | - |
 | `kilo-auto/free` | kilo | `run` | 11,326 chars | 13 | - |
 | `nemotron-3.5-lightning-free` | hermes | `-z` | 14,058 chars | 19 | - |
+| `deepseek/deepseek-v4-flash-free` | mcode | `exec --prompt-mode tui` | 14,777 chars | 18 | - |
+| `deepseek/deepseek-v4-flash-free` | mcode | `exec --prompt-mode coding` | 16,157 chars | 18 | - |
+| `deepseek/deepseek-v4-flash-free` | mcode | `exec --prompt-mode work` | 17,721 chars | 18 | - |
+| `gpt-5.6-sol` | openclaw | `agent exec` | 21,762 chars | 38 | - |
+| `gemini-3.5-flash` | gemini | non-interactive | 25,084 chars | 8 | - |
+| `deepseek-v4.1-flash` | crush | non-interactive | 29,335 chars | 26 | - |
+| `deepseek-v4.1-flash` | goose | non-interactive | 9,768 chars | 18 | - |
+| `deepseek-flash` | dsh | non-interactive | 4,663 chars | 25 | - |
+| `openai/gpt-4o-mini` | cline | non-interactive | 4,258 chars | 25 | - |
+| `openai/gpt-4o-mini` | pi | non-interactive | 2,632 chars | 4 | - |
+| `openai/gpt-4o-mini` | hackerai | non-interactive | 1,696 chars | 0 | - |
+| `deepseek-v4.1-flash` | aider | non-interactive | 1,229 chars | 0 | - |
 
 The five rows below the OpenCode block were missing until now. Three of them carry no prefix
 count: `mimo-v2.5` and `mimo-v2.5-pro` were captured with no valid key, so the server answered
@@ -96,6 +108,30 @@ count: `mimo-v2.5` and `mimo-v2.5-pro` were captured with no valid key, so the s
 which is why `capture.mjs` files these only under `--allow-failed` and says so. `grok-4.5-high`
 and `kilo-auto/free` completed, but neither response carried a usage block to read. Hermes
 completed too, on the same anonymous tier, and its response carried no usage block either.
+
+**The twelve rows below Hermes have no prefix count either, and nine of them have no profile.**
+MiniMax Code has one, `capture.mjs mcode`, and its three modes are three prompts from one binary.
+The nine after it were captured before their harness had one, through `orca record exec` with the
+agent pointed at the proxy -- so `capture.mjs <harness>` will answer `unknown harness` for every
+one of them, and the way to reproduce one today is the way it was taken: run the agent under
+`orca record` with its provider base URL moved, and read the system prompt out of the request.
+Writing profiles for them is the follow-up that turns these rows into one-liners.
+
+Four are worth a sentence each, because the shape of the capture is not obvious from the row:
+
+  aider       1,229 characters and no tools. Aider sends its whole instruction set as the system
+              prompt and drives edits through the reply format rather than through tool calls, so
+              a zero in the tools column is the product, not a truncated capture.
+  hackerai    also zero tools, and driven through the package's own `Agent` class rather than its
+              CLI, which has no non-interactive entry point. The prompt is the product's: the shim
+              only calls `agent.run`, and everything in the request comes from their code.
+  crush       the only one of the nine that needed re-scrubbing before it could be committed. It
+              was taken on 2026-09-18, before `pathRe` learned to match a path written with
+              forward slashes, so eight `<location>` lines carried `C:/Users/<name>/.claude/...`
+              and two account uuids straight through the audit that is supposed to stop exactly
+              that. Re-scrubbed with the current rules; 29,335 characters as sent, 28,839 on disk.
+  openclaw    38 tools, the largest set here, and its first line is an HTML comment
+              (`<!-- openclaw:attempt:STABLE -->`) rather than an identity sentence.
 
 About 6,300 characters of the Hermes row is an `<available_skills>` block listing 51 skills, and
 they are Hermes' own -- `hermes skills list` reports them as builtin, with none installed by
