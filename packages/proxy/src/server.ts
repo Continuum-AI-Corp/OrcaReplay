@@ -1040,15 +1040,49 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
           : `served by the recorded dialect ${dialect.id}`,
       });
     }
-    const upstreamRes = await doFetch(`${origin}${upstreamPath}`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...headersForModel(headers, options.forkModel),
-        ...headersForOrigin(origin),
-      },
-      body: outboundBody,
-    });
+    let upstreamRes: Awaited<ReturnType<typeof doFetch>>;
+    try {
+      upstreamRes = await doFetch(`${origin}${upstreamPath}`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...headersForModel(headers, options.forkModel),
+          ...headersForOrigin(origin),
+        },
+        body: outboundBody,
+      });
+    } catch (err) {
+      // An upstream that never answered, on the path orca *does* understand.
+      //
+      // `passThrough` learned this already; this is the same fact one branch over, and it was the
+      // worse half. A call orca recognised as a model exchange and could not forward left no
+      // event at all: `run.start`, a snapshot, `run.end`. The agent got its 500 and the run then
+      // warned `capture.empty ... "the agent never called the proxy — it may not read a base-URL
+      // variable"` — which is the opposite of what happened, and sends the operator to check
+      // environment variables when the upstream is simply unreachable.
+      //
+      // Recorded as an exchange rather than as network traffic, because that is what it is: the
+      // same call, recorded the same way, whether the upstream answered 503 or never answered at
+      // all. `status: 500` is what the agent receives from the catch-all above, so a replay of
+      // this trace reproduces the failure the way §4 asks — and `>= 400` is what makes
+      // `capture.errors` count it, where `0` would have filed a failed call as a healthy one.
+      //
+      // The body is `reasonFor`'s, not the catch-all's: both name the origin they were given, and
+      // this one is the copy that gets written down. See `scrubOrigin`.
+      //
+      // Answered here rather than rethrown into the catch-all, so the bytes the agent receives
+      // and the bytes the trace holds are the same ones. Rethrowing gave the agent the
+      // catch-all's `TypeError: fetch failed` while the trace held this scrubbed reason, and a
+      // replay then served the trace's version — a recording that did not reproduce itself.
+      // The agent also gets the better of the two messages: one that names orca and the origin.
+      const body = JSON.stringify({
+        error: { message: `orca did not forward this call: ${reasonFor(err, origin)}` },
+      });
+      recordExchange(body, 500, false);
+      res.writeHead(500, { 'content-type': 'application/json' });
+      res.end(body);
+      return;
+    }
 
     const upstreamType = upstreamRes.headers.get('content-type') ?? 'application/json';
     const upstreamStreamed = upstreamType.includes('event-stream');
@@ -1333,11 +1367,42 @@ export async function createProxy(options: ProxyOptions): Promise<ProxyHandle> {
     // Verbatim: everything below forwards this request unchanged, so where it says it was going
     // stands, fork or no fork. See `passthroughOrigin`.
     const origin = passthroughOrigin(headers, forwardBase, { verbatim: true });
-    const upstreamRes = await doFetch(`${origin}${path}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', ...headers, ...headersForOrigin(origin) },
-      body: rawBody,
-    });
+    let upstreamRes: Awaited<ReturnType<typeof doFetch>>;
+    try {
+      upstreamRes = await doFetch(`${origin}${path}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers, ...headersForOrigin(origin) },
+        body: rawBody,
+      });
+    } catch (err) {
+      // The third of the three forwarding paths, and it had the same hole. An index build issues
+      // these hundreds at a time; a gateway that stops answering half way through used to leave
+      // a trace that simply had fewer retrieval calls in it than the run made, with nothing
+      // saying which ones or why.
+      //
+      // `status: 0` and the `net.*` shape, matching `passThrough`: no response header was ever
+      // seen, and a retrieval call is already recorded as network traffic rather than as a
+      // replayable model exchange.
+      options.onNetExchange?.({
+        ...originParts(origin),
+        method: 'POST',
+        path,
+        intercepted: false,
+        rule: rule.id,
+        replayKey: key,
+        ...(batchKey === undefined ? {} : { batchKey }),
+        requestHeaders: recordableHeaders,
+        requestBody: rawBody,
+        requestTruncated: false,
+        status: 0,
+        responseHeaders: {},
+        responseBody: `orca did not forward this call: ${reasonFor(err, origin)}`,
+        responseTruncated: false,
+        responseBytes: 0,
+        durationMs: Date.now() - startedAt,
+      });
+      throw err;
+    }
 
     const responseHeaders: Record<string, string> = {};
     upstreamRes.headers.forEach((value, key2) => {
