@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { NetExchange } from '../src/intercept.js';
+import type { RecordedExchange } from '../src/server.js';
 import { createProxy, defaultDialects } from '../src/server.js';
 import { selectDialect } from '../src/dialects.js';
 
@@ -176,6 +177,111 @@ describe('an upstream that never answers', () => {
 
     expect(seen).toHaveLength(1);
     expect(seen[0]!.responseBody).not.toContain('sk-live-must-not-be-written-down');
+  });
+
+  /**
+   * The same fact on the path orca *does* understand, which was the worse half of it.
+   *
+   * A call orca recognised as a model exchange and could not forward left no event at all — the
+   * trace held `run.start`, a snapshot and `run.end` — and the run then warned `capture.empty`
+   * with `cause="the agent never called the proxy — it may not read a base-URL variable"`. The
+   * agent had called the proxy and the base-URL variables were fine; the upstream was simply
+   * unreachable. So the run that most needed explaining was the one that explained itself
+   * wrongly, and `orca show` held nothing to correct the record with.
+   */
+  it('records a model call it could not forward, not only the ones it cannot read', async () => {
+    const seen: RecordedExchange[] = [];
+    const proxy = await createProxy({
+      mode: 'record',
+      upstream: { openai: 'http://127.0.0.1:9' },
+      fetchImpl: (async () => {
+        throw new TypeError('fetch failed');
+      }) as unknown as typeof fetch,
+      onExchange: (e) => void seen.push(e),
+    });
+    closers.push(proxy.close);
+
+    const res = await post(`${proxy.url}/v1/chat/completions`, {
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+
+    expect(res.status).toBe(500);
+    expect(seen).toHaveLength(1);
+    // `500`, not `0`: it is what the agent received, and `capture.errors` counts `>= 400`. Filed
+    // as `0` this would have been counted a healthy exchange and the run called itself clean.
+    expect(seen[0]!.status).toBe(500);
+    expect(seen[0]!.rawResponse).toContain('orca did not forward this call');
+    expect(seen[0]!.rawResponse).toContain('fetch failed');
+  });
+
+  it('answers the agent the bytes it wrote down, so the recording reproduces itself', async () => {
+    const seen: RecordedExchange[] = [];
+    const proxy = await createProxy({
+      mode: 'record',
+      upstream: { openai: 'http://127.0.0.1:9' },
+      fetchImpl: (async () => {
+        throw new TypeError('fetch failed');
+      }) as unknown as typeof fetch,
+      onExchange: (e) => void seen.push(e),
+    });
+    closers.push(proxy.close);
+
+    const res = await post(`${proxy.url}/v1/chat/completions`, {
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+
+    // Rethrowing into the catch-all gave the agent its `TypeError: fetch failed` while the trace
+    // held the scrubbed reason — and a replay then served the trace's version, so the recording
+    // answered differently from the run it was a recording of.
+    expect(res.text).toBe(seen[0]!.rawResponse);
+  });
+
+  it('keeps the credential out of the recorded reason on the model path too', async () => {
+    const seen: RecordedExchange[] = [];
+    const proxy = await createProxy({
+      mode: 'record',
+      upstream: { openai: 'http://user:hunter2@gw.example' },
+      fetchImpl: (async (url: string | URL | Request) => {
+        // What undici does with a URL carrying credentials: it quotes the URL back at you.
+        throw new TypeError(`Request cannot be constructed from ${String(url)}`);
+      }) as unknown as typeof fetch,
+      onExchange: (e) => void seen.push(e),
+    });
+    closers.push(proxy.close);
+
+    const res = await post(`${proxy.url}/v1/chat/completions`, {
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.rawResponse).not.toContain('hunter2');
+    expect(res.text).not.toContain('hunter2');
+  });
+
+  it('records a retrieval call it could not forward', async () => {
+    const seen: NetExchange[] = [];
+    const proxy = await createProxy({
+      mode: 'record',
+      upstream: { openai: 'http://127.0.0.1:9' },
+      fetchImpl: (async () => {
+        throw new TypeError('fetch failed');
+      }) as unknown as typeof fetch,
+      onNetExchange: (e) => void seen.push(e),
+    });
+    closers.push(proxy.close);
+
+    const res = await post(`${proxy.url}/v1/embeddings`, { input: 'hello' });
+
+    expect(res.status).toBe(500);
+    expect(seen).toHaveLength(1);
+    // `status: 0` and the `net.*` shape, matching the passthrough path: a retrieval call is
+    // already recorded as network traffic rather than as a replayable model exchange.
+    expect(seen[0]!.status).toBe(0);
+    expect(seen[0]!.path).toBe('/v1/embeddings');
+    expect(seen[0]!.responseBody).toContain('orca did not forward this call');
   });
 });
 
