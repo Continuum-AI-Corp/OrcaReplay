@@ -149,3 +149,83 @@ describe('Output', () => {
     expect(rows).toHaveLength(3);
   });
 });
+
+/**
+ * A TABLE IS NOT A TERMINAL PROGRAM.
+ *
+ * Every string in a row came from somewhere else — the gateway's run listing, a trace's event
+ * detail, a trace a colleague sent you — and the renderer printed all of it verbatim. Measured
+ * against `orca list --remote` answered by a hostile listing: a newline split one row into two
+ * and the second was a run the gateway never held, a carriage return rewrote OUTCOME after it
+ * was printed, and `ESC [ 2 J` cleared the screen. The fix belongs here rather than at each
+ * caller, because "one row is one line" is a property of the table, not of whoever fills it.
+ */
+describe('table cells cannot drive the terminal', () => {
+  const sink = () => {
+    const lines: string[] = [];
+    return { lines, write: (s: string) => void lines.push(s) };
+  };
+  const ESC_C = String.fromCharCode(27);
+  const BEL = String.fromCharCode(7);
+  const LF = String.fromCharCode(10);
+  const CR = String.fromCharCode(13);
+
+  const render = (rows: string[][]): string[] => {
+    const s = sink();
+    new Output({ write: s.write, isTTY: false }).table(['A', 'B'], rows);
+    return stripAnsi(s.lines.join('')).trim().split('\n');
+  };
+
+  it('does not let a newline invent a row that was never listed', () => {
+    const rows = render([[`cc${LF}run_deadbeefcafe  gateway`, 'x']]);
+    // One row in, one row out — header plus one.
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toContain('\\x0a');
+    expect(rows[1]).toContain('run_deadbeefcafe');
+  });
+
+  it('does not let a carriage return rewrite what was already printed', () => {
+    const rows = render([['ok', `exit 0${CR}exit 137`]]);
+    expect(rows[1]).not.toContain(CR);
+    expect(rows[1]).toContain('\\x0d');
+  });
+
+  it('shows an escape sequence instead of performing it', () => {
+    const rows = render([
+      [`${ESC_C}[2J${ESC_C}[Hgotcha`, `${ESC_C}]8;;https://evil${BEL}text${ESC_C}]8;;${BEL}`],
+    ]);
+    expect(rows.join('\n')).not.toContain(ESC_C);
+    expect(rows.join('\n')).not.toContain(BEL);
+    expect(rows[1]).toContain('\\x1b[2J');
+    expect(rows[1]).toContain('\\x07');
+  });
+
+  it('pads on what is printed, so a tamed cell still lines up', () => {
+    const rows = render([
+      [`a${LF}b`, 'end'],
+      ['aaaaaaaaaa', 'end'],
+    ]);
+    // `a@B@x0ab` is 7 wide, `aaaaaaaaaa` is 10, so both second cells start at the same column.
+    expect(rows[1]!.indexOf('end')).toBe(rows[2]!.indexOf('end'));
+  });
+
+  /** A cell is a value, and `info key=value` has always replaced a secret-shaped value whole. */
+  it('redacts a secret-shaped cell, as the key=value path does', () => {
+    const rows = render([['sk-abcdefghij0123456789klmn', 'ok']]);
+    expect(rows[1]).not.toContain('sk-abcdefghij');
+    expect(rows[1]).toContain('<redacted>');
+  });
+
+  /** A failure is a sentence this code composed; taming it must not blank the explanation. */
+  it('tames a failure message without discarding it', () => {
+    const s = sink();
+    new Output({ write: s.write, isTTY: false }).failure({
+      event: 'list.failed',
+      what: `gateway answered 403: denied${CR}all clear`,
+    });
+    const text = stripAnsi(s.lines.join(''));
+    expect(text).not.toContain(CR);
+    expect(text).toContain('gateway answered 403: denied');
+    expect(text).toContain('\\x0d');
+  });
+});
