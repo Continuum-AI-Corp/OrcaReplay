@@ -248,6 +248,59 @@ describe('orca list --remote', () => {
     expect(row.split(/\s\s+/)).toContain('9');
   });
 
+  /**
+   * A ROW THAT IS NOT A RUN IS NOT A ROW.
+   *
+   * `items` was mapped straight through, so `null` in it read `run_key` off nothing and the user
+   * got `Cannot read properties of null (reading 'run_key')` with orca's name on it. A string or
+   * a number in there fared no better: every field came out empty and the reader was shown a run
+   * with no id, which is a run they cannot pull. Counted rather than dropped in silence — a
+   * gateway sending these is broken, and the count is the only evidence the reader gets.
+   */
+  it('skips entries that are not runs instead of reading fields off them', async () => {
+    reply = {
+      status: 200,
+      body: JSON.stringify({
+        success: true,
+        data: { items: [null, 'a string', 42, [], { run_key: '' }, { run_key: 'run_abc123' }] },
+      }),
+    };
+    await listCommand(parseArgs(['list', '--remote']), out, home, env());
+
+    const rows = text()
+      .trim()
+      .split('\n')
+      .filter((l) => l.startsWith('run_'));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toContain('run_abc123');
+    expect(logs.map((l) => l.event)).toContain('list.skipped');
+    expect(logs.find((l) => l.event === 'list.skipped')?.fields['entries']).toBe(5);
+  });
+
+  /**
+   * A 2xx THAT IS NOT JSON IS SOMEBODY ELSE ANSWERING. `refusal` already says as much about error
+   * bodies — "a proxy in between may answer instead of the gateway" — and the success path had no
+   * such thought, so a captive portal's login page surfaced as `Unexpected token '<'`, which
+   * reads as a bug in orca rather than as the network fact it is.
+   */
+  it('names a proxy or portal rather than reporting a JSON parse error', async () => {
+    reply = { status: 200, body: '<html><body>502 Bad Gateway</body></html>' };
+    const failed = await listCommand(parseArgs(['list', '--remote']), out, home, env()).catch(
+      (e: Error) => e.message,
+    );
+    expect(failed).toContain('not JSON');
+    expect(failed).toMatch(/proxy|portal/);
+    expect(failed).not.toContain('Unexpected token');
+  });
+
+  /** The shape `orca gc --keep` refuses, for the same reason: a count has to be one. */
+  it.each([['0'], ['-1'], ['2.5']])('refuses --limit %s rather than asking for it', async (n) => {
+    await expect(
+      listCommand(parseArgs(['list', '--remote', '--limit', n]), out, home, env()),
+    ).rejects.toThrow(/--limit needs a whole number/);
+    expect(received).toHaveLength(0);
+  });
+
   /** Same listing endpoint, a different host named for this one invocation. */
   it('honours --gateway as an override of which host, not as the switch', async () => {
     await writeConfig(

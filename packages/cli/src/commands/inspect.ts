@@ -79,7 +79,12 @@ async function listGatewayCommand(
   out: Output,
   env: NodeJS.ProcessEnv,
 ): Promise<void> {
-  const runs = await listGatewayRuns(args, env);
+  const { runs, skipped } = await listGatewayRuns(args, env);
+  if (skipped > 0) {
+    // Said, not swallowed. The count is the only evidence the reader gets that what they are
+    // looking at is not all of what the gateway sent.
+    out.warn('list.skipped', { entries: skipped, why: 'not a run the gateway can name' });
+  }
   if (runs.length === 0) {
     out.plain('the gateway is holding no runs for this key');
     return;
