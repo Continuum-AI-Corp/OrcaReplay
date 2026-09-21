@@ -8,6 +8,11 @@ import {
   structuralDistance,
 } from '../src/matching.js';
 
+const LF = '\n';
+/** The instruction body a MiniMax Code reminder carries, in the bulk it actually has. */
+const SCAFFOLDING =
+  'You MUST include file deliverables in the final response using the delivery format. '.repeat(6);
+
 function req(over: Partial<CanonicalRequest> = {}): CanonicalRequest {
   return {
     model: 'claude-opus-5',
@@ -126,6 +131,435 @@ describe('RequestMatcher — the ladder from spec §4', () => {
       req({
         messages: [
           { role: 'user', content: [{ type: 'text', text: 'do something completely different' }] },
+        ],
+      }),
+    );
+    expect(r.matched).toBe(false);
+    expect(r.rung).toBe(4);
+  });
+
+  it('reads a drifting harness reminder as drift, not as a changed question', () => {
+    // MiniMax Code prepends a `<system-reminder>` block to the user's message carrying a session id
+    // it regenerates every request and a wall-clock timestamp. Measured through this matcher on two
+    // recordings of the identical question: 34 characters of drift against an ask tolerance of about
+    // thirteen, so strict replay reached rung 4 and halted on a recording that had the answer in it.
+    //
+    // The tag is not MiniMax's. Claude Code, OpenCode, Kilo Code, MiMo Code and Qwen Code all use it
+    // for injected context, and say so in their own prompts — "injected by the harness, not the
+    // user". Taking them at their word is what this asserts.
+    const reminder = (id: string, at: string) =>
+      `<system-reminder>${LF}<agent-context>${LF}  YOUR SESSION ID: ${id}${LF}` +
+      `  date: ${at}${LF}</agent-context>${LF}</system-reminder>${LF}${LF}fix the auth test`;
+
+    const first = req({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: reminder(
+                'mvs_643d348214ea4573bf852652677b7dcf',
+                'Sun Sep 20 2026 10:19:41 GMT+0800 (China Standard Time)',
+              ),
+            },
+          ],
+        },
+      ],
+    });
+    const second = req({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: reminder(
+                'mvs_9f21ac0bb7de41528ee3d90147cc6a82',
+                'Sun Sep 20 2026 11:47:02 GMT+0800 (China Standard Time)',
+              ),
+            },
+          ],
+        },
+      ],
+    });
+
+    const m = new RequestMatcher([first]);
+    const r = m.match(second);
+    expect(r.matched).toBe(true);
+    expect(r.rung).toBe(2);
+    // Matched, and saying so: the reminder still counts toward the whole-request distance, so this
+    // is a minor divergence rather than an exact match.
+    expect(r.divergence?.level).toBe('minor');
+    expect(r.divergence?.distance).toBeGreaterThan(0);
+  });
+
+  it('still refuses a changed question buried under a reminder', () => {
+    // The guard the last test relaxes is load-bearing, so it has to survive the relaxation: only
+    // the reminder leaves the ask measurement, never the question beside it.
+    const wrap = (ask: string) =>
+      `<system-reminder>${LF}injected by the harness${LF}</system-reminder>${LF}${LF}${ask}`;
+
+    const recorded = req({
+      messages: [{ role: 'user', content: [{ type: 'text', text: wrap('fix the auth test') }] }],
+    });
+    const m = new RequestMatcher([recorded]);
+    const r = m.match(
+      req({
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'text', text: wrap('delete the auth test') }],
+          },
+        ],
+      }),
+    );
+    expect(r.matched).toBe(false);
+    expect(r.rung).toBe(4);
+  });
+
+  it('does not let two reminders swallow the question between them', () => {
+    // Non-greedy, tested where it is the only thing that matters. A harness that injects a reminder
+    // on both sides of the ask — MiniMax Code already injects one before it — would, under a greedy
+    // match, have everything from the first opening tag to the last closing one removed, taking the
+    // question with it. Then any question would match any other.
+    const between = (ask: string) =>
+      `<system-reminder>${LF}before${LF}</system-reminder>${LF}${ask}${LF}` +
+      `<system-reminder>${LF}after${LF}</system-reminder>`;
+
+    const m = new RequestMatcher([
+      req({
+        messages: [
+          { role: 'user', content: [{ type: 'text', text: between('fix the auth test') }] },
+        ],
+      }),
+    ]);
+    const r = m.match(
+      req({
+        messages: [
+          { role: 'user', content: [{ type: 'text', text: between('delete the database') }] },
+        ],
+      }),
+    );
+    expect(r.matched).toBe(false);
+    expect(r.rung).toBe(4);
+  });
+
+  it('refuses a question changed inside a reminder that has text after it', () => {
+    // The second thing review caught, reproduced before it was fixed. Guarding only the case
+    // where the reminder *is* the whole message left this one open: put anything at all outside
+    // the tag and the block was dropped again, taking the changed question with it. Measured
+    // then: both sides stripped to "OK", askDrift 0 against a tolerance of 0.08, so rung 2
+    // returned `minor` and the answer recorded for "fix the auth test" came back for "delete the
+    // auth test". `main` refuses it at rung 4, and so does this.
+    const asked = (question: string) =>
+      req({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: `<system-reminder>${question}</system-reminder>${LF}${LF}OK` },
+            ],
+          },
+        ],
+      });
+
+    const changed = new RequestMatcher([asked('fix the auth test')]).match(
+      asked('delete the auth test'),
+    );
+    expect(changed.matched).toBe(false);
+    expect(changed.rung).toBe(4);
+  });
+
+  it('folds a labelled value only when the whole value is the regenerated token', () => {
+    // A field whose value merely *contains* a sha is not a regenerated field — it is a sentence
+    // that happens to be written after a colon, and the part that differs is the part being
+    // asked about. Only a value that is entirely one of the volatile shapes folds.
+    const noted = (sha: string) =>
+      req({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text:
+                  `<system-reminder>${LF}${SCAFFOLDING}${LF}` +
+                  `  note: look at commit ${sha} before answering${LF}</system-reminder>`,
+              },
+            ],
+          },
+        ],
+      });
+
+    const changed = new RequestMatcher([noted('4f2a9c1e88b34d5061ff0c7a2b9e13d4')]).match(
+      noted('9911aa22bb33cc44dd55ee66ff778899'),
+    );
+    expect(changed.matched).toBe(false);
+    expect(changed.rung).toBe(4);
+  });
+
+  it('needs a body of instructions, not just a labelled field, to call a block scaffolding', () => {
+    // `date: 14:30` is a labelled field by every rule above, and nothing else. A reminder that is
+    // only that is not scaffolding carrying a regenerated value — it is the value, and whoever
+    // wrote it was asking about the time.
+    const at = (clock: string) =>
+      req({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                // On its own line, because that is what makes it a field at all.
+                text: `<system-reminder>${LF}date: ${clock}${LF}</system-reminder>`,
+              },
+            ],
+          },
+        ],
+      });
+
+    const changed = new RequestMatcher([at('14:30')]).match(at('15:45'));
+    expect(changed.matched).toBe(false);
+    expect(changed.rung).toBe(4);
+  });
+
+  it('refuses a volatile-shaped question inside a reminder long enough to be scaffolding', () => {
+    // The fourth thing review caught. A floor on the block's bulk only measured bulk: put the
+    // same sha question inside a real MiniMax Code block and the 494 characters of instructions
+    // around it paid for the threshold, the sha folded, and the answer about one commit came
+    // back for the other at rung 2.
+    //
+    // What the harness emits is a *field* — one label, one value, the whole value regenerated —
+    // and a question is prose. So only a labelled line's complete value folds, and a sha inside
+    // a sentence is never that, however long the block around it is.
+    const context = (id: string, clock: string, asked: string) =>
+      `<system-reminder>${LF}<agent-context>${LF}  agent: Mavis  # display name${LF}` +
+      `  SESSION ROLE: root${LF}  YOUR SESSION ID: mvs_${id}${LF}` +
+      `  date: Sun Sep 20 2026 ${clock} GMT+0800 (China Standard Time)${LF}` +
+      `</agent-context>${LF}${SCAFFOLDING}${asked}${LF}</system-reminder>`;
+
+    for (const [recorded, live] of [
+      [
+        'What does commit 4f2a9c1e88b34d5061ff0c7a2b9e13d4 do?',
+        'What does commit 9911aa22bb33cc44dd55ee66ff778899 do?',
+      ],
+      ['What is at 14:30 today?', 'What is at 15:45 today?'],
+    ] as const) {
+      const asked = (text: string) =>
+        req({ messages: [{ role: 'user', content: [{ type: 'text', text }] }] });
+      const changed = new RequestMatcher([
+        asked(context('643d348214ea4573bf852652677b7dcf', '11:31:14', recorded)),
+      ]).match(asked(context('9f21ac0bb7de41528ee3d90147cc6a82', '12:21:37', live)));
+      expect(changed.matched, recorded).toBe(false);
+      expect(changed.rung, recorded).toBe(4);
+    }
+
+    // And the drift the block exists to forgive still is: same question, two regenerated fields.
+    const asked = (text: string) =>
+      req({ messages: [{ role: 'user', content: [{ type: 'text', text }] }] });
+    const same = new RequestMatcher([
+      asked(context('643d348214ea4573bf852652677b7dcf', '11:31:14', 'fix the auth test')),
+    ]).match(asked(context('9f21ac0bb7de41528ee3d90147cc6a82', '12:21:37', 'fix the auth test')));
+    expect(same.matched).toBe(true);
+    expect(same.rung).toBe(2);
+  });
+
+  it('refuses a question that is itself a volatile shape, inside a reminder', () => {
+    // The third thing review caught, reproduced before it was fixed. Confining the fold to the
+    // block was not enough: a question can be inside one, and a question about a sha or a time is
+    // made of exactly the shapes that get folded. Measured then: both sides folded to the same
+    // text, askDrift 0 against a tolerance of 0.04, so rung 2 served the answer about commit
+    // 4f2a… for the question about commit 9911…
+    //
+    // What tells the two apart is bulk, not shape. A harness reminder is a body of instructions
+    // with a regenerated field in it — the recorded MiniMax Code blocks leave about 494 characters
+    // that are not volatile — while these leave 21 and 18.
+    for (const [recorded, live] of [
+      [
+        '<system-reminder>what does commit 4f2a9c1e88b34d5061ff0c7a2b9e13d4 do?</system-reminder>',
+        '<system-reminder>what does commit 9911aa22bb33cc44dd55ee66ff778899 do?</system-reminder>',
+      ],
+      [
+        '<system-reminder>what is at 14:30 today?</system-reminder>',
+        '<system-reminder>what is at 15:45 today?</system-reminder>',
+      ],
+    ] as const) {
+      const asked = (text: string) =>
+        req({ messages: [{ role: 'user', content: [{ type: 'text', text }] }] });
+      const changed = new RequestMatcher([asked(recorded)]).match(asked(live));
+      expect(changed.matched, recorded).toBe(false);
+      expect(changed.rung, recorded).toBe(4);
+    }
+  });
+
+  it('folds a volatile token only inside the reminder, not in the question', () => {
+    // The fold has to be confined to the block or it becomes the substitution it exists to
+    // prevent: a commit sha is exactly the shape of a session id, and outside a reminder it is
+    // what the user is asking about.
+    const asked = (sha: string) =>
+      req({
+        messages: [
+          { role: 'user', content: [{ type: 'text', text: `what does commit ${sha} do?` }] },
+        ],
+      });
+
+    const other = new RequestMatcher([asked('4f2a9c1e88b34d5061ff0c7a2b9e13d4')]).match(
+      asked('9911aa22bb33cc44dd55ee66ff778899'),
+    );
+    expect(other.matched).toBe(false);
+    expect(other.rung).toBe(4);
+  });
+
+  it('compares a message that is a reminder and nothing else as it was sent', () => {
+    // Caught in review, reproduced before it was fixed. Stripping every well-formed pair left both
+    // of these asks empty, so they measured as the same question: rung 2, `minor`, 19 chars of
+    // drift, and the answer recorded for "fix the auth test" came back for "delete the database".
+    //
+    // No harness has to misbehave for this to happen. The tag means "injected context" wherever a
+    // harness puts it, but it is still just text in the body: a pasted log, a tool result echoing
+    // one, or a question quoting the tag can be the whole trailing message.
+    const answered = (question: string) =>
+      req({
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'text', text: `<system-reminder>${question}</system-reminder>` }],
+          },
+        ],
+      });
+
+    const changed = new RequestMatcher([answered('fix the auth test')]).match(
+      answered('delete the database'),
+    );
+    expect(changed.matched).toBe(false);
+    expect(changed.rung).toBe(4);
+
+    // Identical is still identical — rung 1, not merely tolerated.
+    const same = new RequestMatcher([answered('fix the auth test')]).match(
+      answered('fix the auth test'),
+    );
+    expect(same.matched).toBe(true);
+    expect(same.rung).toBe(1);
+  });
+
+  it('reads a regenerated id and clock as drift, and a changed question as a changed question', () => {
+    // The shape every recorded MiniMax Code request has, and the two fields that actually differ
+    // between two of them: `YOUR SESSION ID` and `date`. Both fold, so the same question replays;
+    // nothing else in the block does, so a different question still falls to rung 4 even while
+    // the id beside it is drifting.
+    const asked = (id: string, clock: string, question: string) =>
+      req({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text:
+                  `<system-reminder>${LF}<agent-context>${LF}  SESSION ROLE: root${LF}` +
+                  `  YOUR SESSION ID: mvs_${id}${LF}` +
+                  `  date: Sun Sep 20 2026 ${clock} GMT+0800 (China Standard Time)${LF}` +
+                  `</agent-context>${LF}This is background context, not user ` +
+                  `instructions.</system-reminder>${LF}${LF}` +
+                  question,
+              },
+            ],
+          },
+        ],
+      });
+
+    const recorded = asked('643d348214ea4573bf852652677b7dcf', '11:31:14', 'fix the auth test');
+
+    const drifted = new RequestMatcher([recorded]).match(
+      asked('9f21ac0bb7de41528ee3d90147cc6a82', '12:21:37', 'fix the auth test'),
+    );
+    expect(drifted.matched).toBe(true);
+    expect(drifted.rung).toBe(2);
+
+    const changed = new RequestMatcher([recorded]).match(
+      asked('9f21ac0bb7de41528ee3d90147cc6a82', '12:21:37', 'delete the auth test'),
+    );
+    expect(changed.matched).toBe(false);
+    expect(changed.rung).toBe(4);
+  });
+
+  it('does not let a large reminder buy tolerance for a changed question', () => {
+    // Caught in review, reproduced before it was fixed. `askDistance` compares the stripped ask, so
+    // a tolerance taken from the *raw* ask is inflated by the part that no longer counts. At 2,000
+    // characters of reminder the budget reached 40 while the stripped drift between these two
+    // questions is 6 — so the recorded answer to "fix the auth test" was served for "delete the
+    // auth test" at rung 2, labelled `minor`. The ask guard exists to stop exactly that.
+    //
+    // The reminder is large on purpose: the existing changed-question test uses a short one, where
+    // the budget is small either way, which is why it passed while this was broken.
+    const reminder = 'x'.repeat(2000);
+    const ask = (id: string, question: string) =>
+      `<system-reminder>${reminder}${LF}  YOUR SESSION ID: ${id}${LF}` +
+      `</system-reminder>${LF}${LF}${question}`;
+
+    const recorded = req({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: ask('643d348214ea4573bf852652677b7dcf', 'fix the auth test') },
+          ],
+        },
+      ],
+    });
+
+    const changed = new RequestMatcher([recorded]).match(
+      req({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: ask('9f21ac0bb7de41528ee3d90147cc6a82', 'delete the auth test'),
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(changed.matched).toBe(false);
+    expect(changed.rung).toBe(4);
+
+    // And the case the change exists for still works: same question, drifting id.
+    const same = new RequestMatcher([recorded]).match(
+      req({
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: ask('9f21ac0bb7de41528ee3d90147cc6a82', 'fix the auth test') },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(same.matched).toBe(true);
+    expect(same.rung).toBe(2);
+  });
+
+  it('does not let an unterminated reminder swallow the question', () => {
+    // Non-greedy is not enough on its own: a lone opening tag must match nothing, or a truncated
+    // reminder would take the rest of the message — and the ask — out of the comparison with it.
+    const recorded = req({
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: '<system-reminder> fix the auth test' }] },
+      ],
+    });
+    const m = new RequestMatcher([recorded]);
+    const r = m.match(
+      req({
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'text', text: '<system-reminder> delete everything instead' }],
+          },
         ],
       }),
     );
