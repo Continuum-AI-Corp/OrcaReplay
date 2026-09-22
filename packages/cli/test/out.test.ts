@@ -217,6 +217,75 @@ describe('table cells cannot drive the terminal', () => {
   });
 
   /**
+   * A CHARACTER THAT REORDERS IS OBEYED JUST AS READILY AS ONE THAT MOVES THE CURSOR.
+   *
+   * The first version of this taming covered C0 and C1 — the ranges that move the cursor — and
+   * stopped there. U+202E and its family are not in those ranges and a terminal honours them all
+   * the same: they reverse what follows, and the effect runs to the end of the LINE rather than
+   * the cell, so one field shuffles the columns beside it and a run key reads as a name it is
+   * not. In a listing whose purpose is to hand `orca pull` an id, that is the same lie a newline
+   * told, spelled differently.
+   */
+  describe('bidirectional controls are shown, not obeyed', () => {
+    const sink = () => {
+      const lines: string[] = [];
+      return { lines, write: (s: string) => void lines.push(s) };
+    };
+    const render = (cell: string): string => {
+      const s = sink();
+      new Output({ write: s.write, isTTY: false }).table(['RUN', 'APP'], [[cell, 'app']]);
+      return stripAnsi(s.lines.join('')).trim().split('\n')[1] ?? '';
+    };
+
+    const REORDERING = [
+      '\u061C',
+      '\u200E',
+      '\u200F',
+      '\u202A',
+      '\u202B',
+      '\u202C',
+      '\u202D',
+      '\u202E',
+      '\u2066',
+      '\u2067',
+      '\u2068',
+      '\u2069',
+    ];
+
+    it.each(REORDERING)('escapes %j instead of letting it reorder the row', (ch) => {
+      const row = render(`run_${ch}daeh_ekaf`);
+      expect(row).not.toContain(ch);
+      expect(row).toContain('\\u' + ch.codePointAt(0)!.toString(16).padStart(4, '0'));
+      // Still one row, and the column beside it is still beside it.
+      expect(row).toContain('app');
+    });
+
+    /**
+     * The counterpart, and the reason this is a list rather than "every invisible character":
+     * these COMPOSE text. They are how a family emoji, a heart and a Scotland flag are spelled,
+     * and a trace's event detail is allowed to contain any of them. Mangling them would damage
+     * legitimate content to defend against nothing — an invisible character does not lie about
+     * the order of what is around it.
+     */
+    it.each([
+      ['family emoji, joined by U+200D', '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}'],
+      ['heart with U+FE0F', '\u2764\uFE0F'],
+      [
+        'flag spelled with tag characters',
+        '\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}',
+      ],
+      ['CJK', '网关网关'],
+    ])('leaves %s exactly as it arrived', (_label, value) => {
+      expect(render(value)).toContain(value);
+    });
+
+    /** A one-byte control is still spelled at one byte, as every other test here asserts. */
+    it('keeps the two-digit spelling for C0', () => {
+      expect(render('a\nb')).toContain('a\\x0ab');
+    });
+  });
+
+  /**
    * ORDER, AND THEN POSITION.
    *
    * Two findings, one line apart. The taming first ran before the secret check, and every pattern

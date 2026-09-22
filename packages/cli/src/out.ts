@@ -24,7 +24,7 @@ export function stripAnsi(s: string): string {
 }
 
 /**
- * NOTHING THIS PROCESS DID NOT WRITE MAY MOVE THE CURSOR.
+ * NOTHING THIS PROCESS DID NOT WRITE MAY DRIVE THE RENDERER.
  *
  * A table cell and a failure message are both printed verbatim, and both carry strings that came
  * from somewhere else: a run listing is the gateway's, an event detail is the trace's, a refusal
@@ -36,16 +36,38 @@ export function stripAnsi(s: string): string {
  *   - a carriage return overwrites the row already on screen, so OUTCOME can read `exit 0` in the
  *     data and `exit 137` on the terminal;
  *   - `ESC [ 2 J` clears the screen, and `ESC ] 8` makes the text say one thing while the link
- *     underneath goes somewhere else.
+ *     underneath goes somewhere else;
+ *   - U+202E and its family reorder everything after them to the end of the LINE, not the cell,
+ *     so one field shuffles the columns beside it and a run key reads as a name it is not.
  *
  * None of that is a rendering fault — it is a value being executed instead of shown. So a control
  * character is printed as what it is. `\x0a` in a cell is ugly, and is meant to be: it shows up
  * only when something put a control character where a name belongs.
  */
-const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/g;
+/**
+ * C0 and C1, and the bidirectional controls.
+ *
+ * The first two ranges are the ones that move the cursor. The rest do something a terminal obeys
+ * just as readily: U+202E and its family REORDER what follows them, and the effect does not stop
+ * at the cell — it runs to the end of the line, so one field can visually shuffle the columns
+ * after it and a run key can read as a name it is not.
+ *
+ * Deliberately NOT here: U+200D and U+200C, U+FE0F, and the tag characters. Those compose text
+ * rather than reorder it — they are how a family emoji, a heart and a Scotland flag are spelled —
+ * and a trace's event detail is allowed to contain any of them. A denylist that swept up every
+ * invisible character would mangle legitimate content to defend against nothing: an invisible
+ * character does not lie about the order of what is around it.
+ */
+const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu;
 
 export function tame(text: string): string {
-  return text.replace(CONTROL_RE, (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`);
+  return text.replace(CONTROL_RE, (c) => {
+    const n = c.charCodeAt(0);
+    // Spelled at the width it takes to name it, so `\\x0a` stays what it has always been.
+    return n < 0x100
+      ? `\\x${n.toString(16).padStart(2, '0')}`
+      : `\\u${n.toString(16).padStart(4, '0')}`;
+  });
 }
 
 /**
