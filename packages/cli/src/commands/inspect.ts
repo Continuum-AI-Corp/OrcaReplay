@@ -9,7 +9,7 @@ import {
   resolveRunSelector,
   runGraph,
 } from '@orcareplay/core';
-import { listGatewayRuns } from './sync.js';
+import { listGatewayRuns, type GatewayRun } from './sync.js';
 import type { RunGraph } from '@orcareplay/core';
 import {
   buildTimeline,
@@ -74,17 +74,32 @@ export async function listCommand(
  * `net` from one recorded here), and it is the column that answers "what is in this run". SOURCE
  * stays beside it because where a run came from is a different question from what it holds.
  */
+/**
+ * The gateway's runs, with the notice both callers owe the reader.
+ *
+ * Two commands print this listing now — the table here and `--json` — and the skip count is the
+ * only evidence either reader gets that what they are looking at is not all of what arrived. A
+ * second call site that forgot it would be silently less honest than the first, so there is one
+ * call site.
+ */
+export async function gatewayRunsFor(
+  args: ParsedArgs,
+  out: Output,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<GatewayRun[]> {
+  const { runs, skipped } = await listGatewayRuns(args, env);
+  if (skipped > 0) {
+    out.warn('list.skipped', { entries: skipped, why: 'not a run the gateway can name' });
+  }
+  return runs;
+}
+
 async function listGatewayCommand(
   args: ParsedArgs,
   out: Output,
   env: NodeJS.ProcessEnv,
 ): Promise<void> {
-  const { runs, skipped } = await listGatewayRuns(args, env);
-  if (skipped > 0) {
-    // Said, not swallowed. The count is the only evidence the reader gets that what they are
-    // looking at is not all of what the gateway sent.
-    out.warn('list.skipped', { entries: skipped, why: 'not a run the gateway can name' });
-  }
+  const runs = await gatewayRunsFor(args, out, env);
   if (runs.length === 0) {
     out.plain('the gateway is holding no runs for this key');
     return;
