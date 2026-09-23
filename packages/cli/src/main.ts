@@ -74,9 +74,9 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
         --force                  replace a run of the same id already recorded here
   orca list                      runs recorded here
         --remote                 runs held on the gateway instead (a gateway you named)
-        --gateway <url>          where to look (a gateway you named; no default)
-        --source gateway|upload  only what the gateway recorded, or only what was pushed
-        --limit N                how many to list (default 20)
+        --gateway <url>          with --remote: where to look (a gateway you named)
+        --source gateway|upload  with --remote: what it recorded, or what was pushed
+        --limit N                with --remote: how many (default 20)
   orca gc --older-than 7d        reclaim space, forks' scratch worktrees included
                                  --keep N, --dry-run
   orca doctor                    check this machine can record at all

@@ -63,18 +63,6 @@ export async function listCommand(
 }
 
 /**
- * The same question asked of the gateway: what is there that this machine could have.
- *
- * The console shows eleven columns — Run, Started, Source, App / agent, Turns, Tools, Layers,
- * Models, Outcome, Cost and Open. Four are left out here, and it is worth being exact about
- * which: Cost belongs to billing, Open is a link, and neither survives a terminal. The other
- * two, Tools and Layers, are here — an earlier version of this comment claimed only two were
- * dropped while dropping four, and justified SOURCE as a stand-in for the layers. It is not one.
- * LAYERS is reported outright (`model`, `route` from a gateway recording; `fs`, `shell`, `mcp`,
- * `net` from one recorded here), and it is the column that answers "what is in this run". SOURCE
- * stays beside it because where a run came from is a different question from what it holds.
- */
-/**
  * The gateway's runs, with the notice both callers owe the reader.
  *
  * Two commands print this listing now — the table here and `--json` — and the skip count is the
@@ -94,6 +82,18 @@ export async function gatewayRunsFor(
   return runs;
 }
 
+/**
+ * The same question asked of the gateway: what is there that this machine could have.
+ *
+ * The console shows eleven columns — Run, Started, Source, App / agent, Turns, Tools, Layers,
+ * Models, Outcome, Cost and Open. Four are left out here, and it is worth being exact about
+ * which: Cost belongs to billing, Open is a link, and neither survives a terminal. The other
+ * two, Tools and Layers, are here — an earlier version of this comment claimed only two were
+ * dropped while dropping four, and justified SOURCE as a stand-in for the layers. It is not one.
+ * LAYERS is reported outright (`model`, `route` from a gateway recording; `fs`, `shell`, `mcp`,
+ * `net` from one recorded here), and it is the column that answers "what is in this run". SOURCE
+ * stays beside it because where a run came from is a different question from what it holds.
+ */
 async function listGatewayCommand(
   args: ParsedArgs,
   out: Output,

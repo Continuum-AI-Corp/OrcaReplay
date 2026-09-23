@@ -421,7 +421,9 @@ client app, and a deployment whose listing carries no timestamp leaves STARTED u
 dated 1970. `--source gateway` narrows to what the gateway recorded; `--source upload` to what was
 pushed to it; without the flag you get both. `--limit` sets how many (20 by default). `--gateway`
 stays what it is for push and pull — an optional override of *which* host — rather than doubling
-as the switch, so a destination you have already named needs no url typed at it.
+as the switch, so a destination you have already named needs no url typed at it. All three belong
+to `--remote`: given without it they are refused, not ignored, because `orca list --gateway <url>`
+answering with this directory's runs would read as that host's answer.
 
 `--json` asks the same question: `orca list --remote --json` emits the gateway's runs as one
 document on stdout, which is where the id in `orca pull <run>` wants to come from when nobody

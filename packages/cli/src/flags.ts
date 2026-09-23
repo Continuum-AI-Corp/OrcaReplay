@@ -113,6 +113,36 @@ function nearest(name: string, known: readonly string[]): string | undefined {
 }
 
 /**
+ * Flags a command has only ALONGSIDE another.
+ *
+ * `orca list` lists this directory unless `--remote` asks the gateway, and `--gateway`, `--source`
+ * and `--limit` mean something only to the gateway. Being on the list above let them past
+ * `assertKnownFlags` unconditionally — and then the local listing ran and dropped every one of
+ * them without a word. `orca list --gateway <url>` printed THIS directory's runs to someone who
+ * had just named a host, which reads as that host's answer: the silently-ignored instruction this
+ * file exists to refuse, let back in by the entry that added the flags.
+ */
+const NEEDS: Record<string, { flags: readonly string[]; with: string; otherwise: string }> = {
+  list: {
+    flags: ['gateway', 'source', 'limit'],
+    with: 'remote',
+    otherwise:
+      'without it, orca list shows the runs in this directory and asks no gateway anything',
+  },
+};
+
+function assertCompanions(args: ParsedArgs): void {
+  const rule = NEEDS[args.command];
+  if (rule === undefined || args.bool(rule.with)) return;
+  const orphaned = rule.flags.filter((f) => args.has(f));
+  if (orphaned.length === 0) return;
+  throw new Error(
+    `${orphaned.map((f) => `--${f}`).join(', ')} ${orphaned.length === 1 ? 'asks' : 'ask'} ` +
+      `the gateway, and nothing here does: add --${rule.with}\n  ${rule.otherwise}`,
+  );
+}
+
+/**
  * Reject a flag this command does not have.
  *
  * Throws rather than warns. A flag is an instruction, and carrying on having ignored one produces
@@ -127,6 +157,9 @@ export function assertKnownFlags(args: ParsedArgs): void {
   const unknown = Object.keys(args.flags).filter((name) => !known.includes(name));
   // Names first: "unknown flag --modle" is a better answer than "--modle needs a value".
   if (unknown.length === 0) {
+    // Before the values: `--limit abc` without `--remote` is wrong for a reason that has nothing
+    // to do with `abc`, and that is the reason worth giving.
+    assertCompanions(args);
     assertUsableValues(args, known);
     return;
   }
