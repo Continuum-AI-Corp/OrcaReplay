@@ -11,6 +11,7 @@ import {
   checkpointsCommand,
   graphCommand,
   exportCommand,
+  gatewayRunsFor,
   listCommand,
   showCommand,
   uiCommand,
@@ -323,11 +324,24 @@ async function jsonMain(args: ParsedArgs, cwd: string): Promise<number> {
   const emit = (doc: unknown): void => void process.stdout.write(`${JSON.stringify(doc)}\n`);
 
   try {
+    // THE SAME TWO CHECKS THE PLAIN PATH MAKES, for the reason stated there: a flag the command
+    // does not have is an instruction that would be silently ignored. `--json` is a second sink
+    // for the same command, not a different command — and it returned above before either check
+    // ran, so `orca show --worktre --json` did the opposite of what was typed and said nothing
+    // about it, which is the failure the plain path exists to surface.
+    assertKnownFlags(args);
+    assertNoStrayPositionals(args);
+
     const orca = new Orca({ cwd });
     const selector = args.positionals[0] ?? 'last';
     switch (args.command) {
       case 'list':
-        emit(await orca.list());
+        // `--remote` asks the gateway, here as much as on the terminal. It used to be dropped:
+        // `orca list --remote --json` ran the LOCAL listing and emitted `[]` from a directory
+        // with no runs — telling a script the gateway holds nothing while the same command
+        // without `--json` printed what it holds. A silent wrong answer, to the reader least
+        // able to notice.
+        emit(args.bool('remote') ? await gatewayRunsFor(args, out) : await orca.list());
         return 0;
       case 'show':
         emit(await orca.show(selector));

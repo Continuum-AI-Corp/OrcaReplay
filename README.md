@@ -423,6 +423,10 @@ pushed to it; without the flag you get both. `--limit` sets how many (20 by defa
 stays what it is for push and pull — an optional override of *which* host — rather than doubling
 as the switch, so a destination you have already named needs no url typed at it.
 
+`--json` asks the same question: `orca list --remote --json` emits the gateway's runs as one
+document on stdout, which is where the id in `orca pull <run>` wants to come from when nobody
+is reading a table.
+
 ### What it needs
 
 A key with the `replay` scope, from **Console → API Keys → replay**. That scope can read and push

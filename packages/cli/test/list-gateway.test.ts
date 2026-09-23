@@ -7,6 +7,7 @@ import { TraceWriter } from '@orcareplay/core';
 import { parseArgs } from '../src/args.js';
 import { Output, stripAnsi, type LogEntry } from '../src/out.js';
 import { listCommand } from '../src/commands/inspect.js';
+import { main } from '../src/main.js';
 import { pullCommand, pushCommand } from '../src/commands/sync.js';
 import { writeConfig } from '../src/config.js';
 
@@ -354,6 +355,83 @@ describe('orca list --remote', () => {
     expect(text()).not.toContain(String.fromCharCode(13));
     expect(text()).toContain('\\x0d');
     expect(text()).toContain('\\x1b[2J');
+  });
+
+  /**
+   * `--json` IS A SECOND SINK FOR THE SAME COMMAND, NOT A DIFFERENT COMMAND.
+   *
+   * `jsonMain` read `orca.list()` and never looked at `--remote`, so
+   * `orca list --remote --json` ran the LOCAL listing: from a directory with no runs it emitted
+   * `[]` and exited 0, telling a script the gateway holds nothing while the same command without
+   * `--json` printed what it holds. A wrong answer, in silence, to the reader least able to
+   * notice — the one that is not a person.
+   */
+  describe('--json asks the same question the terminal does', () => {
+    const emitted: string[] = [];
+    let stdout: typeof process.stdout.write;
+    let stderr: typeof process.stderr.write;
+
+    beforeEach(() => {
+      emitted.length = 0;
+      stdout = process.stdout.write.bind(process.stdout);
+      stderr = process.stderr.write.bind(process.stderr);
+      process.stdout.write = ((c: string) => {
+        emitted.push(String(c));
+        return true;
+      }) as typeof process.stdout.write;
+      process.stderr.write = (() => true) as typeof process.stderr.write;
+    });
+
+    afterEach(() => {
+      process.stdout.write = stdout;
+      process.stderr.write = stderr;
+    });
+
+    const run = async (argv: string[]): Promise<{ code: number; doc: unknown }> => {
+      const keep = { ...process.env };
+      Object.assign(process.env, env());
+      try {
+        const code = await main(argv, home);
+        return { code, doc: JSON.parse(emitted.join('')) };
+      } finally {
+        for (const k of Object.keys(process.env)) delete process.env[k];
+        Object.assign(process.env, keep);
+      }
+    };
+
+    it('emits the gateway runs rather than an empty local listing', async () => {
+      const { code, doc } = await run(['list', '--remote', '--json']);
+      expect(code).toBe(0);
+      expect(Array.isArray(doc)).toBe(true);
+      expect(doc).toHaveLength(1);
+      expect((doc as { runKey: string }[])[0]!.runKey).toBe('run_67a7ce30bd6a');
+      expect((doc as { layers: string[] }[])[0]!.layers).toEqual(['model', 'fs']);
+      expect(received).toHaveLength(1);
+    });
+
+    it('forwards the listing flags from the json path too', async () => {
+      await run(['list', '--remote', '--source', 'gateway', '--limit', '2', '--json']);
+      const q = new URL(`${url}${received[0]!.path}`).searchParams;
+      expect(q.get('source')).toBe('gateway');
+      expect(q.get('limit')).toBe('2');
+    });
+
+    /**
+     * The plain path refuses both of these before anything runs, over a comment saying a flag the
+     * command does not have is an instruction that would be silently ignored. `--json` returned
+     * above that comment, so it ignored them — `orca show --worktre --json` did the opposite of
+     * what was typed and said nothing.
+     */
+    it.each([
+      [['list', '--bogus', '--json'], /unknown flag --bogus/],
+      [['list', '--remote', 'stray', '--json'], /unexpected argument/],
+    ])('refuses %j as the terminal would', async (argv, expected) => {
+      const { code, doc } = await run(argv as string[]);
+      expect(code).toBe(1);
+      expect((doc as { error: { message: string } }).error.message).toMatch(expected as RegExp);
+      // Refused BEFORE the request, not after it.
+      expect(received).toHaveLength(0);
+    });
   });
 
   it('leaves the local listing alone when --remote is not given', async () => {
