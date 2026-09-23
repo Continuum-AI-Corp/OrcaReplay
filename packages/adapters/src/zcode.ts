@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { Redactor } from '@orcareplay/core';
+import { Redactor, withoutInvisible } from '@orcareplay/core';
 import type { Adapter, Launch, RecordContext } from '@orcareplay/plugin-api';
 import { decodeForwardPath, forwardBasePath } from '@orcareplay/proxy';
 import { detectAgent } from './detect.js';
@@ -244,10 +244,12 @@ function accountedFor(rewritten: string, proxyUrl: string): boolean {
       // looked at it. Measured before the fix: `https://api.example.com/v1/keys/<32 hex>` was
       // written into the run directory with the key verbatim.
       const carried = decodeForwardPath(new URL(node).pathname)?.base;
-      if (carried !== undefined && OPAQUE_TOKEN.test(carried)) ok = false;
+      if (carried !== undefined && OPAQUE_TOKEN.test(withoutInvisible(carried))) ok = false;
       return;
     }
-    if (OPAQUE_TOKEN.test(node)) ok = false;
+    // Judged as a reader would retype it: a zero-width space inside a token otherwise split it
+    // into runs too short for this net, and the value was written into the run directory.
+    if (OPAQUE_TOKEN.test(withoutInvisible(node))) ok = false;
   };
   inspect(JSON.parse(rewritten));
   return ok;

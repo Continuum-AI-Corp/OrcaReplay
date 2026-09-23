@@ -182,6 +182,22 @@ describe('the zcode adapter', () => {
     }
   });
 
+  /**
+   * The opaque-token net measured runs of `[A-Za-z0-9+_=-]`, so an invisible character every
+   * dozen characters split a token into runs too short for it, and the redactor above it could
+   * not see through one either. Either net now judges what a reader would retype.
+   */
+  it('refuses a token with invisible characters inside it', () => {
+    // Hex, because that is the shape the redactor declines and this net exists for — a mixed-case
+    // token would be caught by the redactor first and prove nothing about this one.
+    const token = 'b8e793df1a6e4b1088eeaa608388afc9';
+    for (const ch of ['\u200B', '\uFEFF', '\u3164', '\u2800']) {
+      const split = token.slice(0, 11) + ch + token.slice(11, 22) + ch + token.slice(22);
+      const out = redirectedConfig(JSON.stringify({ config: { x: { monkey: split } } }), PROXY);
+      expect(out, JSON.stringify(ch)).toBeUndefined();
+    }
+  });
+
   it('refuses a signed header, which is where a real one lives', () => {
     // The reachable version of the above, and how it was found: `api.headers` is documented in
     // ZCode's own PROVIDER_CONFIG.md as "Additional HTTP headers, e.g. {"X-Client-Name":...}" —

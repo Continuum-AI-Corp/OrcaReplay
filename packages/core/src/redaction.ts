@@ -9,8 +9,9 @@ import type { RedactionRecord } from '@orcareplay/schema';
 // eating protocol identifiers (`id`, `tool_use_id`, `tool_call_id`); v4 stopped it eating whole
 // PNGs, which is a change in what reaches the trace for exactly the same reason — the same body
 // recorded under v3 and v4 differs, and a reader has to be able to tell that from the content
-// differing.
-export const REDACTION_POLICY_VERSION = 4;
+// differing. v5 judges a value a second time with its invisible characters removed, so a key with
+// a zero-width space, a BOM or a Hangul filler inside it is now redacted where v4 wrote it out.
+export const REDACTION_POLICY_VERSION = 5;
 
 /** Environment capture is allowlist-only (spec §5). Everything else is denied. */
 export const DEFAULT_ENV_ALLOWLIST = [
@@ -534,6 +535,72 @@ function spansOf(value: string): [number, number][] {
   return spans.sort((a, b) => a[0] - b[0]);
 }
 
+/**
+ * WHAT A READER DOES NOT SEE AS A CHARACTER.
+ *
+ * Every shape rule above and the entropy sweep judge runs of `[A-Za-z0-9_-]`, so any character
+ * outside that class placed inside a credential splits it — and one with no visible form splits
+ * it without anyone noticing. `sk-abc` + U+200B + `defghijklmnopqrstuvwxyz` matched no rule, the
+ * run after the space was one the sweep does not consider random, and the key was written to the
+ * trace verbatim: the file `orca push` shares. Interleave one every fifteen characters and no run
+ * the sweep measures is long enough to be measured at all.
+ *
+ * It is a named set, not "whatever renders blank", and the edges are deliberate. In: Unicode's
+ * Default_Ignorable_Code_Point (the zero-width characters, the BOM, the soft hyphen, the Hangul
+ * fillers, variation selectors, tag characters), every format character, every combining mark,
+ * the C0 and C1 controls other than tab, line feed and carriage return, and U+2800, the one blank
+ * glyph outside all of those that exists to be used as nothing. Out: whitespace, and every visible
+ * character including lookalikes from other scripts. A key broken by a space or a dot is broken
+ * where the reader can see it, and no pattern follows every way a person might put visible pieces
+ * back together — whoever can write the field could as easily write the key into two of them.
+ */
+const INVISIBLE_CLASS = String.raw`\p{Default_Ignorable_Code_Point}\p{Cf}\p{M}\u2800\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F`;
+const HAS_INVISIBLE = new RegExp(`[${INVISIBLE_CLASS}]`, 'u');
+const EVERY_INVISIBLE = new RegExp(`[${INVISIBLE_CLASS}]`, 'gu');
+const VISIBLE_RUN = new RegExp(`[^${INVISIBLE_CLASS}]+`, 'gu');
+
+/**
+ * `s` as a reader would retype it: every character in the set above removed.
+ *
+ * The one definition every secret judgement in the product uses — this redactor, the CLI's
+ * renderer, the adapters' opaque-token nets — so that "invisible" cannot mean one thing in the
+ * write path and another on the terminal, which is how each of them came to be fixed separately.
+ */
+export function withoutInvisible(s: string): string {
+  return HAS_INVISIBLE.test(s) ? s.replace(EVERY_INVISIBLE, '') : s;
+}
+
+/** `s` without its invisible characters, and the way back to `s` from any offset in the result. */
+interface HiddenView {
+  text: string;
+  /** One entry per visible run: where it starts in `s`, and where in `text`. */
+  runs: { from: number; to: number }[];
+}
+
+function hiddenView(s: string): HiddenView | undefined {
+  if (!HAS_INVISIBLE.test(s)) return undefined;
+  let text = '';
+  const runs: { from: number; to: number }[] = [];
+  for (const m of s.matchAll(VISIBLE_RUN)) {
+    runs.push({ from: m.index, to: text.length });
+    text += m[0];
+  }
+  return { text, runs };
+}
+
+/** Where offset `k` of the view's text sits in the source. Runs are sorted, so a binary search. */
+function sourceOffset(view: HiddenView, k: number): number {
+  let lo = 0;
+  let hi = view.runs.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (view.runs[mid]!.to <= k) lo = mid;
+    else hi = mid - 1;
+  }
+  const run = view.runs[lo]!;
+  return run.from + (k - run.to);
+}
+
 export interface RedactionOptions {
   /** Per-run salt. Defaults to fresh randomness, and is deliberately never persisted. */
   salt?: string;
@@ -621,8 +688,71 @@ export class Redactor {
     // marker sits one quote in. The marker is only ever written by the proxy around a body it
     // base64-encoded itself, so its presence identifies the value rather than merely appearing in
     // it.
-    if (value.includes(BINARY_BODY_PREFIX)) return value;
-    return this.#scanEntropy(value, context, hits);
+    const binary = value.includes(BINARY_BODY_PREFIX);
+    if (!binary) value = this.#scanEntropy(value, context, hits);
+    return this.#scanHidden(value, context, hits, !binary);
+  }
+
+  /**
+   * The same judgement again, over what a reader would see.
+   *
+   * It only ever adds to the pass above. A match here is acted on only when its extent in the
+   * source is longer than in the view — when an invisible character sits INSIDE it, which is the
+   * one case the raw pass cannot see — so text without such a character is untouched, byte for
+   * byte, and so is everything around a hidden key: a ZWJ emoji two sentences away survives. The
+   * placeholder is computed from the visible characters, so a key spelled with an invisible
+   * character inside it redacts to the same placeholder as the same key without one, and a replay
+   * still matches it structurally.
+   */
+  #scanHidden(
+    value: string,
+    context: string | undefined,
+    hits: Map<string, RedactionRecord>,
+    sweep: boolean,
+  ): string {
+    const view = hiddenView(value);
+    if (view === undefined) return value;
+    const found: { a: number; b: number; kind: string; secret: string }[] = [];
+    for (const rule of RULES) {
+      for (const m of view.text.matchAll(rule.pattern)) {
+        found.push({ a: m.index, b: m.index + m[0].length, kind: rule.kind, secret: m[0] });
+      }
+    }
+    if (sweep) {
+      // The raw sweep's own filters, over the view: placeholders and protocol values stay exempt.
+      const spans = spansOf(view.text);
+      let cursor = 0;
+      let reach = -1;
+      for (const m of view.text.matchAll(TOKEN)) {
+        const token = m[0];
+        const start = m.index;
+        while (cursor < spans.length && spans[cursor]![0] <= start) {
+          if (spans[cursor]![1] > reach) reach = spans[cursor]![1];
+          cursor += 1;
+        }
+        if (start + token.length <= reach) continue;
+        if (token.length < MIN_ENTROPY_LENGTH || !looksRandom(token)) continue;
+        if (entropy(token) <= ENTROPY_BITS_PER_CHAR) continue;
+        found.push({ a: start, b: start + token.length, kind: 'high_entropy', secret: token });
+      }
+    }
+    found.sort((x, y) => x.a - y.a || y.b - x.b);
+    let out = '';
+    let cut = 0;
+    let end = -1;
+    let changed = false;
+    for (const f of found) {
+      if (f.a < end) continue;
+      const from = sourceOffset(view, f.a);
+      const to = sourceOffset(view, f.b - 1) + 1;
+      // Nothing invisible inside it: the raw pass saw exactly this and judged it. Not ours.
+      if (to - from === f.b - f.a) continue;
+      out += value.slice(cut, from) + this.#hit(f.kind, f.secret, context, hits);
+      cut = to;
+      end = f.b;
+      changed = true;
+    }
+    return changed ? out + value.slice(cut) : value;
   }
 
   #scanEntropy(

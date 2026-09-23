@@ -4,6 +4,7 @@ import {
   AUTH_RESPONSE_HEADERS,
   DEFAULT_ENV_ALLOWLIST,
   REDACTION_POLICY_VERSION,
+  withoutInvisible,
   Redactor,
 } from '../src/redaction.js';
 
@@ -422,5 +423,92 @@ describe('thinking signatures', () => {
   it('does not turn `signature` into a hiding place for a credential', () => {
     const body = JSON.stringify({ signature: 'sk-live-9f2c14a03b71d4e8a7c5b6d2' });
     expect(fresh().redactString(body).value).toContain('<secret:sk_api_key:');
+  });
+});
+
+/**
+ * A KEY WITH SOMETHING INVISIBLE INSIDE IT.
+ *
+ * Every shape rule and the entropy sweep judge runs of `[A-Za-z0-9_-]`, so a zero-width space inside
+ * a key split it: `sk-abc` + U+200B + 23 letters matched no rule, the tail was not random enough
+ * for the sweep, and the key was written to the trace — the file `orca push` shares — verbatim.
+ * Interleaving one every few characters leaves no run long enough for the sweep to measure.
+ */
+describe('write-path redaction sees through invisible characters', () => {
+  const INVISIBLE: [string, string][] = [
+    ['zero-width space', '\u200B'],
+    ['zero-width non-joiner', '\u200C'],
+    ['zero-width joiner', '\u200D'],
+    ['word joiner', '\u2060'],
+    ['byte-order mark', '\uFEFF'],
+    ['soft hyphen', '\u00AD'],
+    ['variation selector 16', '\uFE0F'],
+    ['combining acute accent', '\u0301'],
+    ['Hangul filler', '\u3164'],
+    ['Hangul choseong filler', '\u115F'],
+    ['halfwidth Hangul filler', '\uFFA0'],
+    ['braille pattern blank', '\u2800'],
+    ['escape', '\u001B'],
+    ['tag character', '\u{E0041}'],
+  ];
+  const KEY = 'sk-abcdefghijklmnopqrstuvwxyz';
+
+  it.each(INVISIBLE)('redacts a key with a %s inside it', (_name, ch) => {
+    const r = new Redactor({ salt: 's' });
+    const hidden = KEY.slice(0, 6) + ch + KEY.slice(6);
+    const { value, hits } = r.redactString(`auth ${hidden} end`);
+    expect(withoutInvisible(value)).not.toContain('abcdefghijklmnop');
+    expect(value).toMatch(/^auth <secret:sk_api_key:[0-9a-f]{8}> end$/);
+    expect(hits.map((h) => h.rule)).toContain('sk_api_key');
+  });
+
+  it('gives the hidden key the placeholder the plain key gets', () => {
+    const r = new Redactor({ salt: 's' });
+    const plain = r.redactString(KEY).value;
+    expect(r.redactString(KEY.slice(0, 6) + '\u200B' + KEY.slice(6)).value).toBe(plain);
+  });
+
+  it('leaves no run short enough to hide in when one is interleaved throughout', () => {
+    const r = new Redactor({ salt: 's' });
+    const key = 'sk-proj-AbC123dEf456GhI789jKl012MnO345pQr';
+    const every9 = [...key].map((c, i) => (i % 9 === 8 ? c + '\u200B' : c)).join('');
+    expect(r.redactString(`token=${every9}`).value).toMatch(/^token=<secret:[a-z_]+:[0-9a-f]{8}>$/);
+  });
+
+  it('catches an opaque token the sweep would take, hidden the same way', () => {
+    const r = new Redactor({ salt: 's' });
+    const token = 'Zx81Qp0vR7mT2sL9wK4yH6nB3cF5jD';
+    const split = token.slice(0, 10) + '\uFEFF' + token.slice(10, 20) + '\uFEFF' + token.slice(20);
+    const { value } = r.redactString(`x ${split} y`);
+    expect(withoutInvisible(value)).not.toContain(token.slice(0, 12));
+    expect(value).toContain('<secret:high_entropy:');
+  });
+
+  /** Only what hid a secret is touched; everything around it arrives as it was. */
+  it('keeps an emoji two words away from a hidden key byte for byte', () => {
+    const r = new Redactor({ salt: 's' });
+    const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}';
+    const { value } = r.redactString(`${family} and ${KEY.slice(0, 6)}\u200B${KEY.slice(6)}`);
+    expect(value.startsWith(`${family} and <secret:sk_api_key:`)).toBe(true);
+  });
+
+  it('changes nothing in text that has invisible characters and no secret', () => {
+    const r = new Redactor({ salt: 's' });
+    const text = 'a zero\u200Bwidth space, a soft\u00ADhyphen and a heart \u2764\uFE0F';
+    expect(r.redactString(text).value).toBe(text);
+  });
+
+  /**
+   * The edge, pinned so moving it is a decision: a key broken where the reader can SEE it is out
+   * of scope. Whoever can write the field could as easily write the key into two fields.
+   */
+  it('does not reach across a visible break', () => {
+    const r = new Redactor({ salt: 's' });
+    const text = 'sk-abcdefgh\nijklmnopqrstuvwxyz';
+    expect(r.redactString(text).value).toBe(text);
+  });
+
+  it('bumps the policy version, because what reaches the trace changed', () => {
+    expect(REDACTION_POLICY_VERSION).toBe(5);
   });
 });

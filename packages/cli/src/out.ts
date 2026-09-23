@@ -7,6 +7,8 @@
  * errors that say what happened, what it means, and what to run next.
  */
 
+import { withoutInvisible } from '@orcareplay/core';
+
 const ESC = String.fromCharCode(27);
 const CSI = `${ESC}[`;
 
@@ -251,13 +253,19 @@ export class Output {
  * By shape alone — what a table cell can be judged on, having no key to be named by.
  *
  * JUDGED ON WHAT A READER COULD REASSEMBLE, not only on the bytes as they arrived. Every pattern
- * is anchored and its character class stops at the first byte outside it, so `sk-` followed by an
- * ESC and then the rest of the key matched nothing at all — while printing every character of
- * that key, in order, to the terminal. Removing the control characters before testing closes it,
- * and closes it for `info key=value` too, which had the same blind spot from the same cause.
+ * is anchored and its character class stops at the first character outside it, so a key with
+ * anything the class does not contain placed inside it matched nothing — while every character
+ * of the key still reached the reader, in order.
+ *
+ * That was fixed three times before this, each time for the case found and not the class:
+ * control characters in front of a token, then inside one, then format characters and combining
+ * marks — after which review found the Hangul fillers and U+2800 still getting through, and the
+ * same hole in the write-path redactor, which had never been looked at. The set now lives in one
+ * place, `withoutInvisible` in core, with its edges written down there; this renderer, the
+ * redactor and the adapters' nets all judge by it.
  */
 function looksSecret(raw: string): boolean {
-  const stripped = raw.replace(CONTROL_RE, '');
+  const stripped = withoutInvisible(raw.replace(CONTROL_RE, ''));
   return SECRET_PATTERNS.some((re) => re.test(raw) || re.test(stripped));
 }
 
