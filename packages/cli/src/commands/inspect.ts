@@ -9,7 +9,7 @@ import {
   resolveRunSelector,
   runGraph,
 } from '@orcareplay/core';
-import { listGatewayRuns, type GatewayRun } from './sync.js';
+import { listGatewayRuns, readSource, type GatewayRun } from './sync.js';
 import type { RunGraph } from '@orcareplay/core';
 import {
   buildTimeline,
@@ -101,12 +101,19 @@ async function listGatewayCommand(
 ): Promise<void> {
   const runs = await gatewayRunsFor(args, out, env);
   if (runs.length === 0) {
-    out.plain('the gateway is holding no runs for this key');
+    // With a filter, "no runs" is a claim about the filter, not the gateway: production holds
+    // gateway runs and uploads side by side, and none of one kind says nothing about the other.
+    const source = readSource(args);
+    out.plain(
+      source === undefined
+        ? 'the gateway is holding no runs for this key'
+        : `the gateway is holding no ${source} runs for this key; drop --source to see the rest`,
+    );
     return;
   }
-  // A run the gateway recorded itself carries no client app, and a run may carry no model list at
-  // all. An em dash says "the gateway did not report this"; an empty cell reads as a rendering
-  // fault, and `1970-01-01` for a missing timestamp reads as a fact — the wrong one.
+  // A field may arrive empty — an older deployment sends no timestamp at all, and any row may
+  // carry no model list. An em dash says "the gateway did not report this"; an empty cell reads as
+  // a rendering fault, and `1970-01-01` for a missing timestamp reads as a fact — the wrong one.
   const said = (s: string): string => (s === '' ? '—' : s);
   out.table(
     ['RUN', 'STARTED', 'SOURCE', 'APP', 'TURNS', 'TOOLS', 'LAYERS', 'MODELS', 'OUTCOME'],

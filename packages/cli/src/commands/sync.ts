@@ -227,15 +227,21 @@ function refusal(status: number, body: string): string {
 /**
  * One row of the gateway's run listing — the fields a terminal shows, and no more.
  *
- * Named after what a captured listing actually carries:
+ * Named after what listings actually carry — and two deployments carry different things.
+ *
+ * An older gateway answered with nine fields and no timestamp at all:
  *
  *   {"run_key","source","client_app","turns","tool_calls","models","layers","outcome","bytes"}
  *
- * The previous version of this read `created_at`, which is in no such response — the detail
- * endpoint's `session` object has `first_ts`/`last_ts`, and the listing item has no timestamp at
- * all. Every STARTED cell was therefore the missing-value path. `startedAt` now reads whichever
- * of the three a deployment sends and says so when there is none, because the console has a
- * Started column and a newer deployment may well fill it.
+ * The production gateway, read through its own console on 2026-09-23, sends twenty-eight — the
+ * same nine plus `first_ts`, `last_ts`, `created_at`, `updated_at` and `expire_at`, all in
+ * seconds, and account bookkeeping this has no use for. An earlier version of this comment said
+ * no listing carried `created_at`; that was true of the older deployment and false of production,
+ * and it was written as though it were true of both.
+ *
+ * `gateway` recordings report `outcome` as the model's stop reason or a status (`end_turn`,
+ * `error`) and `client_app` as whatever the gateway identified (`Unknown`, `curl`, `Node`); a run
+ * pushed from here reports its exit (`exit 0`) and the adapter that recorded it.
  */
 export interface GatewayRun {
   runKey: string;
@@ -257,8 +263,18 @@ export interface GatewayRun {
   clientApp: string;
 }
 
-/** The first of these the gateway sends, in seconds. Deployments differ; none of them is wrong. */
-const STARTED_KEYS = ['started_at', 'created_at', 'first_ts'] as const;
+/**
+ * Where a start time comes from, best first.
+ *
+ * `first_ts` is the run's first event. `created_at` is when the GATEWAY stored the row — for a
+ * run pushed from here, that is the push. Production shows the difference: a run whose first
+ * event was 09:36:26 was pushed and stored at 09:38:09, and the local manifest of another says
+ * 09:40:11.6 against a `first_ts` of 09:40:12 and a `created_at` of 09:40:13. Preferring
+ * `created_at` labelled the push as the start, so a run recorded on Monday and pushed on Friday
+ * read as Friday's — and the same run showed two different start times in `orca list` and
+ * `orca list --remote`.
+ */
+const STARTED_KEYS = ['started_at', 'first_ts', 'created_at'] as const;
 
 /** The years a run can have started in. Fixed, not "now": a test must not expire. */
 const EARLIEST = Date.UTC(2020, 0, 1) / 1000;
@@ -321,6 +337,29 @@ function readLimit(args: ParsedArgs): number {
   return n;
 }
 
+/**
+ * `--source` as one of the two the gateway has.
+ *
+ * Production answers an unknown source with 200 and an empty list, so `--source gatway` printed
+ * "the gateway is holding no runs for this key" to someone whose gateway held forty-five. A typo
+ * became a false statement about the server. The comparison is case-insensitive because the
+ * gateway's is (`source=Gateway` returns gateway runs), and the value sent is normalised.
+ */
+const SOURCES = ['gateway', 'upload'] as const;
+
+export function readSource(args: ParsedArgs): (typeof SOURCES)[number] | undefined {
+  const raw = args.str('source');
+  if (raw === undefined) return undefined;
+  const source = SOURCES.find((s) => s === raw.toLowerCase());
+  if (source === undefined) {
+    throw new Error(
+      `--source is gateway or upload, not ${JSON.stringify(raw)}` +
+        '\ngateway: runs the gateway recorded itself; upload: runs pushed to it',
+    );
+  }
+  return source;
+}
+
 /** What a listing row must be before it can be one: an object naming a run you could pull. */
 function isRunRow(raw: unknown): raw is Record<string, unknown> {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return false;
@@ -336,7 +375,7 @@ export async function listGatewayRuns(
   const query = new URLSearchParams({ limit: String(readLimit(args)) });
   // Passed through rather than filtered here: the gateway already separates the two, and doing it
   // locally would page through runs only to discard them.
-  const source = args.str('source');
+  const source = readSource(args);
   if (source !== undefined) query.set('source', source);
 
   const res = await fetchPinned(`${url}${UPLOAD_PATH}?${query.toString()}`, { headers });

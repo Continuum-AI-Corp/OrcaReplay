@@ -35,12 +35,14 @@ describe('orca list --remote', () => {
   let reply: { status: number; body: string };
 
   /**
-   * A LISTING ITEM CAPTURED FROM A REAL GATEWAY, FIELD FOR FIELD.
+   * A LISTING ITEM CAPTURED FROM A REAL GATEWAY, FIELD FOR FIELD — an older deployment, which
+   * sends nine fields and no timestamp.
    *
    * The first version of this fixture was written from the mapping rather than from a response,
-   * so it carried `created_at` and an outcome of `ok` — neither of which the gateway sends. The
-   * tests passed against the invention and the STARTED column was empty against the real thing.
-   * A fixture a person made up tests only that the code agrees with the person.
+   * and carried an outcome of `ok`, which no deployment sends. A fixture a person made up tests
+   * only that the code agrees with the person. (It also carried `created_at`, and a later comment
+   * here claimed no gateway sends that. Production does — see `prodItem` — and saying otherwise
+   * was the same mistake one level up: a claim about every deployment, from a capture of one.)
    */
   const item = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
     run_key: 'run_67a7ce30bd6a',
@@ -52,6 +54,44 @@ describe('orca list --remote', () => {
     layers: ['model', 'fs'],
     outcome: 'exit 0',
     bytes: 201620,
+    ...over,
+  });
+
+  /**
+   * A LISTING ITEM IN THE SHAPE PRODUCTION SENDS — all twenty-eight fields, read through the
+   * gateway's own console on 2026-09-23. Timings are production's: this row's first event and the
+   * gateway storing it (the push) are 103 seconds apart, which is what decides the STARTED
+   * column. Account identifiers are replaced; the shape and types are not.
+   */
+  const prodItem = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    agent_id: 0,
+    bytes: 2598,
+    carried_bytes: 0,
+    carried_bytes_expire_at: 0,
+    client_app: 'generic-openai',
+    completion_tokens: 12,
+    created_at: 1_789_459_407 + 103,
+    expire_at: 1_789_459_407 + 103 + 2_592_001,
+    findings_at: 1_789_459_407 + 103,
+    first_ts: 1_789_459_407,
+    id: 1,
+    last_ts: 1_789_459_407 + 1,
+    layers: ['model', 'fs'],
+    max_expire_at: 0,
+    models: ['m'],
+    outcome: 'exit 0',
+    prompt_id: 0,
+    prompt_tokens: 9,
+    quota: 0,
+    run_key: 'run_3d9e61a07b52',
+    source: 'upload',
+    stats_from_preview: false,
+    token_id: 1,
+    tool_calls: 0,
+    turns: 1,
+    updated_at: 1_789_459_407 + 103,
+    user_id: 1,
+    workspace_id: 1,
     ...over,
   });
 
@@ -117,7 +157,7 @@ describe('orca list --remote', () => {
     // Reported outright by the listing, and the column that says what is IN a run.
     expect(rendered).toContain('LAYERS');
     expect(rendered).toContain('model,fs');
-    // `outcome` is the run's exit status as a string — not a status word this invented.
+    // For a pushed run `outcome` is its exit; a gateway recording reports `end_turn` or `error`.
     expect(rendered).toContain('exit 0');
     // The listing exists to be acted on, and pull is the only thing to do with a run not here yet.
     expect(rendered).toContain('orca pull <run>');
@@ -425,6 +465,7 @@ describe('orca list --remote', () => {
     it.each([
       [['list', '--bogus', '--json'], /unknown flag --bogus/],
       [['list', '--remote', 'stray', '--json'], /unexpected argument/],
+      [['list', '--remote', '--source', 'gatway', '--json'], /--source is gateway or upload/],
       [['list', '--limit', '3', '--json'], /asks the gateway, and nothing here does/],
     ])('refuses %j as the terminal would', async (argv, expected) => {
       const { code, doc } = await run(argv as string[]);
@@ -549,6 +590,81 @@ describe('orca list --remote', () => {
     reply = { status: 200, body: 'null' };
     await listCommand(parseArgs(['list', '--remote']), out, home, env());
     expect(text()).toContain('holding no runs');
+  });
+
+  /**
+   * THE RUN'S START, NOT THE PUSH.
+   *
+   * `created_at` is when the gateway stored the row; for a pushed run that is the push, and in
+   * production it trails the run's first event by as long as you waited. Preferring it printed
+   * the push as STARTED — and the same run showed two start times, one in `orca list` and another
+   * in `orca list --remote`.
+   */
+  it('dates a pushed run from its first event, not from the push', async () => {
+    reply = { status: 200, body: holding(prodItem()) };
+    await listCommand(parseArgs(['list', '--remote']), out, home, env());
+    const row =
+      text()
+        .split('\n')
+        .find((l) => l.includes('run_3d9e61a07b52')) ?? '';
+    expect(row).toContain('2026-09-15 08:03');
+    expect(row).not.toContain('08:05');
+  });
+
+  it('renders a gateway recording the way production reports one', async () => {
+    reply = {
+      status: 200,
+      body: holding(
+        prodItem({
+          run_key: 'run_8c14f2e9a07d3b6150e2c49a',
+          source: 'gateway',
+          client_app: 'Unknown',
+          layers: ['model', 'route'],
+          models: ['deepseek/deepseek-v4-flash-free'],
+          outcome: 'end_turn',
+          created_at: 1_789_459_407 + 3,
+        }),
+      ),
+    };
+    await listCommand(parseArgs(['list', '--remote']), out, home, env());
+    const row =
+      text()
+        .split('\n')
+        .find((l) => l.includes('run_8c14f2e9a07d3b6150e2c49a')) ?? '';
+    expect(row).toMatch(
+      /gateway\s+Unknown\s+1\s+0\s+model,route\s+deepseek\/deepseek-v4-flash-free\s+end_turn/,
+    );
+  });
+
+  /**
+   * Production answers an unknown `source` with 200 and no items, so a typo printed "the gateway
+   * is holding no runs" to someone whose gateway held forty-five: a slip at the keyboard, reported
+   * as a fact about the server.
+   */
+  it.each([['gatway'], ['uploads'], ['all']])(
+    'refuses --source %s before asking',
+    async (value) => {
+      const failed = await listCommand(
+        parseArgs(['list', '--remote', '--source', value]),
+        out,
+        home,
+        env(),
+      ).catch((e: Error) => e.message);
+      expect(failed).toMatch(/--source is gateway or upload/);
+      expect(received).toHaveLength(0);
+    },
+  );
+
+  it('sends the source the gateway knows, whatever its case', async () => {
+    await listCommand(parseArgs(['list', '--remote', '--source', 'Gateway']), out, home, env());
+    expect(new URL(`${url}${received[0]!.path}`).searchParams.get('source')).toBe('gateway');
+  });
+
+  it('says a filter matched nothing, rather than that the gateway holds nothing', async () => {
+    reply = { status: 200, body: holding() };
+    await listCommand(parseArgs(['list', '--remote', '--source', 'upload']), out, home, env());
+    expect(text()).toContain('holding no upload runs');
+    expect(text()).toContain('drop --source');
   });
 
   it('leaves the local listing alone when --remote is not given', async () => {
