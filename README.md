@@ -403,10 +403,11 @@ id lived on a tab the terminal could not open. `--remote` asks the gateway the s
 `orca list` asks this directory, over the GET on the path push already POSTs to:
 
 ```console
-$ orca list --remote --limit 2
-RUN                           STARTED           SOURCE   APP          TURNS  TOOLS  LAYERS       MODELS                    OUTCOME
-run_67a7ce30bd6a              2026-09-15 08:03  upload   claude-code  5      3      model,fs     claude-opus-5             exit 0
-run_c3b56f9910ee6050c468aa7c  2026-09-14 07:03  gateway  —            12     0      model,route  claude-sonnet-4-5, gpt-5  exit 1
+$ orca list --remote --limit 3
+RUN                           STARTED           SOURCE   APP             TURNS  TOOLS  LAYERS       MODELS                           OUTCOME
+run_3d9e61a07b52              2026-09-21 09:36  upload   generic-openai  1      0      model,fs     m                                exit 0
+run_8c14f2e9a07d3b6150e2c49a  2026-09-20 04:21  gateway  Unknown         1      0      model,route  deepseek/deepseek-v4-flash-free  end_turn
+run_f07a5c2e91d4468bb3e0a17c  2026-09-20 02:02  gateway  curl            1      0      model,route  deepseek/deepseek-v4.1-flash     error
 
   orca pull <run>      # fetch one into this machine’s store
 ```
@@ -416,10 +417,13 @@ run_c3b56f9910ee6050c468aa7c  2026-09-14 07:03  gateway  —            12     0
 and `net` come from a run recorded here. It says what is in a run before you spend a download on
 it. SOURCE sits beside it because where a run came from is a different question from what it holds.
 
-Anything the gateway does not report reads `—` rather than blank — a gateway recording has no
-client app, and a deployment whose listing carries no timestamp leaves STARTED unset rather than
-dated 1970. `--source gateway` narrows to what the gateway recorded; `--source upload` to what was
-pushed to it; without the flag you get both. `--limit` sets how many (20 by default). `--gateway`
+STARTED is the run's first event, not the moment the gateway stored it — for a pushed run those
+differ by however long you waited before pushing. OUTCOME is the gateway's word for a run it
+recorded (`end_turn`, `error`) and the exit for one pushed from here. Anything the gateway does not
+report reads `—` rather than blank; an older deployment sends no timestamp at all, and STARTED is
+left unset rather than dated 1970. `--source gateway` narrows to what the gateway recorded;
+`--source upload` to what was pushed to it — those two, and a typo is refused rather than answered
+with an empty list; without the flag you get both. `--limit` sets how many (20 by default). `--gateway`
 stays what it is for push and pull — an optional override of *which* host — rather than doubling
 as the switch, so a destination you have already named needs no url typed at it. All three belong
 to `--remote`: given without it they are refused, not ignored, because `orca list --gateway <url>`
