@@ -260,6 +260,35 @@ export interface GatewayRun {
 /** The first of these the gateway sends, in seconds. Deployments differ; none of them is wrong. */
 const STARTED_KEYS = ['started_at', 'created_at', 'first_ts'] as const;
 
+/** The years a run can have started in. Fixed, not "now": a test must not expire. */
+const EARLIEST = Date.UTC(2020, 0, 1) / 1000;
+const LATEST = Date.UTC(2100, 0, 1) / 1000;
+
+/**
+ * A start time in seconds, or 0 when nothing offered is one a person could believe.
+ *
+ * Three units are in use — seconds, and the milliseconds and microseconds of anything written
+ * against `Date.now()` — and across the years a run can have started in they do not overlap, so
+ * the magnitude says which arrived rather than a guess. Anything still outside those years is not
+ * a start time: `-1` rendered as 1969, a millisecond value as the year 58675, and a microsecond
+ * one made `toISOString` throw `Invalid time value` and took the whole listing down with it.
+ */
+function asSeconds(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return 0;
+  const s = v >= 1e14 ? v / 1e6 : v >= 1e11 ? v / 1e3 : v;
+  return s >= EARLIEST && s < LATEST ? Math.floor(s) : 0;
+}
+
+function startedFrom(it: Record<string, unknown>): number {
+  // The first BELIEVABLE one, not the first numeric one: a `started_at` of -1 beside a sound
+  // `first_ts` should not cost the row its date.
+  for (const key of STARTED_KEYS) {
+    const s = asSeconds(it[key]);
+    if (s !== 0) return s;
+  }
+  return 0;
+}
+
 /**
  * What the gateway is holding, so that `orca pull` has somewhere to get a run id from.
  *
@@ -326,7 +355,10 @@ export async function listGatewayRuns(
     );
   });
 
-  const raw = (body as { data?: { items?: unknown } }).data?.items;
+  // `null` is valid JSON and has no properties: a 200 whose body was `null` read `.data` off it
+  // and surfaced `Cannot read properties of null` — the crash the row filter below exists to
+  // prevent, one level up.
+  const raw = (body as { data?: { items?: unknown } } | null)?.data?.items;
   const all = Array.isArray(raw) ? raw : [];
   // A row that is not an object, or names no run, is not a run you could pull — and reading
   // `run_key` off `null` threw a TypeError at the user with orca's name on it. Counted rather
@@ -336,7 +368,7 @@ export async function listGatewayRuns(
     return {
       runKey: String(it['run_key'] ?? ''),
       source: String(it['source'] ?? ''),
-      startedAt: STARTED_KEYS.map((k) => it[k]).find((v) => typeof v === 'number') ?? 0,
+      startedAt: startedFrom(it),
       turns: typeof it['turns'] === 'number' ? it['turns'] : 0,
       toolCalls: typeof it['tool_calls'] === 'number' ? it['tool_calls'] : 0,
       models: Array.isArray(it['models']) ? it['models'].map(String) : [],

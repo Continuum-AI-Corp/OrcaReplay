@@ -425,6 +425,7 @@ describe('orca list --remote', () => {
     it.each([
       [['list', '--bogus', '--json'], /unknown flag --bogus/],
       [['list', '--remote', 'stray', '--json'], /unexpected argument/],
+      [['list', '--limit', '3', '--json'], /asks the gateway, and nothing here does/],
     ])('refuses %j as the terminal would', async (argv, expected) => {
       const { code, doc } = await run(argv as string[]);
       expect(code).toBe(1);
@@ -432,6 +433,122 @@ describe('orca list --remote', () => {
       // Refused BEFORE the request, not after it.
       expect(received).toHaveLength(0);
     });
+  });
+
+  /**
+   * A FLAG THAT ASKS THE GATEWAY, WHEN NOTHING ASKS THE GATEWAY.
+   *
+   * Adding `--gateway`, `--source` and `--limit` to `list`'s allowlist let them past
+   * `assertKnownFlags` unconditionally, and then the local listing ran and dropped them. The worst
+   * of the three: `orca list --gateway <url>` printed THIS directory's runs to someone who had just
+   * named a host, which reads as that host's answer.
+   *
+   * Driven through `main()`, because that is where flags are judged — a command function trusts the
+   * arguments it is handed, which is why calling `listCommand` directly would pass against the bug.
+   */
+  describe('a flag that asks the gateway needs --remote', () => {
+    let printed: string[];
+    let stdout: typeof process.stdout.write;
+    let stderr: typeof process.stderr.write;
+
+    beforeEach(() => {
+      printed = [];
+      stdout = process.stdout.write.bind(process.stdout);
+      stderr = process.stderr.write.bind(process.stderr);
+      const grab = ((c: string) => {
+        printed.push(String(c));
+        return true;
+      }) as typeof process.stdout.write;
+      process.stdout.write = grab;
+      process.stderr.write = grab;
+    });
+
+    afterEach(() => {
+      process.stdout.write = stdout;
+      process.stderr.write = stderr;
+    });
+
+    const run = async (argv: string[]): Promise<number> => {
+      const keep = { ...process.env };
+      Object.assign(process.env, env());
+      try {
+        return await main(argv, home);
+      } finally {
+        for (const k of Object.keys(process.env)) delete process.env[k];
+        Object.assign(process.env, keep);
+      }
+    };
+
+    it.each([
+      [['--gateway', 'http://127.0.0.1:1']],
+      [['--source', 'gateway']],
+      [['--limit', '3']],
+      // Wrong for a reason that has nothing to do with `abc`, and that is the reason worth giving.
+      [['--limit', 'abc']],
+    ])('refuses %j without --remote instead of ignoring it', async (extra) => {
+      const code = await run(['list', ...(extra as string[])]);
+      expect(code).toBe(1);
+      expect(stripAnsi(printed.join(''))).toMatch(
+        /asks the gateway, and nothing here does: add --remote/,
+      );
+      // Refused before anything was asked of anyone.
+      expect(received).toHaveLength(0);
+    });
+
+    it('names every orphan at once rather than one per attempt', async () => {
+      await run(['list', '--source', 'gateway', '--limit', '3']);
+      expect(stripAnsi(printed.join(''))).toMatch(/--source, --limit ask the gateway/);
+    });
+
+    it('still lets them through with --remote', async () => {
+      const code = await run(['list', '--remote', '--source', 'gateway', '--limit', '3']);
+      expect(code).toBe(0);
+      expect(received).toHaveLength(1);
+    });
+  });
+
+  /**
+   * Seconds, milliseconds and microseconds do not overlap across the years a run can have started
+   * in, so the magnitude says which one arrived. Before: a millisecond value rendered as the year
+   * 58675, and a microsecond one made `toISOString` throw and took the whole listing down.
+   */
+  it.each([
+    ['seconds', 1_789_459_407],
+    ['milliseconds', 1_789_459_407_000],
+    ['microseconds', 1_789_459_407_000_000],
+  ])('reads a start time given in %s', async (_unit, value) => {
+    reply = { status: 200, body: holding(item({ started_at: value })) };
+    await listCommand(parseArgs(['list', '--remote']), out, home, env());
+    expect(text()).toContain('2026-09-15 08:03');
+  });
+
+  /** `-1` is not 1969 and `1e300` is not a date: neither is a start time, so neither is shown as one. */
+  it.each([
+    ['a negative number', -1],
+    ['a number no date can hold', 1e300],
+    ['a start before this product existed', 86_400],
+  ])('shows no start time for %s', async (_what, value) => {
+    reply = { status: 200, body: holding(item({ started_at: value })) };
+    await listCommand(parseArgs(['list', '--remote']), out, home, env());
+    const row =
+      text()
+        .split('\n')
+        .find((l) => l.includes('run_67a7ce30bd6a')) ?? '';
+    expect(row).not.toMatch(/19[67][0-9]-/);
+    expect(row.split(/\s\s+/)[1]).toBe('—');
+  });
+
+  it('falls through a start time nobody could believe to one they could', async () => {
+    reply = { status: 200, body: holding(item({ started_at: -1, first_ts: 1_789_459_407 })) };
+    await listCommand(parseArgs(['list', '--remote']), out, home, env());
+    expect(text()).toContain('2026-09-15 08:03');
+  });
+
+  /** `null` is valid JSON with no properties, and reading `.data` off it crashed the listing. */
+  it('reads a null body as holding nothing rather than as a crash', async () => {
+    reply = { status: 200, body: 'null' };
+    await listCommand(parseArgs(['list', '--remote']), out, home, env());
+    expect(text()).toContain('holding no runs');
   });
 
   it('leaves the local listing alone when --remote is not given', async () => {
