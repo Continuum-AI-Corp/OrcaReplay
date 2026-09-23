@@ -272,12 +272,39 @@ const STARTED_KEYS = ['started_at', 'created_at', 'first_ts'] as const;
  * A GET on the path push already POSTs to. Same gateway resolution, same headers, same
  * redirect-refusing fetch: nothing about where a key may travel changes because the verb did.
  */
+/**
+ * `--limit` as a count, the way `orca gc --keep` reads its own.
+ *
+ * `NUMERIC` guarantees it parsed as a number and nothing more, so `--limit 0` asked the gateway
+ * for no runs and `--limit -1` asked it for a negative number of them. Both were sent. What comes
+ * back from either is the gateway's opinion of a nonsense request, which is not an answer this
+ * should be relaying.
+ */
+function readLimit(args: ParsedArgs): number {
+  if (!args.has('limit')) return 20;
+  const n = args.num('limit');
+  if (n === undefined || !Number.isInteger(n) || n < 1) {
+    throw new Error(
+      '--limit needs a whole number of runs to list, like --limit 10' +
+        '\nit is how many the gateway should return, newest first',
+    );
+  }
+  return n;
+}
+
+/** What a listing row must be before it can be one: an object naming a run you could pull. */
+function isRunRow(raw: unknown): raw is Record<string, unknown> {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return false;
+  const key = (raw as Record<string, unknown>)['run_key'];
+  return typeof key === 'string' && key !== '';
+}
+
 export async function listGatewayRuns(
   args: ParsedArgs,
   env: NodeJS.ProcessEnv = process.env,
-): Promise<GatewayRun[]> {
+): Promise<{ runs: GatewayRun[]; skipped: number }> {
   const { url, headers } = await resolveGateway(args, env, 'list');
-  const query = new URLSearchParams({ limit: String(args.num('limit') ?? 20) });
+  const query = new URLSearchParams({ limit: String(readLimit(args)) });
   // Passed through rather than filtered here: the gateway already separates the two, and doing it
   // locally would page through runs only to discard them.
   const source = args.str('source');
@@ -286,10 +313,26 @@ export async function listGatewayRuns(
   const res = await fetchPinned(`${url}${UPLOAD_PATH}?${query.toString()}`, { headers });
   if (!res.ok) throw new Error(refusal(res.status, await res.text()));
 
-  const body = (await res.json()) as { data?: { items?: unknown } };
-  const items = Array.isArray(body.data?.items) ? body.data.items : [];
-  return items.map((raw): GatewayRun => {
-    const it = raw as Record<string, unknown>;
+  // A 2xx THAT IS NOT JSON IS SOMEBODY ELSE ANSWERING. `refusal` already says as much about error
+  // bodies — "a proxy in between may answer instead of the gateway" — and the success path had no
+  // such thought: a captive portal's login page came back as `Unexpected token '<'`, which reads
+  // as a bug in orca rather than as the network fact it is.
+  const body = await res.json().catch(() => {
+    throw new Error(
+      `${url} answered ${res.status} but not JSON ` +
+        `(content-type: ${res.headers.get('content-type') ?? 'none'}). ` +
+        'Something between here and that host answered instead — a proxy, or a portal asking ' +
+        'you to log in. Check the address, or point --gateway at one that is reachable.',
+    );
+  });
+
+  const raw = (body as { data?: { items?: unknown } }).data?.items;
+  const all = Array.isArray(raw) ? raw : [];
+  // A row that is not an object, or names no run, is not a run you could pull — and reading
+  // `run_key` off `null` threw a TypeError at the user with orca's name on it. Counted rather
+  // than dropped in silence: a gateway sending these is broken, and that is worth saying.
+  const items = all.filter(isRunRow);
+  const runs = items.map((it): GatewayRun => {
     return {
       runKey: String(it['run_key'] ?? ''),
       source: String(it['source'] ?? ''),
@@ -302,6 +345,7 @@ export async function listGatewayRuns(
       clientApp: String(it['client_app'] ?? ''),
     };
   });
+  return { runs, skipped: all.length - items.length };
 }
 
 /**
