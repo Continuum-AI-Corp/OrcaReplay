@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Adapter, Launch, RecordContext } from '@orcareplay/plugin-api';
 import { detectAgent } from './detect.js';
-import { Redactor } from '@orcareplay/core';
+import { Redactor, withoutInvisible } from '@orcareplay/core';
 import { decodeForwardPath, forwardBasePath } from '@orcareplay/proxy';
 import { forwardOrProxyBase, PLACEHOLDER_KEY, readEnv } from './env.js';
 
@@ -168,7 +168,8 @@ function hasUnaccountedToken(config: string): boolean {
   return config.split('\n').some((line) => {
     // The two this file rewrites are accounted for by the checks above.
     if (/base[_-]?url|api[_-]?key/i.test(lineBody(line).split(':')[0] ?? '')) return false;
-    return OPAQUE_TOKEN.test(valueText(line));
+    // As a reader would retype it — an invisible character inside a token split it below 24.
+    return OPAQUE_TOKEN.test(withoutInvisible(valueText(line)));
   });
 }
 

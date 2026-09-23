@@ -357,6 +357,13 @@ describe('table cells cannot drive the terminal', () => {
       ['combining grapheme joiner', '\u034F'],
       ['combining acute accent', '\u0301'],
       ['tag character', '\u{E0041}'],
+      // Outside Cf and M, and blank all the same — review found these after the first version of
+      // this list claimed to cover "everything a reader does not see". They are in core's set now.
+      ['Hangul filler', '\u3164'],
+      ['Hangul choseong filler', '\u115F'],
+      ['Hangul jungseong filler', '\u1160'],
+      ['halfwidth Hangul filler', '\uFFA0'],
+      ['braille pattern blank', '\u2800'],
     ];
     const places = [3, 8, 20];
     const cases = INVISIBLE.flatMap(([name, ch]) => places.map((at) => [name, ch, at] as const));

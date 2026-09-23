@@ -499,6 +499,24 @@ describe('the mcode adapter', () => {
     }
   });
 
+  /** An invisible character inside a token split it into runs the 24-character net never saw. */
+  it('refuses a config holding a token with invisible characters inside it', () => {
+    const token = 'b8e793df1a6e4b1088eeaa608388afc9';
+    for (const ch of ['\u200B', '\uFEFF', '\u3164', '\u2800']) {
+      const split = token.slice(0, 11) + ch + token.slice(11, 22) + ch + token.slice(22);
+      const config = [
+        'custom_provider:',
+        '  gw:',
+        '    options:',
+        '      apiKey: sk-live-x',
+        '      baseURL: https://gateway.example/v1',
+        `      rootToken: ${split}`,
+        '',
+      ].join(LF);
+      expect(rewriteIsTrustworthy(config, PROXY), JSON.stringify(ch)).toBe(false);
+    }
+  });
+
   it('rewrites a config with CRLF line endings', () => {
     // The carriage return belongs to the line ending, not to the value. Losing that made every
     // field on a Windows-written config unparseable, so the whole thing was refused and the run

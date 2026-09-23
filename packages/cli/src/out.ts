@@ -7,6 +7,8 @@
  * errors that say what happened, what it means, and what to run next.
  */
 
+import { withoutInvisible } from '@orcareplay/core';
+
 const ESC = String.fromCharCode(27);
 const CSI = `${ESC}[`;
 
@@ -248,18 +250,6 @@ export class Output {
 }
 
 /**
- * What a reader does not see, and so does not stop at.
- *
- * Wider than CONTROL_RE on purpose. That set decides what is ESCAPED in output, and it leaves out
- * U+200D, U+FE0F and the tag characters because emoji are spelled with them. This one decides
- * only what is removed before a value is JUDGED — the stripped form is tested and never printed —
- * so nothing is lost by removing every invisible character: all of Cf (U+200B, U+200C, U+200D,
- * U+2060, U+FEFF, U+00AD, the bidi controls, the tags) and every combining mark, variation
- * selectors included.
- */
-const INVISIBLE_RE = /[\p{Cf}\p{M}]/gu;
-
-/**
  * By shape alone — what a table cell can be judged on, having no key to be named by.
  *
  * JUDGED ON WHAT A READER COULD REASSEMBLE, not only on the bytes as they arrived. Every pattern
@@ -267,15 +257,15 @@ const INVISIBLE_RE = /[\p{Cf}\p{M}]/gu;
  * anything the class does not contain placed inside it matched nothing — while every character
  * of the key still reached the reader, in order.
  *
- * That was fixed twice before this, each time for the case found and not the class. First ESC,
- * tab and newline in front of a token, then the same control characters inside one. Then review
- * put a zero-width space inside one, and a ZWJ, a BOM, a soft hyphen and a variation selector
- * all did the same thing, on this path and on `info key=value` alike: invisible, so the key read
- * as whole, and outside `[A-Za-z0-9_-]`, so the pattern never saw it. The class to strip was
- * never "control characters". It is everything a reader does not see.
+ * That was fixed three times before this, each time for the case found and not the class:
+ * control characters in front of a token, then inside one, then format characters and combining
+ * marks — after which review found the Hangul fillers and U+2800 still getting through, and the
+ * same hole in the write-path redactor, which had never been looked at. The set now lives in one
+ * place, `withoutInvisible` in core, with its edges written down there; this renderer, the
+ * redactor and the adapters' nets all judge by it.
  */
 function looksSecret(raw: string): boolean {
-  const stripped = raw.replace(CONTROL_RE, '').replace(INVISIBLE_RE, '');
+  const stripped = withoutInvisible(raw.replace(CONTROL_RE, ''));
   return SECRET_PATTERNS.some((re) => re.test(raw) || re.test(stripped));
 }
 
