@@ -261,6 +261,48 @@ describe('orca list --remote', () => {
     expect(received).toHaveLength(1);
   });
 
+  /**
+   * THE LISTING IS WHERE A RUN ID COMES FROM, SO A ROW IN IT IS A CLAIM.
+   *
+   * `client_app` is not the operator's string alone — the gateway derives it from request headers
+   * under its own Client App Identification rules, so anyone who can route traffic through the
+   * workspace chooses part of what this prints. A newline in it used to split one row into two,
+   * and the invented second row carried a run key that `orca pull` would then be asked for.
+   */
+  it('cannot be made to print a run the gateway did not list', async () => {
+    const forged = `cc\nrun_deadbeefcafe0123456789ab  2026-09-20 10:00  gateway  trusted`;
+    reply = { status: 200, body: holding(item({ client_app: forged })) };
+    await listCommand(parseArgs(['list', '--remote']), out, home, env());
+
+    const body = text()
+      .trim()
+      .split('\n')
+      .filter((l) => l.includes('run_'));
+    // One item in, one line out — and the forged key is visible as text in a cell, not as a row.
+    expect(body).toHaveLength(1);
+    expect(body[0]).toContain('run_67a7ce30bd6a');
+    expect(body[0]).toContain('\\x0a');
+  });
+
+  it('cannot rewrite a row after printing it, or reach for the terminal', async () => {
+    const ESC_C = String.fromCharCode(27);
+    reply = {
+      status: 200,
+      body: holding(
+        item({
+          outcome: `exit 0${String.fromCharCode(13)}exit 137`,
+          client_app: `${ESC_C}[2J${ESC_C}[Hgotcha`,
+        }),
+      ),
+    };
+    await listCommand(parseArgs(['list', '--remote']), out, home, env());
+
+    expect(text()).not.toContain(ESC_C);
+    expect(text()).not.toContain(String.fromCharCode(13));
+    expect(text()).toContain('\\x0d');
+    expect(text()).toContain('\\x1b[2J');
+  });
+
   it('leaves the local listing alone when --remote is not given', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'orca-list-local-'));
     try {

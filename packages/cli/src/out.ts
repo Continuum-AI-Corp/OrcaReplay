@@ -24,6 +24,53 @@ export function stripAnsi(s: string): string {
 }
 
 /**
+ * NOTHING THIS PROCESS DID NOT WRITE MAY DRIVE THE RENDERER.
+ *
+ * A table cell and a failure message are both printed verbatim, and both carry strings that came
+ * from somewhere else: a run listing is the gateway's, an event detail is the trace's, a refusal
+ * is whatever the host chose to say, and a trace can be one a colleague sent you. Measured against
+ * `orca list --remote` answered by a hostile listing:
+ *
+ *   - a newline in a cell breaks one row into two, and the second is a FABRICATED RUN — in a
+ *     listing whose entire purpose is to hand `orca pull` an id, an id the gateway never held;
+ *   - a carriage return overwrites the row already on screen, so OUTCOME can read `exit 0` in the
+ *     data and `exit 137` on the terminal;
+ *   - `ESC [ 2 J` clears the screen, and `ESC ] 8` makes the text say one thing while the link
+ *     underneath goes somewhere else;
+ *   - U+202E and its family reorder everything after them to the end of the LINE, not the cell,
+ *     so one field shuffles the columns beside it and a run key reads as a name it is not.
+ *
+ * None of that is a rendering fault — it is a value being executed instead of shown. So a control
+ * character is printed as what it is. `\x0a` in a cell is ugly, and is meant to be: it shows up
+ * only when something put a control character where a name belongs.
+ */
+/**
+ * C0 and C1, and the bidirectional controls.
+ *
+ * The first two ranges are the ones that move the cursor. The rest do something a terminal obeys
+ * just as readily: U+202E and its family REORDER what follows them, and the effect does not stop
+ * at the cell — it runs to the end of the line, so one field can visually shuffle the columns
+ * after it and a run key can read as a name it is not.
+ *
+ * Deliberately NOT here: U+200D and U+200C, U+FE0F, and the tag characters. Those compose text
+ * rather than reorder it — they are how a family emoji, a heart and a Scotland flag are spelled —
+ * and a trace's event detail is allowed to contain any of them. A denylist that swept up every
+ * invisible character would mangle legitimate content to defend against nothing: an invisible
+ * character does not lie about the order of what is around it.
+ */
+const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu;
+
+export function tame(text: string): string {
+  return text.replace(CONTROL_RE, (c) => {
+    const n = c.charCodeAt(0);
+    // Spelled at the width it takes to name it, so `\\x0a` stays what it has always been.
+    return n < 0x100
+      ? `\\x${n.toString(16).padStart(2, '0')}`
+      : `\\u${n.toString(16).padStart(4, '0')}`;
+  });
+}
+
+/**
  * Shapes that must never reach a terminal. §7 applies to output, not only to disk: terminals
  * scroll into screenshots, and a key printed once is a key leaked forever.
  */
@@ -144,23 +191,38 @@ export class Output {
 
   failure(f: Failure): void {
     this.error(f.event, {});
-    this.plain(`  ${f.what}`);
-    if (f.why) this.plain(`  ${f.why}`);
-    if (f.next) this.plain(`  next: ${f.next}`);
+    // Tamed but not redacted: a failure is a SENTENCE this code composed, and blanking all of it
+    // because one substring looked like a key would throw away the explanation. A cell is a value
+    // and can be replaced whole; a sentence cannot.
+    this.plain(`  ${tame(f.what)}`);
+    if (f.why) this.plain(`  ${tame(f.why)}`);
+    if (f.next) this.plain(`  next: ${tame(f.next)}`);
   }
 
   /** Aligned columns, no box drawing — a table people can pipe into awk. */
   table(headers: string[], rows: string[][]): void {
-    const widths = headers.map((h, i) =>
-      Math.max(h.length, ...rows.map((r) => (r[i] ?? '').length)),
+    // BEFORE THE WIDTHS, because a cell is as wide as what is printed, and what is printed is the
+    // tamed form. A cell is a value, so a secret shape replaces the whole of it, exactly as
+    // `info key=value` has always done — §7 is about output, not about which door it left by.
+    // RAW FIRST, then tame — the order `formatValue` has always used. Taming before judging put a
+    // hex digit where a control character had been, and every pattern is anchored with `\b`: an
+    // ESC, tab or newline immediately before a key-shaped token therefore removed the boundary
+    // the anchor needs, and the cell printed in full. The taming let through exactly the input it
+    // exists for. `looksSecret` now also judges the control-stripped form, which is what closes
+    // the same trick played one character later, inside the token.
+    const clean = (c: string): string => (looksSecret(c) ? '<redacted>' : tame(c));
+    const heads = headers.map(clean);
+    const cells = rows.map((r) => heads.map((_, i) => clean(r[i] ?? '')));
+    const widths = heads.map((h, i) =>
+      Math.max(h.length, ...cells.map((r) => (r[i] ?? '').length)),
     );
-    const render = (cells: string[]): string =>
-      cells
-        .map((c, i) => (i === cells.length - 1 ? c : c.padEnd(widths[i] ?? 0)))
+    const render = (row: string[]): string =>
+      row
+        .map((c, i) => (i === row.length - 1 ? c : c.padEnd(widths[i] ?? 0)))
         .join('  ')
         .trimEnd();
-    this.#write(`${this.#paint(STYLE.dim)}${render(headers)}${this.#paint(STYLE.reset)}\n`);
-    for (const row of rows) this.#write(`${render(row)}\n`);
+    this.#write(`${this.#paint(STYLE.dim)}${render(heads)}${this.#paint(STYLE.reset)}\n`);
+    for (const row of cells) this.#write(`${render(row)}\n`);
   }
 
   #paint(code: string): string {
@@ -185,8 +247,22 @@ export class Output {
   }
 }
 
+/**
+ * By shape alone — what a table cell can be judged on, having no key to be named by.
+ *
+ * JUDGED ON WHAT A READER COULD REASSEMBLE, not only on the bytes as they arrived. Every pattern
+ * is anchored and its character class stops at the first byte outside it, so `sk-` followed by an
+ * ESC and then the rest of the key matched nothing at all — while printing every character of
+ * that key, in order, to the terminal. Removing the control characters before testing closes it,
+ * and closes it for `info key=value` too, which had the same blind spot from the same cause.
+ */
+function looksSecret(raw: string): boolean {
+  const stripped = raw.replace(CONTROL_RE, '');
+  return SECRET_PATTERNS.some((re) => re.test(raw) || re.test(stripped));
+}
+
 function isSecret(key: string, raw: string): boolean {
-  return SECRET_KEYS.test(key) || SECRET_PATTERNS.some((re) => re.test(raw));
+  return SECRET_KEYS.test(key) || looksSecret(raw);
 }
 
 /** The value as data — the number or boolean kept as itself, anything secret replaced. */

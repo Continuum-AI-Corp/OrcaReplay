@@ -149,3 +149,197 @@ describe('Output', () => {
     expect(rows).toHaveLength(3);
   });
 });
+
+/**
+ * A TABLE IS NOT A TERMINAL PROGRAM.
+ *
+ * Every string in a row came from somewhere else — the gateway's run listing, a trace's event
+ * detail, a trace a colleague sent you — and the renderer printed all of it verbatim. Measured
+ * against `orca list --remote` answered by a hostile listing: a newline split one row into two
+ * and the second was a run the gateway never held, a carriage return rewrote OUTCOME after it
+ * was printed, and `ESC [ 2 J` cleared the screen. The fix belongs here rather than at each
+ * caller, because "one row is one line" is a property of the table, not of whoever fills it.
+ */
+describe('table cells cannot drive the terminal', () => {
+  const sink = () => {
+    const lines: string[] = [];
+    return { lines, write: (s: string) => void lines.push(s) };
+  };
+  const ESC_C = String.fromCharCode(27);
+  const BEL = String.fromCharCode(7);
+  const LF = String.fromCharCode(10);
+  const CR = String.fromCharCode(13);
+
+  const render = (rows: string[][]): string[] => {
+    const s = sink();
+    new Output({ write: s.write, isTTY: false }).table(['A', 'B'], rows);
+    return stripAnsi(s.lines.join('')).trim().split('\n');
+  };
+
+  it('does not let a newline invent a row that was never listed', () => {
+    const rows = render([[`cc${LF}run_deadbeefcafe  gateway`, 'x']]);
+    // One row in, one row out — header plus one.
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toContain('\\x0a');
+    expect(rows[1]).toContain('run_deadbeefcafe');
+  });
+
+  it('does not let a carriage return rewrite what was already printed', () => {
+    const rows = render([['ok', `exit 0${CR}exit 137`]]);
+    expect(rows[1]).not.toContain(CR);
+    expect(rows[1]).toContain('\\x0d');
+  });
+
+  it('shows an escape sequence instead of performing it', () => {
+    const rows = render([
+      [`${ESC_C}[2J${ESC_C}[Hgotcha`, `${ESC_C}]8;;https://evil${BEL}text${ESC_C}]8;;${BEL}`],
+    ]);
+    expect(rows.join('\n')).not.toContain(ESC_C);
+    expect(rows.join('\n')).not.toContain(BEL);
+    expect(rows[1]).toContain('\\x1b[2J');
+    expect(rows[1]).toContain('\\x07');
+  });
+
+  it('pads on what is printed, so a tamed cell still lines up', () => {
+    const rows = render([
+      [`a${LF}b`, 'end'],
+      ['aaaaaaaaaa', 'end'],
+    ]);
+    // `a@B@x0ab` is 7 wide, `aaaaaaaaaa` is 10, so both second cells start at the same column.
+    expect(rows[1]!.indexOf('end')).toBe(rows[2]!.indexOf('end'));
+  });
+
+  /** A cell is a value, and `info key=value` has always replaced a secret-shaped value whole. */
+  it('redacts a secret-shaped cell, as the key=value path does', () => {
+    const rows = render([['sk-abcdefghij0123456789klmn', 'ok']]);
+    expect(rows[1]).not.toContain('sk-abcdefghij');
+    expect(rows[1]).toContain('<redacted>');
+  });
+
+  /**
+   * A CHARACTER THAT REORDERS IS OBEYED JUST AS READILY AS ONE THAT MOVES THE CURSOR.
+   *
+   * The first version of this taming covered C0 and C1 — the ranges that move the cursor — and
+   * stopped there. U+202E and its family are not in those ranges and a terminal honours them all
+   * the same: they reverse what follows, and the effect runs to the end of the LINE rather than
+   * the cell, so one field shuffles the columns beside it and a run key reads as a name it is
+   * not. In a listing whose purpose is to hand `orca pull` an id, that is the same lie a newline
+   * told, spelled differently.
+   */
+  describe('bidirectional controls are shown, not obeyed', () => {
+    const sink = () => {
+      const lines: string[] = [];
+      return { lines, write: (s: string) => void lines.push(s) };
+    };
+    const render = (cell: string): string => {
+      const s = sink();
+      new Output({ write: s.write, isTTY: false }).table(['RUN', 'APP'], [[cell, 'app']]);
+      return stripAnsi(s.lines.join('')).trim().split('\n')[1] ?? '';
+    };
+
+    const REORDERING = [
+      '\u061C',
+      '\u200E',
+      '\u200F',
+      '\u202A',
+      '\u202B',
+      '\u202C',
+      '\u202D',
+      '\u202E',
+      '\u2066',
+      '\u2067',
+      '\u2068',
+      '\u2069',
+    ];
+
+    it.each(REORDERING)('escapes %j instead of letting it reorder the row', (ch) => {
+      const row = render(`run_${ch}daeh_ekaf`);
+      expect(row).not.toContain(ch);
+      expect(row).toContain('\\u' + ch.codePointAt(0)!.toString(16).padStart(4, '0'));
+      // Still one row, and the column beside it is still beside it.
+      expect(row).toContain('app');
+    });
+
+    /**
+     * The counterpart, and the reason this is a list rather than "every invisible character":
+     * these COMPOSE text. They are how a family emoji, a heart and a Scotland flag are spelled,
+     * and a trace's event detail is allowed to contain any of them. Mangling them would damage
+     * legitimate content to defend against nothing — an invisible character does not lie about
+     * the order of what is around it.
+     */
+    it.each([
+      ['family emoji, joined by U+200D', '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}'],
+      ['heart with U+FE0F', '\u2764\uFE0F'],
+      [
+        'flag spelled with tag characters',
+        '\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}',
+      ],
+      ['CJK', '网关网关'],
+    ])('leaves %s exactly as it arrived', (_label, value) => {
+      expect(render(value)).toContain(value);
+    });
+
+    /** A one-byte control is still spelled at one byte, as every other test here asserts. */
+    it('keeps the two-digit spelling for C0', () => {
+      expect(render('a\nb')).toContain('a\\x0ab');
+    });
+  });
+
+  /**
+   * ORDER, AND THEN POSITION.
+   *
+   * Two findings, one line apart. The taming first ran before the secret check, and every pattern
+   * is anchored with `\b`: tamed, an ESC is spelled `\x1b`, whose last character is a hex digit —
+   * a word character — so a control character immediately BEFORE a key-shaped token removed the
+   * boundary the anchor needs. Testing the raw string fixed that and not the next case: a control
+   * character INSIDE the token matched nothing either way, because the character class stops at
+   * the first byte outside it — while every character of the key still reached the terminal, in
+   * order. What a reader can reassemble is what has to be judged, so `looksSecret` strips control
+   * characters before testing as well. That also closes it for `info key=value`, which had the
+   * same blind spot from the same cause.
+   */
+  describe('a key survives no placement of a control character', () => {
+    const sink = () => {
+      const lines: string[] = [];
+      return { lines, write: (s: string) => void lines.push(s) };
+    };
+    const KEY = 'sk-abcdefghij0123456789kl';
+    const at = (code: number, cut: number): string =>
+      KEY.slice(0, cut) + String.fromCharCode(code) + KEY.slice(cut);
+
+    // 0 is before the token; 3 is just after `sk-`; 8 and 20 are inside the run of key characters.
+    const places: [number, number][] = [];
+    for (const code of [27, 9, 10, 13, 0])
+      for (const cut of [0, 3, 8, 20]) places.push([code, cut]);
+
+    it.each(places)('table(): control %i at offset %i', (code, cut) => {
+      const s = sink();
+      new Output({ write: s.write, isTTY: false }).table(['A'], [[at(code, cut)]]);
+      const row = stripAnsi(s.lines.join(''));
+      // Recoverable = every character of the key reaches the reader, however it is spelled.
+      expect(row.replace(/\\x[0-9a-f]{2}/g, '')).not.toContain(KEY);
+      expect(row).toContain('<redacted>');
+    });
+
+    it.each(places)('info key=value: control %i at offset %i', (code, cut) => {
+      const s = sink();
+      new Output({ write: s.write, isTTY: false }).info('probe', { models: at(code, cut) });
+      const line = stripAnsi(s.lines.join(''));
+      expect(line.replace(/\\[nrt]|\u00[0-9a-f]{2}/g, '')).not.toContain(KEY);
+      expect(line).toContain('<redacted>');
+    });
+  });
+
+  /** A failure is a sentence this code composed; taming it must not blank the explanation. */
+  it('tames a failure message without discarding it', () => {
+    const s = sink();
+    new Output({ write: s.write, isTTY: false }).failure({
+      event: 'list.failed',
+      what: `gateway answered 403: denied${CR}all clear`,
+    });
+    const text = stripAnsi(s.lines.join(''));
+    expect(text).not.toContain(CR);
+    expect(text).toContain('gateway answered 403: denied');
+    expect(text).toContain('\\x0d');
+  });
+});
