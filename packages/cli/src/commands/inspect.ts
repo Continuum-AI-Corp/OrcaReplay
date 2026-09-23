@@ -65,10 +65,14 @@ export async function listCommand(
 /**
  * The same question asked of the gateway: what is there that this machine could have.
  *
- * The columns are the ones the gateway's own console shows, minus the two a terminal cannot use:
- * cost belongs to billing, and "open" is a link. SOURCE stays because it is the one that changes
- * what a run contains — the gateway records the model and route layers, and shell, file, mcp and
- * net rows appear only on a run pushed from here.
+ * The console shows eleven columns — Run, Started, Source, App / agent, Turns, Tools, Layers,
+ * Models, Outcome, Cost and Open. Four are left out here, and it is worth being exact about
+ * which: Cost belongs to billing, Open is a link, and neither survives a terminal. The other
+ * two, Tools and Layers, are here — an earlier version of this comment claimed only two were
+ * dropped while dropping four, and justified SOURCE as a stand-in for the layers. It is not one.
+ * LAYERS is reported outright (`model`, `route` from a gateway recording; `fs`, `shell`, `mcp`,
+ * `net` from one recorded here), and it is the column that answers "what is in this run". SOURCE
+ * stays beside it because where a run came from is a different question from what it holds.
  */
 async function listGatewayCommand(
   args: ParsedArgs,
@@ -85,15 +89,17 @@ async function listGatewayCommand(
   // fault, and `1970-01-01` for a missing timestamp reads as a fact — the wrong one.
   const said = (s: string): string => (s === '' ? '—' : s);
   out.table(
-    ['RUN', 'STARTED', 'SOURCE', 'APP', 'TURNS', 'MODELS', 'OUTCOME'],
+    ['RUN', 'STARTED', 'SOURCE', 'APP', 'TURNS', 'TOOLS', 'LAYERS', 'MODELS', 'OUTCOME'],
     runs.map((r) => [
       r.runKey,
-      r.createdAt === 0
+      r.startedAt === 0
         ? '—'
-        : new Date(r.createdAt * 1000).toISOString().slice(0, 16).replace('T', ' '),
+        : new Date(r.startedAt * 1000).toISOString().slice(0, 16).replace('T', ' '),
       said(r.source),
       said(r.clientApp),
       String(r.turns),
+      String(r.toolCalls),
+      said(r.layers.join(',')),
       said(r.models.join(', ')),
       said(r.outcome),
     ]),

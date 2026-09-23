@@ -224,18 +224,41 @@ function refusal(status: number, body: string): string {
   return trimmed === '' ? `gateway answered ${status}` : `gateway answered ${status}: ${trimmed}`;
 }
 
-/** One row of the gateway's run listing — the fields a terminal shows, and no more. */
+/**
+ * One row of the gateway's run listing — the fields a terminal shows, and no more.
+ *
+ * Named after what a captured listing actually carries:
+ *
+ *   {"run_key","source","client_app","turns","tool_calls","models","layers","outcome","bytes"}
+ *
+ * The previous version of this read `created_at`, which is in no such response — the detail
+ * endpoint's `session` object has `first_ts`/`last_ts`, and the listing item has no timestamp at
+ * all. Every STARTED cell was therefore the missing-value path. `startedAt` now reads whichever
+ * of the three a deployment sends and says so when there is none, because the console has a
+ * Started column and a newer deployment may well fill it.
+ */
 export interface GatewayRun {
   runKey: string;
   /** `gateway` for a run it recorded itself, `upload` for one pushed from here. */
   source: string;
-  /** Seconds, as the gateway reports them. */
-  createdAt: number;
+  /** Seconds, as the gateway reports them; 0 when the listing carries no timestamp. */
+  startedAt: number;
   turns: number;
+  /** Tool calls the run made — `tool_calls` in the response. */
+  toolCalls: number;
   models: string[];
+  /**
+   * Which capture layers the run holds: `model` and `route` for a gateway recording, plus `fs`,
+   * `shell`, `mcp` and `net` on one recorded here. The listing reports it directly, so there is
+   * no need to infer it from SOURCE.
+   */
+  layers: string[];
   outcome: string;
   clientApp: string;
 }
+
+/** The first of these the gateway sends, in seconds. Deployments differ; none of them is wrong. */
+const STARTED_KEYS = ['started_at', 'created_at', 'first_ts'] as const;
 
 /**
  * What the gateway is holding, so that `orca pull` has somewhere to get a run id from.
@@ -270,9 +293,11 @@ export async function listGatewayRuns(
     return {
       runKey: String(it['run_key'] ?? ''),
       source: String(it['source'] ?? ''),
-      createdAt: typeof it['created_at'] === 'number' ? it['created_at'] : 0,
+      startedAt: STARTED_KEYS.map((k) => it[k]).find((v) => typeof v === 'number') ?? 0,
       turns: typeof it['turns'] === 'number' ? it['turns'] : 0,
+      toolCalls: typeof it['tool_calls'] === 'number' ? it['tool_calls'] : 0,
       models: Array.isArray(it['models']) ? it['models'].map(String) : [],
+      layers: Array.isArray(it['layers']) ? it['layers'].map(String) : [],
       outcome: String(it['outcome'] ?? ''),
       clientApp: String(it['client_app'] ?? ''),
     };

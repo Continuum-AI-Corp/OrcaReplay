@@ -33,14 +33,24 @@ describe('orca list --remote', () => {
   let received: { method: string; path: string; auth?: string; apiKey?: string }[];
   let reply: { status: number; body: string };
 
+  /**
+   * A LISTING ITEM CAPTURED FROM A REAL GATEWAY, FIELD FOR FIELD.
+   *
+   * The first version of this fixture was written from the mapping rather than from a response,
+   * so it carried `created_at` and an outcome of `ok` — neither of which the gateway sends. The
+   * tests passed against the invention and the STARTED column was empty against the real thing.
+   * A fixture a person made up tests only that the code agrees with the person.
+   */
   const item = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
-    run_key: 'run_ec90339a3c0e',
-    source: 'gateway',
-    created_at: 1_758_000_000,
-    turns: 7,
-    models: ['claude-sonnet-4-5'],
-    outcome: 'ok',
+    run_key: 'run_67a7ce30bd6a',
+    source: 'upload',
     client_app: 'claude-code',
+    turns: 5,
+    tool_calls: 3,
+    models: ['claude-opus-5'],
+    layers: ['model', 'fs'],
+    outcome: 'exit 0',
+    bytes: 201620,
     ...over,
   });
 
@@ -99,10 +109,15 @@ describe('orca list --remote', () => {
 
     const rendered = text();
     expect(rendered).toContain('RUN');
-    expect(rendered).toContain('run_ec90339a3c0e');
-    expect(rendered).toContain('gateway');
+    expect(rendered).toContain('run_67a7ce30bd6a');
+    expect(rendered).toContain('upload');
     expect(rendered).toContain('claude-code');
-    expect(rendered).toContain('claude-sonnet-4-5');
+    expect(rendered).toContain('claude-opus-5');
+    // Reported outright by the listing, and the column that says what is IN a run.
+    expect(rendered).toContain('LAYERS');
+    expect(rendered).toContain('model,fs');
+    // `outcome` is the run's exit status as a string — not a status word this invented.
+    expect(rendered).toContain('exit 0');
     // The listing exists to be acted on, and pull is the only thing to do with a run not here yet.
     expect(rendered).toContain('orca pull <run>');
   });
@@ -115,7 +130,7 @@ describe('orca list --remote', () => {
   it('forwards --limit and --source to the gateway rather than filtering here', async () => {
     reply = {
       status: 200,
-      body: holding(item(), item({ run_key: 'run_second', source: 'upload' })),
+      body: holding(item(), item({ run_key: 'run_second', source: 'gateway' })),
     };
     await listCommand(
       parseArgs(['list', '--remote', '--source', 'gateway', '--limit', '3']),
@@ -178,27 +193,59 @@ describe('orca list --remote', () => {
   });
 
   /**
-   * A run recorded by the gateway has no client app, a run may carry no model list, and a field
-   * the gateway omits is not a field this can invent. An empty cell reads as a rendering fault,
-   * and `1970-01-01` for a missing timestamp reads as a fact — the wrong one.
+   * A gateway recording has no client app, a run may carry no model list, and TODAY'S LISTING
+   * CARRIES NO TIMESTAMP AT ALL — a captured response is
+   * `{run_key,source,client_app,turns,tool_calls,models,layers,outcome,bytes}`. An empty cell
+   * reads as a rendering fault, and `1970-01-01` for a field that was never sent reads as a
+   * fact — the wrong one.
    */
   it('marks what the gateway did not report instead of rendering it as something', async () => {
     reply = {
       status: 200,
-      body: holding(item({ client_app: '', models: [], created_at: null, outcome: '' })),
+      body: holding(item({ client_app: '', models: [], outcome: '', layers: [] })),
     };
     await listCommand(parseArgs(['list', '--remote']), out, home, env());
 
     const row =
       text()
         .split('\n')
-        .find((l) => l.includes('run_ec90339a3c0e')) ?? '';
+        .find((l) => l.includes('run_67a7ce30bd6a')) ?? '';
     expect(row).not.toContain('1970');
-    // APP, MODELS, OUTCOME and STARTED — four cells the gateway left unsaid.
-    expect(row.match(/—/g) ?? []).toHaveLength(4);
+    // STARTED, APP, LAYERS, MODELS and OUTCOME — five cells the gateway left unsaid.
+    expect(row.match(/—/g) ?? []).toHaveLength(5);
     // What it DID report is still reported.
-    expect(row).toContain('run_ec90339a3c0e');
-    expect(row).toContain('gateway');
+    expect(row).toContain('run_67a7ce30bd6a');
+    expect(row).toContain('upload');
+  });
+
+  /**
+   * THE FIELD THE MAPPING GUESSED.
+   *
+   * `created_at` is in no captured response: the detail endpoint's `session` object carries
+   * `first_ts`/`last_ts`, and the listing item carries no timestamp. The console has a Started
+   * column, so a deployment may well fill one — under whichever of the three names. Reading all
+   * of them is the difference between a column that works everywhere and one that worked nowhere.
+   */
+  it.each(['started_at', 'created_at', 'first_ts'])('dates a run from %s', async (key) => {
+    reply = { status: 200, body: holding(item({ [key]: 1_789_459_407 })) };
+    await listCommand(parseArgs(['list', '--remote']), out, home, env());
+    expect(text()).toContain('2026-09-15 08:03');
+  });
+
+  it('counts tool calls and names the layers, both straight from the listing', async () => {
+    reply = {
+      status: 200,
+      body: holding(item({ tool_calls: 9, layers: ['model', 'route', 'shell'] })),
+    };
+    await listCommand(parseArgs(['list', '--remote']), out, home, env());
+
+    const row =
+      text()
+        .split('\n')
+        .find((l) => l.includes('run_67a7ce30bd6a')) ?? '';
+    expect(text()).toContain('TOOLS');
+    expect(row).toContain('model,route,shell');
+    expect(row.split(/\s\s+/)).toContain('9');
   });
 
   /** Same listing endpoint, a different host named for this one invocation. */
