@@ -78,6 +78,31 @@ const exportPath = (runKey: string): string =>
   `/api/replay/runs/${encodeURIComponent(runKey)}/export`;
 
 /**
+ * Which of the three a message is explaining, where the reason differs.
+ *
+ * The RULES do not differ: same named-destination gate, same credential homing, same refusal to
+ * go unauthenticated. Only the sentence does — and it has to, because the answer to "why can I
+ * not do this here" is a different fact for each. Saying "a run carries source, shell output and
+ * workspace snapshots" to someone who asked for a *listing* names a risk they are not taking, and
+ * the message stops being believed the first time it is wrong.
+ */
+type GatewayUse = 'push' | 'pull' | 'list';
+
+/** What actually goes to the host, per operation. A sentence of its own, so each reads as one. */
+const AT_STAKE: Record<GatewayUse, string> = {
+  push: 'A run carries source, shell output and workspace snapshots, and your key travels with it.',
+  pull: 'Your key goes there, and what answers is written into this machine’s store.',
+  list: 'Your key goes there.',
+};
+
+/** How the same refusal reads for each. */
+const NEEDS_KEY: Record<GatewayUse, string> = {
+  push: 'A push needs',
+  pull: 'A pull needs',
+  list: 'Listing needs',
+};
+
+/**
  * The gateway a sync command talks to: flag, then environment, then a configured gateway THE USER
  * NAMED.
  *
@@ -96,6 +121,7 @@ const exportPath = (runKey: string): string =>
 async function resolveGateway(
   args: ParsedArgs,
   env: NodeJS.ProcessEnv,
+  use: GatewayUse,
 ): Promise<{ url: string; headers: Record<string, string> }> {
   const config: OrcaConfig = await readConfig(env);
   const named = namedPushDestination(config);
@@ -107,8 +133,8 @@ async function resolveGateway(
     throw new Error(
       config.gateway?.url !== undefined
         ? `the configured gateway (${recordableOrigin(config.gateway.url) ?? '(unprintable)'}) is orca setup's default for MODEL ` +
-            'traffic, not a destination you named for your runs, and a run carries source, shell ' +
-            'output and workspace snapshots. Name it explicitly: pass --gateway <url>, set ' +
+            `traffic, not a destination you named for your runs. ${AT_STAKE[use]} ` +
+            'Name it explicitly: pass --gateway <url>, set ' +
             'ORCA_GATEWAY_URL, or re-run `orca setup --gateway <url>`.'
         : 'no gateway configured. Run `orca setup --gateway <url>`, or pass --gateway, ' +
             'or set ORCA_GATEWAY_URL.',
@@ -167,11 +193,12 @@ async function resolveGateway(
   }
 
   if (!headers.authorization) {
-    // REFUSED, NOT ATTEMPTED ANONYMOUSLY. A push with no credential does not fail cleanly at the
-    // gateway — an unauthenticated POST is exactly what a misconfigured public endpoint accepts —
-    // and the user would learn their run went somewhere with no owner from a 200.
+    // REFUSED, NOT ATTEMPTED ANONYMOUSLY. None of the three fails cleanly at the gateway without a
+    // credential — an unauthenticated request is exactly what a misconfigured public endpoint
+    // answers — and a 200 is the worst way to find out: for a push, that the run went somewhere
+    // with no owner; for a pull or a listing, that what came back was never scoped to you.
     throw new Error(
-      'no API key for this gateway. A push needs a key carrying the `replay` scope: ' +
+      `no API key for this gateway. ${NEEDS_KEY[use]} a key carrying the \`replay\` scope: ` +
         'set ORCA_GATEWAY_KEY, or run `orca setup --gateway <url> --key-env <VAR>`.',
     );
   }
@@ -195,6 +222,61 @@ function refusal(status: number, body: string): string {
   }
   const trimmed = body.trim().slice(0, 200);
   return trimmed === '' ? `gateway answered ${status}` : `gateway answered ${status}: ${trimmed}`;
+}
+
+/** One row of the gateway's run listing — the fields a terminal shows, and no more. */
+export interface GatewayRun {
+  runKey: string;
+  /** `gateway` for a run it recorded itself, `upload` for one pushed from here. */
+  source: string;
+  /** Seconds, as the gateway reports them. */
+  createdAt: number;
+  turns: number;
+  models: string[];
+  outcome: string;
+  clientApp: string;
+}
+
+/**
+ * What the gateway is holding, so that `orca pull` has somewhere to get a run id from.
+ *
+ * `pull` is the only command whose required argument cannot be obtained from the CLI: `push`
+ * defaults to the last run, but "last" means nothing for a run this machine has never seen (the
+ * comment on POSITIONALS says exactly that). So the id had to come from somewhere else entirely,
+ * and a recording the gateway made itself — which is most of them — could not be discovered here
+ * at all.
+ *
+ * A GET on the path push already POSTs to. Same gateway resolution, same headers, same
+ * redirect-refusing fetch: nothing about where a key may travel changes because the verb did.
+ */
+export async function listGatewayRuns(
+  args: ParsedArgs,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<GatewayRun[]> {
+  const { url, headers } = await resolveGateway(args, env, 'list');
+  const query = new URLSearchParams({ limit: String(args.num('limit') ?? 20) });
+  // Passed through rather than filtered here: the gateway already separates the two, and doing it
+  // locally would page through runs only to discard them.
+  const source = args.str('source');
+  if (source !== undefined) query.set('source', source);
+
+  const res = await fetchPinned(`${url}${UPLOAD_PATH}?${query.toString()}`, { headers });
+  if (!res.ok) throw new Error(refusal(res.status, await res.text()));
+
+  const body = (await res.json()) as { data?: { items?: unknown } };
+  const items = Array.isArray(body.data?.items) ? body.data.items : [];
+  return items.map((raw): GatewayRun => {
+    const it = raw as Record<string, unknown>;
+    return {
+      runKey: String(it['run_key'] ?? ''),
+      source: String(it['source'] ?? ''),
+      createdAt: typeof it['created_at'] === 'number' ? it['created_at'] : 0,
+      turns: typeof it['turns'] === 'number' ? it['turns'] : 0,
+      models: Array.isArray(it['models']) ? it['models'].map(String) : [],
+      outcome: String(it['outcome'] ?? ''),
+      clientApp: String(it['client_app'] ?? ''),
+    };
+  });
 }
 
 /**
@@ -728,7 +810,7 @@ export async function pushCommand(
   cwd = process.cwd(),
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
-  const { url, headers } = await resolveGateway(args, env);
+  const { url, headers } = await resolveGateway(args, env, 'push');
   const ref = await resolveRunSelector(cwd, args.positionals[0] ?? 'last');
   const manifest = JSON.parse(await readFile(join(ref.dir, 'manifest.json'), 'utf8')) as {
     run_id?: unknown;
@@ -1070,7 +1152,7 @@ export async function pullCommand(
   cwd = process.cwd(),
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
-  const { url, headers } = await resolveGateway(args, env);
+  const { url, headers } = await resolveGateway(args, env, 'pull');
   const runKey = args.positionals[0];
   if (!runKey) {
     throw new Error('pull needs the run to fetch: `orca pull <run-id>`');

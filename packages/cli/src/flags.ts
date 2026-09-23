@@ -86,7 +86,11 @@ export const BY_COMMAND: Record<string, readonly string[]> = {
   export: ['o', 'out', 'card', 'graph-card', 'to'],
   ui: ['port'],
   scrub: ['match', 'matches', 'dry-run', 'drop-fs'],
-  list: [],
+  // `--remote` asks the gateway instead of this directory. `--gateway` stays what it is for
+  // push and pull — an optional override of which host — rather than doubling as the switch, so
+  // that a configured destination needs no url typed at it. `--source` and `--limit` are the
+  // listing's own parameters, passed through rather than reimplemented here.
+  list: ['remote', 'gateway', 'source', 'limit'],
   gc: ['older-than', 'keep', 'dry-run'],
   doctor: [],
   setup: ['gateway', 'key', 'key-env', 'models'],
