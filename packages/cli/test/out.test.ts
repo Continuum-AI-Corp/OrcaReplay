@@ -330,6 +330,60 @@ describe('table cells cannot drive the terminal', () => {
     });
   });
 
+  /**
+   * THE CLASS, NOT THE CASE.
+   *
+   * Two earlier fixes here each closed the character that had been found — a control character
+   * before a key, then one inside it — and review then found a zero-width space inside one, which
+   * neither covered. Every invisible character does the same thing: the reader sees the key whole,
+   * and the pattern's character class stops at the character it cannot see. So this asserts the
+   * class, on both output paths, and the characters are named rather than generated so a reader of
+   * the test can see what each one is.
+   */
+  describe('a key survives no invisible character inside it', () => {
+    const sink = () => {
+      const lines: string[] = [];
+      return { lines, write: (s: string) => void lines.push(s) };
+    };
+    const KEY = 'sk-abcdefghij0123456789klmn';
+    const INVISIBLE: [string, string][] = [
+      ['zero-width space', '\u200B'],
+      ['zero-width non-joiner', '\u200C'],
+      ['zero-width joiner', '\u200D'],
+      ['word joiner', '\u2060'],
+      ['byte-order mark', '\uFEFF'],
+      ['soft hyphen', '\u00AD'],
+      ['variation selector 16', '\uFE0F'],
+      ['combining grapheme joiner', '\u034F'],
+      ['combining acute accent', '\u0301'],
+      ['tag character', '\u{E0041}'],
+    ];
+    const places = [3, 8, 20];
+    const cases = INVISIBLE.flatMap(([name, ch]) => places.map((at) => [name, ch, at] as const));
+
+    it.each(cases)('table(): %s at offset %i', (_name, ch, at) => {
+      const s = sink();
+      const cell = KEY.slice(0, at) + ch + KEY.slice(at);
+      new Output({ write: s.write, isTTY: false }).table(['A'], [[cell]]);
+      expect(stripAnsi(s.lines.join(''))).toContain('<redacted>');
+    });
+
+    it.each(cases)('info key=value: %s at offset %i', (_name, ch, at) => {
+      const s = sink();
+      const value = KEY.slice(0, at) + ch + KEY.slice(at);
+      new Output({ write: s.write, isTTY: false }).info('probe', { models: value });
+      expect(stripAnsi(s.lines.join(''))).toContain('<redacted>');
+    });
+
+    /** Stripped only to be JUDGED: what is printed is untouched, so an emoji still arrives whole. */
+    it('changes nothing about how an ordinary cell is printed', () => {
+      const s = sink();
+      const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}';
+      new Output({ write: s.write, isTTY: false }).table(['A'], [[family]]);
+      expect(stripAnsi(s.lines.join(''))).toContain(family);
+    });
+  });
+
   /** A failure is a sentence this code composed; taming it must not blank the explanation. */
   it('tames a failure message without discarding it', () => {
     const s = sink();

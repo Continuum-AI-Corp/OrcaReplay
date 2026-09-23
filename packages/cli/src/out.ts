@@ -248,16 +248,34 @@ export class Output {
 }
 
 /**
+ * What a reader does not see, and so does not stop at.
+ *
+ * Wider than CONTROL_RE on purpose. That set decides what is ESCAPED in output, and it leaves out
+ * U+200D, U+FE0F and the tag characters because emoji are spelled with them. This one decides
+ * only what is removed before a value is JUDGED — the stripped form is tested and never printed —
+ * so nothing is lost by removing every invisible character: all of Cf (U+200B, U+200C, U+200D,
+ * U+2060, U+FEFF, U+00AD, the bidi controls, the tags) and every combining mark, variation
+ * selectors included.
+ */
+const INVISIBLE_RE = /[\p{Cf}\p{M}]/gu;
+
+/**
  * By shape alone — what a table cell can be judged on, having no key to be named by.
  *
  * JUDGED ON WHAT A READER COULD REASSEMBLE, not only on the bytes as they arrived. Every pattern
- * is anchored and its character class stops at the first byte outside it, so `sk-` followed by an
- * ESC and then the rest of the key matched nothing at all — while printing every character of
- * that key, in order, to the terminal. Removing the control characters before testing closes it,
- * and closes it for `info key=value` too, which had the same blind spot from the same cause.
+ * is anchored and its character class stops at the first character outside it, so a key with
+ * anything the class does not contain placed inside it matched nothing — while every character
+ * of the key still reached the reader, in order.
+ *
+ * That was fixed twice before this, each time for the case found and not the class. First ESC,
+ * tab and newline in front of a token, then the same control characters inside one. Then review
+ * put a zero-width space inside one, and a ZWJ, a BOM, a soft hyphen and a variation selector
+ * all did the same thing, on this path and on `info key=value` alike: invisible, so the key read
+ * as whole, and outside `[A-Za-z0-9_-]`, so the pattern never saw it. The class to strip was
+ * never "control characters". It is everything a reader does not see.
  */
 function looksSecret(raw: string): boolean {
-  const stripped = raw.replace(CONTROL_RE, '');
+  const stripped = raw.replace(CONTROL_RE, '').replace(INVISIBLE_RE, '');
   return SECRET_PATTERNS.some((re) => re.test(raw) || re.test(stripped));
 }
 
