@@ -477,6 +477,20 @@ export class ShadowIndex {
     return res.code === 0;
   }
 
+  /**
+   * The files a tree records — blobs only, so a nested repository's gitlink is not among them.
+   *
+   * What a {@link materialize} of the tree will write, asked without writing it: a caller about to
+   * restore a tree over a directory can check each path against the copy it took first.
+   */
+  async files(tree: string): Promise<string[]> {
+    const listed = await this.run(['ls-tree', '-r', '-z', '--full-tree', tree]);
+    return listed
+      .split('\0')
+      .filter((entry) => entry.split(' ', 3)[1] === 'blob')
+      .map((entry) => entry.slice(entry.indexOf('\t') + 1));
+  }
+
   async materialize(tree: string, destDir: string, opts: MaterializeOptions = {}): Promise<void> {
     await mkdir(destDir, { recursive: true });
     const indexFile = join(this.gitDir, `materialize-${randomBytes(8).toString('hex')}.index`);

@@ -19,6 +19,7 @@ import { Output } from '../src/out.js';
 import { recordCommand } from '../src/commands/record.js';
 import { replayCommand } from '../src/commands/replay.js';
 import { startFakeModel } from './fixtures/fake-model.mjs';
+import { existsSync, mkdirSync } from 'node:fs';
 
 const run = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -581,6 +582,48 @@ describe('end to end: record → replay → fork', () => {
     } finally {
       delete process.env.FAKE_AGENT_READ;
     }
+  });
+
+  /**
+   * "Your files are restored when the replay ends" has two halves, and the put-back kept neither
+   * where the recorded tree and the working tree disagree about what exists. It is undone from an
+   * ordinary snapshot, which honours `.gitignore`, so a file the recording tracked and the
+   * workspace ignores now was overwritten with no copy to restore it from. And a snapshot restore
+   * writes files without removing any, so a file the recording had and the operator has deleted
+   * since came back, and stayed.
+   */
+  it('puts back exactly the tree it found: nothing lost, nothing added', async () => {
+    await writeFile(join(workspace, 'settings.json'), '{"endpoint":"recorded"}\n');
+    mkdirSync(join(workspace, 'legacy'));
+    await writeFile(join(workspace, 'legacy', 'old-config.env'), 'OLD CONFIG\n');
+    const recorded = await record(2);
+
+    // Since the recording: the legacy directory is gone, and settings.json became a local file.
+    await rm(join(workspace, 'legacy'), { recursive: true, force: true });
+    await writeFile(join(workspace, '.gitignore'), 'settings.json\n');
+    await writeFile(join(workspace, 'settings.json'), '{"endpoint":"MY LOCAL SETTINGS"}\n');
+    await writeFile(join(workspace, 'auth.ts'), 'MY UNCOMMITTED WORK\n');
+
+    const { leftBehind } = await withIsolatedTmp(async () => {
+      await expect(
+        replayCommand(parseArgs(['replay', recorded.runId]), out, workspace),
+      ).rejects.toThrow(/settings\.json over files your tree has/);
+    });
+    expect(
+      await readFile(join(workspace, 'settings.json'), 'utf8'),
+      'an ignored file the copy does not hold must not be overwritten',
+    ).toBe('{"endpoint":"MY LOCAL SETTINGS"}\n');
+    expect(await readFile(join(workspace, 'auth.ts'), 'utf8')).toBe('MY UNCOMMITTED WORK\n');
+    expect(leftBehind, 'a refused replay must not leave its copy behind').toEqual([]);
+
+    // Moved aside, the replay runs, and hands back the tree it found — without the files the
+    // recording had and this tree does not, and without the directory it made for them.
+    await rm(join(workspace, 'settings.json'));
+    await replayCommand(parseArgs(['replay', recorded.runId]), out, workspace);
+    expect(existsSync(join(workspace, 'legacy')), 'a deleted directory came back').toBe(false);
+    expect(existsSync(join(workspace, 'settings.json')), 'a removed file came back').toBe(false);
+    expect(await readFile(join(workspace, 'auth.ts'), 'utf8')).toBe('MY UNCOMMITTED WORK\n');
+    expect(await readFile(join(workspace, '.gitignore'), 'utf8')).toBe('settings.json\n');
   });
 
   it('does not leave a copy of the working tree in the temp directory', async () => {

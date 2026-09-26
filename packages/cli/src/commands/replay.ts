@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { lstatSync, rmdirSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import {
   enclosingDelegation,
@@ -1353,6 +1354,8 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
   // merely wasteful: the second pass would write the pre-replay tree back over whatever the
   // caller has done since, and the `rm` would take the scratch with it.
   let released = false;
+  // Filled in below, before anything is written — see `assertOverwritable`.
+  let introduced: Introduced = { files: [], dirs: [] };
   const release = async (): Promise<void> => {
     if (released) return;
     released = true;
@@ -1376,6 +1379,20 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
         note: 'your files are in that store and were not put back; it is not deleted',
       });
       throw err;
+    }
+    // What the restore wrote where there was nothing, taken away again — after the put-back, and
+    // only once it has succeeded: the copy never held these, so the put-back alone left them.
+    // `rmdir` takes a directory only while it is empty, so one the replayed agent also wrote into
+    // stays, with what it wrote.
+    for (const file of introduced.files) {
+      await rm(join(ctx.cwd, file), { force: true }).catch(() => undefined);
+    }
+    for (const made of introduced.dirs) {
+      try {
+        rmdirSync(join(ctx.cwd, made));
+      } catch {
+        // Not empty: the replayed agent wrote into it, and what it wrote stays.
+      }
     }
     // Only after the restore succeeded. This store holds the only copy of your working tree as
     // it was before the replay overwrote it, so removing it on the failure path would delete the
@@ -1407,6 +1424,9 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
     // has to be in the copy taken a moment ago, not merely in the recording. It needs the copy,
     // so it runs here, and its failure is what `release` is for.
     await assertResettable(safety, ctx.cwd, artifacts);
+    // And the same rule for what the restore overwrites rather than deletes. Before the reset,
+    // which is the first thing here that changes the working tree.
+    introduced = await assertOverwritable(recorded, initial.fsTree, safety, before.tree, ctx.cwd);
 
     // Before the restore, not after — and that ordering is the whole definition of the reset.
     // `materialize` writes the tree's files and leaves anything else where it is, so a cache the
@@ -1665,6 +1685,82 @@ async function assertResettable(
       'only what it has a copy of, so nothing has been deleted. Move those out of the reset ' +
       'paths, or replay with --in-place to leave the working tree alone.',
   );
+}
+
+/** What a restore will write where the working tree holds nothing, for the put-back to remove. */
+interface Introduced {
+  files: string[];
+  /** Directories it has to create for them, deepest first, so each is empty when its turn comes. */
+  dirs: string[];
+}
+
+/**
+ * Refuse the restore unless the safety copy holds every file it is about to overwrite — and name
+ * the files it will write where the operator has none.
+ *
+ * `materialize` writes each file the recorded tree holds, whatever is at that path. The copy it is
+ * undone from is an ordinary snapshot, which honours the workspace's `.gitignore`, so a path the
+ * recording tracked and the workspace ignores now was overwritten with the recorded bytes, and the
+ * put-back had nothing to put back. Measured: a `settings.json` moved into `.gitignore` after the
+ * recording, holding the operator's local settings, came out of `orca replay` holding the
+ * recording's, under "your files are restored when the replay ends" — and neither git nor orca
+ * held the original anywhere. The rule `assertResettable` enforces for a delete holds for an
+ * overwrite: orca destroys only what it took a copy of first.
+ *
+ * The same listing settles the other half of that sentence. A file the recorded tree holds and the
+ * working tree does not — deleted since, say — is written by the restore, and the put-back, whose
+ * copy never had it, left it there: a replay brought back a config the operator had removed and
+ * committed the removal of. Those are returned for the put-back to take away again. Orca put them
+ * there, and nothing of the operator's was at those paths when it did.
+ *
+ * Asked before `resetArtifacts`: the reset deletes what the copy holds, and an artifact would look
+ * absent after it. Artifacts are forced into the copy, so neither list can name one.
+ */
+async function assertOverwritable(
+  recorded: FsCapture,
+  tree: string,
+  safety: FsCapture,
+  held: string,
+  dir: string,
+): Promise<Introduced> {
+  const copied = new Set((await safety.files(held)).map(fold));
+  // ENOENT and ENOTDIR both mean nothing is at that path yet. Anything else — a file, or a path
+  // this process cannot even look at — counts as something the restore would destroy.
+  const absent = (path: string): boolean => {
+    try {
+      lstatSync(join(dir, path));
+      return false;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      return code === 'ENOENT' || code === 'ENOTDIR';
+    }
+  };
+  const overwritten: string[] = [];
+  const files: string[] = [];
+  for (const path of await recorded.files(tree)) {
+    if (copied.has(fold(path))) continue;
+    if (absent(path)) files.push(path);
+    else overwritten.push(path);
+  }
+  if (overwritten.length > 0) {
+    const shown = overwritten.slice(0, 5).join(', ');
+    const rest = overwritten.length > 5 ? `, and ${overwritten.length - 5} more` : '';
+    throw new Error(
+      `this replay would write the recording's ${shown}${rest} over files your tree has and the ` +
+        'copy orca took first does not hold — the workspace ignores them, or they sit in a ' +
+        'nested repository — so nothing could put them back. Nothing has been changed. Move ' +
+        'them aside, or replay with --worktree to leave the working tree alone.',
+    );
+  }
+  const parents = new Set<string>();
+  for (const file of files) {
+    const parts = file.split('/');
+    for (let i = 1; i < parts.length; i += 1) parents.add(parts.slice(0, i).join('/'));
+  }
+  const dirs: string[] = [];
+  for (const parent of parents) if (absent(parent)) dirs.push(parent);
+  dirs.sort((a, b) => b.split('/').length - a.split('/').length);
+  return { files, dirs };
 }
 
 /** The `--in-place` half of the same rule: say what was not done, rather than doing it unsafely. */

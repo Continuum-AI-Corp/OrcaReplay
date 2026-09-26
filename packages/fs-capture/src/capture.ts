@@ -98,6 +98,11 @@ export class FsCapture {
     return this.shadow.has(tree);
   }
 
+  /** See {@link ShadowIndex.files}: the paths a restore of this tree would write. */
+  async files(tree: string): Promise<string[]> {
+    return this.shadow.files(tree);
+  }
+
   /** See {@link ShadowIndex.uncaptured}: what the last snapshot left behind under these paths. */
   async uncaptured(paths: readonly string[]): Promise<string[]> {
     return this.shadow.uncaptured(paths);
