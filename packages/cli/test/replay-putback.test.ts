@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { existsSync, symlinkSync, unlinkSync } from 'node:fs';
+import { existsSync, lstatSync, symlinkSync, unlinkSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -99,6 +99,55 @@ describe('taking away what a replay introduced', () => {
 
     expect(await readFile(join(dir, 'raced.txt'), 'utf8')).toBe('WRITTEN WHILE ORCA WAS LOOKING\n');
     expect((await readdir(dir)).filter((name) => name.includes('.orca-'))).toEqual([]);
+  });
+
+  /**
+   * What does not match goes back — and never over something that has taken the path meanwhile.
+   * Every way back creates only if absent: a hard link for a file, a fresh link for a link. Here a
+   * newcomer arrives while the original is being judged: it keeps the path, and the original stays
+   * beside it under the name it was set aside as, named.
+   */
+  it('puts back what does not match without replacing what has taken the path since', async () => {
+    const recorded = await gitBlobId(dir, 'RECORDED\n');
+    await writeFile(join(dir, 'notes.txt'), 'THE OPERATOR WROTE THIS\n');
+
+    await removeIntroduced(
+      dir,
+      { files: [{ path: 'notes.txt', oids: new Set([recorded]) }], dirs: [], walked: new Set() },
+      out,
+      async (path) => {
+        await writeFile(path, 'AND THIS ARRIVED WHILE ORCA WAS LOOKING\n');
+      },
+    );
+
+    expect(await readFile(join(dir, 'notes.txt'), 'utf8')).toBe(
+      'AND THIS ARRIVED WHILE ORCA WAS LOOKING\n',
+    );
+    const aside = (await readdir(dir)).filter((name) => name.startsWith('notes.txt.orca-'));
+    expect(aside, 'the original must still exist, beside it').toHaveLength(1);
+    expect(await readFile(join(dir, aside[0]!), 'utf8')).toBe('THE OPERATOR WROTE THIS\n');
+    const warned = lines.find((l) => l.includes('replay.left_in_place')) ?? '';
+    expect(warned).toContain(`set_aside=${aside[0]}`);
+  });
+
+  it('puts a link back as a link', async () => {
+    const recorded = await gitBlobId(dir, 'RECORDED\n');
+    const pointee = join(dir, 'pointee');
+    await mkdir(pointee);
+    symlinkSync(pointee, join(dir, 'link'), process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      await removeIntroduced(
+        dir,
+        { files: [{ path: 'link', oids: new Set([recorded]) }], dirs: [], walked: new Set() },
+        out,
+      );
+      expect(lstatSync(join(dir, 'link')).isSymbolicLink(), 'the link is back, as a link').toBe(
+        true,
+      );
+      expect((await readdir(dir)).filter((name) => name.includes('.orca-'))).toEqual([]);
+    } finally {
+      unlinkSync(join(dir, 'link'));
+    }
   });
 
   /**

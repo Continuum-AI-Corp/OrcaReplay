@@ -2,13 +2,16 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import {
+  constants as fsConstants,
+  copyFileSync,
   createReadStream,
-  existsSync,
   linkSync,
   lstatSync,
   readlinkSync,
   renameSync,
   rmdirSync,
+  statSync,
+  symlinkSync,
   unlinkSync,
 } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
@@ -1873,7 +1876,7 @@ export async function removeIntroduced(
     out.warn('replay.left_in_place', {
       paths: kept.length > 0 ? kept.sort().join(',') : undefined,
       set_aside: setAside.length > 0 ? setAside.sort().join(',') : undefined,
-      why: 'written during the replay, and not as the recording wrote them — orca takes away only what it can show it put there',
+      why: 'orca takes away only what it can show it put there, and could not show it of these — written since by something else, or in use where they could not be moved',
       next: 'delete them yourself if they are not yours; set_aside names ones whose path was taken while they were being judged',
     });
   }
@@ -1923,35 +1926,43 @@ async function takeIfRecorded(
 }
 
 /**
- * Move `aside` back to `target` unless something is at `target` now. A hard link is the atomic
- * form of "create only if absent" — but not for a link, which `link` follows on some platforms
- * (macOS), putting back a copy of what it points at in place of the link itself. Where no hard
- * link can be had, a rename after a check stands in.
+ * Move `aside` back to `target` unless something is at `target` now — and decide that atomically.
+ * Checking the path and then renaming onto it is a race the rename loses: on POSIX `rename`
+ * replaces whatever arrived in between, which is the very write this exists to keep. So every way
+ * back is a primitive that creates only if absent, and fails on EEXIST: a hard link for a file; a
+ * fresh `symlink` for a link, which `link` would follow on some platforms (macOS); and, where the
+ * filesystem has no hard links, a copy opened with O_EXCL.
  */
 function putBack(aside: string, target: string): boolean {
-  let isLink: boolean;
   try {
-    isLink = lstatSync(aside).isSymbolicLink();
+    if (lstatSync(aside).isSymbolicLink()) {
+      const to = readlinkSync(aside);
+      const junction = process.platform === 'win32' && isDirectory(aside);
+      symlinkSync(to, target, junction ? 'junction' : undefined);
+    } else {
+      try {
+        linkSync(aside, target);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
+        copyFileSync(aside, target, fsConstants.COPYFILE_EXCL);
+      }
+    }
   } catch {
+    // EEXIST among them: something has the path now, and this file stays beside it, named.
     return false;
   }
-  if (!isLink) {
-    try {
-      linkSync(aside, target);
-      try {
-        unlinkSync(aside);
-      } catch {
-        // Two names for one file: the one the operator knows is back, which is what matters.
-      }
-      return true;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
-    }
-  }
   try {
-    if (existsSync(target)) return false;
-    renameSync(aside, target);
-    return true;
+    unlinkSync(aside);
+  } catch {
+    // Two names for one file: the one the operator knows is back, which is what matters.
+  }
+  return true;
+}
+
+/** Whether `path` leads to a directory, following links; false when it leads nowhere. */
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
   } catch {
     return false;
   }
