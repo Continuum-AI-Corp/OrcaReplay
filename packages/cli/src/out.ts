@@ -196,8 +196,16 @@ export class Output {
     // Tamed but not redacted: a failure is a SENTENCE this code composed, and blanking all of it
     // because one substring looked like a key would throw away the explanation. A cell is a value
     // and can be replaced whole; a sentence cannot.
+    //
+    // `why` LINE BY LINE. A thrown message is often composed as several lines — a flag's options,
+    // the command to install, the order settings are read in — and `main` hands everything after
+    // the first as `why`. Taming it whole spelled those breaks as `\x0a`, so `export --card x.png`
+    // told people to run `npm i --no-save playwright-core pngjs gifenc\x0a  …then run this again`,
+    // which is not a command anyone can paste. What taming is for is unchanged: a carriage return,
+    // an escape sequence or a bidi control is still spelled out, inside each line. A string this
+    // process did not write is kept to one line where it comes in — see `refusal` in sync.ts.
     this.plain(`  ${tame(f.what)}`);
-    if (f.why) this.plain(`  ${tame(f.why)}`);
+    if (f.why) this.plain(`  ${f.why.split(/\r?\n/).map(tame).join('\n')}`);
     if (f.next) this.plain(`  next: ${tame(f.next)}`);
   }
 

@@ -403,4 +403,23 @@ describe('table cells cannot drive the terminal', () => {
     expect(text).toContain('gateway answered 403: denied');
     expect(text).toContain('\\x0d');
   });
+
+  /**
+   * A thrown message is composed as lines, and `main` hands every line after the first as `why`.
+   * Taming `why` whole spelled those breaks as `\x0a`: `orca export --card x.png` printed
+   * `npm i --no-save playwright-core pngjs gifenc\x0a  …then run this again` as its way out.
+   */
+  it('keeps the lines a failure was composed with, and still tames inside each one', () => {
+    const s = sink();
+    new Output({ write: s.write, isTTY: false }).failure({
+      event: 'export.failed',
+      what: 'writing a .png needs playwright-core, pngjs, gifenc',
+      why: `a browser download is not something everyone should pay for.${LF}  npm i --no-save playwright-core pngjs gifenc${LF}  …then run this again${CR}all clear${ESC_C}[2J`,
+    });
+    const printed = stripAnsi(s.lines.join('')).split(LF);
+    expect(printed).toContain('  npm i --no-save playwright-core pngjs gifenc');
+    expect(printed.join(LF)).not.toContain('\\x0a');
+    // The same line still cannot rewrite itself or the screen.
+    expect(printed).toContain('  …then run this again\\x0dall clear\\x1b[2J');
+  });
 });
