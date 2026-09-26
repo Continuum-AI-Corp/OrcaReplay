@@ -1908,7 +1908,9 @@ async function takeIfRecorded(
     return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'absent' : 'kept';
   }
   await judging?.(target);
-  const now = await blobId(aside, oids);
+  // A file that cannot even be read is not one orca can show it wrote — and throwing here would
+  // leave it under the name it was set aside as. Back where it was, like any other.
+  const now = await blobId(aside, oids).catch(() => undefined);
   if (now !== undefined && oids.has(now)) {
     try {
       unlinkSync(aside);
@@ -1922,27 +1924,37 @@ async function takeIfRecorded(
 
 /**
  * Move `aside` back to `target` unless something is at `target` now. A hard link is the atomic
- * form of "create only if absent"; where the filesystem has none, a rename after a check stands in.
+ * form of "create only if absent" — but not for a link, which `link` follows on some platforms
+ * (macOS), putting back a copy of what it points at in place of the link itself. Where no hard
+ * link can be had, a rename after a check stands in.
  */
 function putBack(aside: string, target: string): boolean {
+  let isLink: boolean;
   try {
-    linkSync(aside, target);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    isLink = lstatSync(aside).isSymbolicLink();
+  } catch {
+    return false;
+  }
+  if (!isLink) {
     try {
-      if (existsSync(target)) return false;
-      renameSync(aside, target);
+      linkSync(aside, target);
+      try {
+        unlinkSync(aside);
+      } catch {
+        // Two names for one file: the one the operator knows is back, which is what matters.
+      }
       return true;
-    } catch {
-      return false;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
     }
   }
   try {
-    unlinkSync(aside);
+    if (existsSync(target)) return false;
+    renameSync(aside, target);
+    return true;
   } catch {
-    // Two names for one file: the one the operator knows is back, which is what matters.
+    return false;
   }
-  return true;
 }
 
 /**
