@@ -626,6 +626,24 @@ describe('end to end: record → replay → fork', () => {
     expect(await readFile(join(workspace, '.gitignore'), 'utf8')).toBe('settings.json\n');
   });
 
+  /**
+   * The same promise, for what the replayed agent writes rather than what the restore does. An exact
+   * replay makes the recorded agent do what it did, so a file it created during the recording is
+   * created again — and the put-back, whose copy never had it, left it in the operator's tree.
+   */
+  it('takes away what the replayed agent created, as well as what the restore wrote', async () => {
+    await rm(join(workspace, 'auth.ts'));
+    const recorded = await record(2);
+    expect(existsSync(join(workspace, 'auth.ts')), 'fixture: the agent creates auth.ts').toBe(true);
+    await rm(join(workspace, 'auth.ts'));
+    await writeFile(join(workspace, 'notes.txt'), 'MY NOTES\n');
+
+    const replayed = await replayCommand(parseArgs(['replay', recorded.runId]), out, workspace);
+    expect(replayed.matchedExact, 'the agent must actually have run').toBe(2);
+    expect(existsSync(join(workspace, 'auth.ts')), 'the replayed agent left its file').toBe(false);
+    expect(await readFile(join(workspace, 'notes.txt'), 'utf8')).toBe('MY NOTES\n');
+  });
+
   it('does not leave a copy of the working tree in the temp directory', async () => {
     // The safety snapshot is a shadow git store holding the whole workspace, and it was never
     // removed — one per `orca replay`, growing with the size of your checkout, in a directory

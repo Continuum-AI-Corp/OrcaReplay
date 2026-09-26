@@ -1424,9 +1424,11 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
     // has to be in the copy taken a moment ago, not merely in the recording. It needs the copy,
     // so it runs here, and its failure is what `release` is for.
     await assertResettable(safety, ctx.cwd, artifacts);
-    // And the same rule for what the restore overwrites rather than deletes. Before the reset,
-    // which is the first thing here that changes the working tree.
-    introduced = await assertOverwritable(recorded, initial.fsTree, safety, before.tree, ctx.cwd);
+    // And the same rule for what the restore overwrites rather than deletes, and for what the
+    // recorded agent writes after it — every tree the run recorded, not only the first. Before
+    // the reset, which is the first thing here that changes the working tree.
+    const trees = deriveCheckpoints(ctx.events).flatMap((c) => (c.fsTree ? [c.fsTree] : []));
+    introduced = await assertOverwritable(recorded, trees, safety, before.tree, ctx.cwd);
 
     // Before the restore, not after — and that ordering is the whole definition of the reset.
     // `materialize` writes the tree's files and leaves anything else where it is, so a cache the
@@ -1713,12 +1715,18 @@ interface Introduced {
  * committed the removal of. Those are returned for the put-back to take away again. Orca put them
  * there, and nothing of the operator's was at those paths when it did.
  *
+ * EVERY TREE THE RUN RECORDED, not only the one the restore writes. An exact replay makes the
+ * recorded agent do what it did, so the files it wrote are in the later checkpoints: one it
+ * created came back with the replay and stayed after the put-back, like the restore's own, and
+ * one it overwrote that the copy does not hold is lost to the agent exactly as it would be to the
+ * restore. Both are answered the same way.
+ *
  * Asked before `resetArtifacts`: the reset deletes what the copy holds, and an artifact would look
  * absent after it. Artifacts are forced into the copy, so neither list can name one.
  */
 async function assertOverwritable(
   recorded: FsCapture,
-  tree: string,
+  trees: readonly string[],
   safety: FsCapture,
   held: string,
   dir: string,
@@ -1737,7 +1745,10 @@ async function assertOverwritable(
   };
   const overwritten: string[] = [];
   const files: string[] = [];
-  for (const path of await recorded.files(tree)) {
+  const recordedFiles = new Set<string>();
+  for (const tree of new Set(trees))
+    for (const path of await recorded.files(tree)) recordedFiles.add(path);
+  for (const path of recordedFiles) {
     if (copied.has(fold(path))) continue;
     if (absent(path)) files.push(path);
     else overwritten.push(path);
