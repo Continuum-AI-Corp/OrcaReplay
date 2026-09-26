@@ -1355,7 +1355,7 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
   // caller has done since, and the `rm` would take the scratch with it.
   let released = false;
   // Filled in below, before anything is written — see `assertOverwritable`.
-  let introduced: Introduced = { files: [], dirs: [] };
+  let introduced: Introduced = { files: [], dirs: [], walked: new Set() };
   const release = async (): Promise<void> => {
     if (released) return;
     released = true;
@@ -1385,6 +1385,7 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
     // `rmdir` takes a directory only while it is empty, so one the replayed agent also wrote into
     // stays, with what it wrote.
     for (const file of introduced.files) {
+      if (!onlyThroughDirectories(ctx.cwd, file, introduced.walked)) continue;
       await rm(join(ctx.cwd, file), { force: true }).catch(() => undefined);
     }
     for (const made of introduced.dirs) {
@@ -1694,6 +1695,11 @@ interface Introduced {
   files: string[];
   /** Directories it has to create for them, deepest first, so each is empty when its turn comes. */
   dirs: string[];
+  /**
+   * The links git walked into as directories when it took the copy — a junction, on Windows. The
+   * removal may pass through these and through real directories, and through nothing else.
+   */
+  walked: ReadonlySet<string>;
 }
 
 /**
@@ -1749,21 +1755,28 @@ async function assertOverwritable(
     return kind;
   };
   const absent = (path: string): boolean => at(path) === 'none';
-  // What the restore would destroy to write `path`: the path itself when anything is there, or the
-  // file standing where the recording had one of its directories — the restore deletes it to make
-  // the directory. Asked of every ancestor rather than read off the error, because the error does
-  // not say: POSIX answers ENOTDIR for a path under a file, and Windows answers ENOENT, exactly as
-  // for a path under nothing at all.
+  // Every directory git walked into when it took the copy. A link among them — a junction, on
+  // Windows, whose contents the copy holds as ordinary files — is a directory as far as the
+  // restore and the put-back are concerned, and is treated as one here.
+  const walked = new Set<string>();
+  for (const held of copied) {
+    const parts = held.split('/');
+    for (let i = 1; i < parts.length; i += 1) walked.add(parts.slice(0, i).join('/'));
+  }
+  // What the restore would destroy to write `path`, asked the way it writes: every directory on
+  // the way first, then the path itself. A file or a link standing where the recording has a
+  // directory is destroyed to make the directory — and the error from asking for the path under it
+  // does not say so, since POSIX answers ENOTDIR there and Windows answers ENOENT, exactly as for a
+  // path under nothing at all. Undefined when nothing is in the way.
   const inTheWay = (path: string): string | undefined => {
-    if (!absent(path)) return path;
     const parts = path.split('/');
     for (let i = 1; i < parts.length; i += 1) {
       const prefix = parts.slice(0, i).join('/');
       const kind = at(prefix);
       if (kind === 'none') return undefined;
-      if (kind === 'other') return prefix;
+      if (kind === 'other' && !walked.has(fold(prefix))) return prefix;
     }
-    return undefined;
+    return absent(path) ? undefined : path;
   };
   const overwritten = new Set<string>();
   const files: string[] = [];
@@ -1773,8 +1786,9 @@ async function assertOverwritable(
   for (const path of recordedFiles) {
     if (copied.has(fold(path))) continue;
     const blocker = inTheWay(path);
-    // A file in the way that the copy holds is put back by the put-back, like any other.
-    if (blocker === undefined || (blocker !== path && copied.has(fold(blocker)))) files.push(path);
+    if (blocker === undefined) files.push(path);
+    // Held: the put-back writes it back, clearing the directory the restore made in its place.
+    else if (blocker !== path && copied.has(fold(blocker))) continue;
     else overwritten.add(blocker);
   }
   if (overwritten.size > 0) {
@@ -1796,7 +1810,26 @@ async function assertOverwritable(
   const dirs: string[] = [];
   for (const parent of parents) if (absent(parent)) dirs.push(parent);
   dirs.sort((a, b) => b.split('/').length - a.split('/').length);
-  return { files, dirs };
+  return { files, dirs, walked };
+}
+
+/**
+ * Whether removing `file` under `dir` stays inside the tree: every directory on the way a real one,
+ * or a link git walked into when it took the copy. Asked at removal time, because a link can have
+ * appeared on the way since — the replayed agent may have made one — and `rm` follows it.
+ */
+function onlyThroughDirectories(dir: string, file: string, walked: ReadonlySet<string>): boolean {
+  const parts = file.split('/');
+  for (let i = 1; i < parts.length; i += 1) {
+    const prefix = parts.slice(0, i).join('/');
+    try {
+      const st = lstatSync(join(dir, prefix));
+      if (!st.isDirectory() && !(st.isSymbolicLink() && walked.has(fold(prefix)))) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 /** The `--in-place` half of the same rule: say what was not done, rather than doing it unsafely. */

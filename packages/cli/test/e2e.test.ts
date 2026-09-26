@@ -19,7 +19,7 @@ import { Output } from '../src/out.js';
 import { recordCommand } from '../src/commands/record.js';
 import { replayCommand } from '../src/commands/replay.js';
 import { startFakeModel } from './fixtures/fake-model.mjs';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, symlinkSync, unlinkSync } from 'node:fs';
 
 const run = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -661,6 +661,35 @@ describe('end to end: record → replay → fork', () => {
       replayCommand(parseArgs(['replay', recorded.runId]), out, workspace),
     ).rejects.toThrow(/would overwrite cfg:/);
     expect(await readFile(join(workspace, 'cfg'), 'utf8')).toBe('MY LOCAL CFG FILE\n');
+  });
+
+  /**
+   * A junction is a directory as far as git is concerned: the copy holds what is inside it as
+   * ordinary files, and the restore writes through it. Judged by `lstat`, which calls it a link,
+   * a file deleted from under one refused the whole replay — "would overwrite data" — when the
+   * restore would only have written that file back and the put-back taken it away again. On POSIX
+   * git records a symlink as itself, so there this holds trivially; on Windows it is the case.
+   */
+  it('treats a directory link git walks into as the directory it is', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'orca-outside-'));
+    const link = join(workspace, 'data');
+    symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      await writeFile(join(outside, 'a.csv'), 'A\n');
+      await writeFile(join(outside, 'b.csv'), 'B\n');
+      const recorded = await record(2);
+      await rm(join(outside, 'b.csv'));
+      await writeFile(join(workspace, 'auth.ts'), 'MY UNCOMMITTED WORK\n');
+
+      const replayed = await replayCommand(parseArgs(['replay', recorded.runId]), out, workspace);
+      expect(replayed.matchedExact).toBe(2);
+      expect(await readdir(outside), 'the deleted file must stay deleted').toEqual(['a.csv']);
+      expect(await readFile(join(workspace, 'auth.ts'), 'utf8')).toBe('MY UNCOMMITTED WORK\n');
+    } finally {
+      // The link first and on its own, so nothing recursive ever walks through it.
+      unlinkSync(link);
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   it('does not leave a copy of the working tree in the temp directory', async () => {
