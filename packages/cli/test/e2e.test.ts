@@ -607,7 +607,7 @@ describe('end to end: record → replay → fork', () => {
     const { leftBehind } = await withIsolatedTmp(async () => {
       await expect(
         replayCommand(parseArgs(['replay', recorded.runId]), out, workspace),
-      ).rejects.toThrow(/settings\.json over files your tree has/);
+      ).rejects.toThrow(/would overwrite settings\.json/);
     });
     expect(
       await readFile(join(workspace, 'settings.json'), 'utf8'),
@@ -642,6 +642,25 @@ describe('end to end: record → replay → fork', () => {
     expect(replayed.matchedExact, 'the agent must actually have run').toBe(2);
     expect(existsSync(join(workspace, 'auth.ts')), 'the replayed agent left its file').toBe(false);
     expect(await readFile(join(workspace, 'notes.txt'), 'utf8')).toBe('MY NOTES\n');
+  });
+
+  /**
+   * A file standing where the recording had a directory is in the way of every path under it, and
+   * the restore deletes it to make the directory. `lstat` answers ENOTDIR for those paths, which
+   * read as "nothing there" — so an ignored file at such a path was destroyed without a copy.
+   */
+  it('counts a file where the recording had a directory as something it would overwrite', async () => {
+    mkdirSync(join(workspace, 'cfg'));
+    await writeFile(join(workspace, 'cfg', 'app.json'), '{"recorded":true}\n');
+    const recorded = await record(2);
+    await rm(join(workspace, 'cfg'), { recursive: true, force: true });
+    await writeFile(join(workspace, '.gitignore'), 'cfg\n');
+    await writeFile(join(workspace, 'cfg'), 'MY LOCAL CFG FILE\n');
+
+    await expect(
+      replayCommand(parseArgs(['replay', recorded.runId]), out, workspace),
+    ).rejects.toThrow(/would overwrite cfg:/);
+    expect(await readFile(join(workspace, 'cfg'), 'utf8')).toBe('MY LOCAL CFG FILE\n');
   });
 
   it('does not leave a copy of the working tree in the temp directory', async () => {

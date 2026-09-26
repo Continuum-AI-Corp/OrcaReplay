@@ -1732,35 +1732,60 @@ async function assertOverwritable(
   dir: string,
 ): Promise<Introduced> {
   const copied = new Set((await safety.files(held)).map(fold));
-  // ENOENT and ENOTDIR both mean nothing is at that path yet. Anything else — a file, or a path
-  // this process cannot even look at — counts as something the restore would destroy.
-  const absent = (path: string): boolean => {
-    try {
-      lstatSync(join(dir, path));
-      return false;
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      return code === 'ENOENT' || code === 'ENOTDIR';
+  // What is on disk at a path, asked once per path. A path this process cannot even look at counts
+  // as something there: nothing here may conclude "safe to overwrite" from an error it cannot read.
+  const seen = new Map<string, 'dir' | 'other' | 'none'>();
+  const at = (path: string): 'dir' | 'other' | 'none' => {
+    let kind = seen.get(path);
+    if (kind === undefined) {
+      try {
+        kind = lstatSync(join(dir, path)).isDirectory() ? 'dir' : 'other';
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        kind = code === 'ENOENT' || code === 'ENOTDIR' ? 'none' : 'other';
+      }
+      seen.set(path, kind);
     }
+    return kind;
   };
-  const overwritten: string[] = [];
+  const absent = (path: string): boolean => at(path) === 'none';
+  // What the restore would destroy to write `path`: the path itself when anything is there, or the
+  // file standing where the recording had one of its directories — the restore deletes it to make
+  // the directory. Asked of every ancestor rather than read off the error, because the error does
+  // not say: POSIX answers ENOTDIR for a path under a file, and Windows answers ENOENT, exactly as
+  // for a path under nothing at all.
+  const inTheWay = (path: string): string | undefined => {
+    if (!absent(path)) return path;
+    const parts = path.split('/');
+    for (let i = 1; i < parts.length; i += 1) {
+      const prefix = parts.slice(0, i).join('/');
+      const kind = at(prefix);
+      if (kind === 'none') return undefined;
+      if (kind === 'other') return prefix;
+    }
+    return undefined;
+  };
+  const overwritten = new Set<string>();
   const files: string[] = [];
   const recordedFiles = new Set<string>();
   for (const tree of new Set(trees))
     for (const path of await recorded.files(tree)) recordedFiles.add(path);
   for (const path of recordedFiles) {
     if (copied.has(fold(path))) continue;
-    if (absent(path)) files.push(path);
-    else overwritten.push(path);
+    const blocker = inTheWay(path);
+    // A file in the way that the copy holds is put back by the put-back, like any other.
+    if (blocker === undefined || (blocker !== path && copied.has(fold(blocker)))) files.push(path);
+    else overwritten.add(blocker);
   }
-  if (overwritten.length > 0) {
-    const shown = overwritten.slice(0, 5).join(', ');
-    const rest = overwritten.length > 5 ? `, and ${overwritten.length - 5} more` : '';
+  if (overwritten.size > 0) {
+    const listed = [...overwritten].sort();
+    const shown = listed.slice(0, 5).join(', ');
+    const rest = listed.length > 5 ? `, and ${listed.length - 5} more` : '';
     throw new Error(
-      `this replay would write the recording's ${shown}${rest} over files your tree has and the ` +
-        'copy orca took first does not hold — the workspace ignores them, or they sit in a ' +
-        'nested repository — so nothing could put them back. Nothing has been changed. Move ' +
-        'them aside, or replay with --worktree to leave the working tree alone.',
+      `this replay would overwrite ${shown}${rest}: your tree has them and the copy orca took ` +
+        'first does not — the workspace ignores them, or they sit in a nested repository — so ' +
+        'nothing could put them back. Nothing has been changed. Move them aside, or replay with ' +
+        '--worktree to leave the working tree alone.',
     );
   }
   const parents = new Set<string>();
