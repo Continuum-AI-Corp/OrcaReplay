@@ -906,21 +906,21 @@ async function replayFork(
   const forkInterceptedHosts = recordedTlsHosts(ctx.events);
   await planTlsCapture(args, forkInterceptedHosts);
 
-  const worktree = await mkdtemp(join(tmpdir(), `orca-${checkpoint.seq}-`));
+  // Before the worktree too, for the same reason as the two above: this refuses, and refusing
+  // after `mkdtemp` left an empty `orca-<seq>-*` directory in `$TMPDIR` on every attempt — no
+  // manifest points at it, so `orca gc` never reclaims it, and nothing printed where it was.
+  let restoreFrom: { fs: FsCapture; tree: string } | undefined;
   if (checkpoint.fsTree && args.bool('fs', true)) {
     // Restore from the ORIGINAL run's shadow store: that is the only place the tree object
     // exists. Pointing a fresh store at the tree id fails to unpack it, which is exactly the
     // silent-wrong-state failure the checkpoint machinery is meant to prevent.
     const fs = await FsCapture.start({ runDir: ctx.runDir, cwd: ctx.cwd });
-    // A RUN CAN ARRIVE WITHOUT THE STORE ITS OWN EVENTS POINT AT.
+    // A RUN CAN BE WITHOUT THE STORE ITS OWN EVENTS POINT AT — see `NO_SNAPSHOT_WHY`.
     //
     // The line above guards against reading the WRONG store. It cannot guard against there being
-    // no store at all, which is what `orca pull` produces every time: a gateway archive carries
-    // manifest.json, events.jsonl, redactions.json and blobs/, and never `fs/`, so a pulled run's
-    // `fs.snapshot` events name trees whose objects were never sent. `materialize` then died
-    // inside git — "failed to unpack tree object <40 hex>" — which names neither the cause nor
-    // anything to do about it, on the exact path the gateway console tells people to take
-    // (`orca pull <run>` then `orca compare last --from N`).
+    // no store at all, and `materialize` then died inside git — "failed to unpack tree object
+    // <40 hex>" — which names neither the cause nor anything to do about it, on the exact path the
+    // gateway console tells people to take (`orca pull <run>` then `orca compare last --from N`).
     //
     // Refusing rather than forking anyway: an empty worktree is not the state the checkpoint
     // describes, and a fork from the wrong state is the failure this machinery exists to prevent.
@@ -934,7 +934,7 @@ async function replayFork(
         seq: checkpoint.seq,
         tree: checkpoint.fsTree,
         store: join(ctx.runDir, 'fs'),
-        why: 'a gateway archive carries manifest, events, redactions and blobs — never the filesystem snapshots, so a pulled run names trees whose objects were never sent',
+        why: NO_SNAPSHOT_WHY,
         recorded_in: ctx.manifest.cwd,
         next: `orca ${args.command} ${ctx.manifest.run_id} --from ${checkpoint.seq} --no-fs   # fork the conversation, without the workspace`,
       });
@@ -943,7 +943,12 @@ async function replayFork(
       );
     }
     await keepNested(out, fs, checkpoint.fsTree, 'a fresh worktree');
-    await fs.restore(checkpoint.fsTree, worktree, { allowIncomplete: true });
+    restoreFrom = { fs, tree: checkpoint.fsTree };
+  }
+
+  const worktree = await mkdtemp(join(tmpdir(), `orca-${checkpoint.seq}-`));
+  if (restoreFrom !== undefined) {
+    await restoreFrom.fs.restore(restoreFrom.tree, worktree, { allowIncomplete: true });
   }
 
   const dir = await ensureRunsDir(ctx.cwd);
@@ -1275,10 +1280,14 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
   const recorded = await FsCapture.start({ runDir: ctx.runDir, cwd: ctx.cwd });
 
   if (args.bool('worktree')) {
+    // Both before `mkdtemp`, because either can refuse, and a refusal after it left an empty
+    // `orca-replay-*` directory in `$TMPDIR` on every attempt: nothing had printed its path yet,
+    // and `orca gc` never reclaims an exact replay's worktree.
+    await assertSnapshotHeld(out, ctx, recorded, initial.fsTree);
+    await keepNested(out, recorded, initial.fsTree, 'a fresh worktree');
     // A fresh directory, so there is nothing for a reset to remove: the restore below is the only
     // thing that puts anything here, and what it puts here is the recording's starting state.
     const worktree = await mkdtemp(join(tmpdir(), `orca-replay-${ctx.manifest.run_id}-`));
-    await keepNested(out, recorded, initial.fsTree, 'a fresh worktree');
     await recorded.restore(initial.fsTree, worktree, { allowIncomplete: true });
     return { dir: worktree, release: noRelease, restored: true };
   }
@@ -1293,13 +1302,14 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
     return { dir: ctx.cwd, release: noRelease, restored: false };
   }
 
-  // BEFORE THE COPY, NOT INSIDE THE TRY BELOW.
+  // BEFORE THE COPY, NOT INSIDE THE TRY BELOW — both of these.
   //
-  // This refuses without writing a byte, so it has to run while there is still nothing to undo.
+  // They refuse without writing a byte, so they have to run while there is still nothing to undo.
   // Refusing after the safety copy existed meant the catch called `release`, whose `materialize`
   // refused for the same reason the guard just did — the operator's own tree holds the same
   // nested repositories — so a replay that had touched nothing printed "your files are in that
   // store and were not put back" and left a copy of the whole workspace in a temp directory.
+  await assertSnapshotHeld(out, ctx, recorded, initial.fsTree);
   const keptNested = await assertRestorable(recorded, initial.fsTree, ctx.cwd, artifacts);
 
   // A store of its own, under the OS temp dir: the safety snapshot is scratch, and writing it into
@@ -1436,6 +1446,49 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
   }
 
   return { dir: ctx.cwd, release, restored: true };
+}
+
+/**
+ * Why a run's events can name workspace snapshots its own store does not hold.
+ *
+ * Two ways, and nothing left on disk says which: `orca pull` of a run pushed without `--fs` — the
+ * default, because push will not ship what scrub cannot reach — and `orca scrub --drop-fs`, which
+ * deletes the store and keeps the `fs.snapshot` events that name it. This used to name only the
+ * first, and as though it were unconditional ("a gateway archive … never the filesystem
+ * snapshots"), which blamed a gateway for a run that had never been near one and hid the way to
+ * get the snapshots: a copy pushed with `--fs` restores and replays exactly.
+ */
+const NO_SNAPSHOT_WHY =
+  "the run's workspace snapshots are not in its store: a pulled run carries them only if it was pushed with --fs, and orca scrub --drop-fs deletes them";
+
+/**
+ * Refuse a restore the run's own store cannot serve, before anything is written.
+ *
+ * Asked up front for the reason {@link assertRestorable} is: otherwise the restore dies inside
+ * git, "failed to unpack tree object <40 hex>", which is true and names neither the cause nor
+ * anything to do about it — the one diagnosis the fork path already gave (`fork.no_snapshot`).
+ *
+ * Refused, not degraded to `--in-place` the way a run recorded with `--no-fs` is. Both callers
+ * were asked for the recorded tree — a scratch copy of it, or it put over the checkout and taken
+ * back afterwards — and running the agent over the tree as it stands instead keeps whatever the
+ * replay writes, which neither of those does. `--in-place` is one flag away, and says so.
+ */
+async function assertSnapshotHeld(
+  out: Output,
+  ctx: Ctx,
+  capture: FsCapture,
+  tree: string,
+): Promise<void> {
+  if (await capture.hasTree(tree)) return;
+  out.warn('replay.no_snapshot', {
+    tree,
+    store: join(ctx.runDir, 'fs'),
+    why: NO_SNAPSHOT_WHY,
+    next: `orca replay ${ctx.manifest.run_id} --in-place   # against this directory as it stands`,
+  });
+  throw new Error(
+    'no workspace snapshot to restore — see replay.no_snapshot; --in-place replays without it',
+  );
 }
 
 /**

@@ -628,6 +628,72 @@ describe('end to end: record → replay → fork', () => {
     }
   });
 
+  /**
+   * A RUN CAN BE WITHOUT THE STORE ITS OWN EVENTS POINT AT: pulled from a gateway it was pushed to
+   * without `--fs`, or put through `orca scrub --drop-fs`. Either way its `fs.snapshot` events name
+   * trees that are nowhere on this machine, and a restore of one died inside git — "failed to
+   * unpack tree object <40 hex>" — on `orca replay` and `--worktree` alike, while only the fork
+   * path said what had happened. Each refusal also left an empty directory in `$TMPDIR` that
+   * nothing named and `orca gc` never reclaims.
+   */
+  it('says why it cannot restore a run whose snapshots are gone, and leaves nothing behind', async () => {
+    const recorded = await record(2);
+    const from = deriveCheckpoints(await (await TraceReader.open(recorded.runDir)).events())[0]!
+      .seq;
+    await rm(join(recorded.runDir, 'fs'), { recursive: true, force: true });
+    await writeFile(join(workspace, 'auth.ts'), 'MY UNCOMMITTED WORK\n');
+
+    const { leftBehind } = await withIsolatedTmp(async () => {
+      for (const extra of [[], ['--worktree']]) {
+        await expect(
+          replayCommand(parseArgs(['replay', recorded.runId, ...extra]), out, workspace),
+        ).rejects.toThrow(/no workspace snapshot to restore/);
+      }
+      await expect(
+        replayCommand(
+          parseArgs([
+            'replay',
+            recorded.runId,
+            '--from',
+            String(from),
+            '--model',
+            'claude-sonnet-5',
+            '--upstream-anthropic',
+            model.url,
+          ]),
+          out,
+          workspace,
+        ),
+      ).rejects.toThrow(/no workspace snapshot for the checkpoint/);
+    });
+
+    // Both causes named, because nothing on disk says which it was — and the first one has a way
+    // back that the old wording ("never the filesystem snapshots") said did not exist.
+    const warned = lines.filter((l) => /(replay|fork)\.no_snapshot/.test(l));
+    expect(warned, `expected three diagnoses in:\n${lines.join('\n')}`).toHaveLength(3);
+    for (const line of warned) {
+      expect(line).toContain('pushed with --fs');
+      expect(line).toContain('--drop-fs');
+    }
+    expect(warned.slice(0, 2).every((l) => l.includes('--in-place'))).toBe(true);
+    expect(warned[2]).toContain('--no-fs');
+
+    expect(leftBehind, 'a refusal must not leave a worktree in the temp directory').toEqual([]);
+    expect(
+      await readFile(join(workspace, 'auth.ts'), 'utf8'),
+      'a refused replay must not have touched the checkout',
+    ).toBe('MY UNCOMMITTED WORK\n');
+
+    // And the way out it names has to work, or the diagnosis is just a nicer dead end.
+    const inPlace = await replayCommand(
+      parseArgs(['replay', recorded.runId, '--in-place']),
+      out,
+      workspace,
+    );
+    expect(inPlace.unmatched).toBe(0);
+    expect(inPlace.matchedExact).toBe(2);
+  });
+
   it('says where the recording ran and where the replay ran when it halts', async () => {
     // A halt reason like "distance 205343" is true and useless. The most common cause by far is
     // that the recorded conversation contains absolute paths from the directory the run was made
