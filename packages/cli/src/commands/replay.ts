@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import {
@@ -1232,6 +1232,24 @@ interface Workspace {
 const noRelease = async (): Promise<void> => {};
 
 /**
+ * Whether two paths name the same directory — asked of the filesystem, not of the strings.
+ *
+ * Windows gives a process its working directory as it was spelled, so one folder arrives as
+ * `C:\proj` from PowerShell and `c:\proj` from cmd or an editor's terminal, or through a junction
+ * under another name altogether. Compared as strings, the directory a run was recorded in read as
+ * somewhere else, and that is not a cosmetic miss: "elsewhere" skips the safety copy, so the
+ * replay ran over the working tree and kept what it wrote there. Measured from cmd: the recorded
+ * edit replaced uncommitted work in the very directory the run was made in.
+ *
+ * `realpath` answers with the name on disk — drive letter, case and links resolved. A path that
+ * does not exist here, such as a colleague's, keeps the comparison it always had.
+ */
+async function sameDirectory(a: string, b: string): Promise<boolean> {
+  const onDisk = (p: string): Promise<string> => realpath(p).catch(() => resolve(p));
+  return (await onDisk(a)) === (await onDisk(b));
+}
+
+/**
  * Prepare the filesystem an exact replay needs.
  *
  * Two facts decide this, and they pull against each other. A harness reads files into the
@@ -1283,7 +1301,7 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
     return { dir: worktree, release: noRelease, restored: true };
   }
 
-  if (resolve(ctx.cwd) !== resolve(ctx.manifest.cwd)) {
+  if (!(await sameDirectory(ctx.cwd, ctx.manifest.cwd))) {
     out.warn('replay.elsewhere', {
       recorded_in: ctx.manifest.cwd,
       running_in: ctx.cwd,

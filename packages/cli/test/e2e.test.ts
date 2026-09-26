@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -664,6 +664,41 @@ describe('end to end: record → replay → fork', () => {
     } finally {
       delete process.env.FAKE_AGENT_PROMPT;
       await rm(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The directory a run was recorded in is that directory however the path to it is spelled.
+   *
+   * Windows hands a process its working directory as typed — `C:\…` from PowerShell, `c:\…` from
+   * cmd — and a junction or symlink names the same folder differently again. Compared as strings,
+   * the replay called it "elsewhere", skipped the safety copy, and the recorded edit replaced
+   * uncommitted work in the very directory the run was made in.
+   */
+  it('restores and puts back where it was recorded, however that path is spelled', async () => {
+    await record(2);
+    const aliasRoot = await mkdtemp(join(tmpdir(), 'orca-alias-'));
+    const alias = join(aliasRoot, 'same');
+    await symlink(workspace, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const spellings = [alias];
+    if (process.platform === 'win32') {
+      spellings.push(workspace.replace(/^[A-Z]:/, (drive) => drive.toLowerCase()));
+    }
+    try {
+      for (const cwd of spellings) {
+        await writeFile(join(workspace, 'auth.ts'), 'MY UNCOMMITTED WORK\n');
+        await replayCommand(parseArgs(['replay', 'last']), out, cwd);
+        expect(
+          await readFile(join(workspace, 'auth.ts'), 'utf8'),
+          `replayed from ${cwd}: the checkout must come back as it was`,
+        ).toBe('MY UNCOMMITTED WORK\n');
+      }
+      expect(lines.join('\n')).not.toContain('replay.elsewhere');
+      expect(lines.filter((l) => l.includes('replay.restored'))).toHaveLength(spellings.length);
+    } finally {
+      // The link first and on its own, so nothing recursive ever walks into the workspace.
+      await unlink(alias);
+      await rm(aliasRoot, { recursive: true, force: true });
     }
   });
 
