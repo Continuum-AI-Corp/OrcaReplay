@@ -101,14 +101,32 @@ export function shellArg(value: string, platform: NodeJS.Platform = process.plat
  * A command that deletes a directory, in the shell a person on this platform is most likely typing
  * into. `rm -rf` is not a command there on Windows: PowerShell's `rm` is Remove-Item, which has
  * `-Recurse` and no `-rf`, and cmd has no `rm` at all.
+ *
+ * `-LiteralPath`, because quoting stops the SHELL from globbing and Remove-Item globs by itself:
+ * its default `-Path` reads `[dev]` as a character class. In a sandbox holding `John [dev]\run_x`
+ * and a neighbour `John d\run_x`, the hint without it deleted the neighbour and left the run it
+ * named — the wrong-directory deletion this function exists to prevent, one layer further in.
  */
 export function removeDirCommand(
   dir: string,
   platform: NodeJS.Platform = process.platform,
 ): string {
   return platform === 'win32'
-    ? `Remove-Item -Recurse -Force ${shellArg(dir, platform)}`
+    ? `Remove-Item -Recurse -Force -LiteralPath ${shellArg(dir, platform)}`
     : `rm -rf ${shellArg(dir, platform)}`;
+}
+
+/**
+ * `cd` to a directory, as a line a person can paste.
+ *
+ * PowerShell's `cd` is Set-Location, whose `-Path` also reads `[` and `]` as a wildcard class: the
+ * same sandbox took `cd "…\John [dev]"` to `John d`, and the replay hint follows that `cd` with
+ * `--in-place`. `-LiteralPath` is PowerShell's alone — cmd and Git Bash reject it — so it is used
+ * only for a path with a bracket in it, the one kind the three shells read differently.
+ */
+export function cdCommand(dir: string, platform: NodeJS.Platform = process.platform): string {
+  const arg = shellArg(dir, platform);
+  return platform === 'win32' && /[[\]]/.test(dir) ? `cd -LiteralPath ${arg}` : `cd ${arg}`;
 }
 
 /**

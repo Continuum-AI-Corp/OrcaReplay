@@ -24,7 +24,7 @@ import { serveViewer } from '@orcareplay/viewer';
 import { isBlobRef, type TraceEvent } from '@orcareplay/schema';
 import type { HarnessArtifacts } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
-import { shellArg, type Output } from '../out.js';
+import { cdCommand, type Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
 import { SerialQueue } from '../serial.js';
 import { appendSnapshot } from '../fs-events.js';
@@ -603,7 +603,7 @@ async function replayRestored(
         const next =
           workspace.dir === ctx.manifest.cwd
             ? 'orca replay <run> --loose'
-            : `cd ${shellArg(ctx.manifest.cwd)} && orca replay <run> --in-place   # or --loose to continue live`;
+            : `${cdCommand(ctx.manifest.cwd)} && orca replay <run> --in-place   # or --loose to continue live`;
         out.warn('replay.unmatched', {
           seq: u.seq,
           index: u.index,

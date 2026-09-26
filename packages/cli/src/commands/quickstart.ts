@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { ensureRunsDir } from '@orcareplay/core';
 import { parseArgs, type ParsedArgs } from '../args.js';
-import { Output, shellArg } from '../out.js';
+import { cdCommand, Output } from '../out.js';
 import { replayCommand } from './replay.js';
 import { showCommand } from './inspect.js';
 
@@ -397,7 +397,7 @@ export async function quickstartCommand(
     out.plain(`  ${replayed.unmatched} turn(s) could not be served from the recording.`);
   }
   out.plain('');
-  out.plain(`  cd ${shellArg(target)}`);
+  out.plain(`  ${cdCommand(target)}`);
   out.plain('');
   // `orca` is on PATH only after a global install. Saying so here rather than letting someone
   // meet `command not found` as the next thing that happens to them.

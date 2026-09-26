@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Output, removeDirCommand, shellArg, stripAnsi } from '../src/out.js';
+import { cdCommand, Output, removeDirCommand, shellArg, stripAnsi } from '../src/out.js';
 
 const ESC = String.fromCharCode(27);
 
@@ -414,31 +414,59 @@ describe('table cells cannot drive the terminal', () => {
  * `rm` is Remove-Item with `-Recurse` and no `-rf`.
  */
 describe('paths printed inside a suggested command', () => {
+  // Windows paths through String.raw. In an ordinary string literal `\U` is `U` and `\r` is a
+  // carriage return, and the first version of these tests wrote them that way — so every "Windows
+  // path" under test held no backslash at all, and the delete-command one held a carriage return.
+  const win = (s: TemplateStringsArray): string => String.raw(s);
+  const BACKSLASH = String.fromCharCode(92);
+
   it('leaves an ordinary path as it was', () => {
     expect(shellArg('/home/u/proj/.orca/runs/run_x', 'linux')).toBe(
       '/home/u/proj/.orca/runs/run_x',
     );
-    expect(shellArg('C:\Users\dev\proj', 'win32')).toBe('C:\Users\dev\proj');
+    expect(shellArg(win`C:\Users\dev\proj`, 'win32')).toBe(win`C:\Users\dev\proj`);
     expect(shellArg('/home/u/工作区', 'linux')).toBe('/home/u/工作区');
   });
 
   it('quotes a path with a space the way each platform expects', () => {
     expect(shellArg('/home/u/John Smith/p', 'linux')).toBe("'/home/u/John Smith/p'");
-    expect(shellArg('C:\Users\John Smith\p', 'win32')).toBe('"C:\Users\John Smith\p"');
+    expect(shellArg(win`C:\Users\John Smith\p`, 'win32')).toBe(win`"C:\Users\John Smith\p"`);
   });
 
   it('keeps an apostrophe in a POSIX path inside the quoting', () => {
-    expect(shellArg("/tmp/it's here", 'linux')).toBe("'/tmp/it'\\''s here'");
+    expect(shellArg("/tmp/it's here", 'linux')).toBe(String.raw`'/tmp/it'\''s here'`);
   });
 
   it('uses literal quotes for a Windows path PowerShell would otherwise expand', () => {
-    expect(shellArg('C:\pay$day files\p', 'win32')).toBe("'C:\pay$day files\p'");
+    expect(shellArg(win`C:\pay$day files\p`, 'win32')).toBe(win`'C:\pay$day files\p'`);
   });
 
-  it('names a delete command the platform shell actually has', () => {
+  /** The first version of these tests could not have noticed a backslash going missing. */
+  it('keeps every backslash of a Windows path', () => {
+    const quoted = shellArg(win`C:\Users\John Smith\r`, 'win32');
+    expect([...quoted].filter((c) => c === BACKSLASH)).toHaveLength(3);
+  });
+
+  /**
+   * Remove-Item's default `-Path` reads `[dev]` as a character class — quoting stops the shell
+   * from globbing, not the cmdlet. With a neighbour `John d\run_x`, the hint without
+   * `-LiteralPath` deleted the neighbour and left the run.
+   */
+  it('names a delete command the platform shell has, taking the path literally', () => {
     expect(removeDirCommand('/home/u/John Smith/r', 'linux')).toBe("rm -rf '/home/u/John Smith/r'");
-    expect(removeDirCommand('C:\Users\John Smith\r', 'win32')).toBe(
-      'Remove-Item -Recurse -Force "C:\Users\John Smith\r"',
+    expect(removeDirCommand(win`C:\Users\John [dev]\r`, 'win32')).toBe(
+      win`Remove-Item -Recurse -Force -LiteralPath "C:\Users\John [dev]\r"`,
     );
+  });
+
+  /** Set-Location globs the same way; `-LiteralPath` only where a bracket makes the shells differ. */
+  it('takes a bracketed Windows directory literally in cd, and only that one', () => {
+    expect(cdCommand(win`C:\Users\John [dev]\proj`, 'win32')).toBe(
+      win`cd -LiteralPath "C:\Users\John [dev]\proj"`,
+    );
+    expect(cdCommand(win`C:\Users\John Smith\proj`, 'win32')).toBe(
+      win`cd "C:\Users\John Smith\proj"`,
+    );
+    expect(cdCommand('/home/u/John [dev]/proj', 'linux')).toBe("cd '/home/u/John [dev]/proj'");
   });
 });
