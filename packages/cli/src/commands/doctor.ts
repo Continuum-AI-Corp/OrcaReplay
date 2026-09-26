@@ -173,6 +173,33 @@ async function checkShellShim(): Promise<DoctorCheck> {
         fix: 'record with --no-shell rather than trusting a layer that records nothing',
       };
     }
+    // WINDOWS: THE COMMAND PROCESSOR REACHES THE SHIM, AND AN AGENT STARTING ITS OWN SHELL DOES NOT.
+    //
+    // The probe above goes through cmd.exe because nothing else resolves PATHEXT, which makes it
+    // the one launch path certain to find `sh.cmd` — a probe that could only ever say yes. An agent
+    // that spawns `sh` or `bash` by name goes to CreateProcess, finds the real `sh.exe`, and is
+    // never seen: driven through `orca record`, `child_process.spawn('bash')` ran its commands and
+    // the trace held none of them, while this line said "captured a test command". record.ts
+    // already says as much of Claude Code, as `shell.ineffective`; this check did not.
+    //
+    // So both questions are asked, and the answer says which is true. A partial answer is a
+    // warning, not a failure — and not the advice to switch the layer off that this check gave
+    // before it learned to use cmd.exe, because a shell started through cmd or PowerShell IS
+    // captured.
+    if (process.platform === 'win32') {
+      await execFileAsync('sh', ['-c', 'printf ok'], { env }).catch(() => undefined);
+      if ((await readShellFrames(shim.framesPath)).length === frames.length) {
+        return {
+          name,
+          status: 'warn',
+          detail: `${shim.shimmed.join(', ')} — captures a shell started through cmd.exe or PowerShell, not one an agent starts itself`,
+          fix:
+            'Windows runs a .cmd only through a shell, so an agent that spawns sh or bash directly ' +
+            '(Claude Code does) is not captured; orca record flags each such run as ' +
+            'shell.ineffective — record those with --no-shell',
+        };
+      }
+    }
     return { name, status: 'ok', detail: `${shim.shimmed.join(', ')} — captured a test command` };
   } catch (err) {
     return {

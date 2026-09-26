@@ -836,9 +836,14 @@ binary of its own, and `orca` lives in `packages/cli`.
 >=22.12.0`, because the test toolchain does; the root `package.json` declares that separately so
 `npm ci` tells you up front. No account, no signup, no API key changes.
 
-On Windows, shell capture writes `.cmd` shims and can instrument `sh.exe` or `bash.exe` when a
-POSIX shell such as Git for Windows is available. If neither is on `PATH`, `orca doctor` warns and
-you can record with `--no-shell`.
+On Windows, shell capture writes `.cmd` shims in front of `sh.exe` and `bash.exe` (Git for Windows
+provides both), and Windows runs a `.cmd` only through a shell. So it captures a shell started
+through cmd.exe or PowerShell, and not one an agent starts itself: a Node harness's
+`child_process.spawn('bash')` goes straight to the real `bash.exe`, and Claude Code finds its shell
+without consulting `PATH` at all. `orca doctor` says which of the two holds on the machine, and
+`orca record` warns `shell.ineffective` on any run whose tool calls ran commands the shim never
+saw — record those with `--no-shell`. If no POSIX shell is on `PATH`, doctor warns and
+`--no-shell` is the way to record.
 
 ## Where your runs are kept
 
