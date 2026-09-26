@@ -5,7 +5,7 @@ import { Redactor, resolveRunSelector } from '@orcareplay/core';
 import { runGit, runGitRaw } from '@orcareplay/fs-capture';
 import { validateEvent, validateManifest } from '@orcareplay/schema';
 import type { ParsedArgs } from '../args.js';
-import type { Output } from '../out.js';
+import { removeDirCommand, type Output } from '../out.js';
 
 const FILE_MODE = 0o600;
 const DIR_MODE = 0o700;
@@ -515,7 +515,7 @@ function assertManifestSurvived(manifest: Record<string, unknown>, runDir: strin
 function manifestAdvice(runDir: string): string {
   return (
     'Nothing was changed — the match covers a field the trace format requires, and a run whose ' +
-    `manifest will not parse cannot be opened at all. Narrow the match, or: rm -rf ${runDir}`
+    `manifest will not parse cannot be opened at all. Narrow the match, or: ${removeDirCommand(runDir)}`
   );
 }
 
@@ -732,7 +732,7 @@ function reportShadowStore(out: Output, runDir: string, status: ShadowStoreStatu
   out.warn('fs_store_not_scrubbed', { path: join(runDir, 'fs'), objects: status.matches });
   out.plain('  the workspace snapshots still contain what you asked to remove: git objects are');
   out.plain('  addressed by their own contents, so they cannot be rewritten in place');
-  out.plain(`  next: orca scrub --drop-fs to delete the snapshots, or rm -rf ${runDir}`);
+  out.plain(`  next: orca scrub --drop-fs to delete the snapshots, or ${removeDirCommand(runDir)}`);
 }
 
 function gitFailure(stderr: string, code: number): string {

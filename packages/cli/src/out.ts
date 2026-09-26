@@ -73,6 +73,45 @@ export function tame(text: string): string {
 }
 
 /**
+ * A PATH AS SOMETHING A PERSON CAN PASTE.
+ *
+ * Several hints hand the reader a command with a path in it — `rm -rf <run>`, `cd <dir>` — and
+ * interpolated it bare. A path with a space in it then pastes as two arguments. Driven against a
+ * sandbox with the directory layout a Linux user named John Smith would have, the scrub hint
+ * `rm -rf /home/…/John Smith/proj/.orca/runs/run_x` deleted `/home/…/John` — someone else's
+ * directory — without a word, and left the run it was meant to delete exactly where it was.
+ *
+ * Left bare when nothing in it means anything to a shell, so an ordinary path prints as before.
+ * Otherwise POSIX gets single quotes, the one quoting in which nothing is special. Windows gets
+ * double quotes, which cmd, PowerShell and Git Bash all accept for a path — a Windows path cannot
+ * contain `"` — except when the path holds `$` or a backtick, which PowerShell expands inside
+ * double quotes; then it gets PowerShell's literal single quotes, because PowerShell is what a
+ * Windows terminal opens by default.
+ */
+export function shellArg(value: string, platform: NodeJS.Platform = process.platform): string {
+  const windows = platform === 'win32';
+  const plain = windows ? /^[\p{L}\p{N}_@%+=:,.\/\\-]+$/u : /^[\p{L}\p{N}_@%+=:,.\/-]+$/u;
+  if (value !== '' && plain.test(value)) return value;
+  if (!windows) return `'${value.replace(/'/g, `'\\''`)}'`;
+  if (/[$`]/.test(value)) return `'${value.replace(/'/g, "''")}'`;
+  return `"${value}"`;
+}
+
+/**
+ * A command that deletes a directory, in the shell a person on this platform is most likely typing
+ * into. `rm -rf` is not a command there on Windows: PowerShell's `rm` is Remove-Item, which has
+ * `-Recurse` and no `-rf`, and cmd has no `rm` at all.
+ */
+export function removeDirCommand(
+  dir: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return platform === 'win32'
+    ? `Remove-Item -Recurse -Force ${shellArg(dir, platform)}`
+    : `rm -rf ${shellArg(dir, platform)}`;
+}
+
+/**
  * Shapes that must never reach a terminal. §7 applies to output, not only to disk: terminals
  * scroll into screenshots, and a key printed once is a key leaked forever.
  */

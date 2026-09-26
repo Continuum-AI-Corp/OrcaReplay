@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Output, stripAnsi } from '../src/out.js';
+import { Output, removeDirCommand, shellArg, stripAnsi } from '../src/out.js';
 
 const ESC = String.fromCharCode(27);
 
@@ -402,5 +402,43 @@ describe('table cells cannot drive the terminal', () => {
     expect(text).not.toContain(CR);
     expect(text).toContain('gateway answered 403: denied');
     expect(text).toContain('\\x0d');
+  });
+});
+
+/**
+ * A PATH IN A HINT HAS TO BE ONE ARGUMENT WHEN PASTED.
+ *
+ * `rm -rf ${runDir}` and `cd ${target}` were printed bare, so a path with a space in it pasted as
+ * two arguments: the scrub hint, run from under a directory named `John Smith`, removed `…/John`
+ * instead of the run it named. On Windows `rm -rf` was not a command at all in PowerShell, whose
+ * `rm` is Remove-Item with `-Recurse` and no `-rf`.
+ */
+describe('paths printed inside a suggested command', () => {
+  it('leaves an ordinary path as it was', () => {
+    expect(shellArg('/home/u/proj/.orca/runs/run_x', 'linux')).toBe(
+      '/home/u/proj/.orca/runs/run_x',
+    );
+    expect(shellArg('C:\Users\dev\proj', 'win32')).toBe('C:\Users\dev\proj');
+    expect(shellArg('/home/u/工作区', 'linux')).toBe('/home/u/工作区');
+  });
+
+  it('quotes a path with a space the way each platform expects', () => {
+    expect(shellArg('/home/u/John Smith/p', 'linux')).toBe("'/home/u/John Smith/p'");
+    expect(shellArg('C:\Users\John Smith\p', 'win32')).toBe('"C:\Users\John Smith\p"');
+  });
+
+  it('keeps an apostrophe in a POSIX path inside the quoting', () => {
+    expect(shellArg("/tmp/it's here", 'linux')).toBe("'/tmp/it'\\''s here'");
+  });
+
+  it('uses literal quotes for a Windows path PowerShell would otherwise expand', () => {
+    expect(shellArg('C:\pay$day files\p', 'win32')).toBe("'C:\pay$day files\p'");
+  });
+
+  it('names a delete command the platform shell actually has', () => {
+    expect(removeDirCommand('/home/u/John Smith/r', 'linux')).toBe("rm -rf '/home/u/John Smith/r'");
+    expect(removeDirCommand('C:\Users\John Smith\r', 'win32')).toBe(
+      'Remove-Item -Recurse -Force "C:\Users\John Smith\r"',
+    );
   });
 });

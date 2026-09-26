@@ -24,7 +24,7 @@ import { serveViewer } from '@orcareplay/viewer';
 import { isBlobRef, type TraceEvent } from '@orcareplay/schema';
 import type { HarnessArtifacts } from '@orcareplay/plugin-api';
 import { ExchangeEventDeriver, appendDerivedEvents } from '../exchange-events.js';
-import type { Output } from '../out.js';
+import { shellArg, type Output } from '../out.js';
 import type { ParsedArgs } from '../args.js';
 import { SerialQueue } from '../serial.js';
 import { appendSnapshot } from '../fs-events.js';
@@ -600,6 +600,10 @@ async function replayRestored(
         // a different question — which is exactly what the matcher refuses to serve from a
         // recording. Without this the operator sees `distance 54` and goes looking for the fault.
         const delegation = enclosingDelegation(ctx.events, u.seq);
+        const next =
+          workspace.dir === ctx.manifest.cwd
+            ? 'orca replay <run> --loose'
+            : `cd ${shellArg(ctx.manifest.cwd)} && orca replay <run> --in-place   # or --loose to continue live`;
         out.warn('replay.unmatched', {
           seq: u.seq,
           index: u.index,
@@ -612,11 +616,12 @@ async function replayRestored(
               }),
           recorded_in: ctx.manifest.cwd,
           replayed_in: workspace.dir,
-          next:
-            workspace.dir === ctx.manifest.cwd
-              ? 'orca replay <run> --loose'
-              : `cd ${ctx.manifest.cwd} && orca replay <run> --in-place   # or --loose to continue live`,
+          next,
         });
+        // Again as a line of its own. The field above is for whatever reads the record; on a terminal
+        // it is shown JSON-escaped — every backslash doubled, every quote escaped — which is correct
+        // for a key=value line and useless to paste, and a Windows path is nothing but backslashes.
+        out.plain(`  next: ${next}`);
         if (!trace) return;
         // `error`, not `divergence`: nothing was served and the run is over, so calling it an
         // inexact match would put a rung on a ladder the request never climbed. It is also the one
