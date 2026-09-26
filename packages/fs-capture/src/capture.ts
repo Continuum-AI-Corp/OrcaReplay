@@ -2,7 +2,7 @@ import { realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import type { GitInfo } from '@orcareplay/schema';
 import { runGit } from './git.js';
-import type { FileChange, MaterializeOptions } from './shadow.js';
+import type { FileChange, MaterializeOptions, TreeFile } from './shadow.js';
 import { ShadowIndex } from './shadow.js';
 
 export interface FsCaptureOptions {
@@ -96,6 +96,11 @@ export class FsCapture {
   /** See {@link ShadowIndex.has}: whether a restore of this tree has anything to restore from. */
   async hasTree(tree: string): Promise<boolean> {
     return this.shadow.has(tree);
+  }
+
+  /** See {@link ShadowIndex.files}: the files a restore of this tree would write. */
+  async files(tree: string): Promise<TreeFile[]> {
+    return this.shadow.files(tree);
   }
 
   /** See {@link ShadowIndex.uncaptured}: what the last snapshot left behind under these paths. */

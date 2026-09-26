@@ -19,6 +19,7 @@ import { Output } from '../src/out.js';
 import { recordCommand } from '../src/commands/record.js';
 import { replayCommand } from '../src/commands/replay.js';
 import { startFakeModel } from './fixtures/fake-model.mjs';
+import { existsSync, mkdirSync, symlinkSync, unlinkSync } from 'node:fs';
 
 const run = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -581,6 +582,134 @@ describe('end to end: record → replay → fork', () => {
     } finally {
       delete process.env.FAKE_AGENT_READ;
     }
+  });
+
+  /**
+   * "Your files are restored when the replay ends" has two halves, and the put-back kept neither
+   * where the recorded tree and the working tree disagree about what exists. It is undone from an
+   * ordinary snapshot, which honours `.gitignore`, so a file the recording tracked and the
+   * workspace ignores now was overwritten with no copy to restore it from. And a snapshot restore
+   * writes files without removing any, so a file the recording had and the operator has deleted
+   * since came back, and stayed.
+   */
+  it('puts back exactly the tree it found: nothing lost, nothing added', async () => {
+    await writeFile(join(workspace, 'settings.json'), '{"endpoint":"recorded"}\n');
+    mkdirSync(join(workspace, 'legacy'));
+    await writeFile(join(workspace, 'legacy', 'old-config.env'), 'OLD CONFIG\n');
+    const recorded = await record(2);
+
+    // Since the recording: the legacy directory is gone, and settings.json became a local file.
+    await rm(join(workspace, 'legacy'), { recursive: true, force: true });
+    await writeFile(join(workspace, '.gitignore'), 'settings.json\n');
+    await writeFile(join(workspace, 'settings.json'), '{"endpoint":"MY LOCAL SETTINGS"}\n');
+    await writeFile(join(workspace, 'auth.ts'), 'MY UNCOMMITTED WORK\n');
+
+    const { leftBehind } = await withIsolatedTmp(async () => {
+      await expect(
+        replayCommand(parseArgs(['replay', recorded.runId]), out, workspace),
+      ).rejects.toThrow(/would overwrite settings\.json/);
+    });
+    expect(
+      await readFile(join(workspace, 'settings.json'), 'utf8'),
+      'an ignored file the copy does not hold must not be overwritten',
+    ).toBe('{"endpoint":"MY LOCAL SETTINGS"}\n');
+    expect(await readFile(join(workspace, 'auth.ts'), 'utf8')).toBe('MY UNCOMMITTED WORK\n');
+    expect(leftBehind, 'a refused replay must not leave its copy behind').toEqual([]);
+
+    // Moved aside, the replay runs, and hands back the tree it found — without the files the
+    // recording had and this tree does not, and without the directory it made for them.
+    await rm(join(workspace, 'settings.json'));
+    await replayCommand(parseArgs(['replay', recorded.runId]), out, workspace);
+    expect(existsSync(join(workspace, 'legacy')), 'a deleted directory came back').toBe(false);
+    expect(existsSync(join(workspace, 'settings.json')), 'a removed file came back').toBe(false);
+    expect(await readFile(join(workspace, 'auth.ts'), 'utf8')).toBe('MY UNCOMMITTED WORK\n');
+    expect(await readFile(join(workspace, '.gitignore'), 'utf8')).toBe('settings.json\n');
+  });
+
+  /**
+   * The same promise, for what the replayed agent writes rather than what the restore does. An exact
+   * replay makes the recorded agent do what it did, so a file it created during the recording is
+   * created again — and the put-back, whose copy never had it, left it in the operator's tree.
+   */
+  it('takes away what the replayed agent created, as well as what the restore wrote', async () => {
+    await rm(join(workspace, 'auth.ts'));
+    const recorded = await record(2);
+    expect(existsSync(join(workspace, 'auth.ts')), 'fixture: the agent creates auth.ts').toBe(true);
+    await rm(join(workspace, 'auth.ts'));
+    await writeFile(join(workspace, 'notes.txt'), 'MY NOTES\n');
+
+    const replayed = await replayCommand(parseArgs(['replay', recorded.runId]), out, workspace);
+    expect(replayed.matchedExact, 'the agent must actually have run').toBe(2);
+    expect(existsSync(join(workspace, 'auth.ts')), 'the replayed agent left its file').toBe(false);
+    expect(await readFile(join(workspace, 'notes.txt'), 'utf8')).toBe('MY NOTES\n');
+  });
+
+  /**
+   * A file standing where the recording had a directory is in the way of every path under it, and
+   * the restore deletes it to make the directory. `lstat` answers ENOTDIR for those paths, which
+   * read as "nothing there" — so an ignored file at such a path was destroyed without a copy.
+   */
+  it('counts a file where the recording had a directory as something it would overwrite', async () => {
+    mkdirSync(join(workspace, 'cfg'));
+    await writeFile(join(workspace, 'cfg', 'app.json'), '{"recorded":true}\n');
+    const recorded = await record(2);
+    await rm(join(workspace, 'cfg'), { recursive: true, force: true });
+    await writeFile(join(workspace, '.gitignore'), 'cfg\n');
+    await writeFile(join(workspace, 'cfg'), 'MY LOCAL CFG FILE\n');
+
+    await expect(
+      replayCommand(parseArgs(['replay', recorded.runId]), out, workspace),
+    ).rejects.toThrow(/would overwrite cfg:/);
+    expect(await readFile(join(workspace, 'cfg'), 'utf8')).toBe('MY LOCAL CFG FILE\n');
+  });
+
+  /**
+   * A junction is a directory as far as git is concerned: the copy holds what is inside it as
+   * ordinary files, and the restore writes through it. Judged by `lstat`, which calls it a link,
+   * a file deleted from under one refused the whole replay — "would overwrite data" — when the
+   * restore would only have written that file back and the put-back taken it away again. On POSIX
+   * git records a symlink as itself, so there this holds trivially; on Windows it is the case.
+   */
+  it('treats a directory link git walks into as the directory it is', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'orca-outside-'));
+    const link = join(workspace, 'data');
+    symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      await writeFile(join(outside, 'a.csv'), 'A\n');
+      await writeFile(join(outside, 'b.csv'), 'B\n');
+      const recorded = await record(2);
+      await rm(join(outside, 'b.csv'));
+      await writeFile(join(workspace, 'auth.ts'), 'MY UNCOMMITTED WORK\n');
+
+      const replayed = await replayCommand(parseArgs(['replay', recorded.runId]), out, workspace);
+      expect(replayed.matchedExact).toBe(2);
+      expect(await readdir(outside), 'the deleted file must stay deleted').toEqual(['a.csv']);
+      expect(await readFile(join(workspace, 'auth.ts'), 'utf8')).toBe('MY UNCOMMITTED WORK\n');
+    } finally {
+      // The link first and on its own, so nothing recursive ever walks through it.
+      unlinkSync(link);
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The other half of the case above: a file where the recording had a directory, and one the copy
+   * DOES hold. The restore deletes it to make the directory; the put-back writes it back, and
+   * `checkout-index -f` clears the directory it made to do so. So this replays, rather than being
+   * refused — and the operator's uncommitted edit survives it. Pinned because it was disputed: the
+   * claim was that the put-back skips a file over a non-empty directory, which git 2.43 (Linux) and
+   * 2.55 (Windows) both do not.
+   */
+  it('puts back a held file where the recording had a directory', async () => {
+    mkdirSync(join(workspace, 'cfg'));
+    await writeFile(join(workspace, 'cfg', 'app.json'), '{"recorded":true}\n');
+    const recorded = await record(2);
+    await rm(join(workspace, 'cfg'), { recursive: true, force: true });
+    await writeFile(join(workspace, 'cfg'), 'MY UNCOMMITTED EDIT\n');
+
+    const replayed = await replayCommand(parseArgs(['replay', recorded.runId]), out, workspace);
+    expect(replayed.matchedExact).toBe(2);
+    expect(await readFile(join(workspace, 'cfg'), 'utf8')).toBe('MY UNCOMMITTED EDIT\n');
   });
 
   it('does not leave a copy of the working tree in the temp directory', async () => {

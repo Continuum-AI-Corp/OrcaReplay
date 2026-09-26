@@ -1,6 +1,20 @@
 import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import {
+  constants as fsConstants,
+  copyFileSync,
+  createReadStream,
+  linkSync,
+  lstatSync,
+  readlinkSync,
+  renameSync,
+  rmdirSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+} from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import {
   enclosingDelegation,
@@ -1353,6 +1367,8 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
   // merely wasteful: the second pass would write the pre-replay tree back over whatever the
   // caller has done since, and the `rm` would take the scratch with it.
   let released = false;
+  // Filled in below, before anything is written — see `assertOverwritable`.
+  let introduced: Introduced = { files: [], dirs: [], walked: new Map() };
   const release = async (): Promise<void> => {
     if (released) return;
     released = true;
@@ -1377,6 +1393,9 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
       });
       throw err;
     }
+    // What the recording wrote where there was nothing, taken away again — after the put-back, and
+    // only once it has succeeded: the copy never held these, so the put-back alone left them.
+    await removeIntroduced(ctx.cwd, introduced, out);
     // Only after the restore succeeded. This store holds the only copy of your working tree as
     // it was before the replay overwrote it, so removing it on the failure path would delete the
     // thing the failure means you still need — better a directory to clean up by hand than the
@@ -1407,6 +1426,11 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
     // has to be in the copy taken a moment ago, not merely in the recording. It needs the copy,
     // so it runs here, and its failure is what `release` is for.
     await assertResettable(safety, ctx.cwd, artifacts);
+    // And the same rule for what the restore overwrites rather than deletes, and for what the
+    // recorded agent writes after it — every tree the run recorded, not only the first. Before
+    // the reset, which is the first thing here that changes the working tree.
+    const trees = deriveCheckpoints(ctx.events).flatMap((c) => (c.fsTree ? [c.fsTree] : []));
+    introduced = await assertOverwritable(recorded, trees, safety, before.tree, ctx.cwd);
 
     // Before the restore, not after — and that ordering is the whole definition of the reset.
     // `materialize` writes the tree's files and leaves anything else where it is, so a cache the
@@ -1665,6 +1689,340 @@ async function assertResettable(
       'only what it has a copy of, so nothing has been deleted. Move those out of the reset ' +
       'paths, or replay with --in-place to leave the working tree alone.',
   );
+}
+
+/** What a restore will write where the working tree holds nothing, for the put-back to remove. */
+export interface Introduced {
+  /** Each with the ids of every version of it the recording holds, to know it again by. */
+  files: { path: string; oids: ReadonlySet<string> }[];
+  /** Directories it has to create for them, deepest first, so each is empty when its turn comes. */
+  dirs: string[];
+  /**
+   * The links on the way to these files that git walked into as directories when it took the copy
+   * — a junction, on Windows — and that were links then, each with where it pointed. The removal
+   * may pass through real directories and through these, while each still points there, and
+   * through nothing else.
+   */
+  walked: ReadonlyMap<string, string>;
+}
+
+/**
+ * Refuse the restore unless the safety copy holds every file it is about to overwrite — and name
+ * the files it will write where the operator has none. Exported for the test that pins what the
+ * removal may walk through.
+ *
+ * `materialize` writes each file the recorded tree holds, whatever is at that path. The copy it is
+ * undone from is an ordinary snapshot, which honours the workspace's `.gitignore`, so a path the
+ * recording tracked and the workspace ignores now was overwritten with the recorded bytes, and the
+ * put-back had nothing to put back. Measured: a `settings.json` moved into `.gitignore` after the
+ * recording, holding the operator's local settings, came out of `orca replay` holding the
+ * recording's, under "your files are restored when the replay ends" — and neither git nor orca
+ * held the original anywhere. The rule `assertResettable` enforces for a delete holds for an
+ * overwrite: orca destroys only what it took a copy of first.
+ *
+ * The same listing settles the other half of that sentence. A file the recorded tree holds and the
+ * working tree does not — deleted since, say — is written by the restore, and the put-back, whose
+ * copy never had it, left it there: a replay brought back a config the operator had removed and
+ * committed the removal of. Those are returned for the put-back to take away again. Orca put them
+ * there, and nothing of the operator's was at those paths when it did.
+ *
+ * EVERY TREE THE RUN RECORDED, not only the one the restore writes. An exact replay makes the
+ * recorded agent do what it did, so the files it wrote are in the later checkpoints: one it
+ * created came back with the replay and stayed after the put-back, like the restore's own, and
+ * one it overwrote that the copy does not hold is lost to the agent exactly as it would be to the
+ * restore. Both are answered the same way.
+ *
+ * Asked before `resetArtifacts`: the reset deletes what the copy holds, and an artifact would look
+ * absent after it. Artifacts are forced into the copy, so neither list can name one.
+ */
+export async function assertOverwritable(
+  recorded: FsCapture,
+  trees: readonly string[],
+  safety: FsCapture,
+  held: string,
+  dir: string,
+): Promise<Introduced> {
+  const copied = new Set((await safety.files(held)).map((file) => fold(file.path)));
+  // What is on disk at a path, asked once per path. A path this process cannot even look at counts
+  // as something there: nothing here may conclude "safe to overwrite" from an error it cannot read.
+  const seen = new Map<string, 'dir' | 'other' | 'none'>();
+  const at = (path: string): 'dir' | 'other' | 'none' => {
+    let kind = seen.get(path);
+    if (kind === undefined) {
+      try {
+        kind = lstatSync(join(dir, path)).isDirectory() ? 'dir' : 'other';
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        kind = code === 'ENOENT' || code === 'ENOTDIR' ? 'none' : 'other';
+      }
+      seen.set(path, kind);
+    }
+    return kind;
+  };
+  const absent = (path: string): boolean => at(path) === 'none';
+  // Every directory git walked into when it took the copy. A link among them — a junction, on
+  // Windows, whose contents the copy holds as ordinary files — is a directory as far as the
+  // restore and the put-back are concerned, and is treated as one here.
+  const intoCopy = new Set<string>();
+  for (const held of copied) {
+    const parts = held.split('/');
+    for (let i = 1; i < parts.length; i += 1) intoCopy.add(parts.slice(0, i).join('/'));
+  }
+  // What the restore would destroy to write `path`, asked the way it writes: every directory on
+  // the way first, then the path itself. A file or a link standing where the recording has a
+  // directory is destroyed to make the directory — and the error from asking for the path under it
+  // does not say so, since POSIX answers ENOTDIR there and Windows answers ENOENT, exactly as for a
+  // path under nothing at all. Undefined when nothing is in the way.
+  const inTheWay = (path: string): string | undefined => {
+    const parts = path.split('/');
+    for (let i = 1; i < parts.length; i += 1) {
+      const prefix = parts.slice(0, i).join('/');
+      const kind = at(prefix);
+      if (kind === 'none') return undefined;
+      if (kind === 'other' && !intoCopy.has(fold(prefix))) return prefix;
+    }
+    return absent(path) ? undefined : path;
+  };
+  const overwritten = new Set<string>();
+  const files: Introduced['files'] = [];
+  const recordedFiles = new Map<string, Set<string>>();
+  for (const tree of new Set(trees)) {
+    for (const { path, oid } of await recorded.files(tree)) {
+      const oids = recordedFiles.get(path) ?? new Set<string>();
+      oids.add(oid);
+      recordedFiles.set(path, oids);
+    }
+  }
+  for (const [path, oids] of recordedFiles) {
+    if (copied.has(fold(path))) continue;
+    const blocker = inTheWay(path);
+    if (blocker === undefined) files.push({ path, oids });
+    // Held: the put-back writes it back, clearing the directory the restore made in its place.
+    else if (blocker !== path && copied.has(fold(blocker))) continue;
+    else overwritten.add(blocker);
+  }
+  if (overwritten.size > 0) {
+    const listed = [...overwritten].sort();
+    const shown = listed.slice(0, 5).join(', ');
+    const rest = listed.length > 5 ? `, and ${listed.length - 5} more` : '';
+    throw new Error(
+      `this replay would overwrite ${shown}${rest}: your tree has them and the copy orca took ` +
+        'first does not — the workspace ignores them, or they sit in a nested repository — so ' +
+        'nothing could put them back. Nothing has been changed. Move them aside, or replay with ' +
+        '--worktree to leave the working tree alone.',
+    );
+  }
+  const parents = new Set<string>();
+  for (const file of files) {
+    const parts = file.path.split('/');
+    for (let i = 1; i < parts.length; i += 1) parents.add(parts.slice(0, i).join('/'));
+  }
+  const dirs: string[] = [];
+  for (const parent of parents) if (absent(parent)) dirs.push(parent);
+  dirs.sort((a, b) => b.split('/').length - a.split('/').length);
+  // What the removal may pass through besides real directories: the links on the way to these
+  // files that git walked into — asked now, while the tree is still the operator's. Not every
+  // directory git walked into: a real one there now could be a link by the time the removal runs,
+  // and a path that was a directory when the copy was taken is no licence to follow a link there.
+  // Where each pointed, too: a link re-pointed by the time the removal runs is another link, and
+  // following it could leave the workspace as surely as following a new one.
+  const walked = new Map<string, string>();
+  for (const parent of parents) {
+    if (!intoCopy.has(fold(parent))) continue;
+    try {
+      const at = join(dir, parent);
+      if (lstatSync(at).isSymbolicLink()) walked.set(fold(parent), readlinkSync(at));
+    } catch {
+      // Gone, or not ours to look at: nothing to walk through.
+    }
+  }
+  return { files, dirs, walked };
+}
+
+/**
+ * Take away what the recording put where the operator had nothing — and only that.
+ *
+ * Asked of each file as it stands now, not as it stood when the list was made. The replayed agent
+ * has run since, for minutes with a real harness, in a tree nothing else was told to keep out of:
+ * the operator's own new file, a watcher's output, or a replay that went its own way can be at one
+ * of these paths by now, and these are exactly the paths no copy holds. So a file goes only while
+ * its bytes are a version the recording holds for that path — what the restore wrote, or what the
+ * recorded agent wrote after it. Anything else is left where it is, and named.
+ *
+ * `rmdir` takes a directory only while it is empty, so one that something else wrote into stays,
+ * with what it wrote. Exported for the test that pins which files it will not take; `judging` is
+ * that test's way in to the moment a file is being judged, and nothing in orca passes one.
+ */
+export async function removeIntroduced(
+  dir: string,
+  introduced: Introduced,
+  out: Output,
+  judging?: (path: string) => void | Promise<void>,
+): Promise<void> {
+  const kept: string[] = [];
+  const setAside: string[] = [];
+  for (const file of introduced.files) {
+    if (!onlyThroughDirectories(dir, file.path, introduced.walked)) continue;
+    const suffix = `.orca-${randomBytes(4).toString('hex')}`;
+    const outcome = await takeIfRecorded(join(dir, file.path), suffix, file.oids, judging);
+    if (outcome === 'kept') kept.push(file.path);
+    else if (outcome === 'set-aside') setAside.push(`${file.path}${suffix}`);
+  }
+  for (const made of introduced.dirs) {
+    if (!onlyThroughDirectories(dir, made, introduced.walked)) continue;
+    try {
+      rmdirSync(join(dir, made));
+    } catch {
+      // Not empty: something wrote into it that is not orca's to take.
+    }
+  }
+  if (kept.length > 0 || setAside.length > 0) {
+    out.warn('replay.left_in_place', {
+      paths: kept.length > 0 ? kept.sort().join(',') : undefined,
+      set_aside: setAside.length > 0 ? setAside.sort().join(',') : undefined,
+      why: 'orca takes away only what it can show it put there, and could not show it of these — written since by something else, or in use where they could not be moved',
+      next: 'delete them yourself if they are not yours; set_aside names ones whose path was taken while they were being judged',
+    });
+  }
+}
+
+/**
+ * Remove the file at `target` if, and only if, it holds one of `oids` — judged on the very file that
+ * goes. Hashing a path and then removing the path looks it up twice, and a writer that replaces
+ * the file in between would have its bytes removed unjudged. Renamed aside first, the file is
+ * pinned: the rename is atomic, and what is hashed is what is removed. A file written at the path
+ * a moment later is a new file there, which this never touches.
+ *
+ * One that does not match goes back where it was — without replacing anything that has taken the
+ * path meanwhile. Then it stays beside it under the name it was set aside as, and is named.
+ */
+async function takeIfRecorded(
+  target: string,
+  suffix: string,
+  oids: ReadonlySet<string>,
+  judging?: (path: string) => void | Promise<void>,
+): Promise<'absent' | 'taken' | 'kept' | 'set-aside'> {
+  try {
+    if (lstatSync(target).isDirectory()) return 'kept';
+  } catch {
+    return 'absent';
+  }
+  const aside = `${target}${suffix}`;
+  try {
+    renameSync(target, aside);
+  } catch (err) {
+    // Gone in the meantime, or held open where the platform will not move it: not taken either way.
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'absent' : 'kept';
+  }
+  await judging?.(target);
+  // A file that cannot even be read is not one orca can show it wrote — and throwing here would
+  // leave it under the name it was set aside as. Back where it was, like any other.
+  const now = await blobId(aside, oids).catch(() => undefined);
+  if (now !== undefined && oids.has(now)) {
+    try {
+      unlinkSync(aside);
+      return 'taken';
+    } catch {
+      // Could not remove it: put it back rather than leave it under a name nobody knows.
+    }
+  }
+  return putBack(aside, target) ? 'kept' : 'set-aside';
+}
+
+/**
+ * Move `aside` back to `target` unless something is at `target` now — and decide that atomically.
+ * Checking the path and then renaming onto it is a race the rename loses: on POSIX `rename`
+ * replaces whatever arrived in between, which is the very write this exists to keep. So every way
+ * back is a primitive that creates only if absent, and fails on EEXIST: a hard link for a file; a
+ * fresh `symlink` for a link, which `link` would follow on some platforms (macOS); and, where the
+ * filesystem has no hard links, a copy opened with O_EXCL.
+ */
+function putBack(aside: string, target: string): boolean {
+  try {
+    if (lstatSync(aside).isSymbolicLink()) {
+      const to = readlinkSync(aside);
+      const junction = process.platform === 'win32' && isDirectory(aside);
+      symlinkSync(to, target, junction ? 'junction' : undefined);
+    } else {
+      try {
+        linkSync(aside, target);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
+        copyFileSync(aside, target, fsConstants.COPYFILE_EXCL);
+      }
+    }
+  } catch {
+    // EEXIST among them: something has the path now, and this file stays beside it, named.
+    return false;
+  }
+  try {
+    unlinkSync(aside);
+  } catch {
+    // Two names for one file: the one the operator knows is back, which is what matters.
+  }
+  return true;
+}
+
+/** Whether `path` leads to a directory, following links; false when it leads nowhere. */
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The git blob id of what stands at `path` now — the id `ls-tree` reports for the same bytes, in
+ * the object format `like` is in. Undefined when nothing is there; something that is neither a
+ * file nor a link gets an id no blob has, so it is never taken for one.
+ */
+async function blobId(path: string, like: ReadonlySet<string>): Promise<string | undefined> {
+  let st: ReturnType<typeof lstatSync>;
+  try {
+    st = lstatSync(path);
+  } catch {
+    return undefined;
+  }
+  const sample = like.values().next().value;
+  const hash = createHash(sample !== undefined && sample.length === 64 ? 'sha256' : 'sha1');
+  if (st.isSymbolicLink()) {
+    const target = readlinkSync(path, { encoding: 'buffer' });
+    hash.update(`blob ${target.length}\0`).update(target);
+  } else if (st.isFile()) {
+    hash.update(`blob ${st.size}\0`);
+    for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+  } else {
+    return 'not a file';
+  }
+  return hash.digest('hex');
+}
+
+/**
+ * Whether removing `file` under `dir` stays inside the tree: every directory on the way a real one,
+ * or a link git walked into when it took the copy that still points where it pointed then. Asked
+ * at removal time, because a link can have appeared on the way since, or been re-pointed — the
+ * replayed agent may have done either — and `rm` follows it wherever it points now.
+ */
+function onlyThroughDirectories(
+  dir: string,
+  file: string,
+  walked: ReadonlyMap<string, string>,
+): boolean {
+  const parts = file.split('/');
+  for (let i = 1; i < parts.length; i += 1) {
+    const prefix = parts.slice(0, i).join('/');
+    const at = join(dir, prefix);
+    try {
+      const st = lstatSync(at);
+      if (st.isDirectory()) continue;
+      const then = walked.get(fold(prefix));
+      if (!st.isSymbolicLink() || then === undefined || readlinkSync(at) !== then) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 /** The `--in-place` half of the same rule: say what was not done, rather than doing it unsafely. */

@@ -123,6 +123,12 @@ function gitlinkPaths(staged: string): string[] {
     .map((entry) => entry.slice(entry.indexOf('\t') + 1));
 }
 
+/** One file of a tree: where it goes, and the id of the bytes it holds. */
+export interface TreeFile {
+  path: string;
+  oid: string;
+}
+
 interface RawRecord {
   letter: string;
   path: string;
@@ -475,6 +481,25 @@ export class ShadowIndex {
   async has(tree: string): Promise<boolean> {
     const res = await runGitRaw(['cat-file', '-e', `${tree}^{tree}`], this.opts());
     return res.code === 0;
+  }
+
+  /**
+   * The files a tree records — blobs only, so a nested repository's gitlink is not among them —
+   * each with the id of the bytes it holds.
+   *
+   * What a {@link materialize} of the tree will write, asked without writing it: a caller about to
+   * restore a tree over a directory can check each path against the copy it took first, and can
+   * tell afterwards whether what stands at a path is still what the tree put there.
+   */
+  async files(tree: string): Promise<TreeFile[]> {
+    const listed = await this.run(['ls-tree', '-r', '-z', '--full-tree', tree]);
+    const files: TreeFile[] = [];
+    for (const entry of listed.split('\0')) {
+      const tab = entry.indexOf('\t');
+      const [, type, oid] = entry.slice(0, tab).split(' ');
+      if (type === 'blob' && oid !== undefined) files.push({ path: entry.slice(tab + 1), oid });
+    }
+    return files;
   }
 
   async materialize(tree: string, destDir: string, opts: MaterializeOptions = {}): Promise<void> {
