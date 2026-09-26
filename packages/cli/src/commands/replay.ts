@@ -1257,6 +1257,18 @@ const noRelease = async (): Promise<void> => {};
  */
 async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise<Workspace> {
   const artifacts = adapterArtifacts(ctx);
+  // `--worktree` IS A PROMISE — "never touches your files" — so once it is asked for, nothing
+  // below may fall back to the operator's directory. Two branches did, both ahead of the one that
+  // reads it: `--in-place` given beside it won without a word, and a run with no snapshot took the
+  // in-place warning and ran the agent over the working tree anyway. Measured on a run recorded
+  // with --no-fs: `orca replay last --worktree` wrote the recorded edit over uncommitted work.
+  const wantsWorktree = args.bool('worktree');
+  if (wantsWorktree && args.bool('in-place')) {
+    throw new Error(
+      '--worktree and --in-place cannot both apply: one replays in a scratch copy and never ' +
+        'touches your files, the other replays in them. Give one.',
+    );
+  }
   if (args.bool('in-place')) {
     warnArtifactsKept(artifacts, out);
     return { dir: ctx.cwd, release: noRelease, restored: false };
@@ -1264,6 +1276,18 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
 
   const initial = deriveCheckpoints(ctx.events).find((c) => c.fsTree !== undefined);
   if (!initial?.fsTree) {
+    // Refused rather than run in an empty directory: an empty directory is not a copy of anything
+    // the run started from, and a replay that halts at the first file it reads is no way to learn
+    // that. `--in-place` is the honest version of what this used to do, and says what it does.
+    if (wantsWorktree) {
+      out.warn('replay.no_snapshot', {
+        why: 'this run was recorded without filesystem capture, so it holds no workspace to copy',
+        next: `orca replay ${ctx.manifest.run_id} --in-place   # against this directory as it stands`,
+      });
+      throw new Error(
+        'no workspace snapshot to copy — see replay.no_snapshot; --in-place replays without it',
+      );
+    }
     out.warn('replay.in-place', {
       why: 'this run has no filesystem snapshot to restore',
       note: 'recorded with --no-fs; a file the run read may since have changed',
