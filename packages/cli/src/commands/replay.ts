@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { lstatSync, rmdirSync } from 'node:fs';
+import { createReadStream, lstatSync, readlinkSync, rmdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import {
   enclosingDelegation,
@@ -1380,21 +1381,9 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
       });
       throw err;
     }
-    // What the restore wrote where there was nothing, taken away again — after the put-back, and
+    // What the recording wrote where there was nothing, taken away again — after the put-back, and
     // only once it has succeeded: the copy never held these, so the put-back alone left them.
-    // `rmdir` takes a directory only while it is empty, so one the replayed agent also wrote into
-    // stays, with what it wrote.
-    for (const file of introduced.files) {
-      if (!onlyThroughDirectories(ctx.cwd, file, introduced.walked)) continue;
-      await rm(join(ctx.cwd, file), { force: true }).catch(() => undefined);
-    }
-    for (const made of introduced.dirs) {
-      try {
-        rmdirSync(join(ctx.cwd, made));
-      } catch {
-        // Not empty: the replayed agent wrote into it, and what it wrote stays.
-      }
-    }
+    await removeIntroduced(ctx.cwd, introduced, out);
     // Only after the restore succeeded. This store holds the only copy of your working tree as
     // it was before the replay overwrote it, so removing it on the failure path would delete the
     // thing the failure means you still need — better a directory to clean up by hand than the
@@ -1691,8 +1680,9 @@ async function assertResettable(
 }
 
 /** What a restore will write where the working tree holds nothing, for the put-back to remove. */
-interface Introduced {
-  files: string[];
+export interface Introduced {
+  /** Each with the ids of every version of it the recording holds, to know it again by. */
+  files: { path: string; oids: ReadonlySet<string> }[];
   /** Directories it has to create for them, deepest first, so each is empty when its turn comes. */
   dirs: string[];
   /**
@@ -1737,7 +1727,7 @@ async function assertOverwritable(
   held: string,
   dir: string,
 ): Promise<Introduced> {
-  const copied = new Set((await safety.files(held)).map(fold));
+  const copied = new Set((await safety.files(held)).map((file) => fold(file.path)));
   // What is on disk at a path, asked once per path. A path this process cannot even look at counts
   // as something there: nothing here may conclude "safe to overwrite" from an error it cannot read.
   const seen = new Map<string, 'dir' | 'other' | 'none'>();
@@ -1779,14 +1769,19 @@ async function assertOverwritable(
     return absent(path) ? undefined : path;
   };
   const overwritten = new Set<string>();
-  const files: string[] = [];
-  const recordedFiles = new Set<string>();
-  for (const tree of new Set(trees))
-    for (const path of await recorded.files(tree)) recordedFiles.add(path);
-  for (const path of recordedFiles) {
+  const files: Introduced['files'] = [];
+  const recordedFiles = new Map<string, Set<string>>();
+  for (const tree of new Set(trees)) {
+    for (const { path, oid } of await recorded.files(tree)) {
+      const oids = recordedFiles.get(path) ?? new Set<string>();
+      oids.add(oid);
+      recordedFiles.set(path, oids);
+    }
+  }
+  for (const [path, oids] of recordedFiles) {
     if (copied.has(fold(path))) continue;
     const blocker = inTheWay(path);
-    if (blocker === undefined) files.push(path);
+    if (blocker === undefined) files.push({ path, oids });
     // Held: the put-back writes it back, clearing the directory the restore made in its place.
     else if (blocker !== path && copied.has(fold(blocker))) continue;
     else overwritten.add(blocker);
@@ -1804,13 +1799,82 @@ async function assertOverwritable(
   }
   const parents = new Set<string>();
   for (const file of files) {
-    const parts = file.split('/');
+    const parts = file.path.split('/');
     for (let i = 1; i < parts.length; i += 1) parents.add(parts.slice(0, i).join('/'));
   }
   const dirs: string[] = [];
   for (const parent of parents) if (absent(parent)) dirs.push(parent);
   dirs.sort((a, b) => b.split('/').length - a.split('/').length);
   return { files, dirs, walked };
+}
+
+/**
+ * Take away what the recording put where the operator had nothing — and only that.
+ *
+ * Asked of each file as it stands now, not as it stood when the list was made. The replayed agent
+ * has run since, for minutes with a real harness, in a tree nothing else was told to keep out of:
+ * the operator's own new file, a watcher's output, or a replay that went its own way can be at one
+ * of these paths by now, and these are exactly the paths no copy holds. So a file goes only while
+ * its bytes are a version the recording holds for that path — what the restore wrote, or what the
+ * recorded agent wrote after it. Anything else is left where it is, and named.
+ *
+ * `rmdir` takes a directory only while it is empty, so one that something else wrote into stays,
+ * with what it wrote. Exported for the test that pins which files it will not take.
+ */
+export async function removeIntroduced(
+  dir: string,
+  introduced: Introduced,
+  out: Output,
+): Promise<void> {
+  const kept: string[] = [];
+  for (const file of introduced.files) {
+    if (!onlyThroughDirectories(dir, file.path, introduced.walked)) continue;
+    const target = join(dir, file.path);
+    const now = await blobId(target, file.oids);
+    if (now === undefined) continue;
+    if (file.oids.has(now)) await rm(target, { force: true }).catch(() => undefined);
+    else kept.push(file.path);
+  }
+  for (const made of introduced.dirs) {
+    try {
+      rmdirSync(join(dir, made));
+    } catch {
+      // Not empty: something wrote into it that is not orca's to take.
+    }
+  }
+  if (kept.length > 0) {
+    out.warn('replay.left_in_place', {
+      paths: kept.sort().join(','),
+      why: 'written during the replay, and not as the recording wrote them — orca takes away only what it can show it put there',
+      next: 'delete them yourself if they are not yours',
+    });
+  }
+}
+
+/**
+ * The git blob id of what stands at `path` now — the id `ls-tree` reports for the same bytes, in
+ * the object format `like` is in. Undefined when nothing is there; something that is neither a
+ * file nor a link gets an id no blob has, so it is never taken for one.
+ */
+async function blobId(path: string, like: ReadonlySet<string>): Promise<string | undefined> {
+  let st: ReturnType<typeof lstatSync>;
+  try {
+    st = lstatSync(path);
+  } catch {
+    return undefined;
+  }
+  const sample = like.values().next().value;
+  const hash = createHash(sample !== undefined && sample.length === 64 ? 'sha256' : 'sha1');
+  if (st.isSymbolicLink()) {
+    const target = readlinkSync(path, { encoding: 'buffer' });
+    hash.update(`blob ${target.length}\0`).update(target);
+  } else if (st.isFile()) {
+    hash.update(`blob ${st.size}\0`);
+    for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+  } else {
+    return 'not a file';
+  }
+  return hash.digest('hex');
 }
 
 /**
