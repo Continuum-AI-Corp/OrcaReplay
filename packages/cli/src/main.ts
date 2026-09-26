@@ -46,7 +46,7 @@ const HELP = `orca ${ORCA_VERSION} — record, replay and fork debugger for AI a
   orca replay [run] --from N     fork from a checkpoint and continue live
         --model <id>             continue on a different model
         --no-fs                  fork the conversation only — do not restore the workspace,
-                                 which a run fetched with orca pull does not carry
+                                 which a pulled run lacks unless it was pushed with --fs
   orca compare [run] --models a,b,c
                                  fork the same checkpoint onto several models
         --from N                 checkpoint to fork every model from
