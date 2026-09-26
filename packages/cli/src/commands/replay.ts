@@ -1,8 +1,17 @@
 import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { createReadStream, lstatSync, readlinkSync, rmdirSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+import {
+  createReadStream,
+  existsSync,
+  linkSync,
+  lstatSync,
+  readlinkSync,
+  renameSync,
+  rmdirSync,
+  unlinkSync,
+} from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import {
   enclosingDelegation,
@@ -1686,15 +1695,17 @@ export interface Introduced {
   /** Directories it has to create for them, deepest first, so each is empty when its turn comes. */
   dirs: string[];
   /**
-   * The links git walked into as directories when it took the copy — a junction, on Windows. The
-   * removal may pass through these and through real directories, and through nothing else.
+   * The links on the way to these files that git walked into as directories when it took the copy
+   * — a junction, on Windows — and that were links then. The removal may pass through these and
+   * through real directories, and through nothing else.
    */
   walked: ReadonlySet<string>;
 }
 
 /**
  * Refuse the restore unless the safety copy holds every file it is about to overwrite — and name
- * the files it will write where the operator has none.
+ * the files it will write where the operator has none. Exported for the test that pins what the
+ * removal may walk through.
  *
  * `materialize` writes each file the recorded tree holds, whatever is at that path. The copy it is
  * undone from is an ordinary snapshot, which honours the workspace's `.gitignore`, so a path the
@@ -1720,7 +1731,7 @@ export interface Introduced {
  * Asked before `resetArtifacts`: the reset deletes what the copy holds, and an artifact would look
  * absent after it. Artifacts are forced into the copy, so neither list can name one.
  */
-async function assertOverwritable(
+export async function assertOverwritable(
   recorded: FsCapture,
   trees: readonly string[],
   safety: FsCapture,
@@ -1748,10 +1759,10 @@ async function assertOverwritable(
   // Every directory git walked into when it took the copy. A link among them — a junction, on
   // Windows, whose contents the copy holds as ordinary files — is a directory as far as the
   // restore and the put-back are concerned, and is treated as one here.
-  const walked = new Set<string>();
+  const intoCopy = new Set<string>();
   for (const held of copied) {
     const parts = held.split('/');
-    for (let i = 1; i < parts.length; i += 1) walked.add(parts.slice(0, i).join('/'));
+    for (let i = 1; i < parts.length; i += 1) intoCopy.add(parts.slice(0, i).join('/'));
   }
   // What the restore would destroy to write `path`, asked the way it writes: every directory on
   // the way first, then the path itself. A file or a link standing where the recording has a
@@ -1764,7 +1775,7 @@ async function assertOverwritable(
       const prefix = parts.slice(0, i).join('/');
       const kind = at(prefix);
       if (kind === 'none') return undefined;
-      if (kind === 'other' && !walked.has(fold(prefix))) return prefix;
+      if (kind === 'other' && !intoCopy.has(fold(prefix))) return prefix;
     }
     return absent(path) ? undefined : path;
   };
@@ -1805,6 +1816,19 @@ async function assertOverwritable(
   const dirs: string[] = [];
   for (const parent of parents) if (absent(parent)) dirs.push(parent);
   dirs.sort((a, b) => b.split('/').length - a.split('/').length);
+  // What the removal may pass through besides real directories: the links on the way to these
+  // files that git walked into — asked now, while the tree is still the operator's. Not every
+  // directory git walked into: a real one there now could be a link by the time the removal runs,
+  // and a path that was a directory when the copy was taken is no licence to follow a link there.
+  const walked = new Set<string>();
+  for (const parent of parents) {
+    if (!intoCopy.has(fold(parent))) continue;
+    try {
+      if (lstatSync(join(dir, parent)).isSymbolicLink()) walked.add(fold(parent));
+    } catch {
+      // Gone, or not ours to look at: nothing to walk through.
+    }
+  }
   return { files, dirs, walked };
 }
 
@@ -1819,36 +1843,106 @@ async function assertOverwritable(
  * recorded agent wrote after it. Anything else is left where it is, and named.
  *
  * `rmdir` takes a directory only while it is empty, so one that something else wrote into stays,
- * with what it wrote. Exported for the test that pins which files it will not take.
+ * with what it wrote. Exported for the test that pins which files it will not take; `judging` is
+ * that test's way in to the moment a file is being judged, and nothing in orca passes one.
  */
 export async function removeIntroduced(
   dir: string,
   introduced: Introduced,
   out: Output,
+  judging?: (path: string) => void | Promise<void>,
 ): Promise<void> {
   const kept: string[] = [];
+  const setAside: string[] = [];
   for (const file of introduced.files) {
     if (!onlyThroughDirectories(dir, file.path, introduced.walked)) continue;
-    const target = join(dir, file.path);
-    const now = await blobId(target, file.oids);
-    if (now === undefined) continue;
-    if (file.oids.has(now)) await rm(target, { force: true }).catch(() => undefined);
-    else kept.push(file.path);
+    const suffix = `.orca-${randomBytes(4).toString('hex')}`;
+    const outcome = await takeIfRecorded(join(dir, file.path), suffix, file.oids, judging);
+    if (outcome === 'kept') kept.push(file.path);
+    else if (outcome === 'set-aside') setAside.push(`${file.path}${suffix}`);
   }
   for (const made of introduced.dirs) {
+    if (!onlyThroughDirectories(dir, made, introduced.walked)) continue;
     try {
       rmdirSync(join(dir, made));
     } catch {
       // Not empty: something wrote into it that is not orca's to take.
     }
   }
-  if (kept.length > 0) {
+  if (kept.length > 0 || setAside.length > 0) {
     out.warn('replay.left_in_place', {
-      paths: kept.sort().join(','),
+      paths: kept.length > 0 ? kept.sort().join(',') : undefined,
+      set_aside: setAside.length > 0 ? setAside.sort().join(',') : undefined,
       why: 'written during the replay, and not as the recording wrote them — orca takes away only what it can show it put there',
-      next: 'delete them yourself if they are not yours',
+      next: 'delete them yourself if they are not yours; set_aside names ones whose path was taken while they were being judged',
     });
   }
+}
+
+/**
+ * Remove the file at `target` if, and only if, it holds one of `oids` — judged on the very file that
+ * goes. Hashing a path and then removing the path looks it up twice, and a writer that replaces
+ * the file in between would have its bytes removed unjudged. Renamed aside first, the file is
+ * pinned: the rename is atomic, and what is hashed is what is removed. A file written at the path
+ * a moment later is a new file there, which this never touches.
+ *
+ * One that does not match goes back where it was — without replacing anything that has taken the
+ * path meanwhile. Then it stays beside it under the name it was set aside as, and is named.
+ */
+async function takeIfRecorded(
+  target: string,
+  suffix: string,
+  oids: ReadonlySet<string>,
+  judging?: (path: string) => void | Promise<void>,
+): Promise<'absent' | 'taken' | 'kept' | 'set-aside'> {
+  try {
+    if (lstatSync(target).isDirectory()) return 'kept';
+  } catch {
+    return 'absent';
+  }
+  const aside = `${target}${suffix}`;
+  try {
+    renameSync(target, aside);
+  } catch (err) {
+    // Gone in the meantime, or held open where the platform will not move it: not taken either way.
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'absent' : 'kept';
+  }
+  await judging?.(target);
+  const now = await blobId(aside, oids);
+  if (now !== undefined && oids.has(now)) {
+    try {
+      unlinkSync(aside);
+      return 'taken';
+    } catch {
+      // Could not remove it: put it back rather than leave it under a name nobody knows.
+    }
+  }
+  return putBack(aside, target) ? 'kept' : 'set-aside';
+}
+
+/**
+ * Move `aside` back to `target` unless something is at `target` now. A hard link is the atomic
+ * form of "create only if absent"; where the filesystem has none, a rename after a check stands in.
+ */
+function putBack(aside: string, target: string): boolean {
+  try {
+    linkSync(aside, target);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    try {
+      if (existsSync(target)) return false;
+      renameSync(aside, target);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  try {
+    unlinkSync(aside);
+  } catch {
+    // Two names for one file: the one the operator knows is back, which is what matters.
+  }
+  return true;
 }
 
 /**
