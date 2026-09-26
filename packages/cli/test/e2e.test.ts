@@ -692,6 +692,26 @@ describe('end to end: record → replay → fork', () => {
     }
   });
 
+  /**
+   * The other half of the case above: a file where the recording had a directory, and one the copy
+   * DOES hold. The restore deletes it to make the directory; the put-back writes it back, and
+   * `checkout-index -f` clears the directory it made to do so. So this replays, rather than being
+   * refused — and the operator's uncommitted edit survives it. Pinned because it was disputed: the
+   * claim was that the put-back skips a file over a non-empty directory, which git 2.43 (Linux) and
+   * 2.55 (Windows) both do not.
+   */
+  it('puts back a held file where the recording had a directory', async () => {
+    mkdirSync(join(workspace, 'cfg'));
+    await writeFile(join(workspace, 'cfg', 'app.json'), '{"recorded":true}\n');
+    const recorded = await record(2);
+    await rm(join(workspace, 'cfg'), { recursive: true, force: true });
+    await writeFile(join(workspace, 'cfg'), 'MY UNCOMMITTED EDIT\n');
+
+    const replayed = await replayCommand(parseArgs(['replay', recorded.runId]), out, workspace);
+    expect(replayed.matchedExact).toBe(2);
+    expect(await readFile(join(workspace, 'cfg'), 'utf8')).toBe('MY UNCOMMITTED EDIT\n');
+  });
+
   it('does not leave a copy of the working tree in the temp directory', async () => {
     // The safety snapshot is a shadow git store holding the whole workspace, and it was never
     // removed — one per `orca replay`, growing with the size of your checkout, in a directory
