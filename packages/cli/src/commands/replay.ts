@@ -1368,7 +1368,7 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
   // caller has done since, and the `rm` would take the scratch with it.
   let released = false;
   // Filled in below, before anything is written — see `assertOverwritable`.
-  let introduced: Introduced = { files: [], dirs: [], walked: new Set() };
+  let introduced: Introduced = { files: [], dirs: [], walked: new Map() };
   const release = async (): Promise<void> => {
     if (released) return;
     released = true;
@@ -1699,10 +1699,11 @@ export interface Introduced {
   dirs: string[];
   /**
    * The links on the way to these files that git walked into as directories when it took the copy
-   * — a junction, on Windows — and that were links then. The removal may pass through these and
-   * through real directories, and through nothing else.
+   * — a junction, on Windows — and that were links then, each with where it pointed. The removal
+   * may pass through real directories and through these, while each still points there, and
+   * through nothing else.
    */
-  walked: ReadonlySet<string>;
+  walked: ReadonlyMap<string, string>;
 }
 
 /**
@@ -1823,11 +1824,14 @@ export async function assertOverwritable(
   // files that git walked into — asked now, while the tree is still the operator's. Not every
   // directory git walked into: a real one there now could be a link by the time the removal runs,
   // and a path that was a directory when the copy was taken is no licence to follow a link there.
-  const walked = new Set<string>();
+  // Where each pointed, too: a link re-pointed by the time the removal runs is another link, and
+  // following it could leave the workspace as surely as following a new one.
+  const walked = new Map<string, string>();
   for (const parent of parents) {
     if (!intoCopy.has(fold(parent))) continue;
     try {
-      if (lstatSync(join(dir, parent)).isSymbolicLink()) walked.add(fold(parent));
+      const at = join(dir, parent);
+      if (lstatSync(at).isSymbolicLink()) walked.set(fold(parent), readlinkSync(at));
     } catch {
       // Gone, or not ours to look at: nothing to walk through.
     }
@@ -1996,16 +2000,24 @@ async function blobId(path: string, like: ReadonlySet<string>): Promise<string |
 
 /**
  * Whether removing `file` under `dir` stays inside the tree: every directory on the way a real one,
- * or a link git walked into when it took the copy. Asked at removal time, because a link can have
- * appeared on the way since — the replayed agent may have made one — and `rm` follows it.
+ * or a link git walked into when it took the copy that still points where it pointed then. Asked
+ * at removal time, because a link can have appeared on the way since, or been re-pointed — the
+ * replayed agent may have done either — and `rm` follows it wherever it points now.
  */
-function onlyThroughDirectories(dir: string, file: string, walked: ReadonlySet<string>): boolean {
+function onlyThroughDirectories(
+  dir: string,
+  file: string,
+  walked: ReadonlyMap<string, string>,
+): boolean {
   const parts = file.split('/');
   for (let i = 1; i < parts.length; i += 1) {
     const prefix = parts.slice(0, i).join('/');
+    const at = join(dir, prefix);
     try {
-      const st = lstatSync(join(dir, prefix));
-      if (!st.isDirectory() && !(st.isSymbolicLink() && walked.has(fold(prefix)))) return false;
+      const st = lstatSync(at);
+      if (st.isDirectory()) continue;
+      const then = walked.get(fold(prefix));
+      if (!st.isSymbolicLink() || then === undefined || readlinkSync(at) !== then) return false;
     } catch {
       return false;
     }

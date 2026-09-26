@@ -59,7 +59,7 @@ describe('taking away what a replay introduced', () => {
           { path: 'never-written.txt', oids: new Set([recorded]) },
         ],
         dirs: ['made', 'busy'],
-        walked: new Set(),
+        walked: new Map(),
       },
       out,
     );
@@ -90,7 +90,7 @@ describe('taking away what a replay introduced', () => {
 
     await removeIntroduced(
       dir,
-      { files: [{ path: 'raced.txt', oids: new Set([recorded]) }], dirs: [], walked: new Set() },
+      { files: [{ path: 'raced.txt', oids: new Set([recorded]) }], dirs: [], walked: new Map() },
       out,
       async (path) => {
         await writeFile(path, 'WRITTEN WHILE ORCA WAS LOOKING\n');
@@ -113,7 +113,7 @@ describe('taking away what a replay introduced', () => {
 
     await removeIntroduced(
       dir,
-      { files: [{ path: 'notes.txt', oids: new Set([recorded]) }], dirs: [], walked: new Set() },
+      { files: [{ path: 'notes.txt', oids: new Set([recorded]) }], dirs: [], walked: new Map() },
       out,
       async (path) => {
         await writeFile(path, 'AND THIS ARRIVED WHILE ORCA WAS LOOKING\n');
@@ -138,7 +138,7 @@ describe('taking away what a replay introduced', () => {
     try {
       await removeIntroduced(
         dir,
-        { files: [{ path: 'link', oids: new Set([recorded]) }], dirs: [], walked: new Set() },
+        { files: [{ path: 'link', oids: new Set([recorded]) }], dirs: [], walked: new Map() },
         out,
       );
       expect(lstatSync(join(dir, 'link')).isSymbolicLink(), 'the link is back, as a link').toBe(
@@ -189,4 +189,50 @@ describe('taking away what a replay introduced', () => {
       unlinkSync(join(ws, 'data'));
     }
   });
+
+  /**
+   * The other direction of the same escape. A junction git walked into is a directory to git, and
+   * the removal may pass through it — but only while it points where it pointed when the copy was
+   * taken. Re-pointed during the replay, it is another link, and following it reached a directory
+   * orca was never given. Only Windows walks into a link (git records a POSIX symlink as itself),
+   * so only Windows can have one to re-point.
+   */
+  it.runIf(process.platform === 'win32')(
+    'does not follow a link re-pointed after the copy was taken',
+    async () => {
+      const ws = join(dir, 'ws');
+      const first = join(dir, 'first');
+      const second = join(dir, 'second');
+      await mkdir(ws);
+      await mkdir(first);
+      await mkdir(second);
+      await writeFile(join(first, 'a.csv'), 'A\n');
+      symlinkSync(first, join(ws, 'data'), 'junction');
+      try {
+        await writeFile(join(first, 'x.csv'), 'RECORDED\n');
+        const recording = await FsCapture.start({ runDir: join(dir, 'recording'), cwd: ws });
+        const recordedTree = (await recording.snapshotTurn(0)).tree;
+        await rm(join(first, 'x.csv'));
+        const copy = await FsCapture.start({ runDir: join(dir, 'copy'), cwd: ws });
+        const held = (await copy.snapshotTurn(0)).tree;
+
+        const introduced = await assertOverwritable(recording, [recordedTree], copy, held, ws);
+        expect(introduced.files.map((f) => f.path)).toEqual(['data/x.csv']);
+
+        // During the replay the junction is re-pointed at another directory, which holds a file
+        // with the recording's bytes at the same name.
+        await writeFile(join(second, 'x.csv'), 'RECORDED\n');
+        unlinkSync(join(ws, 'data'));
+        symlinkSync(second, join(ws, 'data'), 'junction');
+
+        await removeIntroduced(ws, introduced, out);
+        expect(
+          await readFile(join(second, 'x.csv'), 'utf8'),
+          'the removal followed a re-pointed link',
+        ).toBe('RECORDED\n');
+      } finally {
+        unlinkSync(join(ws, 'data'));
+      }
+    },
+  );
 });
