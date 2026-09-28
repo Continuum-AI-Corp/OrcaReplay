@@ -50,7 +50,15 @@ describe('orca doctor — the capture layers', () => {
       check,
       `no shell check in: ${result.checks.map((c) => c.name).join(', ')}`,
     ).toBeDefined();
-    expect(check!.status, `${check!.detail} — ${NEEDS_BUILD}`).toBe('ok');
+    if (process.platform === 'win32') {
+      // Captured through cmd.exe, not by a direct spawn — see checkShellShim. This detail is only
+      // written once the cmd.exe probe has captured, so a broken shim cannot reach it.
+      expect(check!.status, `${check!.detail} — ${NEEDS_BUILD}`).toBe('warn');
+      expect(check!.detail).toContain('started through cmd.exe or PowerShell');
+      expect(check!.fix).toContain('shell.ineffective');
+    } else {
+      expect(check!.status, `${check!.detail} — ${NEEDS_BUILD}`).toBe('ok');
+    }
   });
 
   it('checks the MCP shim', async () => {
