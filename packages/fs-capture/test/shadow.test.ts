@@ -326,6 +326,188 @@ describe('exclusions', () => {
  * `.gitignore` lines are `vector_store/`, `cache/` and `dataset/` — so a recording of an indexing
  * run held every call that built the index and nothing of the index itself.
  */
+/**
+ * A NESTED REPOSITORY WITH NO COMMIT.
+ *
+ * `git init` in a subdirectory and nothing committed yet — which is what anyone starting a second
+ * project inside their workspace has. Git records an embedded repository by the id of its HEAD
+ * commit, and this one has none, so `git add -A` answers `does not have a commit checked out` and
+ * abandons the whole add. Every one of these pins that the snapshot is taken anyway, without that
+ * directory, and that it is named.
+ */
+describe('a nested repository with no commit', () => {
+  async function initRepo(dir: string): Promise<void> {
+    await mkdir(dir, { recursive: true });
+    for (const args of [
+      ['init', '-q'],
+      ['config', 'user.email', 't@e.com'],
+      ['config', 'user.name', 'T'],
+    ]) {
+      await runGit(args, { cwd: dir });
+    }
+  }
+
+  async function commitless(workTree: string, rel: string): Promise<void> {
+    await initRepo(join(workTree, rel));
+    await write(workTree, `${rel}/mine.py`, 'MY OWN WORK\n');
+  }
+
+  itGit('snapshots the rest of the tree instead of failing', async () => {
+    const { workTree, shadow } = await fixture();
+    await write(workTree, 'README.md', 'the outer project\n');
+    await commitless(workTree, 'newproject');
+
+    expect(await filesIn(shadow, await shadow.snapshot())).toEqual(['README.md']);
+  });
+
+  itGit('names it, once, however many snapshots the run takes', async () => {
+    const { workTree, shadow } = await fixture();
+    await write(workTree, 'README.md', 'x\n');
+    await commitless(workTree, 'newproject');
+
+    await shadow.snapshot();
+    expect(shadow.uncommittedNested).toEqual(['newproject']);
+    await write(workTree, 'README.md', 'y\n');
+    await shadow.snapshot();
+    expect(shadow.uncommittedNested).toEqual([]);
+  });
+
+  /**
+   * Git names one and stops — with three of them the first add reported only the first, and
+   * excluding it made the next add fail on the second. Anything that runs the add once and gives
+   * up on the first name passes the single-repository test and fails here.
+   */
+  itGit('leaves out every one of several, not only the first git named', async () => {
+    const { workTree, shadow } = await fixture();
+    await write(workTree, 'README.md', 'x\n');
+    for (const name of ['one', 'two', 'three']) await commitless(workTree, name);
+
+    expect(await filesIn(shadow, await shadow.snapshot())).toEqual(['README.md']);
+    expect([...shadow.uncommittedNested].sort()).toEqual(['one', 'three', 'two']);
+  });
+
+  itGit(
+    'leaves out one buried under ordinary directories, and keeps their other contents',
+    async () => {
+      const { workTree, shadow } = await fixture();
+      await write(workTree, 'a/b/keep.txt', 'mine\n');
+      await commitless(workTree, 'a/b/newproject');
+
+      expect(await filesIn(shadow, await shadow.snapshot())).toEqual(['a/b/keep.txt']);
+      expect(shadow.uncommittedNested).toEqual(['a/b/newproject']);
+    },
+  );
+
+  itGit('leaves out a name holding pattern characters, and only it', async () => {
+    const { workTree, shadow } = await fixture();
+    await write(workTree, 'README.md', 'x\n');
+    await write(workTree, 'my n project/neighbour.txt', 'must stay\n');
+    await commitless(workTree, 'my [new] project');
+
+    expect(await filesIn(shadow, await shadow.snapshot())).toEqual([
+      'README.md',
+      'my n project/neighbour.txt',
+    ]);
+    expect(shadow.uncommittedNested).toEqual(['my [new] project']);
+  });
+
+  /**
+   * WHY THE EXCLUSION SAYS `literal`.
+   *
+   * The path is whatever the operator called the directory, and a pathspec without `literal` is a
+   * pattern. Measured beside a workspace holding `ab/` and `ax/`: `:(exclude)a*` took both out of
+   * the add; `:(exclude,literal)a*` took out only a path named exactly that. So a repository named
+   * `a*` would drop its neighbours from the snapshot — silently, since the add still succeeds.
+   *
+   * POSIX only, because `*` is not a legal character in a Windows filename, so the workspace this
+   * needs cannot exist there. The test above is the same shape with a `[`, which every platform
+   * can hold — and it passes either way, because git compares the leading directory literally
+   * before it wildmatches. This is the one that fails when `literal` is dropped.
+   */
+  it.skipIf(!hasGit || process.platform === 'win32')(
+    'takes the path literally, so a name holding a wildcard excludes only itself',
+    async () => {
+      const { workTree, shadow } = await fixture();
+      await write(workTree, 'README.md', 'x\n');
+      await write(workTree, 'ab/neighbour.txt', 'must stay\n');
+      await write(workTree, 'ax/neighbour.txt', 'must stay too\n');
+      await commitless(workTree, 'a*');
+
+      expect(await filesIn(shadow, await shadow.snapshot())).toEqual([
+        'README.md',
+        'ab/neighbour.txt',
+        'ax/neighbour.txt',
+      ]);
+      expect(shadow.uncommittedNested).toEqual(['a*']);
+    },
+  );
+
+  itGit('still records one that has a commit as a gitlink, beside one that has none', async () => {
+    const { workTree, gitDir, shadow } = await fixture();
+    await write(workTree, 'README.md', 'x\n');
+    await initRepo(join(workTree, 'vendor'));
+    await write(workTree, 'vendor/lib.py', 'upstream\n');
+    await runGit(['add', '-A'], { cwd: join(workTree, 'vendor') });
+    await runGit(['commit', '-qm', 'u'], { cwd: join(workTree, 'vendor') });
+    await commitless(workTree, 'fresh');
+
+    const tree = await shadow.snapshot();
+    expect(shadow.uncommittedNested).toEqual(['fresh']);
+    // The committed one is still a gitlink in the tree, which is what `gitlinks` reports and what
+    // the replay's own guard reads; the commit-less one is in neither, by definition.
+    expect(await shadow.gitlinks(tree)).toEqual(['vendor']);
+    const listed = await runGit(['ls-tree', '-r', '--full-tree', tree], { gitDir });
+    expect(listed.stdout).not.toContain('fresh');
+  });
+
+  itGit('drops the outer one only, when one with no commit holds another', async () => {
+    const { workTree, shadow } = await fixture();
+    await write(workTree, 'README.md', 'x\n');
+    await commitless(workTree, 'outer');
+    await commitless(workTree, 'outer/inner');
+
+    expect(await filesIn(shadow, await shadow.snapshot())).toEqual(['README.md']);
+    expect(shadow.uncommittedNested).toEqual(['outer']);
+  });
+
+  /**
+   * `-A` never reaches a path the workspace ignores, and a declared artifact path is exactly where
+   * an ignored one is — so the forced add can meet a commit-less repository the first add could
+   * not see. It has to survive that too, and say so.
+   */
+  itGit('survives one inside a declared artifact path the workspace ignores', async () => {
+    const root = await makeTempDir();
+    const workTree = join(root, 'ws');
+    await mkdir(workTree, { recursive: true });
+    const shadow = await ShadowIndex.create({
+      gitDir: join(root, 'run', 'fs'),
+      workTree,
+      forced: ['dataset'],
+    });
+    await write(workTree, '.gitignore', 'dataset/\n');
+    await write(workTree, 'dataset/corpus.txt', 'the product\n');
+    await write(workTree, 'main.py', 'print(1)\n');
+    await initRepo(join(workTree, 'dataset', 'scratch'));
+    await write(workTree, 'dataset/scratch/notes.md', 'never committed\n');
+
+    expect(await filesIn(shadow, await shadow.snapshot())).toEqual([
+      '.gitignore',
+      'dataset/corpus.txt',
+      'main.py',
+    ]);
+    expect(shadow.uncommittedNested).toEqual(['dataset/scratch']);
+  });
+
+  /** A failure that is not this one still throws, with git's own words. */
+  itGit('still fails on an add that goes wrong for any other reason', async () => {
+    const { workTree, shadow } = await fixture();
+    await write(workTree, 'README.md', 'x\n');
+    await rm(workTree, { recursive: true, force: true });
+
+    await expect(shadow.snapshot()).rejects.toThrow(/git add failed/);
+  });
+});
+
 describe('forced capture', () => {
   itGit('captures a path the workspace ignores, when the adapter declares it', async () => {
     const root = await makeTempDir();

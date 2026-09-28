@@ -1398,7 +1398,13 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
   // the first. Reporting only the first said nothing about it and then promised, unqualified,
   // that the files come back — while the replayed agent's writes inside it stayed.
   const keptHere = await safety.gitlinks(before.tree);
-  const kept = [...new Set([...keptNested, ...keptHere])].sort();
+  // And the ones no snapshot could hold at all. A nested repository with no commit is not a
+  // gitlink — git has no id to record it by — so neither `gitlinks` call can see it, and before
+  // this the safety snapshot did not merely miss it: it threw, and `orca replay` exited on git's
+  // own sentence about a commit checked out with an `orca-safety-*` directory left behind. It is
+  // skipped now, which makes it exactly the case these lines are about: orca holds no copy of
+  // what is inside it.
+  const kept = [...new Set([...keptNested, ...keptHere, ...safety.uncommittedNested])].sort();
 
   // Not "they are left exactly as they are", which is only true of the restore. The replay runs
   // the recorded agent live in this directory, and orca does not intercept what it does — so a
@@ -1594,22 +1600,10 @@ export async function assertRestorable(
   const gitlinks = await capture.gitlinks(tree);
   if (gitlinks.length === 0) return [];
   const roots = resetRoots(dir, artifacts);
-  // Containment in BOTH directions, because the reset is destructive either way.
-  //
-  // `path.startsWith(root)` is the obvious half: the repository sits inside a path being deleted.
-  // `root.startsWith(path)` is the half that reads backwards and matters just as much — a
-  // multi-segment declaration such as `resetBeforeReplay: ['data/cache']` with a nested
-  // repository at `data` deletes a path *inside* the operator's own repository. Nothing else
-  // catches that: `assertResettable` asks `uncaptured(['data/cache'])`, and git does not look
-  // inside an embedded repository, so it comes back empty and the reset goes ahead. The files
-  // are then gone with nothing anywhere holding a byte of them, under exit 0.
-  const doomed = gitlinks.filter((path) => {
-    const one = fold(path);
-    return roots.some((root) => {
-      const other = fold(root);
-      return one === other || one.startsWith(`${other}/`) || other.startsWith(`${one}/`);
-    });
-  });
+  // Containment in BOTH directions, because the reset is destructive either way — see
+  // `reachedByReset`, which `assertResettable` asks the same question of for a repository with no
+  // commit, since neither this guard nor `uncaptured` can see one.
+  const doomed = gitlinks.filter((path) => reachedByReset(path, roots));
   if (doomed.length === 0) return gitlinks;
   throw new Error(
     `this replay would delete ${roots.join(', ')} to put the harness back where the recording ` +
@@ -1634,6 +1628,27 @@ function fold(path: string): string {
 }
 
 /**
+ * Whether resetting `roots` reaches `path`, in either direction.
+ *
+ * `path` inside a root is the obvious half: the thing sits in a directory being deleted.
+ * A root inside `path` is the half that reads backwards and matters just as much — a multi-segment
+ * declaration such as `resetBeforeReplay: ['data/cache']` with a nested repository at `data`
+ * deletes a path *inside* the operator's own repository.
+ *
+ * Whole segments, so `data2` is not read as being inside `data`; folded where the filesystem folds,
+ * so `Data` is not read as being somewhere else. Shared by the two guards that have to agree about
+ * it — {@link assertRestorable} for a repository the snapshot holds as a gitlink, and
+ * {@link assertResettable} for one it could not hold at all.
+ */
+function reachedByReset(path: string, roots: readonly string[]): boolean {
+  const one = fold(path);
+  return roots.some((root) => {
+    const other = fold(root);
+    return one === other || one.startsWith(`${other}/`) || other.startsWith(`${one}/`);
+  });
+}
+
+/**
  * Say which nested repositories a restore cannot write, and what that costs here.
  *
  * `effect` differs by caller because the consequence does: a fork writes into a directory of its
@@ -1649,7 +1664,7 @@ function keepNestedNote(
   if (paths.length === 0) return;
   out.warn('replay.nested_kept', {
     paths: paths.join(','),
-    why: 'the snapshot records these as embedded git repositories and never held their contents',
+    why: 'these are git repositories of their own, and the snapshot never held their contents — recorded as a reference, or, with no commit to reference, not at all',
     ...fields,
   });
 }
@@ -1751,6 +1766,21 @@ export function resetRoots(dir: string, artifacts: HarnessArtifacts | undefined)
   return [...new Set(roots)];
 }
 
+/** What a restore will write where the working tree holds nothing, for the put-back to remove. */
+export interface Introduced {
+  /** Each with the ids of every version of it the recording holds, to know it again by. */
+  files: { path: string; oids: ReadonlySet<string> }[];
+  /** Directories it has to create for them, deepest first, so each is empty when its turn comes. */
+  dirs: string[];
+  /**
+   * The links on the way to these files that git walked into as directories when it took the copy
+   * — a junction, on Windows — and that were links then, each with where it pointed. The removal
+   * may pass through real directories and through these, while each still points there, and
+   * through nothing else.
+   */
+  walked: ReadonlyMap<string, string>;
+}
+
 /**
  * Refuse the reset unless the safety copy holds everything the reset is about to delete.
  *
@@ -1771,13 +1801,40 @@ export function resetRoots(dir: string, artifacts: HarnessArtifacts | undefined)
  * first. In the ordinary run nothing under these paths is excluded and this asks git one question
  * and moves on.
  */
-async function assertResettable(
+export async function assertResettable(
   safety: FsCapture,
   dir: string,
   artifacts: HarnessArtifacts | undefined,
 ): Promise<void> {
   const roots = resetRoots(dir, artifacts);
   if (roots.length === 0) return;
+
+  // THE SAME RULE, FOR A NESTED REPOSITORY GIT COULD NOT NAME.
+  //
+  // `assertRestorable` asks this of the recording's gitlinks, before anything is copied. One with
+  // no commit is in no tree, so that guard cannot see it — and the `uncaptured` question below
+  // cannot either: `ls-files --others -- data/cache` does not descend into an embedded repository,
+  // so a reset root INSIDE one comes back empty. Measured, with the operator's work at
+  // `data/cache/` in a `git init`-ed `data`: empty for `data/cache`, `data/` for `data`. So the
+  // direction that the other guard needs `root.startsWith(path)` for is the one that gets through
+  // here as well.
+  //
+  // It has to be asked HERE because this is the first thing holding a snapshot of the operator's
+  // own tree, which is the only place a repository with no commit is ever named. And it has to be
+  // asked at all because until the snapshot stopped throwing on one, a replay in such a workspace
+  // never reached the reset: the guard arrives with the thing that made the reset reachable.
+  const reached = safety.uncommittedNested.filter((path) => reachedByReset(path, roots));
+  if (reached.length > 0) {
+    throw new Error(
+      `this replay would delete ${roots.join(', ')} to put the harness back where the recording ` +
+        `started, and cannot put ${reached.join(', ')} back: those are git repositories of their ` +
+        'own with no commit yet, so no snapshot holds a byte of what is inside them — whether the ' +
+        'reset removes one outright or reaches inside it. Nothing has been deleted. Commit inside ' +
+        'them, move them outside the adapter’s reset paths, or replay with --in-place to leave ' +
+        'the working tree alone.',
+    );
+  }
+
   const missing = await safety.uncaptured(roots);
   if (missing.length === 0) return;
   const shown = missing.slice(0, 5).join(', ');
@@ -1789,21 +1846,6 @@ async function assertResettable(
       'only what it has a copy of, so nothing has been deleted. Move those out of the reset ' +
       'paths, or replay with --in-place to leave the working tree alone.',
   );
-}
-
-/** What a restore will write where the working tree holds nothing, for the put-back to remove. */
-export interface Introduced {
-  /** Each with the ids of every version of it the recording holds, to know it again by. */
-  files: { path: string; oids: ReadonlySet<string> }[];
-  /** Directories it has to create for them, deepest first, so each is empty when its turn comes. */
-  dirs: string[];
-  /**
-   * The links on the way to these files that git walked into as directories when it took the copy
-   * — a junction, on Windows — and that were links then, each with where it pointed. The removal
-   * may pass through real directories and through these, while each still points there, and
-   * through nothing else.
-   */
-  walked: ReadonlyMap<string, string>;
 }
 
 /**

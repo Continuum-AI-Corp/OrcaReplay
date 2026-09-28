@@ -6,6 +6,8 @@ export interface SnapshotResult {
   firstSnapshot?: boolean;
   /** See `TurnSnapshot.skippedGitlinks`: declared paths this snapshot could not hold. */
   skippedGitlinks?: readonly string[];
+  /** See `TurnSnapshot.uncommittedNested`: nested repositories with no commit to record them by. */
+  uncommittedNested?: readonly string[];
 }
 
 /** The slice of FsCapture this helper needs, so it can be stubbed in tests. */

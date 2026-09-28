@@ -1,7 +1,7 @@
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
-import type { GitOptions } from './git.js';
+import type { GitOptions, GitResult } from './git.js';
 import { gitAvailable, runGit, runGitRaw } from './git.js';
 
 /** git's hardcoded id for a tree with no entries; always resolvable, even in a fresh store. */
@@ -115,6 +115,27 @@ function matchedNothing(stderr: string): boolean {
   return /did not match any files/i.test(stderr);
 }
 
+/**
+ * The nested repositories a `git add` failure says it could not index, because they hold no commit.
+ *
+ * Read off the message for the same reason {@link matchedNothing} is, and with the same licence:
+ * git has no exit code of its own for this, and `childEnv` sets `LC_ALL=C`, so the wording is
+ * git's rather than the operator's locale's.
+ *
+ * Anchored, and the whole line consumed, because the path is the rest of it: a directory may hold
+ * a space, a quote or a bracket, so nothing here may split on one. Git prints the path with a
+ * trailing slash — `error: 'newproject/' does not have a commit checked out` — which is dropped,
+ * since every pathspec and every path this store reports elsewhere is without one.
+ */
+function commitlessNested(stderr: string): string[] {
+  const named = new Set<string>();
+  for (const line of stderr.split(/\r?\n/)) {
+    const path = /^error: '(.*)\/' does not have a commit checked out$/.exec(line.trim())?.[1];
+    if (path !== undefined && path !== '') named.add(path);
+  }
+  return [...named];
+}
+
 /** The paths a `ls-files --stage -z` listing records as gitlinks. */
 function gitlinkPaths(staged: string): string[] {
   return staged
@@ -153,12 +174,28 @@ export class ShadowIndex {
   private reportedGitlinks = new Set<string>();
   private skipped: readonly string[] = [];
 
+  /** The same, for the ones git could not index at all. See {@link addAll}. */
+  private reportedUncommitted = new Set<string>();
+  private uncommitted: readonly string[] = [];
+
   /**
    * Nested repositories the last snapshot dropped from a declared artifact path, the first time
    * each is seen. Empty on every ordinary snapshot.
    */
   get skippedGitlinks(): readonly string[] {
     return this.skipped;
+  }
+
+  /**
+   * Nested repositories the last snapshot could not hold at all, the first time each is seen —
+   * they have no commit, so git has no id to record them by. See {@link addAll}.
+   *
+   * Reported for the same reason {@link gitlinks} is: this store holds nothing of what is inside
+   * them, so a restore puts nothing back there, and whoever is about to run an agent over this
+   * directory needs to know that before it starts rather than afterwards.
+   */
+  get uncommittedNested(): readonly string[] {
+    return this.uncommitted;
   }
 
   static async isAvailable(): Promise<boolean> {
@@ -223,9 +260,83 @@ export class ShadowIndex {
    */
   async snapshot(): Promise<string> {
     this.skipped = [];
-    await this.run(['add', '-A', '--', '.', ...SENSITIVE_PATHSPECS]);
+    this.uncommitted = [];
+    await this.addAll();
     if (this.forced.length > 0) await this.addForced();
     return (await this.run(['write-tree'])).trim();
+  }
+
+  /**
+   * One `git add`, retried past every nested repository git cannot index at all.
+   *
+   * A NESTED REPOSITORY WITH NO COMMIT STOPS `git add` DEAD. Git stores an embedded repository as
+   * a gitlink, which is the id of its HEAD commit; one that has never been committed to has no
+   * HEAD, so git answers `error: '<path>/' does not have a commit checked out` and then
+   * `fatal: adding files failed` — exit 128, the whole add abandoned, and the index left empty.
+   * That shape is not exotic: it is what `git init` in a subdirectory leaves behind, which is what
+   * anyone starting a second project inside their workspace has until they make the first commit.
+   *
+   * Measured on orca before this, both times it can happen:
+   *
+   *   - there while recording — every turn's snapshot threw, so the trace held no `fs.snapshot`
+   *     at all, and the replay then read that absence as `--no-fs` and told the operator the run
+   *     was "recorded with --no-fs" when nobody had passed it
+   *   - appearing before a replay — the SAFETY snapshot threw, so `orca replay` exited 1 with
+   *     git's own sentence about a commit checked out, having already made its `orca-safety-*`
+   *     scratch directory, which nothing then removed and nothing printed the path of
+   *
+   * Left out and named, which is what git already does with a nested repository that HAS a commit:
+   * that one is stored as a gitlink whose contents this store never holds, and everything
+   * downstream — `replay.nested_kept`, `assertRestorable`, the restore's own note — exists to say
+   * so. One without a commit is the same fact about the same directory, so it is reported the same
+   * way rather than made a fatal error. See {@link uncommittedNested}.
+   *
+   * ONE AT A TIME, because git names one and stops: with three of them the first add named only
+   * the first, and excluding it made the next add fail on the second. So this re-adds until git is
+   * satisfied, and gives up the moment a failure names nothing new — every other failure comes
+   * back to the caller with git's own words, to be judged exactly as before.
+   *
+   * `:(exclude,literal)` rather than a bare `:(exclude)`: the path arrives from git's message as
+   * whatever the operator called the directory, and a pathspec without `literal` is a pattern.
+   * Measured beside a workspace holding `ab/` and `ax/`: `:(exclude)a*` took both out of the add,
+   * while `:(exclude,literal)a*` took out only a path named exactly that. So a nested repository
+   * called `a*` — a legal name on POSIX, not on Windows — would quietly drop its neighbours from
+   * the snapshot. A name holding `[` does not, as it happens: git compares the leading directory
+   * literally before it ever wildmatches, so `my [new] project` excludes only itself either way.
+   * `literal` is used for every one of them because which characters a name holds is not this
+   * code's to know.
+   */
+  private async addSkippingCommitless(
+    args: readonly string[],
+  ): Promise<{ res: GitResult; excluded: string[] }> {
+    const excluded: string[] = [];
+    for (;;) {
+      const res = await runGit(
+        [...args, ...excluded.map((path) => `:(exclude,literal)${path}`), ...SENSITIVE_PATHSPECS],
+        this.opts(),
+      );
+      if (res.code === 0) return { res, excluded };
+      const named = commitlessNested(res.stderr).filter((path) => !excluded.includes(path));
+      if (named.length === 0) return { res, excluded };
+      excluded.push(...named);
+    }
+  }
+
+  private async addAll(): Promise<void> {
+    const { res, excluded } = await this.addSkippingCommitless(['add', '-A', '--', '.']);
+    if (res.code !== 0) throw new Error(`git add failed (${res.code}): ${res.stderr.trim()}`);
+    this.noteUncommitted(excluded);
+  }
+
+  /**
+   * Remember which of these are new to this store, so a run names each once however many snapshots
+   * it takes, and accumulate within one snapshot — the ordinary add and the forced add can each
+   * meet one the other cannot see.
+   */
+  private noteUncommitted(paths: readonly string[]): void {
+    const fresh = paths.filter((path) => !this.reportedUncommitted.has(path));
+    for (const path of fresh) this.reportedUncommitted.add(path);
+    this.uncommitted = [...new Set([...this.uncommitted, ...fresh])].sort();
   }
 
   /**
@@ -251,20 +362,24 @@ export class ShadowIndex {
    * safety snapshot before anything destructive has happened.
    */
   private async addForced(): Promise<void> {
-    const together = await runGit(
-      ['add', '-f', '--', ...this.forced, ...SENSITIVE_PATHSPECS],
-      this.opts(),
-    );
-    if (together.code !== 0) {
+    // Both adds go through the same loop, because they see different things: `-A` never reaches a
+    // path the workspace ignores, and a declared artifact path is exactly where an ignored one is
+    // — so the forced add can meet a commit-less nested repository the first add could not.
+    const left: string[] = [];
+    const together = await this.addSkippingCommitless(['add', '-f', '--', ...this.forced]);
+    left.push(...together.excluded);
+    if (together.res.code !== 0) {
       for (const path of this.forced) {
-        const one = await runGit(['add', '-f', '--', path, ...SENSITIVE_PATHSPECS], this.opts());
-        if (one.code === 0 || matchedNothing(one.stderr)) continue;
+        const one = await this.addSkippingCommitless(['add', '-f', '--', path]);
+        left.push(...one.excluded);
+        if (one.res.code === 0 || matchedNothing(one.res.stderr)) continue;
         throw new Error(
-          `git add failed for the declared artifact path '${path}' (${one.code}): ` +
-            one.stderr.trim(),
+          `git add failed for the declared artifact path '${path}' (${one.res.code}): ` +
+            one.res.stderr.trim(),
         );
       }
     }
+    this.noteUncommitted(left);
     await this.dropForcedGitlinks();
   }
 
