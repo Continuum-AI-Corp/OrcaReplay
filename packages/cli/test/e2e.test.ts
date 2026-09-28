@@ -615,6 +615,59 @@ describe('end to end: record → replay → fork', () => {
     }
   });
 
+  /**
+   * `--worktree` promises never to touch your files, and two branches ahead of the one that reads
+   * it broke the promise: `--in-place` given beside it won without a word, and a run recorded with
+   * --no-fs fell through to the in-place warning and ran the agent over the working tree anyway —
+   * the recorded edit landed on uncommitted work.
+   */
+  it('never replays in your directory once asked for a scratch copy', async () => {
+    const withFs = await record(2);
+    await writeFile(join(workspace, 'auth.ts'), 'MY UNCOMMITTED WORK\n');
+    await expect(
+      replayCommand(
+        parseArgs(['replay', withFs.runId, '--worktree', '--in-place']),
+        out,
+        workspace,
+      ),
+    ).rejects.toThrow(/cannot both apply/);
+    expect(await readFile(join(workspace, 'auth.ts'), 'utf8')).toBe('MY UNCOMMITTED WORK\n');
+
+    const noFs = await recordCommand(
+      parseArgs([
+        'record',
+        'generic-openai',
+        '--no-fs',
+        '--upstream-anthropic',
+        model.url,
+        '--',
+        'node',
+        FAKE_AGENT,
+      ]),
+      out,
+      workspace,
+    );
+    await writeFile(join(workspace, 'auth.ts'), 'MY UNCOMMITTED WORK\n');
+    const { leftBehind } = await withIsolatedTmp(async () => {
+      await expect(
+        replayCommand(parseArgs(['replay', noFs.runId, '--worktree']), out, workspace),
+      ).rejects.toThrow(/no workspace snapshot to copy/);
+    });
+    expect(
+      await readFile(join(workspace, 'auth.ts'), 'utf8'),
+      'a replay asked for a scratch copy must not have written into the checkout',
+    ).toBe('MY UNCOMMITTED WORK\n');
+    expect(leftBehind).toEqual([]);
+    const warned = lines.find((l) => l.includes('replay.no_snapshot')) ?? '';
+    expect(warned, `no diagnosis in:\n${lines.join('\n')}`).toContain('--in-place');
+    expect(lines.join('\n')).not.toContain('replay.in-place');
+
+    // Unchanged without the flag: a run with no snapshot still replays where it is, and says so.
+    const inPlace = await replayCommand(parseArgs(['replay', noFs.runId]), out, workspace);
+    expect(inPlace.matchedExact).toBe(2);
+    expect(lines.join('\n')).toContain('replay.in-place');
+  });
+
   it('does not touch the working tree when asked to replay in a scratch copy', async () => {
     process.env.FAKE_AGENT_READ = 'auth.ts';
     try {
