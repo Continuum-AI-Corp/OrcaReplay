@@ -386,14 +386,17 @@ describe('a nested repository with no commit', () => {
     expect([...shadow.uncommittedNested].sort()).toEqual(['one', 'three', 'two']);
   });
 
-  itGit('leaves out one buried under ordinary directories, and keeps their other contents', async () => {
-    const { workTree, shadow } = await fixture();
-    await write(workTree, 'a/b/keep.txt', 'mine\n');
-    await commitless(workTree, 'a/b/newproject');
+  itGit(
+    'leaves out one buried under ordinary directories, and keeps their other contents',
+    async () => {
+      const { workTree, shadow } = await fixture();
+      await write(workTree, 'a/b/keep.txt', 'mine\n');
+      await commitless(workTree, 'a/b/newproject');
 
-    expect(await filesIn(shadow, await shadow.snapshot())).toEqual(['a/b/keep.txt']);
-    expect(shadow.uncommittedNested).toEqual(['a/b/newproject']);
-  });
+      expect(await filesIn(shadow, await shadow.snapshot())).toEqual(['a/b/keep.txt']);
+      expect(shadow.uncommittedNested).toEqual(['a/b/newproject']);
+    },
+  );
 
   itGit('leaves out a name holding pattern characters, and only it', async () => {
     const { workTree, shadow } = await fixture();
