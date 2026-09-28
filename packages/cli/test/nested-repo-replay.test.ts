@@ -4,12 +4,13 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { TraceReader, deriveCheckpoints } from '@orcareplay/core';
+import { TraceReader, deriveCheckpoints, type TraceWriter } from '@orcareplay/core';
 import { FsCapture } from '@orcareplay/fs-capture';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parseArgs } from '../src/args.js';
 import { assertResettable, assertRestorable, replayCommand } from '../src/commands/replay.js';
 import { recordCommand } from '../src/commands/record.js';
+import { appendSnapshot } from '../src/fs-events.js';
 import { Output, type LogEntry } from '../src/out.js';
 import { startFakeModel } from './fixtures/fake-model.mjs';
 
@@ -303,6 +304,152 @@ describe('assertResettable, with a nested repository that has no commit', () => 
     await writeFile(join(dir, 'cache', 'built.bin'), 'the run built this');
     await safety.snapshotTurn(1);
     await expect(assertResettable(safety, dir, artifacts(['cache']))).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * A DECLARED ARTIFACT PATH INSIDE A NESTED REPOSITORY — `resetBeforeReplay: ['data/cache']` with
+ * the operator's own project at `data`.
+ *
+ * Git stages nothing inside another repository, and before the forced add set such a path aside
+ * it answered in two ways, both of them wrong for orca:
+ *
+ *   committed, not ignored   the forced add died on "Pathspec 'data/cache' is in submodule 'data'"
+ *                            — every snapshot of a recording, and the safety copy of a replay,
+ *                            after its `orca-safety-*` directory already existed
+ *   ignored, or no commit    the forced add exited 0 having staged nothing, and a replay whose
+ *                            reset reached `data/cache` deleted it under exit 0, having printed
+ *                            "your files are restored when the replay ends"
+ *
+ * No bundled adapter declares a path that deep, so these drive the two functions the CLI runs —
+ * `appendSnapshot` while recording and `assertResettable` before a reset — over a real capture of
+ * a real workspace.
+ */
+describe('a declared artifact path inside a nested repository', () => {
+  const artifacts = (resetBeforeReplay: string[]) => ({ resetBeforeReplay });
+  let dir: string;
+
+  /** The operator's project at `data`, with their work under `data/cache/`. */
+  async function project(committed: boolean): Promise<void> {
+    const at = join(dir, 'data');
+    await mkdir(join(at, 'cache'), { recursive: true });
+    await initRepo(at);
+    await writeFile(join(at, 'notes.md'), 'work of my own');
+    await writeFile(join(at, 'cache', 'mine.bin'), 'also mine, and in nobody’s snapshot');
+    if (committed) {
+      await run('git', ['add', '-A'], { cwd: at });
+      await run('git', ['commit', '-qm', 'mine'], { cwd: at });
+    }
+  }
+
+  /** The copy a replay takes: forced over what the adapter captures and resets. */
+  async function capture(forced: string[]): Promise<FsCapture> {
+    return FsCapture.start({ runDir: join(dir, '.orca-run'), cwd: dir, forced });
+  }
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'orca-inside-'));
+    await initRepo(dir);
+    await writeFile(join(dir, 'README.md'), 'the outer project');
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  describe('while recording', () => {
+    async function record(forced: string[]): Promise<{ text: string; types: string[] }> {
+      const lines: string[] = [];
+      const types: string[] = [];
+      const out = new Output({ write: (s) => void lines.push(s), isTTY: false });
+      // Only `append` is used; what matters is what the snapshot wrote, not how a trace stores it.
+      const writer = {
+        append: async (event: { type: string }) => void types.push(event.type),
+      } as unknown as TraceWriter;
+      await appendSnapshot(await capture(forced), writer, out, 0, { initial: true });
+      return { text: lines.join(''), types };
+    }
+
+    it('keeps the snapshot a committed one used to cost every turn', async () => {
+      await project(true);
+      const { text, types } = await record(['data/cache']);
+      expect(text).not.toContain('fs.snapshot_failed');
+      expect(types).toContain('fs.snapshot');
+    });
+
+    it('says which declared path it could not hold, and whose repository it is in', async () => {
+      await writeFile(join(dir, '.gitignore'), 'data/\n');
+      await project(true);
+      const { text } = await record(['data/cache']);
+      // Silent before: nothing failed, and nothing said the artifact was not in the recording.
+      expect(text).toContain('fs.artifact_inside_repository');
+      expect(text).toContain('paths=data/cache');
+      expect(text).toContain('inside=data');
+    });
+  });
+
+  describe('before a reset', () => {
+    /** The case that deleted the operator's work: nothing else sees a repository around the root. */
+    it('refuses a reset path inside one the workspace ignores', async () => {
+      await writeFile(join(dir, '.gitignore'), 'data/\n');
+      await project(true);
+      const safety = await capture(['data/cache']);
+      await safety.snapshotTurn(0);
+
+      // Pinned so the reason is on the page: neither question the other guards ask sees it.
+      await expect(safety.uncaptured(['data/cache'])).resolves.toEqual([]);
+      expect(safety.uncommittedNested).toEqual([]);
+      await expect(assertResettable(safety, dir, artifacts(['data/cache']))).rejects.toThrow(
+        /cannot put data back/,
+      );
+    });
+
+    it('refuses one that is committed and not ignored, which used to die inside git', async () => {
+      await project(true);
+      const safety = await capture(['data/cache']);
+      // The throw this replaces came from right here, after `orca-safety-*` already existed.
+      await expect(safety.snapshotTurn(0)).resolves.toBeDefined();
+      await expect(assertResettable(safety, dir, artifacts(['data/cache']))).rejects.toThrow(
+        /cannot put data back/,
+      );
+    });
+
+    it('refuses one with no commit under an ignored path', async () => {
+      await writeFile(join(dir, '.gitignore'), 'data/\n');
+      await project(false);
+      const safety = await capture(['data/cache']);
+      await safety.snapshotTurn(0);
+      await expect(assertResettable(safety, dir, artifacts(['data/cache']))).rejects.toThrow(
+        /cannot put data back/,
+      );
+    });
+
+    /**
+     * It used to say "commit inside them", which never helped: a committed repository is a gitlink,
+     * whose contents no snapshot holds either, so the same reset is refused the same way — as the
+     * committed cases above show.
+     */
+    it('does not tell the operator to commit inside it', async () => {
+      await project(false);
+      const safety = await capture(['data/cache']);
+      await safety.snapshotTurn(0);
+      const message = await assertResettable(safety, dir, artifacts(['data/cache'])).then(
+        () => 'it did not refuse',
+        (error: Error) => error.message,
+      );
+      expect(message).toContain('Nothing has been deleted');
+      expect(message).not.toMatch(/commit inside/i);
+    });
+
+    it('lets a reset that reaches only other paths go ahead', async () => {
+      await writeFile(join(dir, '.gitignore'), 'data/\ncache/\n');
+      await project(true);
+      await mkdir(join(dir, 'cache'), { recursive: true });
+      await writeFile(join(dir, 'cache', 'index.bin'), 'the run built this');
+      // `data/cache` is captured-only here; the reset is `cache`, which holds no repository.
+      const safety = await capture(['data/cache', 'cache']);
+      await safety.snapshotTurn(0);
+      await expect(assertResettable(safety, dir, artifacts(['cache']))).resolves.toBeUndefined();
+    });
   });
 });
 

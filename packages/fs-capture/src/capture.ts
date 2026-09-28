@@ -2,7 +2,7 @@ import { realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import type { GitInfo } from '@orcareplay/schema';
 import { runGit } from './git.js';
-import type { FileChange, MaterializeOptions, TreeFile } from './shadow.js';
+import type { FileChange, ForcedInsideNested, MaterializeOptions, TreeFile } from './shadow.js';
 import { ShadowIndex } from './shadow.js';
 
 export interface FsCaptureOptions {
@@ -32,6 +32,12 @@ export interface TurnSnapshot {
    * snapshot; see {@link ShadowIndex.uncommittedNested}.
    */
   uncommittedNested?: readonly string[];
+  /**
+   * Declared artifact paths this snapshot could not hold because each sits inside a nested
+   * repository, with that repository, named the first time each is seen. Absent from every
+   * ordinary snapshot; see {@link ShadowIndex.forcedInsideNested}.
+   */
+  forcedInsideNested?: readonly ForcedInsideNested[];
 }
 
 /**
@@ -79,12 +85,14 @@ export class FsCapture {
     this.lastTurn = turn;
     const skipped = this.shadow.skippedGitlinks;
     const uncommitted = this.shadow.uncommittedNested;
+    const inside = this.shadow.forcedInsideNested;
     return {
       tree,
       changes,
       firstSnapshot: previous === undefined,
       ...(skipped.length === 0 ? {} : { skippedGitlinks: skipped }),
       ...(uncommitted.length === 0 ? {} : { uncommittedNested: uncommitted }),
+      ...(inside.length === 0 ? {} : { forcedInsideNested: inside }),
     };
   }
 
@@ -104,6 +112,11 @@ export class FsCapture {
   /** See {@link ShadowIndex.uncommittedNested}: what no snapshot of this work tree can hold. */
   get uncommittedNested(): readonly string[] {
     return this.shadow.uncommittedNested;
+  }
+
+  /** See {@link ShadowIndex.forcedInsideNested}: declared paths no snapshot here can hold. */
+  get forcedInsideNested(): readonly ForcedInsideNested[] {
+    return this.shadow.forcedInsideNested;
   }
 
   /** See {@link ShadowIndex.has}: whether a restore of this tree has anything to restore from. */

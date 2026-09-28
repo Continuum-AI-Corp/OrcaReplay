@@ -1404,7 +1404,17 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
   // own sentence about a commit checked out with an `orca-safety-*` directory left behind. It is
   // skipped now, which makes it exactly the case these lines are about: orca holds no copy of
   // what is inside it.
-  const kept = [...new Set([...keptNested, ...keptHere, ...safety.uncommittedNested])].sort();
+  //
+  // And the repositories around a declared artifact path, which the forced add set aside for the
+  // same reason: git stages nothing inside another repository, so neither snapshot holds them.
+  const kept = [
+    ...new Set([
+      ...keptNested,
+      ...keptHere,
+      ...safety.uncommittedNested,
+      ...safety.forcedInsideNested.map((entry) => entry.repository),
+    ]),
+  ].sort();
 
   // Not "they are left exactly as they are", which is only true of the restore. The replay runs
   // the recorded agent live in this directory, and orca does not intercept what it does — so a
@@ -1809,29 +1819,38 @@ export async function assertResettable(
   const roots = resetRoots(dir, artifacts);
   if (roots.length === 0) return;
 
-  // THE SAME RULE, FOR A NESTED REPOSITORY GIT COULD NOT NAME.
+  // THE SAME RULE, FOR THE NESTED REPOSITORIES NO SNAPSHOT NAMES AS GITLINKS.
   //
-  // `assertRestorable` asks this of the recording's gitlinks, before anything is copied. One with
-  // no commit is in no tree, so that guard cannot see it — and the `uncaptured` question below
-  // cannot either: `ls-files --others -- data/cache` does not descend into an embedded repository,
-  // so a reset root INSIDE one comes back empty. Measured, with the operator's work at
-  // `data/cache/` in a `git init`-ed `data`: empty for `data/cache`, `data/` for `data`. So the
-  // direction that the other guard needs `root.startsWith(path)` for is the one that gets through
-  // here as well.
+  // `assertRestorable` asks this of the recording's gitlinks, before anything is copied. Two kinds
+  // of repository are in no tree, so that guard cannot see them — and the `uncaptured` question
+  // below cannot either: `ls-files --others -- data/cache` does not descend into an embedded
+  // repository, so a reset root INSIDE one comes back empty (measured: empty for `data/cache`,
+  // `data/` for `data`). So the direction the other guard needs `root.startsWith(path)` for is the
+  // one that gets through here, for both:
+  //
+  //   - one with no commit, which git cannot record at all (`uncommittedNested`)
+  //   - one around a declared path, which the forced add sets aside rather than hand to git
+  //     (`forcedInsideNested`). Measured before it did: with `data/` ignored, `add -f -- data/cache`
+  //     exited 0 having staged nothing, and the reset then deleted the operator's `data/cache`
+  //     under exit 0 and "your files are restored when the replay ends" — committed or not.
   //
   // It has to be asked HERE because this is the first thing holding a snapshot of the operator's
-  // own tree, which is the only place a repository with no commit is ever named. And it has to be
-  // asked at all because until the snapshot stopped throwing on one, a replay in such a workspace
-  // never reached the reset: the guard arrives with the thing that made the reset reachable.
-  const reached = safety.uncommittedNested.filter((path) => reachedByReset(path, roots));
+  // own tree, which is the only place either kind is ever named.
+  const unheld = [
+    ...safety.uncommittedNested,
+    ...safety.forcedInsideNested.map((entry) => entry.repository),
+  ];
+  const reached = [...new Set(unheld)].filter((path) => reachedByReset(path, roots)).sort();
   if (reached.length > 0) {
+    // Not "commit inside them", which this said before and which never helped: a committed
+    // repository is a gitlink, whose contents no snapshot holds either, so the same reset is
+    // refused the same way.
     throw new Error(
       `this replay would delete ${roots.join(', ')} to put the harness back where the recording ` +
         `started, and cannot put ${reached.join(', ')} back: those are git repositories of their ` +
-        'own with no commit yet, so no snapshot holds a byte of what is inside them — whether the ' +
-        'reset removes one outright or reaches inside it. Nothing has been deleted. Commit inside ' +
-        'them, move them outside the adapter’s reset paths, or replay with --in-place to leave ' +
-        'the working tree alone.',
+        'own, and no snapshot holds a byte of what is inside them — whether the reset removes one ' +
+        'outright or reaches inside it. Nothing has been deleted. Move those repositories clear of ' +
+        'the adapter’s reset paths, or replay with --in-place to leave the working tree alone.',
     );
   }
 

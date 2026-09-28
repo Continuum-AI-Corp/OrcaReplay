@@ -62,6 +62,19 @@ export async function appendSnapshot(
     });
   }
 
+  // A declared artifact path inside a nested repository is not in this snapshot and cannot be: git
+  // stages nothing inside another repository. Before this was said, the forced add either killed
+  // the snapshot — every turn, so the run held none — or quietly staged nothing, and the recording
+  // looked like it held the artifacts right up until a replay needed them. Once per path.
+  if (snap.forcedInsideNested !== undefined && snap.forcedInsideNested.length > 0) {
+    out.warn('fs.artifact_inside_repository', {
+      paths: snap.forcedInsideNested.map((entry) => entry.path).join(','),
+      inside: [...new Set(snap.forcedInsideNested.map((entry) => entry.repository))].join(','),
+      why: 'these declared artifact paths sit inside a git repository of their own, and git stages nothing inside another repository, so this snapshot holds none of them',
+      next: 'a replay cannot put them back and will refuse to reset them; keep the artifacts outside that repository',
+    });
+  }
+
   await writer.append({
     type: 'fs.snapshot',
     actor: 'orca',

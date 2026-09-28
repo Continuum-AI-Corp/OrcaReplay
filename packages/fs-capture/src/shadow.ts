@@ -1,6 +1,6 @@
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, rm, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import type { GitOptions, GitResult } from './git.js';
 import { gitAvailable, runGit, runGitRaw } from './git.js';
 
@@ -136,12 +136,78 @@ function commitlessNested(stderr: string): string[] {
   return [...named];
 }
 
+/**
+ * The nested repository a declared path sits strictly inside, if any: the first directory on the
+ * way down from the work tree to it that holds a `.git` of its own. Not the work tree's own, and not
+ * the path itself — a declared path that IS a repository is stored as a gitlink, which
+ * {@link ShadowIndex.dropForcedGitlinks} already handles.
+ *
+ * ASKED OF THE FILESYSTEM, NOT OF GIT, because git answers the same question three different ways
+ * depending on things the operator does not control. Measured with the operator's own project at
+ * `data` and an adapter declaring `data/cache`:
+ *
+ *   committed, not ignored   `add -A` stages `data` as a gitlink, and `add -f -- data/cache` then
+ *                            dies: "Pathspec 'data/cache' is in submodule 'data'" — every turn of a
+ *                            recording, so it held no snapshot at all, and the safety copy before a
+ *                            replay, after its `orca-safety-*` directory already existed
+ *   ignored, or no commit    `add -f -- data/cache` exits 0 having staged nothing and named nothing
+ *
+ * Neither is an answer anything downstream can use, and the second is silent: a replay whose reset
+ * reached inside that repository deleted the operator's files under exit 0, with no copy anywhere.
+ * A `.git` on the way down is the one fact all three share.
+ *
+ * Only literal segments are walked. A glob ends the walk, and every segment before it encloses
+ * whatever the glob matches; a path that leaves the work tree has no enclosing repository here.
+ */
+async function enclosingRepository(
+  workTree: string,
+  declared: string,
+): Promise<string | undefined> {
+  const inside = relative(workTree, resolve(workTree, declared));
+  if (inside === '' || isAbsolute(inside) || inside.split(/[\\/]/)[0] === '..') return undefined;
+  const segments = inside.split(/[\\/]/).filter((segment) => segment !== '');
+  const literal: string[] = [];
+  for (const segment of segments) {
+    if (/[*?[]/.test(segment)) break;
+    literal.push(segment);
+  }
+  // Every proper prefix of the path; and all of the literal ones, when a glob cut the walk short.
+  const deepest = literal.length === segments.length ? literal.length - 1 : literal.length;
+  for (let depth = 1; depth <= deepest; depth += 1) {
+    if (await holdsGitDir(join(workTree, ...literal.slice(0, depth)))) {
+      return literal.slice(0, depth).join('/');
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Whether `dir` has a `.git` — a directory for a repository of its own, a file for a submodule or a
+ * linked worktree. A path this process cannot even look at counts as one: what depends on the
+ * answer is whether orca may delete inside it, and nothing may conclude "safe" from an error.
+ */
+async function holdsGitDir(dir: string): Promise<boolean> {
+  try {
+    await lstat(join(dir, '.git'));
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return !(code === 'ENOENT' || code === 'ENOTDIR');
+  }
+}
+
 /** The paths a `ls-files --stage -z` listing records as gitlinks. */
 function gitlinkPaths(staged: string): string[] {
   return staged
     .split('\0')
     .filter((entry) => entry.startsWith(`${GITLINK_MODE} `))
     .map((entry) => entry.slice(entry.indexOf('\t') + 1));
+}
+
+/** A declared artifact path, and the nested repository it sits inside. */
+export interface ForcedInsideNested {
+  path: string;
+  repository: string;
 }
 
 /** One file of a tree: where it goes, and the id of the bytes it holds. */
@@ -178,6 +244,10 @@ export class ShadowIndex {
   private reportedUncommitted = new Set<string>();
   private uncommitted: readonly string[] = [];
 
+  /** The same, for declared paths inside a nested repository. See {@link addForced}. */
+  private reportedInside = new Set<string>();
+  private inside: readonly ForcedInsideNested[] = [];
+
   /**
    * Nested repositories the last snapshot dropped from a declared artifact path, the first time
    * each is seen. Empty on every ordinary snapshot.
@@ -196,6 +266,19 @@ export class ShadowIndex {
    */
   get uncommittedNested(): readonly string[] {
     return this.uncommitted;
+  }
+
+  /**
+   * Declared artifact paths the last snapshot could not hold because each sits inside a nested
+   * repository, with the repository, the first time each path is seen. Empty on every ordinary
+   * snapshot; see `enclosingRepository` for why git cannot be asked.
+   *
+   * The repository matters as much as the path: it is the thing a reset reaching inside it would
+   * destroy with no copy anywhere, since this store holds nothing of what a nested repository
+   * holds — see {@link uncommittedNested}, which says the same of the ones git could not name.
+   */
+  get forcedInsideNested(): readonly ForcedInsideNested[] {
+    return this.inside;
   }
 
   static async isAvailable(): Promise<boolean> {
@@ -261,6 +344,7 @@ export class ShadowIndex {
   async snapshot(): Promise<string> {
     this.skipped = [];
     this.uncommitted = [];
+    this.inside = [];
     await this.addAll();
     if (this.forced.length > 0) await this.addForced();
     return (await this.run(['write-tree'])).trim();
@@ -362,14 +446,30 @@ export class ShadowIndex {
    * safety snapshot before anything destructive has happened.
    */
   private async addForced(): Promise<void> {
+    // The declared paths inside a nested repository are set aside before git sees them: git stages
+    // nothing inside another repository, and asked to anyway it either dies or says nothing — see
+    // `enclosingRepository`. They are named instead, and the rest are captured as before.
+    const reachable: string[] = [];
+    const inside: ForcedInsideNested[] = [];
+    for (const path of this.forced) {
+      const repository = await enclosingRepository(this.workTree, path);
+      if (repository === undefined) reachable.push(path);
+      else inside.push({ path, repository });
+    }
+    this.noteInside(inside);
+    // Nothing left to add, and nothing to drop: `ls-files -- <no paths>` lists the whole index, and
+    // dropping every gitlink in it would take the workspace's own nested repositories out of the
+    // snapshot along with the ones this method is about.
+    if (reachable.length === 0) return;
+
     // Both adds go through the same loop, because they see different things: `-A` never reaches a
     // path the workspace ignores, and a declared artifact path is exactly where an ignored one is
     // — so the forced add can meet a commit-less nested repository the first add could not.
     const left: string[] = [];
-    const together = await this.addSkippingCommitless(['add', '-f', '--', ...this.forced]);
+    const together = await this.addSkippingCommitless(['add', '-f', '--', ...reachable]);
     left.push(...together.excluded);
     if (together.res.code !== 0) {
-      for (const path of this.forced) {
+      for (const path of reachable) {
         const one = await this.addSkippingCommitless(['add', '-f', '--', path]);
         left.push(...one.excluded);
         if (one.res.code === 0 || matchedNothing(one.res.stderr)) continue;
@@ -380,7 +480,14 @@ export class ShadowIndex {
       }
     }
     this.noteUncommitted(left);
-    await this.dropForcedGitlinks();
+    await this.dropForcedGitlinks(reachable);
+  }
+
+  /** Named once each, however many snapshots a run takes, and keyed by the declared path. */
+  private noteInside(entries: readonly ForcedInsideNested[]): void {
+    const fresh = entries.filter((entry) => !this.reportedInside.has(entry.path));
+    for (const entry of fresh) this.reportedInside.add(entry.path);
+    this.inside = fresh;
   }
 
   /**
@@ -399,8 +506,8 @@ export class ShadowIndex {
    * all. {@link skippedGitlinks} names them, once each, so a run can say so rather than quietly
    * omit them — which is the failure the rest of this method exists to stop repeating.
    */
-  private async dropForcedGitlinks(): Promise<void> {
-    const staged = await this.run(['ls-files', '--stage', '-z', '--', ...this.forced]);
+  private async dropForcedGitlinks(paths: readonly string[]): Promise<void> {
+    const staged = await this.run(['ls-files', '--stage', '-z', '--', ...paths]);
     const links = gitlinkPaths(staged);
     for (const path of links) {
       await this.run(['update-index', '--force-remove', '--', path]);
