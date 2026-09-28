@@ -26,6 +26,12 @@ export interface TurnSnapshot {
    * {@link ShadowIndex.skippedGitlinks} for why they are dropped rather than captured or refused.
    */
   skippedGitlinks?: readonly string[];
+  /**
+   * Nested repositories anywhere in the work tree that this snapshot could not hold because they
+   * have no commit of their own, named the first time each is seen. Absent from every ordinary
+   * snapshot; see {@link ShadowIndex.uncommittedNested}.
+   */
+  uncommittedNested?: readonly string[];
 }
 
 /**
@@ -72,11 +78,13 @@ export class FsCapture {
     this.previousTree = tree;
     this.lastTurn = turn;
     const skipped = this.shadow.skippedGitlinks;
+    const uncommitted = this.shadow.uncommittedNested;
     return {
       tree,
       changes,
       firstSnapshot: previous === undefined,
       ...(skipped.length === 0 ? {} : { skippedGitlinks: skipped }),
+      ...(uncommitted.length === 0 ? {} : { uncommittedNested: uncommitted }),
     };
   }
 
@@ -91,6 +99,11 @@ export class FsCapture {
   /** See {@link ShadowIndex.gitlinks}: what a restore of this tree would refuse, asked up front. */
   async gitlinks(tree: string): Promise<string[]> {
     return this.shadow.gitlinks(tree);
+  }
+
+  /** See {@link ShadowIndex.uncommittedNested}: what no snapshot of this work tree can hold. */
+  get uncommittedNested(): readonly string[] {
+    return this.shadow.uncommittedNested;
   }
 
   /** See {@link ShadowIndex.has}: whether a restore of this tree has anything to restore from. */

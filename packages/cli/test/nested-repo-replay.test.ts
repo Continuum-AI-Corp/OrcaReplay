@@ -567,3 +567,123 @@ describe('a recording whose agent writes inside the nested repository', () => {
     timeout,
   );
 });
+
+/**
+ * THE SAME REPOSITORY, WITH NO COMMIT IN IT YET.
+ *
+ * Every block above is about a nested repository git can record as a gitlink. One that has never
+ * been committed to has no HEAD for git to name it by, so `git add -A` refuses the whole add — and
+ * orca had no answer for that at either end:
+ *
+ *   recorded with it there   every turn's snapshot threw, so the trace held no `fs.snapshot` at
+ *                            all, and the replay read that absence as `--no-fs` and told the
+ *                            operator the run had been "recorded with --no-fs" when nobody passed it
+ *   appearing before it      the safety snapshot threw, so the replay exited 1 on git's own
+ *                            sentence about a commit checked out, leaving behind the `orca-safety-*`
+ *                            directory it had already made and printing no path to it
+ *
+ * `git init` in a subdirectory is all it takes, which is what starting a second project inside a
+ * workspace looks like until the first commit. Both ends are driven through the built binary here,
+ * because the thing that was wrong was what an operator saw and what was left on their disk.
+ */
+describe('a nested git repository with no commit in it', () => {
+  const timeout = 120_000;
+  const nested = ['newproject'];
+  let dir: string;
+  let scratch: string;
+  let env: NodeJS.ProcessEnv;
+
+  /** `git init` and a file, and nothing committed — the state git cannot make a gitlink of. */
+  async function startProject(): Promise<void> {
+    const at = join(dir, ...nested);
+    await mkdir(at, { recursive: true });
+    await initRepo(at);
+    await writeFile(join(at, 'main.py'), 'work of my own, never committed anywhere');
+  }
+
+  async function record(): Promise<{ id: string; out: string }> {
+    const result = await run(process.execPath, [cli, 'record', 'node', '--', 'node', 'a.mjs'], {
+      cwd: dir,
+      env,
+      timeout: timeout / 2,
+    });
+    const [id] = (await readdir(join(dir, '.orca', 'runs'))) as [string];
+    return { id, out: `${result.stdout}${result.stderr}` };
+  }
+
+  async function replay(id: string): Promise<{ code: number; out: string }> {
+    const result = (await run(process.execPath, [cli, 'replay', id], {
+      cwd: dir,
+      env,
+      timeout: timeout / 2,
+    }).catch((error: unknown) => error)) as { code?: number; stdout?: string; stderr?: string };
+    return { code: result.code ?? 0, out: `${result.stdout ?? ''}${result.stderr ?? ''}` };
+  }
+
+  beforeEach(async () => {
+    scratch = await mkdtemp(join(tmpdir(), 'orca-nc-tmp-'));
+    dir = await mkdtemp(join(tmpdir(), 'orca-nc-ws-'));
+    env = { ...process.env, NO_COLOR: '1', TMPDIR: scratch, TMP: scratch, TEMP: scratch };
+    await initRepo(dir);
+    await writeFile(join(dir, 'README.md'), 'the outer project');
+    await writeFile(join(dir, 'a.mjs'), QUIET_AGENT);
+  }, timeout);
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+    await rm(scratch, { recursive: true, force: true });
+  });
+
+  it(
+    'is recorded around, not instead of: the run still has snapshots, and says what is missing',
+    async () => {
+      await startProject();
+      const { id, out } = await record();
+
+      expect(out).toContain('fs.nested_not_captured');
+      expect(out).toContain('newproject');
+      expect(out).not.toContain('fs.snapshot_failed');
+
+      // The trace has the workspace in it, which is the whole difference: with the add failing
+      // there was no `fs.snapshot` anywhere, and everything downstream read that as `--no-fs`.
+      const events = await new TraceReader(join(dir, '.orca', 'runs', id)).events();
+      const snapshots = events.filter((event) => event.type === 'fs.snapshot');
+      expect(snapshots.length).toBeGreaterThan(0);
+      expect(deriveCheckpoints(events).some((point) => point.fsTree !== undefined)).toBe(true);
+
+      const capture = await FsCapture.start({ runDir: join(dir, '.orca', 'runs', id), cwd: dir });
+      const tree = String(snapshots[0]?.attrs?.['tree']);
+      const held = (await capture.files(tree)).map((file) => file.path);
+      expect(held).toContain('README.md');
+      // And it is left OUT rather than swept in: a repository orca cannot restore is one it must
+      // not pretend to hold either.
+      expect(held.filter((path) => path.startsWith('newproject/'))).toEqual([]);
+      expect(await capture.gitlinks(tree)).toEqual([]);
+    },
+    timeout,
+  );
+
+  it(
+    'replays with one appearing since, keeping the work in it and leaving no copy behind',
+    async () => {
+      const { id } = await record();
+      // Started after the recording — the shape that took the safety snapshot down with it.
+      await startProject();
+      const mine = join(dir, ...nested, 'main.py');
+
+      const { code, out } = await replay(id);
+
+      expect(code, out).toBe(0);
+      expect(out).not.toContain('does not have a commit checked out');
+      // Named before the agent runs, for the reason every other nested repository is: orca holds
+      // no copy of what is in there, so whatever the replay does there stays.
+      expect(out).toContain('replay.nested_kept');
+      expect(out).toContain('newproject');
+      expect(await readFile(mine, 'utf8')).toBe('work of my own, never committed anywhere');
+      expect(
+        (await readdir(scratch)).filter((entry) => entry.startsWith('orca-safety-')),
+      ).toEqual([]);
+    },
+    timeout,
+  );
+});

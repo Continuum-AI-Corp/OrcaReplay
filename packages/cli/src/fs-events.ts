@@ -50,6 +50,18 @@ export async function appendSnapshot(
         'the declared artifact paths',
     });
   }
+  // A nested repository with no commit of its own is not in this snapshot and cannot be: git
+  // records an embedded repository by the id of its HEAD commit, and it has none. Said here for
+  // the reason the line above is said — a recording that quietly omits part of the workspace looks
+  // exactly like one that has all of it, right up until someone replays it. Once per path.
+  if (snap.uncommittedNested !== undefined && snap.uncommittedNested.length > 0) {
+    out.warn('fs.nested_not_captured', {
+      paths: snap.uncommittedNested.join(','),
+      why: 'these are git repositories of their own with no commit yet, so git has no id to record them by and this snapshot holds nothing of what is inside them',
+      next: 'commit inside them, or move them outside the workspace, if a replay needs their contents',
+    });
+  }
+
   await writer.append({
     type: 'fs.snapshot',
     actor: 'orca',

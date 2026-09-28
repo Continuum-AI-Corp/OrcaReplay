@@ -1398,7 +1398,13 @@ async function replayWorkspace(args: ParsedArgs, out: Output, ctx: Ctx): Promise
   // the first. Reporting only the first said nothing about it and then promised, unqualified,
   // that the files come back — while the replayed agent's writes inside it stayed.
   const keptHere = await safety.gitlinks(before.tree);
-  const kept = [...new Set([...keptNested, ...keptHere])].sort();
+  // And the ones no snapshot could hold at all. A nested repository with no commit is not a
+  // gitlink — git has no id to record it by — so neither `gitlinks` call can see it, and before
+  // this the safety snapshot did not merely miss it: it threw, and `orca replay` exited on git's
+  // own sentence about a commit checked out with an `orca-safety-*` directory left behind. It is
+  // skipped now, which makes it exactly the case these lines are about: orca holds no copy of
+  // what is inside it.
+  const kept = [...new Set([...keptNested, ...keptHere, ...safety.uncommittedNested])].sort();
 
   // Not "they are left exactly as they are", which is only true of the restore. The replay runs
   // the recorded agent live in this directory, and orca does not intercept what it does — so a
@@ -1649,7 +1655,7 @@ function keepNestedNote(
   if (paths.length === 0) return;
   out.warn('replay.nested_kept', {
     paths: paths.join(','),
-    why: 'the snapshot records these as embedded git repositories and never held their contents',
+    why: 'these are git repositories of their own, and the snapshot never held their contents — recorded as a reference, or, with no commit to reference, not at all',
     ...fields,
   });
 }
