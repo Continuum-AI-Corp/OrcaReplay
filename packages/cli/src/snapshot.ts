@@ -8,6 +8,8 @@ export interface SnapshotResult {
   skippedGitlinks?: readonly string[];
   /** See `TurnSnapshot.uncommittedNested`: nested repositories with no commit to record them by. */
   uncommittedNested?: readonly string[];
+  /** See `TurnSnapshot.forcedInsideNested`: declared paths inside a nested repository. */
+  forcedInsideNested?: readonly { path: string; repository: string }[];
 }
 
 /** The slice of FsCapture this helper needs, so it can be stubbed in tests. */

@@ -508,6 +508,167 @@ describe('a nested repository with no commit', () => {
   });
 });
 
+/**
+ * A DECLARED PATH INSIDE A NESTED REPOSITORY.
+ *
+ * Git stages nothing inside another repository, and asked to it answers in whichever way the
+ * operator's setup happens to produce: with the repository committed and not ignored, `add -A`
+ * stages it as a gitlink and `add -f -- data/cache` then dies ("Pathspec 'data/cache' is in
+ * submodule 'data'"), which cost a recording every snapshot it took; ignored, or with no commit,
+ * `add -f` exits 0 having staged nothing, which is silent. So the path is set aside before git sees
+ * it, and named with the repository around it.
+ */
+describe('a declared path inside a nested repository', () => {
+  async function initRepo(dir: string): Promise<void> {
+    await mkdir(dir, { recursive: true });
+    for (const args of [
+      ['init', '-q'],
+      ['config', 'user.email', 't@e.com'],
+      ['config', 'user.name', 'T'],
+    ]) {
+      await runGit(args, { cwd: dir });
+    }
+  }
+
+  /** The operator's own project at `rel`, with their work in `cache/` inside it. */
+  async function project(workTree: string, rel: string, commit: boolean): Promise<void> {
+    await initRepo(join(workTree, rel));
+    await write(workTree, `${rel}/cache/mine.bin`, 'their own work\n');
+    await write(workTree, `${rel}/notes.md`, 'theirs too\n');
+    if (commit) {
+      await runGit(['add', '-A'], { cwd: join(workTree, rel) });
+      await runGit(['commit', '-qm', 'u'], { cwd: join(workTree, rel) });
+    }
+  }
+
+  async function forcedFixture(forced: string[]): Promise<Fixture> {
+    const root = await makeTempDir();
+    const workTree = join(root, 'ws');
+    const gitDir = join(root, 'run', 'fs');
+    await mkdir(workTree, { recursive: true });
+    const shadow = await ShadowIndex.create({ gitDir, workTree, forced });
+    return { root, workTree, gitDir, shadow };
+  }
+
+  /** The case that took every snapshot down with it. */
+  itGit('snapshots around one that is committed and not ignored, instead of dying', async () => {
+    const { workTree, shadow } = await forcedFixture(['data/cache']);
+    await write(workTree, 'README.md', 'x\n');
+    await project(workTree, 'data', true);
+
+    const tree = await shadow.snapshot();
+    // The outer file, and `data` as the gitlink `add -A` made of it — none of what is inside.
+    expect(await filesIn(shadow, tree)).toEqual(['README.md', 'data']);
+    expect(shadow.forcedInsideNested).toEqual([{ path: 'data/cache', repository: 'data' }]);
+    // What `add -A` made of the repository itself is left as it was: a gitlink, which the
+    // replay's own guard reads.
+    expect(await shadow.gitlinks(tree)).toEqual(['data']);
+  });
+
+  /** The silent case: nothing failed, and nothing said the declared path was not captured. */
+  itGit('names one the workspace ignores, which git passes over without a word', async () => {
+    const { workTree, shadow } = await forcedFixture(['data/cache']);
+    await write(workTree, '.gitignore', 'data/\n');
+    await project(workTree, 'data', true);
+
+    expect(await filesIn(shadow, await shadow.snapshot())).toEqual(['.gitignore']);
+    expect(shadow.forcedInsideNested).toEqual([{ path: 'data/cache', repository: 'data' }]);
+  });
+
+  itGit('names one with no commit, as well as naming the repository itself', async () => {
+    const { workTree, shadow } = await forcedFixture(['data/cache']);
+    await write(workTree, 'README.md', 'x\n');
+    await project(workTree, 'data', false);
+
+    expect(await filesIn(shadow, await shadow.snapshot())).toEqual(['README.md']);
+    expect(shadow.forcedInsideNested).toEqual([{ path: 'data/cache', repository: 'data' }]);
+    expect(shadow.uncommittedNested).toEqual(['data']);
+  });
+
+  itGit('names the nearest repository on the way down, however deep the path is', async () => {
+    const { workTree, shadow } = await forcedFixture(['a/b/data/cache/index']);
+    await write(workTree, 'a/b/keep.txt', 'mine\n');
+    await project(workTree, 'a/b/data', true);
+
+    await shadow.snapshot();
+    expect(shadow.forcedInsideNested).toEqual([
+      { path: 'a/b/data/cache/index', repository: 'a/b/data' },
+    ]);
+  });
+
+  itGit('still captures the declared paths that are not inside one', async () => {
+    const { workTree, shadow } = await forcedFixture(['data/cache', 'cache']);
+    await write(workTree, '.gitignore', 'cache/\ndata/\n');
+    await write(workTree, 'cache/index.bin', 'the product\n');
+    await project(workTree, 'data', true);
+
+    expect(await filesIn(shadow, await shadow.snapshot())).toEqual([
+      '.gitignore',
+      'cache/index.bin',
+    ]);
+    expect(shadow.forcedInsideNested).toEqual([{ path: 'data/cache', repository: 'data' }]);
+  });
+
+  /**
+   * With every declared path set aside there is nothing to add — and nothing may be dropped:
+   * `ls-files -- <no paths>` lists the WHOLE index, so dropping the gitlinks it returns would take
+   * the workspace's own nested repositories out of the snapshot too.
+   */
+  itGit(
+    'leaves the workspace’s other nested repositories alone when nothing is left to add',
+    async () => {
+      const { workTree, shadow } = await forcedFixture(['data/cache']);
+      await write(workTree, 'README.md', 'x\n');
+      await project(workTree, 'data', true);
+      await project(workTree, 'vendor', true);
+
+      const tree = await shadow.snapshot();
+      expect((await shadow.gitlinks(tree)).sort()).toEqual(['data', 'vendor']);
+      expect(shadow.skippedGitlinks).toEqual([]);
+    },
+  );
+
+  /** A declared path that IS the repository is a gitlink, dropped as before — not "inside" one. */
+  itGit('leaves a declared path that is itself a repository to the gitlink handling', async () => {
+    const { workTree, shadow } = await forcedFixture(['dataset']);
+    await write(workTree, '.gitignore', 'dataset/\n');
+    await project(workTree, 'dataset', true);
+
+    await shadow.snapshot();
+    expect(shadow.forcedInsideNested).toEqual([]);
+    expect(shadow.skippedGitlinks).toEqual(['dataset']);
+  });
+
+  itGit('walks only the literal segments before a glob', async () => {
+    const { workTree, shadow } = await forcedFixture(['data/*/cache', 'test_results_*.json']);
+    await write(workTree, 'test_results_1.json', '{}\n');
+    await project(workTree, 'data', true);
+
+    expect(await filesIn(shadow, await shadow.snapshot())).toContain('test_results_1.json');
+    expect(shadow.forcedInsideNested).toEqual([{ path: 'data/*/cache', repository: 'data' }]);
+  });
+
+  itGit('names each one once, however many snapshots the run takes', async () => {
+    const { workTree, shadow } = await forcedFixture(['data/cache']);
+    await write(workTree, 'README.md', 'x\n');
+    await project(workTree, 'data', true);
+
+    await shadow.snapshot();
+    expect(shadow.forcedInsideNested).toHaveLength(1);
+    await write(workTree, 'README.md', 'y\n');
+    await shadow.snapshot();
+    expect(shadow.forcedInsideNested).toEqual([]);
+  });
+
+  itGit('says nothing when no declared path is inside a repository', async () => {
+    const { workTree, shadow } = await forcedFixture(['cache']);
+    await write(workTree, 'cache/index.bin', 'x\n');
+
+    await shadow.snapshot();
+    expect(shadow.forcedInsideNested).toEqual([]);
+  });
+});
+
 describe('forced capture', () => {
   itGit('captures a path the workspace ignores, when the adapter declares it', async () => {
     const root = await makeTempDir();
