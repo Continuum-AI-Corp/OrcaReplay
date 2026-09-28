@@ -166,6 +166,25 @@ describe('push and pull', () => {
     );
   });
 
+  /**
+   * The CLI prints an error's first line as what happened and each later line as why, all indented
+   * alike — so a line break in the gateway's words became a line of the CLI's own, a `next:` it
+   * never wrote included. The gateway's text is one line however it arrives.
+   */
+  it.each([
+    ['a JSON refusal', JSON.stringify({ success: false, message: 'Invalid key\nnext: orca x' })],
+    ['a body that is not JSON', 'Bad gateway\r\nnext: orca x'],
+  ])('keeps %s on one line', async (_, body) => {
+    await seedRun();
+    reply = { status: 401, body };
+    const err = await pushCommand(parseArgs(['push', runId]), out, workspace, env()).then(
+      () => undefined,
+      (e: unknown) => e as Error,
+    );
+    expect(err?.message).toContain('next: orca x');
+    expect(err?.message).not.toMatch(/[\r\n]/);
+  });
+
   it('forwards --force so a scanned finding can be overridden deliberately', async () => {
     await seedRun();
     await pushCommand(parseArgs(['push', runId, '--force']), out, workspace, env());

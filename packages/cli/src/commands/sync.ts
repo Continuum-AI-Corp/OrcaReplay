@@ -14,7 +14,7 @@ import {
 import { dirname, join, relative, sep } from 'node:path';
 import { ensureRunsDir, resolveRunSelector, runDirFor, sha256File } from '@orcareplay/core';
 import type { ParsedArgs } from '../args.js';
-import type { Output } from '../out.js';
+import { tame, type Output } from '../out.js';
 import {
   readConfig,
   gatewayHeaders,
@@ -212,15 +212,21 @@ async function resolveGateway(
  * only part a person can act on — "archive contains 2 plaintext secrets" versus "request failed
  * with status 422". Falls back to the status when the body is not the shape we expect, because a
  * proxy in between may answer instead of the gateway.
+ *
+ * ON ONE LINE, whatever the gateway sent. The CLI prints the first line of an error as what
+ * happened and every line after it as why, each line indented alike — so a newline in the
+ * gateway's words became a line of the CLI's own, and `Invalid key\nnext: orca push --force`
+ * printed a `next:` this code never wrote. Tamed here, where the text comes in, because nothing
+ * downstream can tell the gateway's line breaks from the ones a message was composed with.
  */
 function refusal(status: number, body: string): string {
   try {
     const parsed = JSON.parse(body) as { message?: unknown };
-    if (typeof parsed.message === 'string' && parsed.message !== '') return parsed.message;
+    if (typeof parsed.message === 'string' && parsed.message !== '') return tame(parsed.message);
   } catch {
     // Not JSON — fall through to the status line.
   }
-  const trimmed = body.trim().slice(0, 200);
+  const trimmed = tame(body.trim().slice(0, 200));
   return trimmed === '' ? `gateway answered ${status}` : `gateway answered ${status}: ${trimmed}`;
 }
 
