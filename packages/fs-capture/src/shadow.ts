@@ -467,10 +467,12 @@ export class ShadowIndex {
    * Same posture as {@link gitlinks}: ask before doing something that would otherwise fail from
    * inside git, with a message about object names that says nothing about the cause.
    *
-   * The cause worth naming is a run that arrived over the wire. A gateway archive carries
-   * manifest.json, events.jsonl, redactions.json and blobs/  never this store  so a pulled run's
-   * `fs.snapshot` events name trees whose objects were never sent. {@link materialize} on one of
-   * those dies in `read-tree`, and the caller has no way to tell that from a corrupt store.
+   * The cause worth naming is a run whose store is not all there: one pulled from a gateway it was
+   * pushed to without `--fs` — the archive then carries manifest.json, events.jsonl,
+   * redactions.json and blobs/, not this store — or one whose store `orca scrub --drop-fs`
+   * deleted. Either way its `fs.snapshot` events name trees whose objects are not here.
+   * {@link materialize} on one of those dies in `read-tree`, and the caller has no way to tell
+   * that from a corrupt store.
    */
   async has(tree: string): Promise<boolean> {
     const res = await runGitRaw(['cat-file', '-e', `${tree}^{tree}`], this.opts());

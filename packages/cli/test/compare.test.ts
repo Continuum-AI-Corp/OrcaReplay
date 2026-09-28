@@ -128,9 +128,9 @@ describe('compare', () => {
   /**
    * A RUN CAN ARRIVE WITHOUT THE STORE ITS OWN EVENTS POINT AT.
    *
-   * `orca pull` produces one every time. A gateway archive carries manifest.json, events.jsonl,
-   * redactions.json and blobs/ — never `fs/` — so a pulled run's `fs.snapshot` events name trees
-   * whose objects were never sent. The restore then died inside git with "failed to unpack tree
+   * `orca pull` produces one unless the run was pushed with `--fs`: the archive then carries
+   * manifest.json, events.jsonl, redactions.json and blobs/ — not `fs/` — so a pulled run's
+   * `fs.snapshot` events name trees whose objects were never sent. The restore then died inside git with "failed to unpack tree
    * object <40 hex>", which names neither the cause nor anything to do about it, on the exact path
    * the gateway console prints under "fork it locally": `orca pull <run>`, then `orca compare`.
    *
