@@ -1,0 +1,26 @@
+# OrcaReplay
+
+> Records a coding-agent run below the harness and replays it offline from the recorded bytes, with no model called. A run can also be forked at any step onto a different model, so the model is the only variable in a comparison.
+
+One npm package named `orcareplay` puts one command named `orca` on the PATH. Nothing is installed into the agent, and the agent runs unmodified: `orca record claude` captures the request and response bytes exchanged with the model through a base-URL proxy, alongside shell, MCP and filesystem capture layers. `orca replay last` re-runs that session against the recording with no network and no tokens spent. `orca replay last --from 4 --model <other>` re-runs it from a chosen step on a different model with the conversation prefix held fixed.
+
+Apache-2.0 for the code, CC BY 4.0 for the trace-format spec. Requires Node 20+. Works with Claude Code, Codex, the OpenAI Agents SDK, the Vercel AI SDK, and agents that read no base-URL variable at all.
+
+## Docs
+
+- [README](https://github.com/Continuum-AI-Corp/OrcaReplay/blob/main/README.md): Install, the three commands, the capture-layer diagram, and a per-capability status table.
+- [Architecture](https://github.com/Continuum-AI-Corp/OrcaReplay/blob/main/docs/architecture.md): Why a stateless model API means one interception point yields a near-complete execution graph, the five capture layers with their confidence levels and fallbacks, and the two limits the approach cannot escape.
+- [Trace format v0 spec](https://github.com/Continuum-AI-Corp/OrcaReplay/blob/main/spec/orca-trace-v0.md): The on-disk recording format — manifest, events and blobs — licensed CC BY 4.0 so other tools can read and write it.
+- [Integrations](https://github.com/Continuum-AI-Corp/OrcaReplay/blob/main/docs/integrations.md): Per-harness notes on what is captured and how each agent is pointed at the proxy.
+- [Plugins](https://github.com/Continuum-AI-Corp/OrcaReplay/blob/main/docs/plugins.md): The plugin API and its neutrality guarantees.
+- [Fidelity](https://github.com/Continuum-AI-Corp/OrcaReplay/blob/main/docs/fidelity.md): What "byte-for-byte" does and does not cover on replay.
+- [Validation](https://github.com/Continuum-AI-Corp/OrcaReplay/blob/main/docs/validation.md): The trace-format conformance check and how to run it against your own traces.
+
+## MCP
+
+- [server.json](https://github.com/Continuum-AI-Corp/OrcaReplay/blob/main/server.json): MCP server manifest. `orca mcp` serves the trace store over stdio as six tools, so an agent can list, read, diff and replay its own past runs.
+
+## Optional
+
+- [Good first issues](https://github.com/Continuum-AI-Corp/OrcaReplay/blob/main/docs/good-first-issues.md): Scoped starting points for contributors.
+- [Repository](https://github.com/Continuum-AI-Corp/OrcaReplay): Source, issues and releases.
