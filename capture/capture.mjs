@@ -156,7 +156,7 @@ function parseArgs(argv) {
 
 const { harness, flags } = parseArgs(process.argv.slice(2));
 
-const USAGE = `usage: node capture/capture.mjs <claude|codex|opencode|qwen|mimo|mcode|zcode|kilo|cursor|hermes> [options]
+const USAGE = `usage: node capture/capture.mjs <claude|codex|opencode|qwen|mimo|mcode|zcode|muse|kilo|cursor|hermes> [options]
 
   --model <id>       model to capture. default: the harness's own default
   --prompt-mode <m>  mcode only: tui, coding or work. default: coding
@@ -225,6 +225,54 @@ function extractOpenAiShaped(body) {
       dialect: body.input ? 'openai-responses' : 'openai-chat',
       temperature: body.temperature,
       max_tokens: body.max_tokens ?? body.max_completion_tokens,
+    },
+  };
+}
+
+/**
+ * Muse Code's turn, which is OpenAI-responses-shaped and still needs its own reader.
+ *
+ * Two departures from `extractOpenAiShaped`, both of which would otherwise file the wrong text
+ * under the wrong heading:
+ *
+ * The prompt is in `instructions`, a field that extractor never looks at. Codex uses the same
+ * dialect and puts its prompt in a `developer` message, so reading only `messages`/`input` has
+ * been right up to now. Here it would have filed Muse's 22k-character workspace context as the
+ * system prompt and dropped the 24k-character prompt entirely.
+ *
+ * The tools arrive as one entry of `type: "namespace"` with the real tools nested inside it.
+ * Counting the outer array gives `1`, which is the number that would have gone into the table in
+ * this file's README; the harness offers twenty-five.
+ */
+function extractMuse(body) {
+  const blocks = [];
+  if (typeof body.instructions === 'string' && body.instructions !== '') {
+    blocks.push({ label: 'instructions', text: body.instructions });
+  }
+  const context = [];
+  for (const m of body.input ?? []) {
+    if (m.type !== undefined && m.type !== 'message') continue;
+    const text =
+      typeof m.content === 'string'
+        ? m.content
+        : (Array.isArray(m.content) ? m.content : []).map((c) => c.text ?? '').join('');
+    // Everything the harness injected but did not put in `instructions`: the workspace identity,
+    // the skills list, the memory snapshot. Kept out of the prompt file, which is what its name
+    // says it is, and into the annotated one.
+    if (text !== '' && (m.role === 'developer' || m.role === 'system')) {
+      context.push({ label: `${m.role}[${context.length}]`, text });
+    }
+  }
+  const flat = (body.tools ?? []).flatMap((t) => (t?.type === 'namespace' ? (t.tools ?? []) : [t]));
+  return {
+    blocks,
+    context,
+    tools: flat,
+    toolNames: flat.map((x) => x.function?.name ?? x.name).filter(Boolean),
+    meta: {
+      dialect: 'openai-responses',
+      max_tokens: body.max_output_tokens,
+      reasoning_effort: body.reasoning?.effort,
     },
   };
 }
@@ -828,6 +876,59 @@ const PROFILES = {
     },
   },
 
+  /**
+   * Muse Code, Meta's terminal coding agent, captured in front of the proxy rather than through
+   * it.
+   *
+   * Every other profile here hands the harness an origin and gets out of the way. Muse needs a
+   * process in between, for a reason neither side is wrong about: it fetches a model catalogue
+   * with `GET /muse-code/models` and will not build a turn until that answers, and orca's proxy
+   * answers 404 to every non-POST because only a POST is ever a model call. `muse-shim.mjs`
+   * serves that one GET and forwards the rest untouched, so the turn carrying the prompt is still
+   * recorded by orca as a `/responses` exchange.
+   *
+   * The origin reaches the shim through `ORCA_BASE_URL_VARS`, bare. `/forward/` is not available:
+   * Muse discards any path on `--base-url`, measured — given `…:47001/deep/path` it still asks
+   * for `/muse-code/models` at the root — and a forward is nothing but path.
+   *
+   * No account is needed. The key is a placeholder, the turn comes back refused, and the prompt
+   * travels in the request either way. Verified against the signed binary: Muse stores the prompt
+   * as a template with `{{tool:…}}` placeholders, and rendering those to `muse.<name>` reproduces
+   * the captured text exactly.
+   *
+   * `MUSE_BIN` points at the executable when it is not on PATH, which on Windows it will not be:
+   * `dev.meta.ai/install.sh` only handles macOS and Linux, though the release manifest does carry
+   * a Windows build.
+   */
+  muse: {
+    id: 'muse',
+    // Muse reads no origin variable at all, so there is nothing for an adapter to set. `exec`
+    // launches the shim and redirects nothing, which is exactly what is wanted here.
+    adapter: 'exec',
+    promptDir: 'MUSECODE',
+    defaultInteractive: false,
+    recordFlags: [],
+    defaultModel: 'muse-spark-1.3',
+    recordArgs: (model, prompt) => [
+      '--',
+      process.execPath,
+      join(CAPTURE_DIR, 'muse-shim.mjs'),
+      prompt,
+      model,
+    ],
+    consoleArgs: (model, prompt) => [join(CAPTURE_DIR, 'muse-shim.mjs'), `"${prompt}"`, model],
+    forceAnthropicUpstream: false,
+
+    prepare() {
+      // `=/` is the bare origin. Without the explicit path `applyNamedBaseUrls` would append
+      // `v1`, which Muse would then discard along with the rest of the path — harmless but
+      // misleading to read in a trace.
+      return { env: { ORCA_BASE_URL_VARS: 'MUSE_PROXY=/' }, restore() {} };
+    },
+
+    extract: extractMuse,
+  },
+
   qwen: {
     id: 'qwen',
     adapter: 'generic-openai',
@@ -1067,6 +1168,7 @@ function readBlob(dir, ref) {
  */
 function pickPromptRequest(dir, profile) {
   let fallback;
+  let best;
   for (const e of readEvents(dir)) {
     if (e.type !== 'model.request' || !e.payload?.$blob) continue;
     let body;
@@ -1077,10 +1179,18 @@ function pickPromptRequest(dir, profile) {
     }
     const got = profile.extract(body);
     if (got.blocks.length === 0) continue;
-    if (got.toolNames.length > 0) return { event: e, body, got };
+    // The most tools, not the first with any. Muse Code is why: it sends two turns, the agent's
+    // with twenty-five tools and a skill-relevance judge with one, and they do not arrive in a
+    // fixed order — so "first with tools" filed whichever won the race and the tool count in the
+    // README table came out 1 or 25 depending on the run. For every other harness here the side
+    // calls declare no tools at all, so this picks what the old rule picked.
+    if (got.toolNames.length > 0) {
+      if (!best || got.toolNames.length > best.got.toolNames.length) best = { event: e, body, got };
+      continue;
+    }
     fallback ??= { event: e, body, got };
   }
-  return fallback;
+  return best ?? fallback;
 }
 
 /** True once the trace holds the request we want, so the poll loop knows to stop. */

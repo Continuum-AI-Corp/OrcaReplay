@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,11 +24,26 @@ import { describe, expect, it } from 'vitest';
 const REPO = fileURLToPath(new URL('../../../', import.meta.url));
 const PROMPTS = join(REPO, 'prompt');
 
+/**
+ * Tracked files, which is what "committed" in the name of this suite means.
+ *
+ * Reading the directory instead swept in whatever a capture in progress had left lying there —
+ * three of them the first time this ran, from a session working on other harnesses — and failed
+ * on work nobody had offered for review yet. A capture becomes this suite's business when someone
+ * stages it; until then it is a scratch file.
+ */
+const tracked = new Set(
+  execFileSync('git', ['ls-files', 'prompt'], { cwd: REPO, encoding: 'utf8' })
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.endsWith('.md')),
+);
+
 const artifacts = readdirSync(PROMPTS)
   .filter((d) => statSync(join(PROMPTS, d)).isDirectory())
   .flatMap((d) =>
     readdirSync(join(PROMPTS, d))
-      .filter((f) => f.endsWith('.md'))
+      .filter((f) => f.endsWith('.md') && tracked.has(`prompt/${d}/${f}`))
       .map((f) => [`${d}/${f}`, readFileSync(join(PROMPTS, d, f), 'utf8')] as const),
   );
 

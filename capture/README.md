@@ -93,6 +93,7 @@ Measured on one machine, and the reason the table is here rather than in a folde
 | `deepseek/deepseek-v4-flash-free` | mcode | `exec --prompt-mode coding` | 16,157 chars | 18 | - |
 | `deepseek/deepseek-v4-flash-free` | mcode | `exec --prompt-mode work` | 17,721 chars | 18 | - |
 | `glm-4.6` | zcode | `--prompt --mode yolo` | 9,084 chars | 27 | - |
+| `muse-spark-1.3` | muse | `exec` | 24,864 chars | 25 | - |
 | `gpt-5.6-sol` | openclaw | `agent exec` | 21,762 chars | 38 | - |
 | `gemini-3.5-flash` | gemini | non-interactive | 25,084 chars | 8 | - |
 | `deepseek-v4.1-flash` | crush | non-interactive | 29,335 chars | 26 | - |
@@ -110,7 +111,7 @@ which is why `capture.mjs` files these only under `--allow-failed` and says so. 
 and `kilo-auto/free` completed, but neither response carried a usage block to read. Hermes
 completed too, on the same anonymous tier, and its response carried no usage block either.
 
-**The thirteen rows below Hermes have no prefix count either, and nine of them have no profile.**
+**The fourteen rows below Hermes have no prefix count either, and nine of them have no profile.**
 MiniMax Code has one, `capture.mjs mcode`, and its three modes are three prompts from one binary.
 ZCode has one too, `capture.mjs zcode`; it is the second harness here redirected through its own
 config file rather than an environment variable, and the first whose file is JSON, so the rewrite
@@ -134,7 +135,23 @@ directory, because the branch name and the dirty list are part of what was sent:
 in an empty repository, and more inside a checkout by however much its own git state comes to.
 The row records the empty-repository figure, which is the one that reproduces.
 
-The nine after them were captured before their harness had one, through `orca record exec` with
+Muse Code has a profile too, `capture.mjs muse`, and it is the only one that puts a process
+between the harness and the proxy. Muse fetches a model catalogue with `GET /muse-code/models` and
+will not build a turn until that answers; orca's proxy answers 404 to every non-POST, because only
+a POST is ever a model call. Neither is wrong, so `muse-shim.mjs` serves that one GET and forwards
+everything else untouched -- a catalogue is not a model call, and the turn carrying the prompt is
+still recorded by orca as a `/responses` exchange. The shim also exists because Muse takes its
+origin from a `--base-url` flag and *discards any path on it*, measured, which rules out
+`/forward/` for this harness: a forward is nothing but path.
+
+Two things about that row are unlike the others. Its twenty-five tools arrive as a single entry of
+`type: "namespace"` with the real tools nested inside, so counting the outer array gives `1` --
+which is what the table said until `pickPromptRequest` learned to prefer the turn with the most
+tools. That rule earned itself twice over: Muse sends two turns per prompt, the agent's and a
+skill-relevance judge's, they do not arrive in a fixed order, and "first turn with any tools" filed
+whichever won the race. Both carry the same 24,864-character prompt; only the tools and the
+context differ. No account is needed for any of it -- the key is a placeholder, the turn comes back
+refused, and `--allow-failed` is what files it, the same as the MiniMax rows.
 the agent pointed at the proxy -- so `capture.mjs <harness>` will answer `unknown harness` for
 every one of them, and the way to reproduce one today is the way it was taken: run the agent
 under `orca record` with its provider base URL moved, and read the system prompt out of the
